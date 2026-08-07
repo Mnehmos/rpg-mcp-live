@@ -1,0 +1,1242 @@
+{
+  "schemaVersion": 2,
+  "packVersion": "open5e-v2-full-corpus-s8",
+  "packHash": "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f",
+  "targetDocumentKey": "srd-2014",
+  "taxonomyDocumentKey": "core",
+  "gamesystems": [
+    "5e-2014",
+    "5e-2024",
+    "a5e"
+  ],
+  "scope": {
+    "kind": "corpus",
+    "basePackHash": "a189ccc9b1b691e790f08c2aab3e090b4f3c7f6255ab28ec94485fadbd939644",
+    "defaultDocumentKey": "srd-2014"
+  },
+  "sourceApiVersion": "v2",
+  "sourceFetchedAt": "2026-08-07T06:16:36.932Z",
+  "collections": {
+    "conditions": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/conditions/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/conditions/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/conditions.ndjson",
+        "sha256": "3bd507333bfdb14e1d8e0df91d6c9338d66fd4a8f3a95a5450e7b1b7c81c4fe3",
+        "recordCount": 21
+      },
+      "normalized": {
+        "path": "normalized/conditions.ndjson",
+        "sha256": "7e2b4a7288aab1e0b0d3631ec264c7fb60ee540698ef7809e9e9dcdd2811bd83",
+        "recordCount": 50
+      },
+      "compiled": {
+        "path": "compiled/conditions.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "damagetypes": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/damagetypes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/damagetypes/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/damagetypes.ndjson",
+        "sha256": "5f12d5a0348e6005ec858f6f07758ab8354e9f6bf4aa9c7d8cb1658539815013",
+        "recordCount": 13
+      },
+      "normalized": {
+        "path": "normalized/damagetypes.ndjson",
+        "sha256": "23a43a306b5a29a4a9f712ea89c6470f4d436d1ec4fcd6f103b27b4b0e613980",
+        "recordCount": 26
+      },
+      "compiled": {
+        "path": "compiled/damagetypes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "sizes": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/sizes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/sizes/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/sizes.ndjson",
+        "sha256": "728409c0f024f14a3c5622f0ca89f3727b5bd942586e0a7434ce2a0962b51dae",
+        "recordCount": 7
+      },
+      "normalized": {
+        "path": "normalized/sizes.ndjson",
+        "sha256": "b0c9d3de516b1eb69de97c45b1c1af733745a8393a9901735775c24f244c62ca",
+        "recordCount": 7
+      },
+      "compiled": {
+        "path": "compiled/sizes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "documents": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/documents/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/documents/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/documents.ndjson",
+        "sha256": "bfddd1fe5295b47b2bbda59e2c33b7520c99c97f894d66163a4dfdbbb25a995f",
+        "recordCount": 24
+      },
+      "normalized": {
+        "path": "normalized/documents.ndjson",
+        "sha256": "bbd2b67e5df59d5ae46fab3a54ada903fd362d3ee5521ba6283229f73aa938b1",
+        "recordCount": 24
+      },
+      "compiled": {
+        "path": "compiled/documents.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "skills": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/skills/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/skills/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/skills.ndjson",
+        "sha256": "1af777a896724194cf8a5934d9d6fe09dd245ba4bb9ee098f0bbb7f238a11453",
+        "recordCount": 20
+      },
+      "normalized": {
+        "path": "normalized/skills.ndjson",
+        "sha256": "32228a6c0b5ada588025534423ce81f269d22dcd506fcd428ce77efbc6f01fd4",
+        "recordCount": 56
+      },
+      "compiled": {
+        "path": "compiled/skills.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "rules": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/rules/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/rules/?limit=100",
+        "https://api.open5e.com/v2/rules/?limit=100&page=2",
+        "https://api.open5e.com/v2/rules/?limit=100&page=3"
+      ],
+      "raw": {
+        "path": "raw/rules.ndjson",
+        "sha256": "0f64eda14be22c40d2f31fc098af8d04cfbeed75d7f00ed1ca10a828b5907f97",
+        "recordCount": 283
+      },
+      "normalized": {
+        "path": "normalized/rules.ndjson",
+        "sha256": "8866bd6e4b8840434899029be3ff3bfb9f8e3e5f19d264acc607c9a8f8b7c029",
+        "recordCount": 283
+      },
+      "compiled": {
+        "path": "compiled/rules.ndjson",
+        "sha256": "dcb4b5ffd560b3d40bbaab062bbc50e61c6bcaf257a0382327c043982659d315",
+        "recordCount": 1
+      }
+    },
+    "rulesets": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/rulesets/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/rulesets/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/rulesets.ndjson",
+        "sha256": "af87e05a00deb481cf5e8fa3d1a3bffadf093eadfb9d1084b5bfc528dad9430c",
+        "recordCount": 52
+      },
+      "normalized": {
+        "path": "normalized/rulesets.ndjson",
+        "sha256": "ae617c5a57d4e75f894dc9fc253e639cd2605eaae01194c8d23e95235bbe95e6",
+        "recordCount": 52
+      },
+      "compiled": {
+        "path": "compiled/rulesets.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "items": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/items/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/items/?limit=100",
+        "https://api.open5e.com/v2/items/?limit=100&page=2",
+        "https://api.open5e.com/v2/items/?limit=100&page=3",
+        "https://api.open5e.com/v2/items/?limit=100&page=4",
+        "https://api.open5e.com/v2/items/?limit=100&page=5"
+      ],
+      "raw": {
+        "path": "raw/items.ndjson",
+        "sha256": "1d6753b7e66914495e6f6103f523babcbb072effd11120d6ab651e137a21e4fd",
+        "recordCount": 440
+      },
+      "normalized": {
+        "path": "normalized/items.ndjson",
+        "sha256": "fe0f9bc45ba3bffc3796ecd3fd433b696a6c529e82acc1da56621491dd003afb",
+        "recordCount": 440
+      },
+      "compiled": {
+        "path": "compiled/items.ndjson",
+        "sha256": "9ce91a1abcaa8547719efd4a5ce1876a5de233116a8c2d39c1b3565ab8dc62df",
+        "recordCount": 1
+      }
+    },
+    "itemsets": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/itemsets/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/itemsets/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/itemsets.ndjson",
+        "sha256": "bb42c6af569a599e12ea7a0905df36d404197020a9d32ab88f68c1adbcee036a",
+        "recordCount": 20
+      },
+      "normalized": {
+        "path": "normalized/itemsets.ndjson",
+        "sha256": "9e8b586115779235e788c5f94060382f7173bb00cf231f16bd1254a2c3fb5fb6",
+        "recordCount": 20
+      },
+      "compiled": {
+        "path": "compiled/itemsets.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "itemcategories": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/itemcategories/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/itemcategories/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/itemcategories.ndjson",
+        "sha256": "edcbfc023c3f8ae94d9a0481d710c16839dbed0eef59cb6702038b047092c3cd",
+        "recordCount": 24
+      },
+      "normalized": {
+        "path": "normalized/itemcategories.ndjson",
+        "sha256": "32349d64b43c9b83dab091eb30164b8782073a824b43bf637e46bcab57aac3a1",
+        "recordCount": 24
+      },
+      "compiled": {
+        "path": "compiled/itemcategories.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "weapons": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/weapons/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/weapons/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/weapons.ndjson",
+        "sha256": "68cc548c4a62445af8db3241f1262b8e7bab62bb0b37be10e8985b7c90908818",
+        "recordCount": 75
+      },
+      "normalized": {
+        "path": "normalized/weapons.ndjson",
+        "sha256": "b87d234e75f04efc9d3792c423c917d32afca6da687134a065c1c8d43cc42a5f",
+        "recordCount": 75
+      },
+      "compiled": {
+        "path": "compiled/weapons.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "armor": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/armor/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/armor/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/armor.ndjson",
+        "sha256": "02c7cd606175c802892af026a39a4d0a117159f5e980096661ca7e130ab317eb",
+        "recordCount": 25
+      },
+      "normalized": {
+        "path": "normalized/armor.ndjson",
+        "sha256": "9465a7cf0aea349b526ea31928237eb1a241d0c43749180561845802c464d79a",
+        "recordCount": 25
+      },
+      "compiled": {
+        "path": "compiled/armor.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "magicitems": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/magicitems/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/magicitems/?limit=100",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=10",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=11",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=12",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=13",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=14",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=15",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=16",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=17",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=18",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=19",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=2",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=20",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=21",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=22",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=23",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=24",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=3",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=4",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=5",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=6",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=7",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=8",
+        "https://api.open5e.com/v2/magicitems/?limit=100&page=9"
+      ],
+      "raw": {
+        "path": "raw/magicitems.ndjson",
+        "sha256": "6f345ae7987c2c68707dab185dfeeb8b6a378db11a172eee0dc54cd5c9929ca3",
+        "recordCount": 2319
+      },
+      "normalized": {
+        "path": "normalized/magicitems.ndjson",
+        "sha256": "9d74e8af4db6a7f1d0e17d6b9d86e7d108917fd5f77401fe63524a10482f95fe",
+        "recordCount": 2319
+      },
+      "compiled": {
+        "path": "compiled/magicitems.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "weaponproperties": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/weaponproperties/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/weaponproperties/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/weaponproperties.ndjson",
+        "sha256": "e2bb367761b09e03a157ceddd1e2b7cc0798e72cd726d70987ed0f77b9561f70",
+        "recordCount": 29
+      },
+      "normalized": {
+        "path": "normalized/weaponproperties.ndjson",
+        "sha256": "2f9e0eb57f35a428e94185b361b9181c84162c68a1f181e000874b4bce384fe1",
+        "recordCount": 29
+      },
+      "compiled": {
+        "path": "compiled/weaponproperties.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "itemrarities": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/itemrarities/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/itemrarities/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/itemrarities.ndjson",
+        "sha256": "ced119ce5c941728ad74855b574af94dc74ed22d4c1b424e118d06e2cfd29abb",
+        "recordCount": 6
+      },
+      "normalized": {
+        "path": "normalized/itemrarities.ndjson",
+        "sha256": "0bb382c692f684141e2231f4c079c34450ab3113a421071903cc67f11d174fac",
+        "recordCount": 6
+      },
+      "compiled": {
+        "path": "compiled/itemrarities.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "creaturetypes": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/creaturetypes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/creaturetypes/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/creaturetypes.ndjson",
+        "sha256": "c5b2b30fa028bff573642e962f739937d48adfb1108f75ecb3d46ed4225aba67",
+        "recordCount": 14
+      },
+      "normalized": {
+        "path": "normalized/creaturetypes.ndjson",
+        "sha256": "aa1dd13c2eb01679562f06d605715700d84ca840804c6aa681f97caae17c16d9",
+        "recordCount": 42
+      },
+      "compiled": {
+        "path": "compiled/creaturetypes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "environments": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/environments/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/environments/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/environments.ndjson",
+        "sha256": "64ec2816824cf852b9f5fb10b5ea93cda2de02d427c14727b7461ebf38c70bee",
+        "recordCount": 31
+      },
+      "normalized": {
+        "path": "normalized/environments.ndjson",
+        "sha256": "0d275adc022813624ef30d3c41262138131a79405fda70ad788f6fac3e7ca542",
+        "recordCount": 31
+      },
+      "compiled": {
+        "path": "compiled/environments.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "creaturesets": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/creaturesets/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/creaturesets/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/creaturesets.ndjson",
+        "sha256": "96fb4fa5b1f7a98c841dd89f17fb6bba0763dbe914d3c4bb33694198c2633af3",
+        "recordCount": 1
+      },
+      "normalized": {
+        "path": "normalized/creaturesets.ndjson",
+        "sha256": "2915555b35f66efe8da48dccd8a4b63fd25fd5a6dd234f7a06e5ddde99f42946",
+        "recordCount": 1
+      },
+      "compiled": {
+        "path": "compiled/creaturesets.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "creatures": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/creatures/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/creatures/?limit=100",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=10",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=11",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=12",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=13",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=14",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=15",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=16",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=17",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=18",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=19",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=2",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=20",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=21",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=22",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=23",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=24",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=25",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=26",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=27",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=28",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=29",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=3",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=30",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=31",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=32",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=33",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=34",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=35",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=36",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=4",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=5",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=6",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=7",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=8",
+        "https://api.open5e.com/v2/creatures/?limit=100&page=9"
+      ],
+      "raw": {
+        "path": "raw/creatures.ndjson",
+        "sha256": "2e88a5f17d1efc08e835545cf125ee947b84600a57cc1cceed9a44ae62db46b5",
+        "recordCount": 3541
+      },
+      "normalized": {
+        "path": "normalized/creatures.ndjson",
+        "sha256": "710b88d1b8e3f2ccacabda4d3045472dbcbe8e45d41107c1509ec867d6dfaf52",
+        "recordCount": 3541
+      },
+      "compiled": {
+        "path": "compiled/creatures.ndjson",
+        "sha256": "381d894f406b992a674d1068641fa4c5618d86a296079aaffd7c81f3613b272a",
+        "recordCount": 608
+      }
+    },
+    "spellschools": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/spellschools/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/spellschools/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/spellschools.ndjson",
+        "sha256": "8b784db8499211443b74ff529dda9c62f73ea524b2edd10dbdfe3da5eabe39db",
+        "recordCount": 9
+      },
+      "normalized": {
+        "path": "normalized/spellschools.ndjson",
+        "sha256": "0340e3b2ed60aedc6e48dadae1cc44bbc327292a088bcdb158b112360367fa1b",
+        "recordCount": 9
+      },
+      "compiled": {
+        "path": "compiled/spellschools.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "spells": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/spells/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/spells/?limit=100",
+        "https://api.open5e.com/v2/spells/?limit=100&page=10",
+        "https://api.open5e.com/v2/spells/?limit=100&page=11",
+        "https://api.open5e.com/v2/spells/?limit=100&page=12",
+        "https://api.open5e.com/v2/spells/?limit=100&page=13",
+        "https://api.open5e.com/v2/spells/?limit=100&page=14",
+        "https://api.open5e.com/v2/spells/?limit=100&page=15",
+        "https://api.open5e.com/v2/spells/?limit=100&page=16",
+        "https://api.open5e.com/v2/spells/?limit=100&page=17",
+        "https://api.open5e.com/v2/spells/?limit=100&page=18",
+        "https://api.open5e.com/v2/spells/?limit=100&page=19",
+        "https://api.open5e.com/v2/spells/?limit=100&page=2",
+        "https://api.open5e.com/v2/spells/?limit=100&page=20",
+        "https://api.open5e.com/v2/spells/?limit=100&page=3",
+        "https://api.open5e.com/v2/spells/?limit=100&page=4",
+        "https://api.open5e.com/v2/spells/?limit=100&page=5",
+        "https://api.open5e.com/v2/spells/?limit=100&page=6",
+        "https://api.open5e.com/v2/spells/?limit=100&page=7",
+        "https://api.open5e.com/v2/spells/?limit=100&page=8",
+        "https://api.open5e.com/v2/spells/?limit=100&page=9"
+      ],
+      "raw": {
+        "path": "raw/spells.ndjson",
+        "sha256": "b5660659a7c2b5659d65860cea6b779c09c442a437e535a9558ec9326ea2cc0e",
+        "recordCount": 1955
+      },
+      "normalized": {
+        "path": "normalized/spells.ndjson",
+        "sha256": "5c126e3f73a58294bf254183f54a017aa2f41b2b39d43bcc6d8837cded940794",
+        "recordCount": 1955
+      },
+      "compiled": {
+        "path": "compiled/spells.ndjson",
+        "sha256": "e11711d106a449aca8628b1d278227862d1dee743afd59c6f6f9687a925d639a",
+        "recordCount": 82
+      }
+    },
+    "abilities": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/abilities/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/abilities/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/abilities.ndjson",
+        "sha256": "e647f904b8290c7234dfd291286fde6e49de6fb39651ca3d2790d3591f41ee58",
+        "recordCount": 6
+      },
+      "normalized": {
+        "path": "normalized/abilities.ndjson",
+        "sha256": "6854fea82d3d362ec9a094ac653643ac99f14ae5a100d86121554fbd16c9bbb3",
+        "recordCount": 18
+      },
+      "compiled": {
+        "path": "compiled/abilities.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "languages": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/languages/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/languages/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/languages.ndjson",
+        "sha256": "85d422d30be02369d94108e0f005dc0203335752b81f9cbc402a4dc09f7c14fa",
+        "recordCount": 19
+      },
+      "normalized": {
+        "path": "normalized/languages.ndjson",
+        "sha256": "894626642cad9010b8c63df8775b2c8254b172531f167ae8b67810b38282db10",
+        "recordCount": 19
+      },
+      "compiled": {
+        "path": "compiled/languages.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "alignments": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/alignments/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/alignments/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/alignments.ndjson",
+        "sha256": "4c79c2fd9564cc85cf16ef022207fa4636590ae4afe426a93c399e6edcca8e4a",
+        "recordCount": 9
+      },
+      "normalized": {
+        "path": "normalized/alignments.ndjson",
+        "sha256": "f03bd0bf359826640b47099bb0f0d01f4aac0cc1f1a25db387faa168fe95eb00",
+        "recordCount": 18
+      },
+      "compiled": {
+        "path": "compiled/alignments.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "species": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/species/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/species/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/species.ndjson",
+        "sha256": "339c21b8e7a6dc2a2f2e781a74fe081ceb2b6a3f4d2ba7f6b7bd10831a7a6c04",
+        "recordCount": 63
+      },
+      "normalized": {
+        "path": "normalized/species.ndjson",
+        "sha256": "8ab6fb263754fc588089cd8e84e62737c1cd93d6d13f5496abf36e2a98b93163",
+        "recordCount": 63
+      },
+      "compiled": {
+        "path": "compiled/species.ndjson",
+        "sha256": "9163f6f7b496241611509f6fa646ecb469c9f423559d919fc2db13fc123a45d5",
+        "recordCount": 13
+      }
+    },
+    "classes": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/classes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/classes/?limit=100",
+        "https://api.open5e.com/v2/classes/?limit=100&page=2"
+      ],
+      "raw": {
+        "path": "raw/classes.ndjson",
+        "sha256": "1c452ce7eb7f8da02d0524966ece92569611efc31f904234b101770b3930be1c",
+        "recordCount": 151
+      },
+      "normalized": {
+        "path": "normalized/classes.ndjson",
+        "sha256": "f59242fd4a5502d4fbb3f3b2338334255d80f0f366cb4d8b54272b5e299c945f",
+        "recordCount": 151
+      },
+      "compiled": {
+        "path": "compiled/classes.ndjson",
+        "sha256": "e783e01b4b5f41ce2f7c787c5424c438eb16af59ec1399080393fdc6bf4b94a1",
+        "recordCount": 12
+      }
+    },
+    "backgrounds": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/backgrounds/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/backgrounds/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/backgrounds.ndjson",
+        "sha256": "caecf2a72886bb1a1869e0022a36bb1c04b32843f3ebb3540fcc6ad71d3826b8",
+        "recordCount": 58
+      },
+      "normalized": {
+        "path": "normalized/backgrounds.ndjson",
+        "sha256": "9a2b68658a3a710946b63e2d91c88b5730a122c3f8a02f8cc735f2cf04805471",
+        "recordCount": 58
+      },
+      "compiled": {
+        "path": "compiled/backgrounds.ndjson",
+        "sha256": "f188c59e2a0ea82ee7e62558bf58bef31e74d147cd84dc877e669ba2731074ce",
+        "recordCount": 27
+      }
+    },
+    "feats": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/feats/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/feats/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/feats.ndjson",
+        "sha256": "0eaeb9912ebe4ee80c933dbab66935b172e69c81c025558a4168a11701440d06",
+        "recordCount": 91
+      },
+      "normalized": {
+        "path": "normalized/feats.ndjson",
+        "sha256": "97b9af1df86dd1163ae6d1ce2b63d011dc531a45fe1b7cddbeb4608a6e77a035",
+        "recordCount": 91
+      },
+      "compiled": {
+        "path": "compiled/feats.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "licenses": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/licenses/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/licenses/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/licenses.ndjson",
+        "sha256": "50ebf558de4cef759a53fed4866c2ad468f61c92fa913ad70145845654c19f4a",
+        "recordCount": 3
+      },
+      "normalized": {
+        "path": "normalized/licenses.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      },
+      "compiled": {
+        "path": "compiled/licenses.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "publishers": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/publishers/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/publishers/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/publishers.ndjson",
+        "sha256": "77eb7ad21f0bded8e139f20ff9fcaadf34397f7b170473cd3a10e921b94ab1c2",
+        "recordCount": 6
+      },
+      "normalized": {
+        "path": "normalized/publishers.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      },
+      "compiled": {
+        "path": "compiled/publishers.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "gamesystems": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/gamesystems/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/gamesystems/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/gamesystems.ndjson",
+        "sha256": "535f8f275ad4ce764ac24537d184f1904881f195b0b6c9b903011cb5b7d494c0",
+        "recordCount": 3
+      },
+      "normalized": {
+        "path": "normalized/gamesystems.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      },
+      "compiled": {
+        "path": "compiled/gamesystems.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "images": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/images/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/images/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/images.ndjson",
+        "sha256": "4a24a52525e709b175610c415ccbbfd88ee34207912b7f1e1b867c2f2c23c8f2",
+        "recordCount": 32
+      },
+      "normalized": {
+        "path": "normalized/images.ndjson",
+        "sha256": "e5e203fb27af2a6c02d63c6ae490018e8d1030e03e49edeb6ac5a012d535e96a",
+        "recordCount": 32
+      },
+      "compiled": {
+        "path": "compiled/images.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "services": {
+      "sourceApiVersion": "v2",
+      "endpoint": "https://api.open5e.com/v2/services/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/services/?limit=100"
+      ],
+      "raw": {
+        "path": "raw/services.ndjson",
+        "sha256": "55560aa90ad7b4557c2b0f2aa3981453253e85797f6c73bc28d3b72619c651ac",
+        "recordCount": 30
+      },
+      "normalized": {
+        "path": "normalized/services.ndjson",
+        "sha256": "9c4ac170882346d064b1ecd1a579f50b32e0f18f272a2a37ab79e5df0462e760",
+        "recordCount": 30
+      },
+      "compiled": {
+        "path": "compiled/services.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "spelllists": {
+      "sourceApiVersion": "v1",
+      "endpoint": "https://api.open5e.com/v1/spelllist/",
+      "sourceUrls": [
+        "https://api.open5e.com/v1/spelllist/?limit=100&ordering=slug"
+      ],
+      "raw": {
+        "path": "raw/spelllists.ndjson",
+        "sha256": "1e23e268f51ded48ccf9785c9caaff4a4584c73ac46bf24512c46ff26990d46b",
+        "recordCount": 7
+      },
+      "normalized": {
+        "path": "normalized/spelllists.ndjson",
+        "sha256": "5ef314a0b451cc337ddba701de93fa8b8ef2f8ff2defc5bbd3dafd197a9495af",
+        "recordCount": 7
+      },
+      "compiled": {
+        "path": "compiled/spelllists.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "spellprogressions": {
+      "sourceApiVersion": "v1",
+      "endpoint": "https://api.open5e.com/v1/classes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v1/classes/?limit=100&ordering=slug&document__slug=wotc-srd"
+      ],
+      "raw": {
+        "path": "raw/spellprogressions.ndjson",
+        "sha256": "de8062576c41882b8c6049cd34e696d062df01d37fff6697c5ee87726c4fa3fa",
+        "recordCount": 12
+      },
+      "normalized": {
+        "path": "normalized/spellprogressions.ndjson",
+        "sha256": "1f89f24942fd59633218751ef7c183d6eb41619adad7484d9bbd275d82dd8e51",
+        "recordCount": 8
+      },
+      "compiled": {
+        "path": "compiled/spellprogressions.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "sections": {
+      "sourceApiVersion": "v1",
+      "endpoint": "https://api.open5e.com/v1/sections/",
+      "sourceUrls": [
+        "https://api.open5e.com/v1/sections/?limit=100&ordering=slug&document__slug=wotc-srd"
+      ],
+      "raw": {
+        "path": "raw/sections.ndjson",
+        "sha256": "1dc3e00080c2f9391c77cf905a5ecbd7ace2c06caa48e11f8f2b3cf9034c03d2",
+        "recordCount": 45
+      },
+      "normalized": {
+        "path": "normalized/sections.ndjson",
+        "sha256": "30b21a1da966f8fcc02692c4bfb86796057a36438c15f0ba75c65bda1120d844",
+        "recordCount": 45
+      },
+      "compiled": {
+        "path": "compiled/sections.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "planes": {
+      "sourceApiVersion": "v1",
+      "endpoint": "https://api.open5e.com/v1/planes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v1/planes/?limit=100&ordering=slug&document__slug=wotc-srd"
+      ],
+      "raw": {
+        "path": "raw/planes.ndjson",
+        "sha256": "fc60c9b2f275d5d39b94a4f793ebea7dbfc8280a04043a78e446c60337aadf9a",
+        "recordCount": 8
+      },
+      "normalized": {
+        "path": "normalized/planes.ndjson",
+        "sha256": "067921b6317974e06d4644f79c4eec75b9fe08f3a7627f78ffaccf6046300915",
+        "recordCount": 8
+      },
+      "compiled": {
+        "path": "compiled/planes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    }
+  },
+  "documents": [
+    {
+      "key": "a5e-ag",
+      "packRole": "content",
+      "gamesystem": "a5e",
+      "publisher": {
+        "key": "en-publishing",
+        "name": "EN Publishing"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://a5esrd.com/a5esrd"
+    },
+    {
+      "key": "a5e-ddg",
+      "packRole": "content",
+      "gamesystem": "a5e",
+      "publisher": {
+        "key": "en-publishing",
+        "name": "EN Publishing"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://a5esrd.com/a5esrd"
+    },
+    {
+      "key": "a5e-gpg",
+      "packRole": "content",
+      "gamesystem": "a5e",
+      "publisher": {
+        "key": "en-publishing",
+        "name": "EN Publishing"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://a5esrd.com/a5esrd"
+    },
+    {
+      "key": "a5e-mm",
+      "packRole": "content",
+      "gamesystem": "a5e",
+      "publisher": {
+        "key": "en-publishing",
+        "name": "EN Publishing"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://enpublishingrpg.com/collections/level-up-advanced-5th-edition-a5e/products/level-up-monstrous-menagerie-a5e"
+    },
+    {
+      "key": "bfrd",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "cc-by-40"
+      ],
+      "permalink": "https://koboldpress.com/black-flag-reference-document/"
+    },
+    {
+      "key": "ccdx",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/kpstore/product/creature-codex-for-5th-edition-dnd/"
+    },
+    {
+      "key": "core",
+      "packRole": "taxonomy",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "deepm",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/kpstore/product/deep-magic-for-5th-edition-hardcover/"
+    },
+    {
+      "key": "deepmx",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/deepmagic"
+    },
+    {
+      "key": "elderberry-inn-icons",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "cc0"
+      ],
+      "permalink": "https://github.com/anaislalovi/dnd5e-icons"
+    },
+    {
+      "key": "kp",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/"
+    },
+    {
+      "key": "open5e",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://open5e.com/"
+    },
+    {
+      "key": "open5e-2024",
+      "packRole": "content",
+      "gamesystem": "5e-2024",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://open5e.com/"
+    },
+    {
+      "key": "spells-that-dont-suck",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "somanyrobots",
+        "name": "Somanyrobots"
+      },
+      "licenseKeys": [
+        "cc-by-40"
+      ],
+      "permalink": "https://www.somanyrobots.com/s/Spells-That-Dont-Suck-compressed.pdf"
+    },
+    {
+      "key": "srd-2014",
+      "packRole": "target",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "wizards-of-the-coast",
+        "name": "Wizards of the Coast"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "srd-2024",
+      "packRole": "content",
+      "gamesystem": "5e-2024",
+      "publisher": {
+        "key": "wizards-of-the-coast",
+        "name": "Wizards of the Coast"
+      },
+      "licenseKeys": [
+        "cc-by-40"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "tdcs",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "green-ronin",
+        "name": "Green Ronin Publishing"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://en.wikipedia.org/wiki/Critical_Role%3A_Tal'Dorei_Campaign_Setting"
+    },
+    {
+      "key": "tob",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/tome-of-beasts/"
+    },
+    {
+      "key": "tob-2023",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/kpstore/product/tome-of-beasts-1-2023-edition-hardcover/"
+    },
+    {
+      "key": "tob2",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/tome-of-beasts-2/"
+    },
+    {
+      "key": "tob3",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/tome-of-beasts-3/"
+    },
+    {
+      "key": "toh",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/kpstore/product/tome-of-heroes-for-5th-edition/"
+    },
+    {
+      "key": "vom",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/kpstore/product/vault-of-magic-for-5th-edition/"
+    },
+    {
+      "key": "wz",
+      "packRole": "content",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "kobold-press",
+        "name": "Kobold Press"
+      },
+      "licenseKeys": [
+        "ogl-10a"
+      ],
+      "permalink": "https://koboldpress.com/kpstore/product-category/all-products/warlock-5th-edition-dnd/"
+    }
+  ],
+  "reports": {
+    "attributionSha256": "eb53a69699ab49fb1f6f3380fb3e071ba0692201dad9266bd754e02777857d67",
+    "coverageSha256": "2d6dd466a0774103030f2196c731b9b2bbe3216f9bf6bdfa22ed93d83f840821"
+  }
+}

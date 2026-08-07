@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0c11" />
+    <meta
+      name="description"
+      content="Lantern Table is a one-player tabletop adventure with an AI Dungeon Master."
+    />
+    <title>Lantern Table — Your next campaign starts here</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <header class="site-header shell">
+      <a class="brand" href="/" aria-label="Lantern Table home">
+        <span class="brand-mark">✦</span>
+        <span>LANTERN <em>/</em> TABLE <small>LIVE</small></span>
+      </a>
+      <nav class="top-nav" aria-label="Primary navigation">
+        <a href="#how-it-works">How it works</a>
+        <a href="#membership">Membership</a>
+        <a class="button button-quiet" href="#play">Enter the game</a>
+        <span id="user-button" class="user-button" hidden></span>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero shell">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="status-dot"></span> A living tabletop for one</p>
+          <h1>Your next campaign starts <i>here.</i></h1>
+          <p class="hero-lede">
+            You bring the character. The Dungeon Master, the world, and every voice in the dark
+            respond to what you do.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#play">Start your first session <span>↗</span></a>
+            <a class="text-link" href="#how-it-works">See how the table works <span>↓</span></a>
+          </div>
+          <p class="micro-copy">No group chat to schedule. No rails to follow. Just the next decision.</p>
+        </div>
+        <div class="hero-art" aria-label="Abstract map of a living campaign world">
+          <div class="world-orbit world-orbit-one"></div>
+          <div class="world-orbit world-orbit-two"></div>
+          <div class="world-path world-path-one"></div>
+          <div class="world-path world-path-two"></div>
+          <div class="world-node world-node-one">✦</div>
+          <div class="world-node world-node-two">·</div>
+          <div class="art-caption"><span>OPEN WORLD</span><strong>YOUR CAMPAIGN</strong></div>
+          <div class="art-note note-top">Every choice<br />makes a place.</div>
+          <div class="art-note note-bottom">The world is listening.</div>
+        </div>
+      </section>
+
+      <section id="how-it-works" class="three-up shell section-rule">
+        <article class="feature-card">
+          <span class="feature-number">01</span>
+          <h2>Say what you do.</h2>
+          <p>Speak naturally. Search the room, draw steel, make a deal, or try something the rules never anticipated.</p>
+        </article>
+        <article class="feature-card feature-card-highlight">
+          <span class="feature-number">02</span>
+          <h2>The world answers.</h2>
+          <p>The DM keeps the campaign moving while the rules engine tracks the things that matter: risk, time, position, and consequence.</p>
+        </article>
+        <article class="feature-card">
+          <span class="feature-number">03</span>
+          <h2>Your story persists.</h2>
+          <p>Come back to the same fire, the same rivals, and the choices only your character could have made.</p>
+        </article>
+      </section>
+
+      <section id="membership" class="membership shell">
+        <div>
+          <p class="eyebrow">THE PLAYER PASS</p>
+          <h2>A table that is always open.</h2>
+          <p class="section-lede">One membership unlocks your persistent campaign and the room to see where it goes.</p>
+        </div>
+        <div class="price-card">
+          <div>
+            <p class="price-label" id="subscription-label">Player Pass</p>
+            <p class="price" id="subscription-price">Configure in Stripe</p>
+          </div>
+          <ul>
+            <li><span>✦</span> Persistent player state</li>
+            <li><span>✦</span> Server-kept campaign history</li>
+            <li><span>✦</span> New worlds as they arrive</li>
+          </ul>
+          <button class="button button-primary button-full" data-action="checkout">Claim your seat <span>↗</span></button>
+          <p class="price-footnote">Cancel from the customer portal at any time.</p>
+        </div>
+      </section>
+
+      <section id="play" class="play-section shell">
+        <div class="play-heading">
+          <div>
+            <p class="eyebrow"><span class="status-dot"></span> Live table</p>
+            <h2 id="play-title">The next move is yours.</h2>
+          </div>
+          <div class="table-status"><span class="status-pulse"></span><p id="session-status">Connecting to the table…</p></div>
+        </div>
+        <div class="play-context-bar">
+          <div>
+            <span class="tiny-label">CAMPAIGN</span>
+            <strong id="campaign-name">No campaign selected</strong>
+            <span id="campaign-tagline">Build a world, then step into it.</span>
+          </div>
+          <div class="play-context-actions"><button id="phase-label" class="phase-label phase-button" type="button" data-action="show-campaign-form">SET UP CAMPAIGN</button><button id="manage-campaign-button" class="text-button" data-action="open-campaign-manager" hidden>Manage campaigns</button></div>
+        </div>
+
+        <section id="campaign-manager" class="onboarding-panel" hidden>
+          <div class="onboarding-header">
+            <div><p class="eyebrow">CAMPAIGN MANAGER</p><h3>Choose your world.</h3><p id="campaign-manager-copy">Open a campaign, start a new one, or remove an old world from your account.</p></div>
+            <span class="onboarding-count">YOUR WORLDS</span>
+          </div>
+          <div id="campaign-auth-gate" class="setup-auth-gate" hidden><p>Sign in to create and keep your own worlds.</p><button class="button button-primary" data-action="open-auth">Sign in to begin <span>↗</span></button></div>
+          <div id="campaign-list-wrap" class="campaign-list-wrap" hidden><span class="tiny-label">YOUR CAMPAIGNS</span><div id="campaign-list" class="campaign-list"></div></div>
+          <button id="show-campaign-form" class="button button-quiet" data-action="show-campaign-form" hidden>Start a new campaign <span>↗</span></button>
+          <form id="campaign-form" class="setup-form">
+            <div class="form-grid form-grid-wide">
+              <label>Campaign name<input id="campaign-name-input" name="name" maxlength="80" placeholder="The Salt Road" required></label>
+              <label>Setting<input id="campaign-setting-input" name="setting" maxlength="120" placeholder="A frontier city at the edge of an old empire" required></label>
+            </div>
+            <label>What is this world about?<textarea id="campaign-premise-input" name="premise" maxlength="2000" rows="3" placeholder="A fallen star has opened a road beneath the city, and every faction wants what is buried there." required></textarea></label>
+            <label>Tone<select id="campaign-tone-input" name="tone"><option>Adventurous</option><option>Mysterious</option><option>Grim</option><option>Whimsical</option></select></label>
+            <section id="campaign-rules-panel" class="campaign-rules-panel" hidden>
+              <div class="campaign-rules-heading"><div><span class="tiny-label">RULES &amp; SOURCES</span><strong>Choose what belongs at this table.</strong></div><span id="campaign-pack-label"></span></div>
+              <div class="form-grid form-grid-wide">
+                <label>Game system<select id="campaign-gamesystem-input"></select></label>
+                <label>Base rules<select id="campaign-base-document-input"></select></label>
+              </div>
+              <div><span class="campaign-source-label">Enabled source documents</span><div id="campaign-source-options" class="campaign-source-options"></div></div>
+              <label id="campaign-ogl-choice" class="campaign-license-choice" hidden><input id="campaign-ogl-input" type="checkbox"><span><strong>Enable OGL 1.0a sources</strong><small>Optional third-party material. Required attribution remains visible in the campaign.</small></span></label>
+              <p id="campaign-rules-help" class="campaign-rules-help">The rules engine uses only records allowed by this campaign. Other systems and licenses cannot leak in by name or model memory.</p>
+            </section>
+            <div class="form-actions"><p id="campaign-form-feedback" class="form-feedback" role="status"></p><button class="button button-primary" type="submit">Create the world <span>↗</span></button></div>
+          </form>
+        </section>
+
+        <section id="character-setup" class="onboarding-panel" hidden>
+          <div class="onboarding-header">
+            <div><p class="eyebrow">YOUR CHARACTER</p><h3>Put someone in the world.</h3><p>Your character is not a preset. Choose who enters this campaign, and let the rules grow from there.</p></div>
+            <span class="onboarding-count">02 / 04</span>
+          </div>
+          <form id="character-form" class="setup-form">
+            <div class="character-intro"><span class="character-mark">✦</span><p>The world belongs to the campaign. The point of view belongs to you.</p></div>
+            <div class="form-grid form-grid-wide">
+              <label>Character name<input id="character-name-input" name="name" maxlength="80" placeholder="Mnehmos" required></label>
+              <label>Species<select id="character-species-input" name="speciesKey" disabled><option value="">Loading Open5e species…</option></select></label>
+            </div>
+            <div class="form-grid form-grid-wide">
+              <label>Class<select id="character-class-input" name="classKey" disabled><option value="">Loading Open5e classes…</option></select></label>
+              <label>Background<select id="character-background-choice" name="backgroundKey" disabled><option value="">Loading backgrounds…</option></select></label>
+            </div>
+            <label>Alignment<select id="character-alignment-choice" name="alignmentKey" disabled><option value="">Loading alignments…</option></select></label>
+            <div id="character-source-summary" class="character-source-summary" aria-live="polite">The table is loading the campaign's pinned SRD character options.</div>
+            <section id="character-ability-scores" class="character-choice-panel ability-score-setup">
+              <div class="character-choice-heading"><span>Ability scores</span><small id="character-ability-score-help">Choose a method, then assign one value to each ability.</small></div>
+              <div class="ability-score-method-row">
+                <label>Generation method<select id="character-ability-method"><option value="standard_array">Standard array · 15, 14, 13, 12, 10, 8</option><option value="rolled">Roll 4d6, drop the lowest</option></select></label>
+                <button id="character-roll-stats" class="button button-quiet" type="button">Roll my scores <span>↗</span></button>
+              </div>
+              <div id="character-ability-rolls" class="ability-roll-list" hidden></div>
+              <div id="character-ability-score-options" class="ability-score-options"></div>
+            </section>
+            <section id="character-ability-choice" class="character-choice-panel" hidden>
+              <div class="character-choice-heading"><span>Ability bonuses</span><small id="character-ability-choice-help"></small></div>
+              <div id="character-ability-choice-options" class="character-choice-options"></div>
+            </section>
+            <section id="character-skill-choice" class="character-choice-panel" hidden>
+              <div class="character-choice-heading"><span>Class skills</span><small id="character-skill-choice-help"></small></div>
+              <div id="character-skill-choice-options" class="character-choice-options"></div>
+            </section>
+            <section id="character-language-choice" class="character-choice-panel" hidden>
+              <div class="character-choice-heading"><span>Languages</span><small id="character-language-choice-help"></small></div>
+              <div id="character-language-choice-options" class="character-choice-options"></div>
+            </section>
+            <section id="character-tool-choice" class="character-choice-panel" hidden>
+              <div class="character-choice-heading"><span>Tool proficiencies</span><small id="character-tool-choice-help"></small></div>
+              <div id="character-tool-choice-options" class="character-tool-choice-options"></div>
+            </section>
+            <div class="form-actions"><p id="character-form-feedback" class="form-feedback" role="status"></p><button class="button button-primary" type="submit">Enter the story <span>↗</span></button></div>
+          </form>
+        </section>
+
+        <section id="tutorial-panel" class="onboarding-panel tutorial-panel" hidden>
+          <div class="onboarding-header">
+            <div><p class="eyebrow">THE FIRST CHAPTER</p><h3 id="tutorial-title">Learn the table.</h3><p id="tutorial-copy">The Dungeon Master is ready to show you how this world responds.</p></div>
+            <span class="onboarding-count">03 / 04</span>
+          </div>
+          <div class="journey-steps" aria-label="Campaign progress"><span class="complete">WORLD</span><span class="complete">CHARACTER</span><span id="tutorial-step-one" class="active">TUTORIAL</span><span id="tutorial-step-two">SANDBOX</span></div>
+          <div class="tutorial-card"><span class="tutorial-glyph">✦</span><div><p class="tiny-label">A NOTE FROM THE DM</p><div id="tutorial-narration" class="markdown-body">You choose an action in plain language. The engine decides when the rules need to speak.</div></div></div>
+          <div class="form-actions"><p id="tutorial-feedback" class="form-feedback" role="status"></p><button class="button button-primary" data-game-action="continue">Continue <span>↗</span></button></div>
+        </section>
+
+        <div id="game-shell" class="game-shell" hidden>
+          <aside class="player-panel" aria-label="Player dossier">
+            <div class="player-panel-topline"><span>PLAYER DOSSIER</span><span id="phase-status">SANDBOX</span></div>
+            <div class="campaign-dossier">
+              <span class="tiny-label">YOUR CAMPAIGN</span>
+              <strong id="campaign-dossier-name">Your campaign</strong>
+              <span id="campaign-dossier-setting">The world is yours to shape.</span>
+              <button id="campaign-attribution-button" class="dossier-source-button" type="button" data-action="open-attribution">Rules, sources &amp; attribution</button>
+            </div>
+
+            <div id="campaign-beat-card" class="campaign-beat-card" hidden>
+              <span class="tiny-label">CURRENT PRESSURE</span>
+              <strong id="campaign-beat-title">The world is moving.</strong>
+              <div id="campaign-beat-description" class="markdown-body"></div>
+              <span id="campaign-beat-pressure" class="beat-pressure"></span>
+              <div id="campaign-beat-choices" class="beat-choices"></div>
+            </div>
+
+            <div class="player-sheet" aria-label="Full character sheet">
+              <div class="sheet-heading"><span class="tiny-label">YOUR CHARACTER</span><span id="character-level" class="sheet-level">LEVEL 1</span></div>
+              <div class="character-heading">
+                <strong id="character-name">Your character</strong>
+                <span id="character-identity">Not created yet</span>
+              </div>
+              <div class="character-details">
+                <span id="character-background">Background —</span>
+                <span id="character-alignment">Alignment —</span>
+                <span id="character-size">Size —</span>
+                <span id="character-speed">Speed —</span>
+                <span id="character-proficiency">Proficiency —</span>
+                <span id="character-spellcasting">Spellcasting —</span>
+              </div>
+              <div id="character-description" class="character-description markdown-body" hidden></div>
+              <div class="hp-row"><span>VITALITY</span><strong><span id="character-hp">—</span> / <span id="character-max-hp">—</span> HP</strong></div>
+              <div class="hp-meter" aria-label="Hit points"><span id="character-hp-fill"></span></div>
+              <div class="stat-grid">
+                <div><span>AC</span><strong id="character-ac">—</strong></div>
+                <div><span>GOLD</span><strong id="character-gold">—</strong></div>
+                <div><span>XP</span><strong id="character-xp">—</strong></div>
+              </div>
+              <div class="stat-grid derived-stat-grid">
+                <div><span>INITIATIVE</span><strong id="character-initiative">—</strong></div>
+                <div><span>PASSIVE PERCEPTION</span><strong id="character-passive-perception">—</strong></div>
+              </div>
+              <div class="combat-resource-row"><span>HIT DICE <b id="character-hit-dice">—</b></span><span>TEMP HP <b id="character-temp-hp">0</b></span><span id="character-inspiration" class="inspiration-indicator">INSPIRATION · OFF</span></div>
+              <div class="currency-row" aria-label="Currency"><span><b id="character-platinum-coins">0</b> pp</span><span><b id="character-gold-coins">0</b> gp</span><span><b id="character-electrum-coins">0</b> ep</span><span><b id="character-silver-coins">0</b> sp</span><span><b id="character-copper-coins">0</b> cp</span></div>
+              <div class="carry-row"><span>CARRY</span><strong><span id="character-carry-weight">0</span> / <span id="character-carry-capacity">0</span> lb</strong></div>
+              <div class="sheet-subsection">
+                <span class="tiny-label">ABILITIES</span>
+                <div id="character-abilities" class="ability-grid"></div>
+              </div>
+              <div class="sheet-subsection">
+                <span class="tiny-label">SAVES &amp; SKILLS</span>
+                <div id="character-skills" class="skill-grid"></div>
+              </div>
+              <div class="sheet-subsection">
+                <span class="tiny-label">ATTACKS &amp; SPELLCASTING</span>
+                <div id="character-attacks" class="attack-list"></div>
+              </div>
+              <div class="sheet-subsection">
+                <span class="tiny-label">FEATURES &amp; PROFICIENCIES</span>
+                <div id="character-features" class="feature-list"></div>
+                <div id="character-feature-details" class="feature-detail-list"></div>
+              </div>
+              <div class="sheet-subsection">
+                <span class="tiny-label">OTHER PROFICIENCIES &amp; LANGUAGES</span>
+                <div id="character-proficiencies" class="proficiency-list"></div>
+              </div>
+              <div id="character-lore-section" class="sheet-subsection" hidden>
+                <span class="tiny-label">CHARACTER STORY</span>
+                <div id="character-lore" class="lore-grid"></div>
+              </div>
+              <div id="character-source-section" class="sheet-subsection" hidden>
+                <span class="tiny-label">SOURCE-BACKED RULES</span>
+                <div id="character-source-details" class="source-detail-list"></div>
+              </div>
+              <div id="character-spellbook-section" class="sheet-subsection" hidden>
+                <div class="spell-heading"><span class="tiny-label">SPELLCASTING</span><span id="spell-selection-mode">SPELLBOOK</span></div>
+                <div id="character-spell-slots" class="spell-slot-grid"></div>
+                <div id="character-concentration" class="concentration-row" hidden></div>
+                <div class="spell-columns">
+                  <div><span id="known-spell-label" class="spell-list-label">KNOWN / SPELLBOOK</span><div id="character-known-spells" class="spell-list"></div></div>
+                  <div><span id="prepared-spell-label" class="spell-list-label">PREPARED</span><div id="character-prepared-spells" class="spell-list"></div></div>
+                </div>
+              </div>
+              <div class="sheet-subsection">
+                <span class="tiny-label">INVENTORY</span>
+                <div id="character-inventory" class="inventory-list"></div>
+              </div>
+              <div id="character-conditions" class="condition-list" hidden></div>
+              <div class="death-save-row"><span>DEATH SAVES</span><strong id="character-death-saves">0 / 0</strong></div>
+            </div>
+
+            <section class="character-edit-card" aria-label="Character details editor">
+              <div class="notes-heading"><span class="tiny-label">YOUR DETAILS</span><span>PLAYER EDIT</span></div>
+              <form id="character-edit-form" class="note-form">
+                <textarea id="character-description-input" rows="4" maxlength="2000" placeholder="Describe your character's appearance, history, ideals, bonds, and flaws in your own words."></textarea>
+                <details class="character-details-editor"><summary>Edit the full character sheet</summary>
+                  <div class="detail-edit-grid">
+                    <label>Player name<input id="character-player-name-input" maxlength="120"></label>
+                    <label>Age<input id="character-age-input" maxlength="80"></label>
+                    <label>Height<input id="character-height-input" maxlength="80"></label>
+                    <label>Weight<input id="character-weight-input" maxlength="80"></label>
+                    <label>Eyes<input id="character-eyes-input" maxlength="80"></label>
+                    <label>Skin<input id="character-skin-input" maxlength="80"></label>
+                    <label>Hair<input id="character-hair-input" maxlength="80"></label>
+                    <label>Faction / symbol<input id="character-faction-input" maxlength="160"></label>
+                  </div>
+                  <div class="detail-edit-grid detail-edit-wide">
+                    <label>Personality traits<textarea id="character-personality-input" rows="2" maxlength="2000"></textarea></label>
+                    <label>Ideals<textarea id="character-ideals-input" rows="2" maxlength="2000"></textarea></label>
+                    <label>Bonds<textarea id="character-bonds-input" rows="2" maxlength="2000"></textarea></label>
+                    <label>Flaws<textarea id="character-flaws-input" rows="2" maxlength="2000"></textarea></label>
+                    <label>Appearance<textarea id="character-appearance-input" rows="3" maxlength="4000"></textarea></label>
+                    <label>Backstory<textarea id="character-backstory-input" rows="3" maxlength="6000"></textarea></label>
+                    <label>Allies &amp; organizations<textarea id="character-allies-input" rows="3" maxlength="4000"></textarea></label>
+                    <label>Treasure<textarea id="character-treasure-input" rows="3" maxlength="4000"></textarea></label>
+                  </div>
+                  <label class="inspiration-input"><input id="character-inspiration-input" type="checkbox"><span>My character has inspiration</span></label>
+                  <label>Temporary hit points<input id="character-temp-hp-input" type="number" min="0" max="1000000" step="1"></label>
+                </details>
+                <button class="button button-quiet" type="submit">Save details <span>↗</span></button>
+                <p id="character-edit-feedback" class="form-feedback" role="status"></p>
+              </form>
+            </section>
+
+            <section class="quest-card" aria-label="Quest journal">
+              <div class="notes-heading"><span class="tiny-label">QUEST JOURNAL</span><span id="quest-count">0</span></div>
+              <div id="quest-list" class="quest-list"><p class="notes-empty">No active quests yet.</p></div>
+            </section>
+
+            <section class="notes-card" aria-label="Player notes">
+              <div class="notes-heading"><span class="tiny-label">PLAYER NOTES</span><span id="notes-count">0</span></div>
+              <div id="player-notes" class="player-notes"><p class="notes-empty">Notes you and the DM choose to keep.</p></div>
+              <form id="note-form" class="note-form">
+                <textarea id="note-input" rows="3" maxlength="4000" placeholder="Write a note for your future self…"></textarea>
+                <button class="button button-quiet" type="submit">Add note <span>↗</span></button>
+                <p id="note-feedback" class="form-feedback" role="status"></p>
+              </form>
+            </section>
+
+            <div id="combat-card" class="combat-card" hidden>
+              <div class="combat-heading"><span class="tiny-label">ENCOUNTER</span><span id="combat-round">ROUND —</span></div>
+              <strong id="combat-name">Hostile presence</strong>
+              <div class="enemy-health"><span id="enemy-health-fill"></span></div>
+              <p id="combat-detail">Your action is ready.</p>
+              <div id="combat-enemies" class="combat-enemy-list"></div>
+            </div>
+
+            <div class="player-panel-meta"><span>DM ONLINE</span><span id="integration-state">SERVER READY</span></div>
+          </aside>
+          <section class="table-panel" aria-label="Game table">
+            <div class="table-header">
+              <div>
+                <div class="table-kicker"><span class="tiny-label">THE DM</span><span class="live-chip">LIVE</span></div>
+                <h3 id="table-prompt">What do you do?</h3>
+                <p id="table-subtitle">The world is listening. Describe one clear move.</p>
+              </div>
+              <span class="player-pill">YOU / PLAYER</span>
+            </div>
+            <div class="log-heading"><span class="tiny-label">CAMPAIGN LOG</span><span>Persistent record</span></div>
+            <div id="game-log" class="game-log" aria-live="polite">
+              <div id="log-empty" class="log-empty">
+                <span class="empty-glyph">✦</span>
+                <strong>The table is ready.</strong>
+                <p>Your campaign will take shape here.</p>
+              </div>
+            </div>
+            <form id="chat-form" class="chat-composer">
+              <div class="compose-topline"><label class="tiny-label" for="player-input">YOUR TURN</label><span id="input-counter">0 / 2000</span></div>
+              <div class="chat-input-row">
+                <textarea id="player-input" rows="2" maxlength="2000" placeholder="I describe what my character does next." required></textarea>
+                <button class="button button-primary chat-submit" type="submit">Send <span>↗</span></button>
+              </div>
+              <p class="chat-hint">Speak naturally. The engine rolls only when the fiction calls for a risk.</p>
+            </form>
+            <div class="action-heading"><span class="tiny-label">QUICK MOVES</span><span>Rules-aware shortcuts</span></div>
+            <div class="action-row" aria-label="Available actions">
+              <button class="action-button" data-game-action="observe"><span>◌</span><strong>Observe</strong><small>Read the moment</small></button>
+              <button class="action-button" data-game-action="listen"><span>◒</span><strong>Listen</strong><small>Test your senses</small></button>
+              <button class="action-button action-button-roll" data-game-action="roll"><span>d20</span><strong>Make a check</strong><small>Let the dice speak</small></button>
+            </div>
+            <div class="table-footer"><span id="auth-state">Local table preview</span><button class="text-button" data-action="open-auth">Sign in to save your campaign</button></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer shell">
+      <div class="brand"><span class="brand-mark">✦</span><span>LANTERN <em>/</em> TABLE <small>LIVE</small></span></div>
+      <p>Built for players who still want to be surprised.</p>
+      <span class="footer-note">AUTH BY CLERK · PAYMENTS BY STRIPE</span>
+    </footer>
+
+    <dialog id="auth-dialog" class="auth-dialog">
+      <button class="dialog-close" data-action="close-auth" aria-label="Close sign in">×</button>
+      <p class="eyebrow">WELCOME TO THE TABLE</p>
+      <h2>Take your seat.</h2>
+      <p class="dialog-copy">Sign in to keep your campaign waiting for you.</p>
+      <div id="auth-mount" class="auth-mount"></div>
+      <p id="auth-fallback" class="auth-fallback" hidden></p>
+    </dialog>
+
+    <dialog id="delete-campaign-dialog" class="auth-dialog danger-dialog">
+      <button class="dialog-close" data-action="close-delete-campaign" aria-label="Close delete campaign dialog">&times;</button>
+      <p class="eyebrow">REMOVE CAMPAIGN</p>
+      <h2 id="delete-campaign-title">Delete this world?</h2>
+      <p id="delete-campaign-copy" class="dialog-copy">This permanently removes the campaign, its character, notes, log, commands, and events from your account.</p>
+      <p id="delete-campaign-feedback" class="form-feedback" role="status"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" type="button" data-action="close-delete-campaign">Keep campaign</button>
+        <button id="confirm-delete-campaign" class="button button-danger" type="button" data-action="confirm-delete-campaign">Delete permanently</button>
+      </div>
+    </dialog>
+
+    <dialog id="attribution-dialog" class="auth-dialog attribution-dialog">
+      <button class="dialog-close" data-action="close-attribution" aria-label="Close sources and attribution">×</button>
+      <p class="eyebrow">CAMPAIGN SOURCES</p>
+      <h2>Rules at this table.</h2>
+      <p id="attribution-summary" class="dialog-copy">This campaign resolves only against its pinned source partition.</p>
+      <div id="attribution-list" class="attribution-list"></div>
+      <p id="attribution-pack" class="attribution-pack"></p>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

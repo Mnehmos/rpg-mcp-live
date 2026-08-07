@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Lantern Table">
+  <rect width="64" height="64" rx="16" fill="#0b0c11" />
+  <path d="M32 10c-9 0-16 7-16 16v17h32V26c0-9-7-16-16-16Z" fill="#e8a84c" />
+  <path d="M21 45h22M25 51h14" stroke="#f8e7c8" stroke-width="4" stroke-linecap="round" />
+  <path d="M32 16v24" stroke="#fff4d6" stroke-width="3" stroke-linecap="round" opacity=".8" />
+</svg>

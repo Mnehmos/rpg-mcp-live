@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "packVersion": "open5e-v2-srd-2014-s0",
+  "packHash": "4ab7eb54947841957f63c468dfbf266306779db470ceb7aacbd3eecf11aa2f95",
+  "targetDocumentKey": "srd-2014",
+  "taxonomyDocumentKey": "core",
+  "gamesystems": [
+    "5e-2014"
+  ],
+  "sourceApiVersion": "v2",
+  "sourceFetchedAt": "2026-08-07T00:00:00.000Z",
+  "collections": {
+    "conditions": {
+      "endpoint": "https://api.open5e.com/v2/conditions/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/conditions/?document__key=core&limit=5&ordering=key&page=2",
+        "https://api.open5e.com/v2/conditions/?document__key=core&limit=5&ordering=key&page=3",
+        "https://api.open5e.com/v2/conditions/?limit=5&ordering=key&document__key=core"
+      ],
+      "raw": {
+        "path": "raw/conditions.ndjson",
+        "sha256": "271dffec9572aca39947737d5649feed4116ad85c9e83b13c4d30b645f86dec8",
+        "recordCount": 15
+      },
+      "normalized": {
+        "path": "normalized/conditions.ndjson",
+        "sha256": "87c2704c2e578e52c7085657dca704928b02f6becb7a0608ad358aca3ad0f7f5",
+        "recordCount": 15
+      },
+      "compiled": {
+        "path": "compiled/conditions.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "damagetypes": {
+      "endpoint": "https://api.open5e.com/v2/damagetypes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/damagetypes/?document__key=core&limit=5&ordering=key&page=2",
+        "https://api.open5e.com/v2/damagetypes/?document__key=core&limit=5&ordering=key&page=3",
+        "https://api.open5e.com/v2/damagetypes/?limit=5&ordering=key&document__key=core"
+      ],
+      "raw": {
+        "path": "raw/damagetypes.ndjson",
+        "sha256": "5f12d5a0348e6005ec858f6f07758ab8354e9f6bf4aa9c7d8cb1658539815013",
+        "recordCount": 13
+      },
+      "normalized": {
+        "path": "normalized/damagetypes.ndjson",
+        "sha256": "9db2ae6ed24e35f25870048f488beec05b55a7e69c83b5301fead951d6052e15",
+        "recordCount": 13
+      },
+      "compiled": {
+        "path": "compiled/damagetypes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "sizes": {
+      "endpoint": "https://api.open5e.com/v2/sizes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/sizes/?document__key=core&limit=5&ordering=key&page=2",
+        "https://api.open5e.com/v2/sizes/?limit=5&ordering=key&document__key=core"
+      ],
+      "raw": {
+        "path": "raw/sizes.ndjson",
+        "sha256": "a1e2b89bdf074fdc54263086aedc2fde323afaa8b0d95cb2160782c4745d0eeb",
+        "recordCount": 6
+      },
+      "normalized": {
+        "path": "normalized/sizes.ndjson",
+        "sha256": "e36469da816aca990b274866e9541e7203fee57d69c997558105fda6638c71b9",
+        "recordCount": 6
+      },
+      "compiled": {
+        "path": "compiled/sizes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "documents": {
+      "endpoint": "https://api.open5e.com/v2/documents/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/documents/?limit=5&ordering=key&key=a5e-ag",
+        "https://api.open5e.com/v2/documents/?limit=5&ordering=key&key=core",
+        "https://api.open5e.com/v2/documents/?limit=5&ordering=key&key=elderberry-inn-icons",
+        "https://api.open5e.com/v2/documents/?limit=5&ordering=key&key=srd-2014",
+        "https://api.open5e.com/v2/documents/?limit=5&ordering=key&key=srd-2024"
+      ],
+      "raw": {
+        "path": "raw/documents.ndjson",
+        "sha256": "02981768a25997229621172813b8cf91f9b93f8e2877bad3956772c64edecd0a",
+        "recordCount": 5
+      },
+      "normalized": {
+        "path": "normalized/documents.ndjson",
+        "sha256": "2edaf55307600a2739e7b222f6f57fc00de1554c6989df519dfe217f1970890a",
+        "recordCount": 5
+      },
+      "compiled": {
+        "path": "compiled/documents.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    }
+  },
+  "documents": [
+    {
+      "key": "a5e-ag",
+      "packRole": "raw-attribution",
+      "gamesystem": "a5e",
+      "publisher": {
+        "key": "en-publishing",
+        "name": "EN Publishing"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://a5esrd.com/a5esrd"
+    },
+    {
+      "key": "core",
+      "packRole": "taxonomy",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "elderberry-inn-icons",
+      "packRole": "raw-attribution",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "cc0"
+      ],
+      "permalink": "https://github.com/anaislalovi/dnd5e-icons"
+    },
+    {
+      "key": "srd-2014",
+      "packRole": "target",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "wizards-of-the-coast",
+        "name": "Wizards of the Coast"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "srd-2024",
+      "packRole": "raw-attribution",
+      "gamesystem": "5e-2024",
+      "publisher": {
+        "key": "wizards-of-the-coast",
+        "name": "Wizards of the Coast"
+      },
+      "licenseKeys": [
+        "cc-by-40"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    }
+  ],
+  "reports": {
+    "attributionSha256": "7a14831fcf2335380cbef2a13a98d6e460d59d579a20a5a947e94187bc5b74fb",
+    "coverageSha256": "6188c0921a7e39a487aca260067ab620ef2be8c570b09bdb552cb25fd77e11f2"
+  }
+}

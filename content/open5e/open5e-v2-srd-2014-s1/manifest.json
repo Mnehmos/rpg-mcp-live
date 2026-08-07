@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "packVersion": "open5e-v2-srd-2014-s1",
+  "packHash": "7a30c58868cb9dfd87124582a26f95cfa43577d948f3bfc5311e7ab52eb03bf3",
+  "targetDocumentKey": "srd-2014",
+  "taxonomyDocumentKey": "core",
+  "gamesystems": [
+    "5e-2014"
+  ],
+  "sourceApiVersion": "v2",
+  "sourceFetchedAt": "2026-08-07T00:00:00.000Z",
+  "collections": {
+    "conditions": {
+      "endpoint": "https://api.open5e.com/v2/conditions/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/conditions/?limit=25&ordering=key&document__key=core"
+      ],
+      "raw": {
+        "path": "raw/conditions.ndjson",
+        "sha256": "271dffec9572aca39947737d5649feed4116ad85c9e83b13c4d30b645f86dec8",
+        "recordCount": 15
+      },
+      "normalized": {
+        "path": "normalized/conditions.ndjson",
+        "sha256": "87c2704c2e578e52c7085657dca704928b02f6becb7a0608ad358aca3ad0f7f5",
+        "recordCount": 15
+      },
+      "compiled": {
+        "path": "compiled/conditions.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "damagetypes": {
+      "endpoint": "https://api.open5e.com/v2/damagetypes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/damagetypes/?limit=25&ordering=key&document__key=core"
+      ],
+      "raw": {
+        "path": "raw/damagetypes.ndjson",
+        "sha256": "5f12d5a0348e6005ec858f6f07758ab8354e9f6bf4aa9c7d8cb1658539815013",
+        "recordCount": 13
+      },
+      "normalized": {
+        "path": "normalized/damagetypes.ndjson",
+        "sha256": "9db2ae6ed24e35f25870048f488beec05b55a7e69c83b5301fead951d6052e15",
+        "recordCount": 13
+      },
+      "compiled": {
+        "path": "compiled/damagetypes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "sizes": {
+      "endpoint": "https://api.open5e.com/v2/sizes/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/sizes/?limit=25&ordering=key&document__key=core"
+      ],
+      "raw": {
+        "path": "raw/sizes.ndjson",
+        "sha256": "a1e2b89bdf074fdc54263086aedc2fde323afaa8b0d95cb2160782c4745d0eeb",
+        "recordCount": 6
+      },
+      "normalized": {
+        "path": "normalized/sizes.ndjson",
+        "sha256": "e36469da816aca990b274866e9541e7203fee57d69c997558105fda6638c71b9",
+        "recordCount": 6
+      },
+      "compiled": {
+        "path": "compiled/sizes.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "documents": {
+      "endpoint": "https://api.open5e.com/v2/documents/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/documents/?limit=25&ordering=key&key=a5e-ag",
+        "https://api.open5e.com/v2/documents/?limit=25&ordering=key&key=core",
+        "https://api.open5e.com/v2/documents/?limit=25&ordering=key&key=elderberry-inn-icons",
+        "https://api.open5e.com/v2/documents/?limit=25&ordering=key&key=srd-2014",
+        "https://api.open5e.com/v2/documents/?limit=25&ordering=key&key=srd-2024"
+      ],
+      "raw": {
+        "path": "raw/documents.ndjson",
+        "sha256": "02981768a25997229621172813b8cf91f9b93f8e2877bad3956772c64edecd0a",
+        "recordCount": 5
+      },
+      "normalized": {
+        "path": "normalized/documents.ndjson",
+        "sha256": "2edaf55307600a2739e7b222f6f57fc00de1554c6989df519dfe217f1970890a",
+        "recordCount": 5
+      },
+      "compiled": {
+        "path": "compiled/documents.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "skills": {
+      "endpoint": "https://api.open5e.com/v2/skills/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/skills/?limit=25&ordering=key"
+      ],
+      "raw": {
+        "path": "raw/skills.ndjson",
+        "sha256": "1af777a896724194cf8a5934d9d6fe09dd245ba4bb9ee098f0bbb7f238a11453",
+        "recordCount": 20
+      },
+      "normalized": {
+        "path": "normalized/skills.ndjson",
+        "sha256": "ae9a3a89f18df70b427f871487aa2c1ff987a21310ccc5cce639acd3a28ef84c",
+        "recordCount": 18
+      },
+      "compiled": {
+        "path": "compiled/skills.ndjson",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "recordCount": 0
+      }
+    },
+    "rules": {
+      "endpoint": "https://api.open5e.com/v2/rules/",
+      "sourceUrls": [
+        "https://api.open5e.com/v2/rules/?limit=25&ordering=key&key=srd_coins_exchange-rates"
+      ],
+      "raw": {
+        "path": "raw/rules.ndjson",
+        "sha256": "32736ec42b74af332a1cfa71fafa52e71c0182ff3eeb27b473687eeabb21b2ca",
+        "recordCount": 1
+      },
+      "normalized": {
+        "path": "normalized/rules.ndjson",
+        "sha256": "71e08eec5fd59a00e0335566ebd351f6ca68895fff8bb36851dcbfd7054dd7e8",
+        "recordCount": 1
+      },
+      "compiled": {
+        "path": "compiled/rules.ndjson",
+        "sha256": "8c3e32d7cb8dfaa8fd40fc5f4b10141e69382ec7f678d7f74586efb3978acc8b",
+        "recordCount": 1
+      }
+    }
+  },
+  "documents": [
+    {
+      "key": "a5e-ag",
+      "packRole": "raw-attribution",
+      "gamesystem": "a5e",
+      "publisher": {
+        "key": "en-publishing",
+        "name": "EN Publishing"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://a5esrd.com/a5esrd"
+    },
+    {
+      "key": "core",
+      "packRole": "taxonomy",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "elderberry-inn-icons",
+      "packRole": "raw-attribution",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "open5e",
+        "name": "Open5e"
+      },
+      "licenseKeys": [
+        "cc0"
+      ],
+      "permalink": "https://github.com/anaislalovi/dnd5e-icons"
+    },
+    {
+      "key": "srd-2014",
+      "packRole": "target",
+      "gamesystem": "5e-2014",
+      "publisher": {
+        "key": "wizards-of-the-coast",
+        "name": "Wizards of the Coast"
+      },
+      "licenseKeys": [
+        "cc-by-40",
+        "ogl-10a"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    },
+    {
+      "key": "srd-2024",
+      "packRole": "raw-attribution",
+      "gamesystem": "5e-2024",
+      "publisher": {
+        "key": "wizards-of-the-coast",
+        "name": "Wizards of the Coast"
+      },
+      "licenseKeys": [
+        "cc-by-40"
+      ],
+      "permalink": "https://dnd.wizards.com/resources/systems-reference-document"
+    }
+  ],
+  "reports": {
+    "attributionSha256": "30cb911d102c034ab130e3ed2d41a027ab261b9d47398b3106402f1ec54e63e3",
+    "coverageSha256": "fbfbd33b8b887bf58da36ac53ec9caa035c265c14de4bd10c54cc8ac8257ab58"
+  }
+}
