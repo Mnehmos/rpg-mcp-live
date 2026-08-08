@@ -39,6 +39,7 @@ const ALL_COMMAND_KINDS = [
   "challenge_attempt",
   "character_update",
   "move",
+  "travel",
   "interact",
   "social_check",
   "merchant_trade",
@@ -69,6 +70,7 @@ const ALL_COMMAND_KINDS = [
   "death_save",
   "loot",
   "rest",
+  "project",
   "tutorial_advance",
   "declare",
 ] as const satisfies readonly CommandKind[];
@@ -193,6 +195,15 @@ function worldState(): LanternCampaignState {
     }],
     objects: [],
   };
+  return normalizeCampaignState(state);
+}
+
+function travelState(): LanternCampaignState {
+  const state = worldState();
+  state.character.inventory.push(
+    { id: "census-ration", quantity: 1, ownerRef: { kind: "actor", id: state.character.id }, authoredDefinition: { name: "Census ration", kind: "consumable", weight: 1, properties: ["ration"] } },
+    { id: "census-water", quantity: 1, ownerRef: { kind: "actor", id: state.character.id }, authoredDefinition: { name: "Census water", kind: "consumable", weight: 1, properties: ["water"] } },
+  );
   return normalizeCampaignState(state);
 }
 
@@ -370,6 +381,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   },
   { kind: "character_update", tool: "character_update", expectedCode: "character_required", state: initialState, rawCommand: () => ({ kind: "character_update", name: "Too early" }) },
   { kind: "move", tool: "move", expectedCode: "invalid_move", state: initialState, rawCommand: () => ({ kind: "move", destinationId: "missing-exit" }) },
+  { kind: "travel", tool: "travel", expectedCode: "route_unreviewed", state: initialState, rawCommand: () => ({ kind: "travel", routeId: "unreviewed", destinationId: "missing-exit", pace: "normal" }) },
   { kind: "interact", tool: "interact", expectedCode: "object_locked", state: worldObjectState, rawCommand: () => ({ kind: "interact", targetId: "gatehouse-door", affordance: "open", goal: "Open the locked gatehouse door." }) },
   { kind: "social_check", tool: "social_check", expectedCode: "npc_not_found", state: createdState, rawCommand: () => ({ kind: "social_check", npcId: "missing-npc", ability: "cha", goal: "Ask for help." }) },
   { kind: "merchant_trade", tool: "merchant_trade", expectedCode: "merchant_not_found", state: createdState, rawCommand: () => ({ kind: "merchant_trade", merchantId: "missing-merchant", itemId: "lamp-oil", side: "buy", quantity: 1 }) },
@@ -396,6 +408,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "death_save", tool: "death_save", expectedCode: "not_unconscious", state: createdState, rawCommand: () => ({ kind: "death_save" }) },
   { kind: "loot", tool: "loot", expectedCode: "encounter_active", state: createdState, rawCommand: () => ({ kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }) },
   { kind: "rest", tool: "rest", expectedCode: "combat_active", state: activeCombatState, rawCommand: () => ({ kind: "rest", restType: "long" }) },
+  { kind: "project", tool: "project", expectedCode: "project_unreviewed", state: initialState, rawCommand: () => ({ kind: "project", action: "start", projectId: "unreviewed" }) },
   { kind: "tutorial_advance", tool: "tutorial_advance", expectedCode: "character_required", state: initialState, rawCommand: () => ({ kind: "tutorial_advance" }) },
 ];
 
@@ -407,11 +420,13 @@ const controlFixtures: readonly ControlFixture[] = [
   { kind: "experience_boundary", tool: "experience_boundary", state: experienceState, rawCommand: () => ({ kind: "experience_boundary", theme: "graphic violence", action: "skip" }) },
   { kind: "challenge_attempt", tool: "challenge_attempt", state: initialState, rawCommand: () => ({ kind: "challenge_attempt", challengeId: "ordinary-unlocked-door-v1", goal: "Open the door", approach: "Turn the handle" }) },
   { kind: "interact", tool: "interact", state: initialState, rawCommand: () => ({ kind: "interact", targetId: "unbounded-fiction", goal: "Try the fixture interaction." }) },
+  { kind: "travel", tool: "travel", state: travelState, rawCommand: () => ({ kind: "travel", routeId: "one-day-road-v1", destinationId: "west-pier", pace: "normal" }) },
   { kind: "quest_create", tool: "quest_create", state: initialState, rawCommand: () => ({ kind: "quest_create", title: "A bounded quest", objective: "Record a valid quest.", rewardXp: 1, rewardCopper: 1 }) },
   { kind: "improvise", tool: "improvise", state: initialState, rawCommand: () => ({ kind: "improvise", title: "A cosmetic detail", description: "The bell rings once.", effectType: "fictional" }) },
   { kind: "campaign_beat", tool: "campaign_beat", state: initialState, rawCommand: () => ({ kind: "campaign_beat", title: "A pressure", description: "The tide turns.", pressure: "The window is closing.", choices: ["Wait", "Act"] }) },
   { kind: "roll_check", tool: "roll_check", state: initialState, rawCommand: () => ({ kind: "roll_check", ability: "wis", goal: "Study the fixture." }) },
   { kind: "declare", tool: "declare", state: initialState, rawCommand: () => ({ kind: "declare", goal: "Take a fictional action." }) },
+  { kind: "project", tool: "project", state: initialState, rawCommand: () => ({ kind: "project", action: "start", projectId: "research-v1" }) },
   { kind: "encounter_decision", tool: "encounter_decision", state: lifecycleOfferState, rawCommand: () => ({ kind: "encounter_decision", decision: "reject_surrender", targetId: "fixture" }) },
 ];
 
@@ -426,6 +441,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "challenge_attempt", tool: "challenge_attempt", build: () => ({ state: initialState(), command: parseCommand({ kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force the barred door", approach: "Shoulder it" }) }) },
   { kind: "character_update", tool: "character_update", build: () => ({ state: createdState(), command: parseCommand({ kind: "character_update", name: "Replay Hero" }) }) },
   { kind: "move", tool: "move", build: () => ({ state: worldState(), command: parseCommand({ kind: "move", destinationId: "west-pier" }) }) },
+  { kind: "travel", tool: "travel", build: () => ({ state: travelState(), command: parseCommand({ kind: "travel", routeId: "one-day-road-v1", destinationId: "west-pier", pace: "normal" }) }) },
   { kind: "interact", tool: "interact", build: () => ({ state: initialState(), command: parseCommand({ kind: "interact", targetId: "fixture-object", goal: "Touch the fixture." }) }) },
   { kind: "interact", tool: "interact", build: () => ({ state: worldObjectState(), command: parseCommand({ kind: "interact", targetId: "gatehouse-door", affordance: "unlock", goal: "Replay the typed door interaction." }) }) },
   { kind: "social_check", tool: "social_check", build: () => ({ state: worldState(), command: parseCommand({ kind: "social_check", npcId: "guide", ability: "cha", goal: "Ask for directions." }) }) },
@@ -475,6 +491,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "death_save", tool: "death_save", build: () => ({ state: unconsciousState(), command: parseCommand({ kind: "death_save" }) }) },
   { kind: "loot", tool: "loot", build: () => ({ state: endedCombatState(), command: parseCommand({ kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }) }) },
   { kind: "rest", tool: "rest", build: () => ({ state: createdState(), command: parseCommand({ kind: "rest", restType: "long" }) }) },
+  { kind: "project", tool: "project", build: () => ({ state: initialState(), command: parseCommand({ kind: "project", action: "start", projectId: "research-v1" }) }) },
   { kind: "tutorial_advance", tool: "tutorial_advance", build: () => ({ state: createdState(), command: parseCommand({ kind: "tutorial_advance" }) }) },
   { kind: "declare", tool: "declare", build: () => ({ state: initialState(), command: parseCommand({ kind: "declare", goal: "Replay a declaration." }) }) },
 ];
@@ -483,7 +500,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(42);
+    expect(ALL_COMMAND_KINDS).toHaveLength(44);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

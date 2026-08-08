@@ -451,6 +451,7 @@ export const engineToolNameSchema = z.enum([
   "merchant_catalog",
   "observe",
   "move",
+  "travel",
   "interact",
   "social_check",
   "merchant_trade",
@@ -486,6 +487,7 @@ export const engineToolNameSchema = z.enum([
   "death_save",
   "loot",
   "rest",
+  "project",
   "roll_check",
   "tutorial_advance",
 ]);
@@ -906,6 +908,23 @@ export const engineCampaignDeleteSchema = z
   .strict();
 export type EngineCampaignDeleteRequest = z.infer<typeof engineCampaignDeleteSchema>;
 
+export const engineTravelCommandSchema = z.object({
+  kind: z.literal("travel"),
+  routeId: z.string().trim().min(1).max(120),
+  destinationId: z.string().trim().min(1).max(120),
+  pace: z.enum(["normal", "fast"]),
+  navigatorId: z.string().trim().min(1).max(120).optional(),
+  watcherId: z.string().trim().min(1).max(120).optional(),
+}).strict();
+export type EngineTravelCommand = z.infer<typeof engineTravelCommandSchema>;
+
+export const engineProjectCommandSchema = z.object({
+  kind: z.literal("project"),
+  action: z.enum(["start", "work"]),
+  projectId: z.string().trim().min(1).max(120),
+}).strict();
+export type EngineProjectCommand = z.infer<typeof engineProjectCommandSchema>;
+
 export const engineCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("observe") }).strict(),
   z.object({ kind: z.literal("listen") }).strict(),
@@ -930,6 +949,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     details: engineCharacterDetailsSchema.optional(),
   }).strict(),
   z.object({ kind: z.literal("move"), destinationId: z.string().trim().min(1).max(80) }).strict(),
+  engineTravelCommandSchema,
   z
     .object({
       kind: z.literal("interact"),
@@ -1177,6 +1197,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("rest"), restType: z.enum(["short", "long"]).default("long") }).strict(),
+  engineProjectCommandSchema,
   z.object({ kind: z.literal("tutorial_advance") }).strict(),
   z.object({ kind: z.literal("declare"), goal: z.string().trim().min(1).max(2_000) }).strict(),
 ]);
@@ -1624,6 +1645,8 @@ export interface EngineEffectInstance {
   stackingRule: "stack" | "replace" | "ignore";
   clearedBy: EngineEffectClearPolicy[];
   status: "active" | "expired" | "removed";
+  /** Optional campaign-clock anchor for fixed minute/hour/day durations. */
+  startTimeMinutes?: number;
   provenance: EngineEffectProvenance;
 }
 
@@ -1859,6 +1882,141 @@ export interface EngineQuest {
   progress: number;
   giverNpcId?: string;
   deadline?: string;
+  /** Engine-owned in-fiction deadline. `deadline` remains legacy display text. */
+  deadlineAtMinutes?: number;
+}
+
+export type EngineTravelPace = "normal" | "fast";
+export type EngineGameWeather = "clear" | "rain" | "storm";
+
+export interface EngineGameTime {
+  calendarId: string;
+  year: number;
+  day: number;
+  hour: number;
+  minute: number;
+  totalMinutes: number;
+}
+
+export interface EngineScheduledEvent {
+  id: string;
+  kind: "rest-interruption" | "effect-expiry" | "world-clock" | "quest-deadline";
+  dueAtMinutes: number;
+  status: "pending" | "processed";
+  sourceRef?: string;
+  targetRef?: string;
+  processedAtMinutes?: number;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+  };
+}
+
+export interface EngineTravelPlan {
+  id: string;
+  routeId: string;
+  originRef: string;
+  destinationRef: string;
+  pace: EngineTravelPace;
+  navigatorId: string;
+  watcherId: string;
+  distanceMiles: number;
+  elapsedMinutes: number;
+  startedAtMinutes: number;
+  arrivalAtMinutes: number;
+  status: "arrived" | "failed";
+  navigation: {
+    roll: number;
+    modifier: number;
+    total: number;
+    dc: number;
+    success: boolean;
+  };
+  supplies: { rations: number; water: number };
+  weather: EngineGameWeather;
+  randomEventId: string;
+  forcedMarch: boolean;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+  };
+}
+
+export interface EngineRestState {
+  status: "idle" | "in_progress" | "completed" | "interrupted";
+  restType: "short" | "long" | null;
+  startedAtMinutes: number | null;
+  completedAtMinutes: number | null;
+  requiredMinutes: number;
+  interruptionEventId: string | null;
+  lastCompletedAtMinutes: number | null;
+}
+
+export interface EngineSurvivalState {
+  exhaustionLevel: number;
+  exposure: number;
+  forcedMarches: number;
+  weather: EngineGameWeather;
+}
+
+export interface EngineWorldClock {
+  id: string;
+  name: string;
+  elapsedMinutes: number;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+  };
+}
+
+export interface EngineRandomEventResolution {
+  id: string;
+  trigger: "travel-day" | "travel-watch" | "rest-watch" | "downtime";
+  triggerId: string;
+  tableId: string;
+  tableVersion: string;
+  contextHash: string;
+  occurrenceRoll: number;
+  occurrenceThreshold: number;
+  triggered: boolean;
+  selectionRoll?: number;
+  selectedEntryId?: string;
+  reusedEntityIds: string[];
+  instantiatedEntityIds: string[];
+  createdFactIds: string[];
+  createdClockIds: string[];
+  createdSituationIds: string[];
+  createdEncounterIds: string[];
+  sourceEventId: string;
+  campaignVersion: number;
+}
+
+export interface EngineProjectClock {
+  id: string;
+  definitionId: "research-v1";
+  title: string;
+  workRequiredMinutes: number;
+  workCompletedMinutes: number;
+  materialProperty: "project-material";
+  materialQuantity: number;
+  status: "active" | "completed";
+  startedAtMinutes: number;
+  completedAtMinutes: number | null;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+  };
+}
+
+export interface EngineTimeState {
+  gameTime: EngineGameTime;
+  scheduledEvents: EngineScheduledEvent[];
+  travel: EngineTravelPlan | null;
+  rest: EngineRestState;
+  survival: EngineSurvivalState;
+  worldClocks: EngineWorldClock[];
+  randomEvents: EngineRandomEventResolution[];
+  projects: EngineProjectClock[];
 }
 
 export interface EngineImprovEffect {
@@ -1904,6 +2062,7 @@ export interface LanternCampaignState {
   characterCreation: EngineCharacterCreationState;
   advancementPolicy: EngineAdvancementPolicy;
   pendingAdvancement: EnginePendingAdvancement | null;
+  time: EngineTimeState;
   worldContext: EngineWorldContext | null;
   worldFacts: EngineWorldFact[];
   actorKnowledge: EngineKnowledgeRecord[];
@@ -1959,6 +2118,7 @@ export interface EngineSessionView {
   characterCreation: EngineCharacterCreationState;
   advancementPolicy: EngineAdvancementPolicy;
   pendingAdvancement: EnginePendingAdvancement | null;
+  time: EngineTimeState;
   characterCreated: boolean;
   worldContext: EngineWorldContextView | null;
   playerNotes: EngineNote[];
