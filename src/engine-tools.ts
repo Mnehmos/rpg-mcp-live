@@ -5,6 +5,8 @@ import { readToolData } from "./engine-domain.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
 import {
   engineAbilitySchema,
+  engineAdjudicationDifficultyBandSchema,
+  engineAdjudicationStakeSchema,
   engineCharacterDetailsSchema,
   engineCommandSchema,
   engineExperienceProfileInputSchema,
@@ -38,6 +40,14 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   experience_profile_update: z.object({ profile: engineExperienceProfileInputSchema }).strict(),
   experience_feedback_add: z.object({ rating: z.number().int().min(1).max(5), note: z.string().trim().min(1).max(500).optional() }).strict(),
   experience_boundary: z.object({ theme: z.string().trim().min(1).max(120), action: z.enum(["redirect", "fade_to_black", "skip"]) }).strict(),
+  challenge_attempt: z.object({
+    challengeId: z.string().trim().min(1).max(120),
+    goal: z.string().trim().min(1).max(2_000),
+    approach: z.string().trim().min(1).max(2_000),
+    sceneId: z.string().trim().min(1).max(120).optional(),
+    difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
+    requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
+  }).strict(),
   content_search: z.object({
     query: z.string().trim().max(200).optional(),
     collection: open5eCollectionSchema.optional(),
@@ -329,7 +339,6 @@ const npcPatchJsonSchema = {
     description: { type: "string" },
     disposition: { type: "string", enum: ["hostile", "unfriendly", "neutral", "friendly", "helpful"] },
     goals: { type: "array", maxItems: 12, items: { type: "string" } },
-    socialDc: { type: "integer", minimum: 1, maximum: 30, description: "Temporary authored social difficulty; challenge-tier ownership is tracked separately." },
     relationshipScore: { type: "integer", minimum: -100, maximum: 100, description: "Reserved authoritative field. Do not supply it: every supplied value is rejected." },
     memories: { type: "array", maxItems: 20, items: { type: "string" } },
   },
@@ -458,6 +467,23 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         merchants: merchantPatchOperationsJsonSchema,
       },
       required: ["title", "description", "features", "exits"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "challenge_attempt",
+    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, and barred-door-v1.",
+    {
+      type: "object",
+      properties: {
+        challengeId: { type: "string", description: "Reviewed challenge id or supported alias." },
+        goal: { type: "string", description: "The concrete outcome the actor is pursuing." },
+        approach: { type: "string", description: "The actor's current approach; retrying it without a changed approach or situation is blocked." },
+        sceneId: { type: "string", description: "Optional stable scene/situation id used for retry identity." },
+        difficultyBand: { type: "string", enum: ["gentle", "standard", "challenging"], description: "Optional model proposal recorded as evidence; the active player profile selects the final band." },
+        requestedStakes: { type: "array", items: { type: "string", enum: ["time", "noise", "exposure", "opportunity"] }, maxItems: 4, description: "Optional model-proposed stakes; the reviewed challenge definition controls the final stakes." },
+      },
+      required: ["challengeId", "goal", "approach"],
       additionalProperties: false,
     }
   ),
@@ -826,6 +852,16 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({ kind: "experience_feedback_add", rating: args.rating, note: args.note });
     case "experience_boundary":
       return engineCommandSchema.parse({ kind: "experience_boundary", theme: args.theme, action: args.action });
+    case "challenge_attempt":
+      return engineCommandSchema.parse({
+        kind: "challenge_attempt",
+        challengeId: args.challengeId,
+        goal: args.goal,
+        approach: args.approach,
+        sceneId: args.sceneId,
+        difficultyBand: args.difficultyBand,
+        requestedStakes: args.requestedStakes,
+      });
     case "character_update":
       return engineCommandSchema.parse({ kind: "character_update", ...args });
     case "interact":

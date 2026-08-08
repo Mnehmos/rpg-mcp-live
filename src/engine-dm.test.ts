@@ -134,12 +134,13 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(firstRequest.parallel_tool_calls).toBe(false);
-    expect(firstRequest.tools).toHaveLength(46);
+    expect(firstRequest.tools).toHaveLength(47);
     const systemPrompt = firstRequest.messages[0]?.content;
     expect(systemPrompt).toContain("creative director");
     expect(systemPrompt).toContain("combat_start");
     expect(systemPrompt).toContain("creature content keys");
     expect(systemPrompt).toContain("never supplies fixed demo loot");
+    expect(systemPrompt).toContain("challenge_attempt");
     expect(systemPrompt).toContain("commits the complete plan atomically");
     expect(systemPrompt).toContain("context-aware moves");
     expect(result.event?.tool).toBe("turn_plan");

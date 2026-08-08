@@ -34,6 +34,7 @@ const ALL_COMMAND_KINDS = [
   "experience_profile_update",
   "experience_feedback_add",
   "experience_boundary",
+  "challenge_attempt",
   "character_update",
   "move",
   "interact",
@@ -297,6 +298,7 @@ function createStore(state: LanternCampaignState): StoreHarness {
 }
 
 const invalidFixtures: readonly InvalidFixture[] = [
+  { kind: "challenge_attempt", tool: "challenge_attempt", expectedCode: "unknown_challenge_definition", state: initialState, rawCommand: () => ({ kind: "challenge_attempt", challengeId: "unreviewed", goal: "Try it", approach: "Force it" }) },
   {
     kind: "experience_profile_update",
     tool: "experience_profile_update",
@@ -363,6 +365,7 @@ const controlFixtures: readonly ControlFixture[] = [
   { kind: "player_note_add", tool: "player_note_add", state: initialState, rawCommand: () => ({ kind: "player_note_add", text: "A durable clue.", source: "player" }) },
   { kind: "experience_feedback_add", tool: "experience_feedback_add", state: initialState, rawCommand: () => ({ kind: "experience_feedback_add", rating: 5 }) },
   { kind: "experience_boundary", tool: "experience_boundary", state: experienceState, rawCommand: () => ({ kind: "experience_boundary", theme: "graphic violence", action: "skip" }) },
+  { kind: "challenge_attempt", tool: "challenge_attempt", state: initialState, rawCommand: () => ({ kind: "challenge_attempt", challengeId: "ordinary-unlocked-door-v1", goal: "Open the door", approach: "Turn the handle" }) },
   { kind: "interact", tool: "interact", state: initialState, rawCommand: () => ({ kind: "interact", targetId: "unbounded-fiction", goal: "Try the fixture interaction." }) },
   { kind: "quest_create", tool: "quest_create", state: initialState, rawCommand: () => ({ kind: "quest_create", title: "A bounded quest", objective: "Record a valid quest.", rewardXp: 1, rewardCopper: 1 }) },
   { kind: "improvise", tool: "improvise", state: initialState, rawCommand: () => ({ kind: "improvise", title: "A cosmetic detail", description: "The bell rings once.", effectType: "fictional" }) },
@@ -379,6 +382,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "experience_profile_update", tool: "experience_profile_update", build: () => ({ state: initialState(), command: parseCommand({ kind: "experience_profile_update", profile: { pillarWeights: { combat: 40, exploration: 20, social: 20, mystery: 20 }, difficulty: "gentle", narrationStyle: "immersive", verbosity: "standard", guidance: "guided", rulesTransparency: "explicit", excludedThemes: ["violence"], fadeToBlackThemes: [] } }) }) },
   { kind: "experience_feedback_add", tool: "experience_feedback_add", build: () => ({ state: initialState(), command: parseCommand({ kind: "experience_feedback_add", rating: 4, note: "Replay feedback" }) }) },
   { kind: "experience_boundary", tool: "experience_boundary", build: () => ({ state: experienceState(), command: parseCommand({ kind: "experience_boundary", theme: "graphic violence", action: "redirect" }) }) },
+  { kind: "challenge_attempt", tool: "challenge_attempt", build: () => ({ state: initialState(), command: parseCommand({ kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force the barred door", approach: "Shoulder it" }) }) },
   { kind: "character_update", tool: "character_update", build: () => ({ state: createdState(), command: parseCommand({ kind: "character_update", name: "Replay Hero" }) }) },
   { kind: "move", tool: "move", build: () => ({ state: worldState(), command: parseCommand({ kind: "move", destinationId: "west-pier" }) }) },
   { kind: "interact", tool: "interact", build: () => ({ state: initialState(), command: parseCommand({ kind: "interact", targetId: "fixture-object", goal: "Touch the fixture." }) }) },
@@ -416,7 +420,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(38);
+    expect(ALL_COMMAND_KINDS).toHaveLength(39);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

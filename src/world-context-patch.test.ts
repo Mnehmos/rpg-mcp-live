@@ -224,7 +224,6 @@ describe("world_context patch semantics", () => {
       { label: "description", patch: { description: "A watch captain holding a brass signal key." } },
       { label: "disposition", patch: { disposition: "helpful" as const } },
       { label: "goals", patch: { goals: ["open the sealed lock"] } },
-      { label: "socialDc", patch: { socialDc: 18 } },
       { label: "memories", patch: { memories: ["The player decoded the harbor signal."] } },
     ];
     for (const testCase of npcCases) {
@@ -447,6 +446,26 @@ describe("world_context patch semantics", () => {
       expect(store.listCampaignEvents(context), String(score)).toHaveLength(0);
       store.close();
     }
+  });
+
+  it("rejects free socialDc authoring so social checks cannot gain a new DM-owned DC", () => {
+    const state = seededCampaign();
+    const raw = {
+      title: state.worldContext!.title,
+      description: state.worldContext!.description,
+      features: state.worldContext!.features,
+      exits: state.worldContext!.exits,
+      npcs: { upsert: [{ id: "npc-a", socialDc: 18 }] },
+    };
+    const parsed = parseToolArguments("world_context", raw);
+    const next = commandForTool("world_context", parsed);
+    if (!next || next.kind !== "world_context") throw new Error("Expected a world_context command.");
+    const before = JSON.stringify(state);
+    const result = resolveWorldContext(state, next);
+    expect(result).toMatchObject({ accepted: false, code: "field_not_authorable" });
+    expect(result.message).toContain("reviewed challenge definition");
+    expect(JSON.stringify(result.state)).toBe(before);
+    expect(result.event).toBeNull();
   });
 
   it("preserves scoped world/mechanical invariants for a rejected command with player text while retaining the generic player-log exception", () => {

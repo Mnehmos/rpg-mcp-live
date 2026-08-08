@@ -113,6 +113,7 @@ describe("Lantern engine boundary", () => {
         "rules_reference",
         "character_options",
         "world_context",
+        "challenge_attempt",
         "player_notes",
         "player_note_add",
         "npc_context",
@@ -153,7 +154,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(46);
+    expect(names).toHaveLength(47);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");
@@ -1171,7 +1172,7 @@ describe("Lantern engine boundary", () => {
       description: "A living bazaar where every deal has a witness.",
       features: ["jade stall", "tea cart"],
       exits: [],
-      npcs: { upsert: [{ id: "narin", name: "Narin", description: "A cautious trader.", disposition: "neutral" as const, goals: ["turn a profit"], socialDc: 12, memories: [] }] },
+      npcs: { upsert: [{ id: "narin", name: "Narin", description: "A cautious trader.", disposition: "neutral" as const, goals: ["turn a profit"], memories: [] }] },
       merchants: { upsert: [{
         id: "narin-market",
         name: "Narin's stall",
@@ -1531,7 +1532,7 @@ describe("Lantern engine boundary", () => {
         description: "Three roads meet under a watchful hawk.",
         features: ["old milestone"],
         exits: [],
-        npcs: { upsert: [{ id: "guide", name: "The Guide", description: "A patient traveler.", disposition: "friendly", goals: ["find the lost caravan"], socialDc: 10, memories: [] }] },
+        npcs: { upsert: [{ id: "guide", name: "The Guide", description: "A patient traveler.", disposition: "friendly", goals: ["find the lost caravan"], memories: [] }] },
       },
       "world_context"
     );

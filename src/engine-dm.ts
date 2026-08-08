@@ -281,6 +281,7 @@ export class LanternDungeonMaster {
           "The campaign profile belongs to the player; preserve its premise, setting, and tone as the world canon.",
           "The player experience profile is also player-owned. Use only its minimum projection for presentation and situation selection; never attempt to mutate it through DM tools.",
           "Do not deliberately introduce excluded or fade-to-black themes. If the player asks for one, redirect or fade before authoring detail. The difficulty policy key selects a reviewed band only; it never changes dice, modifiers, HP, enemy stats, or committed mechanics.",
+          "For open-ended challenge adjudication, call challenge_attempt with a reviewed challenge id, explicit goal, and approach. The engine decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence.",
           "Respect the campaign lifecycle: character creation and tutorial are onboarding chapters; the sandbox begins only after the tutorial is complete.",
           mode === "opening"
             ? "This is the opening pass before the first player action. Author the first situation from campaign context and persist it with world_context; do not wait for a player prompt."
