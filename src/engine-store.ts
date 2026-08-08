@@ -386,8 +386,11 @@ export class LanternEngineStore {
         );
 
       const rawResolution = input.resolve(current);
-      const resolution = input.playerText ? appendPlayerTurn(current, rawResolution, input.playerText) : rawResolution;
-      if ((!resolution.readOnly && resolution.accepted) || input.playerText) {
+      // Boundary rejections must not copy the sensitive player text into the
+      // ordinary campaign log or advance persistence as a side effect.
+      const persistPlayerTurn = Boolean(input.playerText && rawResolution.code !== "experience_boundary_blocked");
+      const resolution = persistPlayerTurn ? appendPlayerTurn(current, rawResolution, input.playerText!) : rawResolution;
+      if ((!resolution.readOnly && resolution.accepted) || persistPlayerTurn) {
         this.writeState(resolution.state);
       }
       if (resolution.event) {

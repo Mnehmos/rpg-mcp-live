@@ -1,6 +1,11 @@
 import { narrationEnvelopeSchema, type NarrationEnvelope } from "./ai-contracts.js";
 import type { Open5eContentResolver } from "./content/resolve.js";
-import { cloneCampaign, resolveEngineCommand } from "./engine-domain.js";
+import {
+  cloneCampaign,
+  projectExperienceProfile,
+  resolveEngineCommand,
+  sanitizeNarrationForProfile,
+} from "./engine-domain.js";
 import { hasActiveCondition } from "./engine-effects.js";
 import {
   compileAtomicTurnResolution,
@@ -147,7 +152,10 @@ export class LanternDungeonMaster {
           narrationSource: "rules",
         };
       }
-      const narration = parseNarration(toolLoop.finalText, committed.message);
+      const narration = sanitizeNarrationForProfile(
+        parseNarration(toolLoop.finalText, committed.message),
+        committed.state.experienceProfile
+      );
       return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
     } catch (error) {
       if (committed) {
@@ -235,7 +243,10 @@ export class LanternDungeonMaster {
           narrationSource: "rules",
         };
       }
-      const narration = parseNarration(toolLoop.finalText, committed.message);
+      const narration = sanitizeNarrationForProfile(
+        parseNarration(toolLoop.finalText, committed.message),
+        committed.state.experienceProfile
+      );
       return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
     } catch (error) {
       if (committed) {
@@ -268,6 +279,8 @@ export class LanternDungeonMaster {
         content: [
           "You are the live Dungeon Master for Lantern Table.",
           "The campaign profile belongs to the player; preserve its premise, setting, and tone as the world canon.",
+          "The player experience profile is also player-owned. Use only its minimum projection for presentation and situation selection; never attempt to mutate it through DM tools.",
+          "Do not deliberately introduce excluded or fade-to-black themes. If the player asks for one, redirect or fade before authoring detail. The difficulty policy key selects a reviewed band only; it never changes dice, modifiers, HP, enemy stats, or committed mechanics.",
           "Respect the campaign lifecycle: character creation and tutorial are onboarding chapters; the sandbox begins only after the tutorial is complete.",
           mode === "opening"
             ? "This is the opening pass before the first player action. Author the first situation from campaign context and persist it with world_context; do not wait for a player prompt."
@@ -314,6 +327,7 @@ export class LanternDungeonMaster {
           tutorialStep: initialState.tutorialStep,
           rulesVersion: initialState.rulesVersion,
           contentPolicy: initialState.contentPolicy,
+          experienceProfile: projectExperienceProfile(initialState.experienceProfile),
           worldContext: initialState.worldContext,
           playerNotes: initialState.playerNotes,
           quests: initialState.quests,
@@ -397,6 +411,22 @@ export class LanternDungeonMaster {
         code: "unknown_tool",
         message: "That tool is not available in Lantern.",
         data: { requestedTool: toolName },
+        campaignVersion: currentState.version,
+      };
+    }
+
+    if (
+      toolName === "experience_profile_update"
+      || toolName === "experience_feedback_add"
+      || toolName === "experience_boundary"
+    ) {
+      return {
+        tool: toolName,
+        readOnly: false,
+        accepted: false,
+        code: "profile_player_only",
+        message: "Experience preferences can only be changed by an explicit player command.",
+        data: null,
         campaignVersion: currentState.version,
       };
     }

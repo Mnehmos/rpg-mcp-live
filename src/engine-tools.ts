@@ -7,6 +7,7 @@ import {
   engineAbilitySchema,
   engineCharacterDetailsSchema,
   engineCommandSchema,
+  engineExperienceProfileInputSchema,
   engineInventoryItemInputSchema,
   engineToolNameSchema,
   engineWorldContextArgsSchema,
@@ -34,6 +35,9 @@ const lootItemSchema = inventoryItemSchema.refine((item) => item.quantity > 0, {
 });
 const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   campaign_context: noArguments,
+  experience_profile_update: z.object({ profile: engineExperienceProfileInputSchema }).strict(),
+  experience_feedback_add: z.object({ rating: z.number().int().min(1).max(5), note: z.string().trim().min(1).max(500).optional() }).strict(),
+  experience_boundary: z.object({ theme: z.string().trim().min(1).max(120), action: z.enum(["redirect", "fade_to_black", "skip"]) }).strict(),
   content_search: z.object({
     query: z.string().trim().max(200).optional(),
     collection: open5eCollectionSchema.optional(),
@@ -816,6 +820,12 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       });
     case "player_note_add":
       return engineCommandSchema.parse({ kind: "player_note_add", text: args.text, source: args.source ?? "dm" });
+    case "experience_profile_update":
+      return engineCommandSchema.parse({ kind: "experience_profile_update", profile: args.profile });
+    case "experience_feedback_add":
+      return engineCommandSchema.parse({ kind: "experience_feedback_add", rating: args.rating, note: args.note });
+    case "experience_boundary":
+      return engineCommandSchema.parse({ kind: "experience_boundary", theme: args.theme, action: args.action });
     case "character_update":
       return engineCommandSchema.parse({ kind: "character_update", ...args });
     case "interact":

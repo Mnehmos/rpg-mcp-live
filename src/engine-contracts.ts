@@ -191,6 +191,9 @@ export type EngineWorldContextCommand = z.infer<typeof engineWorldContextCommand
 
 export const engineToolNameSchema = z.enum([
   "campaign_context",
+  "experience_profile_update",
+  "experience_feedback_add",
+  "experience_boundary",
   "content_search",
   "content_get",
   "rules_reference",
@@ -252,6 +255,81 @@ export const engineCampaignProfileSchema = z
   .strict();
 export type EngineCampaignProfile = z.infer<typeof engineCampaignProfileSchema>;
 
+const engineExperienceThemeSchema = z.string().trim().min(1).max(120);
+
+export const engineExperiencePillarWeightsSchema = z.object({
+  combat: z.number().int().min(0).max(100),
+  exploration: z.number().int().min(0).max(100),
+  social: z.number().int().min(0).max(100),
+  mystery: z.number().int().min(0).max(100),
+}).strict();
+export type EngineExperiencePillarWeights = z.infer<typeof engineExperiencePillarWeightsSchema>;
+
+export const engineExperienceProfileInputSchema = z.object({
+  pillarWeights: engineExperiencePillarWeightsSchema,
+  difficulty: z.enum(["gentle", "standard", "challenging"]),
+  narrationStyle: z.enum(["compact", "immersive"]),
+  verbosity: z.enum(["compact", "standard", "detailed"]),
+  guidance: z.enum(["open", "balanced", "guided"]),
+  rulesTransparency: z.enum(["summary", "explicit"]),
+  excludedThemes: z.array(engineExperienceThemeSchema).max(12).default([]),
+  fadeToBlackThemes: z.array(engineExperienceThemeSchema).max(12).default([]),
+}).strict();
+export type EngineExperienceProfileInput = z.infer<typeof engineExperienceProfileInputSchema>;
+
+export const engineExperienceFeedbackSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  rating: z.number().int().min(1).max(5),
+  note: z.string().trim().min(1).max(500).optional(),
+  createdAt: z.string().datetime(),
+}).strict();
+export type EngineExperienceFeedback = z.infer<typeof engineExperienceFeedbackSchema>;
+
+export const engineExperienceProfileSchema = engineExperienceProfileInputSchema.extend({
+  version: z.literal(1),
+  revision: z.number().int().nonnegative(),
+  source: z.literal("player"),
+  difficultyPolicyKey: z.string().trim().min(1).max(120),
+  feedback: z.array(engineExperienceFeedbackSchema).max(8),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+}).strict();
+export type EngineExperienceProfile = z.infer<typeof engineExperienceProfileSchema>;
+
+export interface EngineExperienceProfileProjection {
+  version: 1;
+  revision: number;
+  pillarWeights: EngineExperiencePillarWeights;
+  difficulty: EngineExperienceProfileInput["difficulty"];
+  difficultyPolicyKey: string;
+  narrationStyle: EngineExperienceProfileInput["narrationStyle"];
+  verbosity: EngineExperienceProfileInput["verbosity"];
+  guidance: EngineExperienceProfileInput["guidance"];
+  rulesTransparency: EngineExperienceProfileInput["rulesTransparency"];
+  excludedThemes: string[];
+  fadeToBlackThemes: string[];
+}
+
+export const engineExperienceProfileUpdateCommandSchema = z.object({
+  kind: z.literal("experience_profile_update"),
+  profile: engineExperienceProfileInputSchema,
+}).strict();
+export type EngineExperienceProfileUpdateCommand = z.infer<typeof engineExperienceProfileUpdateCommandSchema>;
+
+export const engineExperienceFeedbackAddCommandSchema = z.object({
+  kind: z.literal("experience_feedback_add"),
+  rating: z.number().int().min(1).max(5),
+  note: z.string().trim().min(1).max(500).optional(),
+}).strict();
+export type EngineExperienceFeedbackAddCommand = z.infer<typeof engineExperienceFeedbackAddCommandSchema>;
+
+export const engineExperienceBoundaryCommandSchema = z.object({
+  kind: z.literal("experience_boundary"),
+  theme: engineExperienceThemeSchema,
+  action: z.enum(["redirect", "fade_to_black", "skip"]),
+}).strict();
+export type EngineExperienceBoundaryCommand = z.infer<typeof engineExperienceBoundaryCommandSchema>;
+
 export const engineContentPolicySchema = z
   .object({
     gamesystem: z.string().trim().min(1).max(80),
@@ -287,6 +365,7 @@ export type EngineContentPolicy = z.infer<typeof engineContentPolicySchema>;
 
 export const engineCampaignCreateSchema = engineCampaignProfileSchema.extend({
   contentPolicy: engineContentPolicySchema.optional(),
+  experienceProfile: engineExperienceProfileInputSchema.optional(),
 }).strict();
 export type EngineCampaignCreate = z.infer<typeof engineCampaignCreateSchema>;
 
@@ -309,6 +388,9 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       source: z.enum(["player", "dm"]).default("dm"),
     })
     .strict(),
+  engineExperienceProfileUpdateCommandSchema,
+  engineExperienceFeedbackAddCommandSchema,
+  engineExperienceBoundaryCommandSchema,
   z.object({ kind: z.literal("character_update"),
     name: z.string().trim().min(1).max(80).optional(),
     background: z.string().trim().min(1).max(120).optional(),
@@ -1220,6 +1302,7 @@ export interface LanternCampaignState {
   rulesVersion: string;
   contentPolicy: EngineContentPolicy;
   campaign: EngineCampaignProfile;
+  experienceProfile: EngineExperienceProfile;
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;
@@ -1269,6 +1352,7 @@ export interface EngineSessionView {
   rulesVersion: string;
   contentPolicy: EngineContentPolicy;
   campaign: EngineCampaignProfile;
+  experienceProfile: EngineExperienceProfile;
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;

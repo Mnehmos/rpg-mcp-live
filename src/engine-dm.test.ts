@@ -454,4 +454,89 @@ describe("Lantern OpenRouter tool loop", () => {
     ]);
     store.close();
   });
+
+  it("keeps player experience mutations out of the DM tool catalog and rejects a model attempt", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-profile-update",
+                type: "function",
+                function: {
+                  name: "experience_profile_update",
+                  arguments: JSON.stringify({
+                    profile: {
+                      pillarWeights: { combat: 10, exploration: 40, social: 30, mystery: 20 },
+                      difficulty: "gentle",
+                      narrationStyle: "immersive",
+                      verbosity: "standard",
+                      guidance: "guided",
+                      rulesTransparency: "explicit",
+                      excludedThemes: ["private boundary"],
+                      fadeToBlackThemes: [],
+                    },
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({ text: "I keep the focus on a safer path.", proposedFacts: [], suggestedActions: [] }),
+            },
+          }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-profile-dm", "actor-profile-dm");
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: "account-profile-dm",
+        actorId: "actor-profile-dm",
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: "account-profile-dm",
+      campaignId: state.id,
+      actorId: "actor-profile-dm",
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      0,
+      "I choose a safer path."
+    );
+
+    const request = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const names = request.tools.map((tool: { function: { name: string } }) => tool.function.name);
+    expect(names).not.toContain("experience_profile_update");
+    expect(names).not.toContain("experience_feedback_add");
+    expect(names).not.toContain("experience_boundary");
+    expect(request.messages[0]?.content).toContain("minimum projection");
+    expect(result.state.experienceProfile.revision).toBe(0);
+    expect(result.narration.text).toContain("safer path");
+    store.close();
+  });
 });
