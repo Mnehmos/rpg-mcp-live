@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import type { NarrationEnvelope } from "./ai-contracts.js";
 import {
   engineExperienceProfileInputSchema,
@@ -12,6 +12,12 @@ import type {
 } from "./content/schema.js";
 import type {
   EngineAbility,
+  EngineAdjudicationAttempt,
+  EngineAdjudicationCosts,
+  EngineAdjudicationDecision,
+  EngineAdjudicationDifficultyBand,
+  EngineAdjudicationOutcome,
+  EngineAdjudicationStake,
   EngineAdvancementPolicy,
   EngineAdvancementPreview,
   EngineCampaignProfile,
@@ -24,6 +30,7 @@ import type {
   EngineCharacterView,
   EngineCampaignBeat,
   EngineCommand,
+  EngineChallengeAttemptCommand,
   EngineCombatant,
   EngineCombatantProgression,
   EngineCombatantView,
@@ -283,6 +290,247 @@ function redactedExperienceProfileEvidence(profile: EngineExperienceProfile): Re
   };
 }
 
+const ADJUDICATION_POLICY_REVISION = "lantern-adjudication-v1";
+
+type ChallengeDefinition = {
+  id: string;
+  aliases: string[];
+  feasibility: EngineAdjudicationDecision["feasibility"];
+  selectedRuleFamily: string;
+  dcSource: EngineAdjudicationDecision["dcSource"];
+  dcByDifficulty?: Record<EngineAdjudicationDifficultyBand, number>;
+  dcProvenance: string;
+  stakes: EngineAdjudicationStake[];
+  allowedOutcomes: EngineAdjudicationOutcome[];
+  retryPolicy: EngineAdjudicationDecision["retryPolicy"];
+  costs: EngineAdjudicationCosts;
+  reason?: string;
+  alternatives?: string[];
+};
+
+const REVIEWED_CHALLENGE_DEFINITIONS: ChallengeDefinition[] = [
+  {
+    id: "ordinary-unlocked-door-v1",
+    aliases: ["ordinary-door", "unlocked-door", "ordinary-unlocked-door"],
+    feasibility: "automatic",
+    selectedRuleFamily: "world-truth-automatic",
+    dcSource: "none",
+    dcProvenance: "reviewed-challenge:ordinary-unlocked-door-v1",
+    stakes: [],
+    allowedOutcomes: ["automatic-success"],
+    retryPolicy: "not_applicable",
+    costs: { timeMinutes: 0, noise: 0, exposure: 0 },
+  },
+  {
+    id: "multi-ton-stone-gate-v1",
+    aliases: ["multi-ton-stone-gate", "stone-gate", "impossible-stone-gate"],
+    feasibility: "impossible",
+    selectedRuleFamily: "world-truth-impossible",
+    dcSource: "none",
+    dcProvenance: "reviewed-challenge:multi-ton-stone-gate-v1",
+    stakes: ["opportunity"],
+    allowedOutcomes: ["impossible"],
+    retryPolicy: "not_applicable",
+    costs: { timeMinutes: 0, noise: 0, exposure: 0 },
+    reason: "The gate is a multi-ton stone slab; one person cannot move it by hand with the available leverage.",
+    alternatives: ["find a lever or mechanism", "seek a different route", "use a reviewed effect that can move stone"],
+  },
+  {
+    id: "barred-door-v1",
+    aliases: ["barred-door", "force-barred-door", "barred-door-under-pressure"],
+    feasibility: "uncertain",
+    selectedRuleFamily: "athletics",
+    dcSource: "reviewed_challenge",
+    dcByDifficulty: { gentle: 10, standard: 14, challenging: 18 },
+    dcProvenance: "reviewed-challenge:barred-door-v1:dc-band-v1",
+    stakes: ["time", "noise", "exposure"],
+    allowedOutcomes: ["success", "failure-with-complication"],
+    retryPolicy: "new_approach_or_state_change",
+    costs: { timeMinutes: 5, noise: 2, exposure: 1 },
+  },
+];
+
+function normalizeChallengeId(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/[ _]+/g, "-");
+}
+
+function reviewedChallengeDefinition(value: string): ChallengeDefinition | null {
+  const normalized = normalizeChallengeId(value);
+  return REVIEWED_CHALLENGE_DEFINITIONS.find((definition) =>
+    definition.id === normalized || definition.aliases.includes(normalized)
+  ) ?? null;
+}
+
+function normalizeApproach(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function challengeApproachHash(
+  actorId: string,
+  challengeId: string,
+  sceneId: string,
+  approach: string
+): string {
+  return createHash("sha256")
+    .update([actorId, challengeId, sceneId, normalizeApproach(approach).toLocaleLowerCase()].join("\n"))
+    .digest("hex");
+}
+
+function buildAdjudicationDecision(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineChallengeAttemptCommand,
+  definition: ChallengeDefinition
+): EngineAdjudicationDecision {
+  const sceneId = command.sceneId?.trim() || state.worldContext?.id || "campaign-scene";
+  const selectedDifficultyBand = state.experienceProfile.difficulty;
+  const requestedStakes = [...new Set(command.requestedStakes ?? [])];
+  return {
+    id: clientCommandId,
+    actorId: context.actorId,
+    challengeId: definition.id,
+    sceneId,
+    goal: command.goal.trim(),
+    approach: normalizeApproach(command.approach),
+    approachHash: challengeApproachHash(context.actorId, definition.id, sceneId, command.approach),
+    clarificationStatus: "not_needed",
+    feasibility: definition.feasibility,
+    selectedRuleFamily: definition.selectedRuleFamily,
+    dcSource: definition.dcSource,
+    dc: definition.dcByDifficulty?.[selectedDifficultyBand] ?? null,
+    dcProvenance: definition.dcProvenance,
+    requestedDifficultyBand: command.difficultyBand ?? null,
+    selectedDifficultyBand,
+    difficultyPolicyKey: state.experienceProfile.difficultyPolicyKey,
+    requestedStakes,
+    stakes: [...definition.stakes],
+    allowedOutcomes: [...definition.allowedOutcomes],
+    retryPolicy: definition.retryPolicy,
+    costs: { ...definition.costs },
+    informationPolicy: "public",
+    policyRevision: ADJUDICATION_POLICY_REVISION,
+    rulesVersion: state.rulesVersion,
+  };
+}
+
+function appendAdjudicationAttempt(
+  next: LanternCampaignState,
+  state: LanternCampaignState,
+  decision: EngineAdjudicationDecision,
+  outcome: EngineAdjudicationOutcome,
+  roll?: number,
+  total?: number
+): { attempt: EngineAdjudicationAttempt; change: { path: string; before: unknown; after: unknown } } {
+  const attempt: EngineAdjudicationAttempt = {
+    ...decision,
+    outcome,
+    attemptVersion: state.version + 1,
+    ...(roll === undefined ? {} : { roll }),
+    ...(total === undefined ? {} : { total }),
+  };
+  next.adjudicationHistory = [...state.adjudicationHistory, attempt].slice(-100);
+  return {
+    attempt,
+    change: {
+      path: "/adjudicationHistory/" + attempt.id,
+      before: null,
+      after: attempt,
+    },
+  };
+}
+
+function hasIdenticalRetry(state: LanternCampaignState, decision: EngineAdjudicationDecision): boolean {
+  return decision.retryPolicy === "new_approach_or_state_change"
+    && state.adjudicationHistory.some((attempt) =>
+      attempt.actorId === decision.actorId
+      && attempt.challengeId === decision.challengeId
+      && attempt.sceneId === decision.sceneId
+      && attempt.approachHash === decision.approachHash
+      && attempt.attemptVersion === state.version
+    );
+}
+
+function adjudicationRejection(
+  state: LanternCampaignState,
+  tool: EngineToolName | "declare" | "listen",
+  code: string,
+  message: string,
+  decision: EngineAdjudicationDecision,
+  extraData: Record<string, unknown> = {}
+): EngineResolution {
+  return rejection(state, tool, code, message, { adjudication: decision, ...extraData });
+}
+
+function resolveChallengeAttempt(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineChallengeAttemptCommand,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const definition = reviewedChallengeDefinition(command.challengeId);
+  if (!definition) return rejection(state, tool, "unknown_challenge_definition", "That challenge has no reviewed adjudication definition.");
+  const decision = buildAdjudicationDecision(state, context, clientCommandId, command, definition);
+  if (definition.feasibility === "impossible") {
+    return adjudicationRejection(
+      state,
+      tool,
+      "impossible_action",
+      definition.reason ?? "The established world makes that approach impossible.",
+      decision,
+      { alternatives: definition.alternatives ?? [] }
+    );
+  }
+  if (hasIdenticalRetry(state, decision)) {
+    return adjudicationRejection(
+      state,
+      tool,
+      "retry_blocked",
+      "That identical approach cannot be retried until the approach or situation changes.",
+      decision
+    );
+  }
+  if (definition.feasibility === "automatic") {
+    const next = cloneCampaign(state);
+    const { change } = appendAdjudicationAttempt(next, state, decision, "automatic-success");
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      "The unlocked door opens without a roll; there is no meaningful pressure.",
+      { adjudication: decision, outcome: "automatic-success" },
+      "automatic-success",
+      [],
+      [],
+      [change],
+      [],
+      decision
+    );
+  }
+
+  const checkCommand = {
+    kind: "roll_check" as const,
+    ability: "str" as const,
+    skill: "athletics",
+    goal: command.goal,
+  };
+  return resolveCheck(
+    state,
+    context,
+    clientCommandId,
+    checkCommand,
+    tool,
+    "str",
+    "athletics",
+    command.goal,
+    decision,
+    command
+  );
+}
+
 export function defaultContentPolicy(): EngineContentPolicy {
   return {
     gamesystem: "5e-2014",
@@ -343,6 +591,7 @@ export function createInitialCampaign(
     contentPolicy: normalizeContentPolicy(contentPolicy),
     campaign,
     experienceProfile: buildExperienceProfile(normalizedExperienceProfile, now),
+    adjudicationHistory: [],
     phase: "character_creation",
     tutorialStep: 0,
     characterCreation: { abilityScoreDraft: null },
@@ -397,10 +646,14 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     playerNotes?: unknown;
     contentPolicy?: EngineContentPolicy;
     experienceProfile?: unknown;
+    adjudicationHistory?: unknown;
   };
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
   next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
+  next.adjudicationHistory = Array.isArray(next.adjudicationHistory)
+    ? next.adjudicationHistory.slice(-100) as EngineAdjudicationAttempt[]
+    : [];
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
   if (!next.tutorialStep && next.tutorialStep !== 0) next.tutorialStep = 0;
@@ -967,6 +1220,8 @@ export function resolveEngineCommand(
       return resolveExperienceFeedbackAdd(state, context, clientCommandId, command, tool);
     case "experience_boundary":
       return resolveExperienceBoundary(state, context, clientCommandId, command, tool);
+    case "challenge_attempt":
+      return resolveChallengeAttempt(state, context, clientCommandId, command, tool);
     case "character_update":
       return resolveCharacterUpdate(state, context, clientCommandId, command, tool);
     case "move":
@@ -1145,6 +1400,12 @@ function validateWorldContextPatch(
       return {
         code: "field_not_authorable",
         message: "relationshipScore is authoritative and cannot be authored through world_context.",
+      };
+    }
+    if (Object.hasOwn(patch, "socialDc")) {
+      return {
+        code: "field_not_authorable",
+        message: "socialDc is not a reviewed challenge definition and cannot be authored through world_context.",
       };
     }
   }
@@ -2158,7 +2419,9 @@ function resolveCheck(
   tool: EngineToolName | "declare" | "listen",
   ability: EngineAbility,
   skill: string | null,
-  goal: string
+  goal: string,
+  adjudication?: EngineAdjudicationDecision,
+  persistedCommand?: EngineCommand
 ): EngineResolution {
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
   const firstRoll = randomInt(1, 21);
@@ -2173,9 +2436,13 @@ function resolveCheck(
   const modifier = skill && state.character.skills[skill]
     ? state.character.skills[skill].bonus
     : abilityModifier(state.character.abilities[ability]);
-  const dc = state.combat.status === "active" ? 14 : 12;
+  const dc = adjudication?.dc ?? (state.combat.status === "active" ? 14 : 12);
   const total = roll + modifier;
   const success = total >= dc;
+  const adjudicationOutcome: EngineAdjudicationOutcome | null = adjudication
+    ? success ? "success" : "failure-with-complication"
+    : null;
+  const outcome = adjudicationOutcome ?? (success ? "success" : "failure");
   const label = ability.toUpperCase() + (skill ? " (" + skill + ")" : "");
   const text =
     "You make a " +
@@ -2192,21 +2459,29 @@ function resolveCheck(
     (success ? "Success." : "Failure.");
   const next = cloneCampaign(state);
   next.lastRoll = roll;
+  const attemptChange = adjudication && adjudicationOutcome
+    ? appendAdjudicationAttempt(next, state, adjudication, adjudicationOutcome, roll, total).change
+    : null;
   return commit(
     next,
     context,
     clientCommandId,
-    command,
+    persistedCommand ?? command,
     tool,
     text,
-    { ability, skill, goal, dc, roll, modifier, total, success },
-    success ? "success" : "failure",
+    { ability, skill, goal, dc, roll, modifier, total, success, ...(adjudication ? { adjudication, costs: adjudication.costs, outcome } : {}) },
+    outcome,
     [
       { kind: "d20", value: roll, sides: 20 },
       ...(secondRoll === null ? [] : [{ kind: `d20_${modifierQuery.mode}`, value: secondRoll, sides: 20 }]),
     ],
     [{ name: ability + "_modifier", value: modifier }, { name: "dc", value: dc }],
-    [{ path: "/lastRoll", before: state.lastRoll, after: roll }]
+    [
+      { path: "/lastRoll", before: state.lastRoll, after: roll },
+      ...(attemptChange ? [attemptChange] : []),
+    ],
+    [],
+    adjudication
   );
 }
 
@@ -4695,7 +4970,8 @@ function commit(
   rolls: Array<{ kind: string; value: number; sides?: number }>,
   modifiers: Array<{ name: string; value: number }>,
   stateChanges: Array<{ path: string; before: unknown; after: unknown }>,
-  evidenceContentKeys: string[] = []
+  evidenceContentKeys: string[] = [],
+  adjudication?: EngineAdjudicationDecision
 ): EngineResolution {
   const next = cloneCampaign(state);
   const createdAt = new Date().toISOString();
@@ -4708,6 +4984,7 @@ function commit(
     kind: "command",
     tool,
     command: persistedCommand,
+    ...(adjudication ? { adjudication } : {}),
     accountId: context.accountId,
     campaignId: context.campaignId,
     actorId: context.actorId,
@@ -4785,7 +5062,8 @@ function rejection(
   state: LanternCampaignState,
   tool: EngineToolName | "declare" | "listen",
   code: string,
-  message: string
+  message: string,
+  extraData?: Record<string, unknown>
 ): EngineResolution {
   return {
     state,
@@ -4794,7 +5072,7 @@ function rejection(
     accepted: false,
     code,
     message,
-    data: { code, message, campaignVersion: state.version },
+    data: { code, message, campaignVersion: state.version, ...extraData },
     event: null,
     narration: rulesNarration(message),
   };

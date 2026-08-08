@@ -194,6 +194,7 @@ export const engineToolNameSchema = z.enum([
   "experience_profile_update",
   "experience_feedback_add",
   "experience_boundary",
+  "challenge_attempt",
   "content_search",
   "content_get",
   "rules_reference",
@@ -330,6 +331,78 @@ export const engineExperienceBoundaryCommandSchema = z.object({
 }).strict();
 export type EngineExperienceBoundaryCommand = z.infer<typeof engineExperienceBoundaryCommandSchema>;
 
+export const engineAdjudicationFeasibilitySchema = z.enum(["automatic", "uncertain", "impossible"]);
+export type EngineAdjudicationFeasibility = z.infer<typeof engineAdjudicationFeasibilitySchema>;
+
+export const engineAdjudicationOutcomeSchema = z.enum([
+  "automatic-success",
+  "success",
+  "success-with-cost",
+  "partial-success",
+  "failure-with-progress",
+  "failure-with-complication",
+  "failure-closes-opportunity",
+  "impossible",
+]);
+export type EngineAdjudicationOutcome = z.infer<typeof engineAdjudicationOutcomeSchema>;
+
+export const engineAdjudicationStakeSchema = z.enum(["time", "noise", "exposure", "opportunity"]);
+export type EngineAdjudicationStake = z.infer<typeof engineAdjudicationStakeSchema>;
+
+export const engineAdjudicationDifficultyBandSchema = z.enum(["gentle", "standard", "challenging"]);
+export type EngineAdjudicationDifficultyBand = z.infer<typeof engineAdjudicationDifficultyBandSchema>;
+
+export interface EngineAdjudicationCosts {
+  timeMinutes: number;
+  noise: number;
+  exposure: number;
+}
+
+export interface EngineAdjudicationDecision {
+  id: string;
+  actorId: string;
+  challengeId: string;
+  sceneId: string;
+  goal: string;
+  approach: string;
+  approachHash: string;
+  clarificationStatus: "not_needed" | "required";
+  feasibility: EngineAdjudicationFeasibility;
+  selectedRuleFamily: string;
+  dcSource: "none" | "reviewed_challenge" | "reviewed_difficulty_band" | "opposed_actor" | "pinned_content";
+  dc: number | null;
+  dcProvenance: string;
+  requestedDifficultyBand: EngineAdjudicationDifficultyBand | null;
+  selectedDifficultyBand: EngineAdjudicationDifficultyBand;
+  difficultyPolicyKey: string;
+  requestedStakes: EngineAdjudicationStake[];
+  stakes: EngineAdjudicationStake[];
+  allowedOutcomes: EngineAdjudicationOutcome[];
+  retryPolicy: "not_applicable" | "new_approach_or_state_change";
+  costs: EngineAdjudicationCosts;
+  informationPolicy: "public" | "withheld";
+  policyRevision: string;
+  rulesVersion: string;
+}
+
+export interface EngineAdjudicationAttempt extends EngineAdjudicationDecision {
+  outcome: EngineAdjudicationOutcome;
+  attemptVersion: number;
+  roll?: number;
+  total?: number;
+}
+
+export const engineChallengeAttemptCommandSchema = z.object({
+  kind: z.literal("challenge_attempt"),
+  challengeId: z.string().trim().min(1).max(120),
+  goal: z.string().trim().min(1).max(2_000),
+  approach: z.string().trim().min(1).max(2_000),
+  sceneId: z.string().trim().min(1).max(120).optional(),
+  difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
+  requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
+}).strict();
+export type EngineChallengeAttemptCommand = z.infer<typeof engineChallengeAttemptCommandSchema>;
+
 export const engineContentPolicySchema = z
   .object({
     gamesystem: z.string().trim().min(1).max(80),
@@ -391,6 +464,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   engineExperienceProfileUpdateCommandSchema,
   engineExperienceFeedbackAddCommandSchema,
   engineExperienceBoundaryCommandSchema,
+  engineChallengeAttemptCommandSchema,
   z.object({ kind: z.literal("character_update"),
     name: z.string().trim().min(1).max(80).optional(),
     background: z.string().trim().min(1).max(120).optional(),
@@ -657,6 +731,7 @@ export interface EngineTurnEffectEvidence extends EngineTurnPlanEffect {
   contentKeys: string[];
   rolls: Array<{ kind: string; value: number; sides?: number }>;
   modifiers: Array<{ name: string; value: number }>;
+  adjudication?: EngineAdjudicationDecision;
   outcome: string;
   stateChanges: Array<{ path: string; before: unknown; after: unknown }>;
   data: unknown;
@@ -1303,6 +1378,7 @@ export interface LanternCampaignState {
   contentPolicy: EngineContentPolicy;
   campaign: EngineCampaignProfile;
   experienceProfile: EngineExperienceProfile;
+  adjudicationHistory: EngineAdjudicationAttempt[];
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;
@@ -1329,6 +1405,7 @@ export interface EngineEvent {
   tool: EngineResolutionTool;
   command: EnginePersistedCommand;
   effects?: EngineTurnEffectEvidence[];
+  adjudication?: EngineAdjudicationDecision;
   accountId: string;
   campaignId: string;
   actorId: string;
