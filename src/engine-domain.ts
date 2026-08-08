@@ -5186,6 +5186,9 @@ function resolveSituationCreate(
   if (command.sourceRandomEventId) {
     if (!sourceRandomEvent) return rejection(state, tool, "random_event_not_found", "The situation source random event is not committed in this campaign.");
     if (sourceRandomEvent.createdSituationIds.length > 0) return rejection(state, tool, "random_event_replayed", "That random event has already seeded a situation.");
+    if (sourceRandomEvent.tableId !== "travel-watch-v1" || !sourceRandomEvent.triggered || sourceRandomEvent.selectedEntryId !== "roadside-sign") {
+      return rejection(state, tool, "random_event_not_eligible", "That committed random event does not authorize this situation template.");
+    }
   }
   const existingObject = state.worldContext?.objects.find((object) => object.id === "watchtower-relic");
   if (existingObject && existingObject.definition.sourceRef !== "reviewed-situation:watchtower-relic-v1") {

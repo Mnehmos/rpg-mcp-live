@@ -41,6 +41,9 @@ npm run test:gauntlet:ci
 
 The gauntlet emits ten versioned traces, hard privacy/atomicity/idempotency
 assertions, a stable baseline digest, and separate pending human scorecards.
+The same command also runs the random-event regression fixtures: stable table
+and context provenance, actor/object reuse and instantiation, retry/restart
+idempotency, noncombat continuation, and rejection of narrator substitution.
 Live-provider evaluation remains opt-in and budget-capped through
 `live-eval.yml`; it is never a required CI or deployment step.
 
