@@ -1,7 +1,7 @@
 # ADR-H26: Effects & Conditions Kernel
 
-Status: Accepted  
-Date: 2026-08-08  
+Status: Accepted
+Date: 2026-08-08
 See also: `docs/ADR-H25-magic-effects-kernel.md`, `docs/ADR-H11-campaign-command-lifecycle.md`, `docs/ADR-H15-atomic-multi-effect-turns.md`
 
 ## Context
