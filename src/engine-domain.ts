@@ -30,6 +30,9 @@ import type {
   EngineCharacterFeatureView,
   EngineCharacterSourceDetailsView,
   EngineCharacterView,
+  EngineActionOffer,
+  EngineActionOfferCost,
+  EngineActionOfferTiming,
   EngineCorpse,
   EngineDeathRecord,
   EngineLifecycleState,
@@ -2169,29 +2172,157 @@ function recalculateProgressionOnLoad(character: EngineCharacter): EngineCharact
   return character;
 }
 
+function actionOffer(
+  state: LanternCampaignState,
+  actionId: string,
+  label: string,
+  timing: EngineActionOfferTiming,
+  cost: EngineActionOfferCost,
+  validTargets: string[] = [],
+  reasonUnavailable: string | null = null,
+): EngineActionOffer {
+  return {
+    actionId,
+    label,
+    timing,
+    validTargets: [...validTargets],
+    cost: { ...cost },
+    stateVersion: state.version,
+    reasonUnavailable,
+  };
+}
+
+function actionBudgetReason(state: LanternCampaignState): string | null {
+  return state.combat.turnBudget.action.spent ? "Action already spent this turn." : null;
+}
+
+function bonusActionBudgetReason(state: LanternCampaignState): string | null {
+  return state.combat.turnBudget.bonusAction.spent ? "Bonus Action already spent this turn." : null;
+}
+
+function reactionBudgetReason(state: LanternCampaignState): string | null {
+  return state.combat.turnBudget.reaction.spent ? "Reaction already spent this round." : null;
+}
+
+/**
+ * Derive the finite action menu from authoritative state.  This is a
+ * presentation contract only: command resolvers still re-check every offer
+ * against the expected campaign version and current state before committing.
+ */
+export function deriveActionOffers(state: LanternCampaignState): EngineActionOffer[] {
+  const pending = state.combat.pendingReaction;
+  if (state.combat.status === "active" && pending) {
+    const resolvedReason = pending.status !== "offered" ? "This reaction offer is already resolved." : null;
+    const acceptReason = resolvedReason
+      ?? (pending.eligibleReactionIds.length ? reactionBudgetReason(state) : "No eligible reaction is available.");
+    return [
+      actionOffer(state, "reaction_response:accept", "Use an offered reaction.", "reaction", { reaction: 1 }, [pending.id], acceptReason),
+      actionOffer(state, "reaction_response:decline", "Decline the offered reaction.", "free", {}, [pending.id], resolvedReason),
+    ];
+  }
+  if (state.phase === "character_creation") {
+    return [actionOffer(state, "create_character", "Create a character.", "free", {})];
+  }
+  if (state.phase === "tutorial") {
+    return [actionOffer(state, "continue", "Continue the tutorial.", "free", {})];
+  }
+
+  const offers: EngineActionOffer[] = [
+    actionOffer(state, "observe", "Observe the current situation.", "free", {}),
+    actionOffer(state, "listen", "Listen for useful information.", "free", {}),
+    actionOffer(state, "roll", "Make a sandbox roll.", "free", {}),
+  ];
+  if (state.pendingAdvancement?.status === "pending") {
+    offers.push(actionOffer(state, "advancement_confirm", "Confirm the pending advancement.", "free", {}));
+  }
+
+  const controlledActors = projectControlledActors(state);
+  if (state.character.created) {
+    offers.push(actionOffer(state, "controlled_actor_create", "Create a reviewed controlled actor.", "free", {}));
+    if (controlledActors.some((actor) => actor.status === "active")) {
+      offers.push(actionOffer(state, "controlled_actor_dismiss", "Dismiss an active controlled actor.", "free", {}));
+    }
+  }
+
+  if (state.combat.status !== "active") return offers;
+
+  const enemyTargets = state.combat.enemies.filter((enemy) => enemy.alive && enemy.hp > 0).map((enemy) => enemy.id);
+  const encounterTarget = state.combat.encounterId ? [state.combat.encounterId] : [];
+  if (state.combat.lifecycle?.phase === "resolving" && state.combat.activeActorId === state.actorId) {
+    for (const decision of [
+      ["encounter_decision:accept_surrender", "Accept the surrender."],
+      ["encounter_decision:reject_surrender", "Reject the surrender."],
+      ["encounter_decision:capture", "Capture the surrendering creatures."],
+      ["encounter_decision:retreat", "Retreat from the encounter."],
+      ["encounter_decision:pursue", "Pursue the retreating creatures."],
+      ["encounter_decision:continue_attack", "Continue the attack."],
+    ] as const) {
+      offers.push(actionOffer(state, decision[0], decision[1], "free", {}, encounterTarget));
+    }
+    return offers;
+  }
+
+  if (state.combat.activeActorId !== state.actorId) {
+    const activeTarget = state.combat.activeActorId ? [state.combat.activeActorId] : [];
+    offers.push(actionOffer(
+      state,
+      "advance_turn",
+      "Resolve the active creature's turn.",
+      "free",
+      {},
+      activeTarget,
+      activeTarget.length ? null : "There is no active combatant to advance.",
+    ));
+    return offers;
+  }
+
+  const actionReason = actionBudgetReason(state);
+  const targetReason = enemyTargets.length ? null : "No living enemy target is available.";
+  const remainingMovement = Math.max(0, state.combat.turnBudget.movementFeet.available - state.combat.turnBudget.movementFeet.spent);
+  offers.push(actionOffer(
+    state,
+    "combat_move",
+    `Move up to ${remainingMovement} feet (the path determines the final cost).`,
+    "movement",
+    { movementFeet: remainingMovement },
+    [],
+    remainingMovement > 0 ? null : "No movement remains this turn.",
+  ));
+  offers.push(actionOffer(state, "combat_action:attack", "Attack a living enemy with the equipped weapon.", "action", { action: 1 }, enemyTargets, actionReason ?? targetReason));
+  offers.push(actionOffer(
+    state,
+    "combat_action:attack_nonlethal",
+    "Make a nonlethal attack with the equipped weapon.",
+    "action",
+    { action: 1 },
+    enemyTargets,
+    actionReason ?? (state.combat.lifecycle ? targetReason : "Nonlethal attacks require an active encounter lifecycle."),
+  ));
+  offers.push(actionOffer(state, "combat_action:dodge", "Dodge until the next turn.", "action", { action: 1 }, [], actionReason));
+
+  const secondWindReason = state.character.className.trim().toLocaleLowerCase("en-US") !== "fighter"
+    ? "Second Wind is not available to this character."
+    : (state.character.featureUses.secondWind ?? 0) < 1
+      ? "Second Wind has no uses remaining."
+      : bonusActionBudgetReason(state);
+  offers.push(actionOffer(state, "combat_action:second_wind", "Recover hit points with Second Wind.", "bonus_action", { bonusAction: 1 }, [], secondWindReason));
+
+  const controlledCommandOffers = controlledActors.flatMap((actor) => actor.legalCommands);
+  if (controlledActors.length) {
+    const legalControlledCommand = controlledCommandOffers.some((offer) => offer.legal);
+    const controlledReason = legalControlledCommand ? null : controlledCommandOffers.find((offer) => offer.reason)?.reason ?? "No controlled actor command is legal this turn.";
+    offers.push(actionOffer(state, "controlled_actor_command", "Command a controlled actor.", "action", { action: 1 }, enemyTargets, controlledReason));
+  }
+  offers.push(actionOffer(state, "end_turn", "End the player's combat turn.", "free", {}));
+  return offers;
+}
+
+export const deriveLegalActionOffers = deriveActionOffers;
+
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
   const projection = actorKnowledgeProjection(activePartyViewpointId(state), state);
   const controlledActors = projectControlledActors(state);
-  const sandboxActions = ["observe", "listen", "roll"];
-  const controlledActorActions = state.character.created
-    ? ["controlled_actor_create", ...(controlledActors.some((actor) => actor.status === "active") ? ["controlled_actor_dismiss"] : [])]
-    : [];
-  const advancementActions = state.pendingAdvancement?.status === "pending" ? ["advancement_confirm"] : [];
-  const combatActions = state.combat.status === "active"
-    ? state.combat.pendingReaction
-      ? ["reaction_response:accept", "reaction_response:decline"]
-      : state.combat.lifecycle?.phase === "resolving" && state.combat.activeActorId === state.actorId
-      ? ["encounter_decision:accept_surrender", "encounter_decision:reject_surrender", "encounter_decision:capture", "encounter_decision:retreat", "encounter_decision:pursue", "encounter_decision:continue_attack"]
-      : state.combat.activeActorId === state.actorId
-      ? [
-          ...(state.combat.turnBudget.movementFeet.spent < state.combat.turnBudget.movementFeet.available ? ["combat_move"] : []),
-          ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", ...(state.combat.lifecycle ? ["combat_action:attack_nonlethal"] : []), "combat_action:dodge"]),
-          ...(state.combat.turnBudget.bonusAction.spent || (state.character.featureUses.secondWind ?? 0) < 1 ? [] : ["combat_action:second_wind"]),
-          ...(controlledActors.some((actor) => actor.legalCommands.some((offer) => offer.legal)) ? ["controlled_actor_command"] : []),
-          "end_turn",
-        ]
-      : ["advance_turn"]
-    : [];
+  const actionOffers = deriveActionOffers(state);
   return {
     id: state.id,
     userId: state.accountId,
@@ -2219,14 +2350,8 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     scene: state.orchestration?.activeScene ?? null,
     suggestedActions: state.suggestedActions,
     log: state.log.slice(-40),
-    availableActions:
-      state.combat.pendingReaction
-        ? ["reaction_response:accept", "reaction_response:decline"]
-        : state.phase === "character_creation"
-        ? ["create_character"]
-        : state.phase === "tutorial"
-          ? ["continue"]
-          : [...sandboxActions, ...advancementActions, ...controlledActorActions, ...combatActions],
+    availableActions: actionOffers.filter((offer) => offer.reasonUnavailable === null).map((offer) => offer.actionId),
+    actionOffers,
     lastRoll: state.lastRoll,
     character: characterData(state.character) as EngineSessionView["character"],
     combat: combatData(state.combat),

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   createInitialCampaign,
+  deriveActionOffers,
   deriveWeaponAttack,
   normalizeCampaignState,
   resolveEngineCommand,
@@ -53,6 +54,57 @@ describe("typed action-economy kernel", () => {
     });
     expect(attack?.attackBonus).toBe(state.character.abilityModifiers.str + state.character.proficiencyBonus);
     expect(attack?.explanation).toContain("Longsword uses STR");
+  });
+
+  it("projects structured combat offers with costs, targets, and reasons", () => {
+    const started = encounter();
+    expect(started.accepted).toBe(true);
+    const state = started.state;
+    const offers = deriveActionOffers(state);
+    const attack = offers.find((offer) => offer.actionId === "combat_action:attack");
+    const nonlethal = offers.find((offer) => offer.actionId === "combat_action:attack_nonlethal");
+    const secondWind = offers.find((offer) => offer.actionId === "combat_action:second_wind");
+    const endTurn = offers.find((offer) => offer.actionId === "end_turn");
+    expect(attack).toMatchObject({
+      timing: "action",
+      cost: { action: 1 },
+      validTargets: [state.combat.enemies[0]!.id],
+      stateVersion: state.version,
+      reasonUnavailable: null,
+    });
+    expect(nonlethal).toMatchObject({
+      timing: "action",
+      cost: { action: 1 },
+      validTargets: [state.combat.enemies[0]!.id],
+      reasonUnavailable: "Nonlethal attacks require an active encounter lifecycle.",
+    });
+    expect(secondWind).toMatchObject({ timing: "bonus_action", cost: { bonusAction: 1 }, reasonUnavailable: null });
+    expect(endTurn).toMatchObject({ timing: "free", cost: {}, reasonUnavailable: null });
+    expect(toSessionView(state).availableActions).toContain("combat_action:attack");
+    expect(toSessionView(state).availableActions).not.toContain("combat_action:attack_nonlethal");
+  });
+
+  it("refreshes offer reasons from spent budgets without changing the action contract", () => {
+    const started = encounter();
+    started.state.character.hp = Math.max(1, started.state.character.maxHp - 4);
+    const wind = apply(started.state, { kind: "combat_action", action: "second_wind" });
+    expect(wind.accepted).toBe(true);
+    const afterWind = deriveActionOffers(wind.state);
+    expect(afterWind.find((offer) => offer.actionId === "combat_action:second_wind")).toMatchObject({
+      cost: { bonusAction: 1 },
+      reasonUnavailable: "Second Wind has no uses remaining.",
+    });
+    wind.state.combat.enemies[0]!.hp = 100;
+    wind.state.combat.enemies[0]!.alive = true;
+    const attack = apply(wind.state, { kind: "combat_action", action: "attack", targetId: wind.state.combat.enemies[0]!.id });
+    expect(attack.accepted).toBe(true);
+    const afterAttack = deriveActionOffers(attack.state);
+    expect(afterAttack.find((offer) => offer.actionId === "combat_action:attack")).toMatchObject({
+      cost: { action: 1 },
+      reasonUnavailable: "Action already spent this turn.",
+    });
+    expect(afterAttack.find((offer) => offer.actionId === "end_turn")).toMatchObject({ reasonUnavailable: null });
+    expect(toSessionView(attack.state).availableActions).not.toContain("combat_action:attack");
   });
 
   it("handles finesse, ranged, and non-proficient weapons without caller numbers", () => {
@@ -156,6 +208,8 @@ describe("typed action-economy kernel", () => {
 
   it("normalizes and projects a generic pending-reaction envelope", () => {
     const state = fighter();
+    state.combat.status = "active";
+    state.combat.activeActorId = state.actorId;
     state.combat.pendingReaction = {
       version: 1,
       id: "reaction-1",
@@ -183,7 +237,24 @@ describe("typed action-economy kernel", () => {
     };
     const normalized = normalizeCampaignState(JSON.parse(JSON.stringify(state)));
     expect(normalized.combat.pendingReaction).toEqual(state.combat.pendingReaction);
-    expect(toSessionView(normalized).combat.pendingReaction?.status).toBe("offered");
+    const view = toSessionView(normalized);
+    expect(view.combat.pendingReaction?.status).toBe("offered");
+    expect(view.actionOffers).toEqual([
+      expect.objectContaining({
+        actionId: "reaction_response:accept",
+        timing: "reaction",
+        cost: { reaction: 1 },
+        validTargets: ["reaction-1"],
+        reasonUnavailable: null,
+      }),
+      expect.objectContaining({
+        actionId: "reaction_response:decline",
+        timing: "free",
+        validTargets: ["reaction-1"],
+        reasonUnavailable: null,
+      }),
+    ]);
+    expect(deriveActionOffers(normalized)).toEqual(deriveActionOffers(JSON.parse(JSON.stringify(normalized))));
   });
 
   it("restores the once-per-rest Second Wind resource", () => {

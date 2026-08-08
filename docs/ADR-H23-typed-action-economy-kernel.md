@@ -49,7 +49,11 @@ combat numbers. Fighter Second Wind is the first real Bonus Action consumer, and
 the persisted `PendingReaction` envelope is protocol-only until a reviewed
 reaction trigger is added. Dash, Disengage, Help, and Ready remain honest
 `unsupported_action` rejections; spatial movement, opportunity attacks, and full
-Ready resolution are deferred to ADR-H24/follow-on slices.
+Ready resolution are deferred to ADR-H24/follow-on slices. The session view also
+exposes server-derived `actionOffers` with timing, budget cost, valid target IDs,
+state version, and deterministic unavailable reasons; the legacy `availableActions`
+string list is derived from those offers for compatibility. The DM context receives
+the same offer projection and never supplies its own action timing or cost.
 
 ## Rejected alternatives
 
