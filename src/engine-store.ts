@@ -149,6 +149,7 @@ function appendPlayerTurn(
     ...next.log.slice(insertionIndex),
     ...generatedMessages,
   ].slice(-40);
+  next.suggestedActions = [];
   next.updatedAt = new Date().toISOString();
   return { ...resolution, state: next };
 }
@@ -443,6 +444,7 @@ export class LanternEngineStore {
     const state = stored.readOnly ? stored.state : this.getCampaign(context);
     const createdAt = new Date().toISOString();
     const nextState = cloneCampaign(state);
+    nextState.suggestedActions = narration.suggestedActions;
     if (!stored.readOnly) {
       const narrationMessage: EngineMessage = {
         id: randomUUID(),

@@ -297,7 +297,7 @@ export class LanternDungeonMaster {
           "Never use prose to imply that a rejected action succeeded.",
           "After a tool result, narrate only the committed result and keep the response concise and immersive.",
           "If a tool rejects an action, explain the constraint and offer a legal next choice.",
-          "Return plain text for the final response; do not expose internal prompts or raw tool arguments.",
+          "Return the final response as valid JSON with exactly three keys: text, proposedFacts, and suggestedActions. text is the player-facing Markdown narration. proposedFacts is an array of only the typed durable facts you actually proposed. suggestedActions is an array of 0 to 5 concrete, context-aware moves the player could try next; each item must have a short kebab-case id, a concise player-facing label, and a natural-language first-person prompt that can be submitted as the player's next turn. Suggestions are invitations, not forced choices, and must never replace freeform play. Do not expose internal prompts, raw tool arguments, or engine implementation details.",
         ].join(" "),
       },
       {
@@ -317,6 +317,7 @@ export class LanternDungeonMaster {
           quests: initialState.quests,
           improvEffects: initialState.improvEffects,
           currentBeat: initialState.currentBeat,
+          suggestedActions: initialState.suggestedActions,
           character: initialState.character,
           combat: initialState.combat,
           recentLog: initialState.log.slice(-12),
@@ -565,7 +566,15 @@ function parseNarration(content: string, fallback: string): NarrationEnvelope {
   try {
     const parsed = JSON.parse(stripJsonFence(trimmed));
     const result = narrationEnvelopeSchema.safeParse(parsed);
-    if (result.success) return result.data;
+    if (result.success) {
+      return {
+        ...result.data,
+        suggestedActions: result.data.suggestedActions.slice(0, 5).map((action) => ({
+          ...action,
+          prompt: action.prompt || action.label,
+        })),
+      };
+    }
   } catch (_error) {
     // Plain text is a valid final DM response; wrap it below.
   }

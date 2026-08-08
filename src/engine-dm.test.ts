@@ -88,7 +88,15 @@ describe("Lantern OpenRouter tool loop", () => {
             {
               message: {
                 role: "assistant",
-                content: "A useful detail emerges from the first lead.",
+                content: JSON.stringify({
+                  text: "A useful detail emerges from the first lead.",
+                  proposedFacts: [],
+                  suggestedActions: [{
+                    id: "study-lead",
+                    label: "Study the lead",
+                    prompt: "I study the first lead closely for anything it reveals.",
+                  }],
+                }),
               },
             },
           ],
@@ -133,12 +141,16 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(systemPrompt).toContain("creature content keys");
     expect(systemPrompt).toContain("never supplies fixed demo loot");
     expect(systemPrompt).toContain("commits the complete plan atomically");
+    expect(systemPrompt).toContain("context-aware moves");
     expect(result.event?.tool).toBe("turn_plan");
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check"]);
     expect(result.event?.rolls[0]?.kind).toBe("d20");
     expect(result.state.version).toBe(1);
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.text).toContain("useful detail");
+    expect(result.narration.suggestedActions[0]?.prompt).toContain("first lead");
+    expect(result.session.suggestedActions[0]?.id).toBe("study-lead");
+    expect(store.getCampaign(context).suggestedActions[0]?.id).toBe("study-lead");
     expect(result.session.log.slice(-3).map((message) => message.kind)).toEqual(["player", "roll", "narration"]);
     store.close();
   });

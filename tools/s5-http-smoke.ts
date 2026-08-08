@@ -48,7 +48,7 @@ try {
   assert(engineHealth.status === "ok", "Engine health was not ok.");
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f", "Engine booted an unexpected pack hash.");
-  assert(engineHealth.toolCount === 41, "Engine tool count drifted.");
+  assert(engineHealth.toolCount === 42, "Engine tool count drifted.");
 
   const page = await fetch(`${webBaseUrl}/play`);
   const pageHtml = await page.text();
@@ -122,6 +122,8 @@ try {
       classKey: characterClass.contentKey,
       backgroundKey: background.contentKey,
       alignmentKey: alignment.contentKey,
+      abilityScoreMethod: "standard_array",
+      abilityScores: { str: 15, dex: 14, con: 13, int: 12, wis: 10, cha: 8 },
       abilityBonusChoices: [],
       skillKeys,
       languageKeys,

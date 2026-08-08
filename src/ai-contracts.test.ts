@@ -22,4 +22,18 @@ describe("DM adapter contracts", () => {
 
     expect(result.success).toBe(false);
   });
+
+  it("accepts a bounded player prompt for a generated move", () => {
+    const result = narrationEnvelopeSchema.safeParse({
+      text: "The courier watches your hands.",
+      proposedFacts: [],
+      suggestedActions: [{
+        id: "speak-courier",
+        label: "Question the courier",
+        prompt: "I ask the courier why they keep watching my hands.",
+      }],
+    });
+
+    expect(result.success).toBe(true);
+  });
 });
