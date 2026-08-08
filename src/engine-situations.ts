@@ -234,12 +234,14 @@ export function reconcileSituation(situation: EngineSituation, state: LanternCam
   const next = clone(situation);
   const preferred = state.worldContext?.npcs.find((npc) => {
     if (npc.id !== next.role.preferredRef) return false;
-    return !npc.agency || npc.agency.lifecycleState !== "dead";
+    if (npc.disposition === "hostile") return false;
+    if (!npc.agency) return true;
+    return npc.agency.lifecycleState === "conscious"
+      && (!state.worldContext || npc.agency.locationRef === state.worldContext.id);
   });
   const fallbackAvailable = Boolean(
     state.worldContext?.features.includes(next.role.fallbackRef)
-      || state.worldContext?.objects.some((object) => object.id === next.role.fallbackRef && object.state !== "destroyed")
-      || next.role.fallbackRef === FALLBACK_ID,
+      || state.worldContext?.objects.some((object) => object.id === next.role.fallbackRef && object.state !== "destroyed"),
   );
   next.role.status = preferred ? "preferred" : fallbackAvailable ? "fallback" : "impossible";
   next.role.activeSourceRef = preferred?.id ?? (fallbackAvailable ? next.role.fallbackRef : null);

@@ -115,6 +115,17 @@ describe("reviewed situations", () => {
 
     const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(state)) as LanternCampaignState);
     expect(restarted.situation).toEqual(state.situation);
+
+    const bypassContext = accepted(characterReady(), {
+      kind: "world_context",
+      title: "A side road",
+      description: "The expected entrance was never used.",
+      features: ["side entrance"],
+      exits: [{ id: "side-yard", label: "the side yard" }],
+    });
+    const bypassed = accepted(bypassContext, { kind: "situation_create", templateId: "watchtower-relic-v1" });
+    expect(bypassed.situation?.currentLocationId).toBe("watchtower-road");
+    expect(bypassed.worldContext?.features).toEqual(expect.arrayContaining(["watchtower-road", "watchtower-vault", "watchtower-relic"]));
   });
 
   it("keeps traversal explicit and rejects out-of-order node access without mutation", () => {
