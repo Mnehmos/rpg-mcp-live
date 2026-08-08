@@ -191,6 +191,8 @@ describe("scene pacing and session orchestration", () => {
       expect(result.state.orchestration?.activeScene?.noChangeTurns).toBe(3);
       expect(result.state.orchestration?.activeScene?.immediateQuestion).toBe("What will you do next?");
       expect(result.state.orchestration?.activeScene?.revision).toBe(sceneBefore.revision + 1);
+      expect(result.state.orchestration?.activeScene?.status).toBe("active");
+      expect(result.state.orchestration?.activeScene?.discoveredFactRefs).toEqual([]);
       expect(result.state.orchestration?.hooks[0]?.status).toBe("active");
       expect(result.state.orchestration?.hooks[0]?.lastUsedSceneId).toBe(sceneBefore.sceneId);
 
