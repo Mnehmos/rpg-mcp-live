@@ -479,12 +479,54 @@ export const engineNpcPatchSchema = z.object({
   description: z.string().trim().max(2_000).optional(),
   disposition: worldContextDispositionSchema.optional(),
   goals: z.array(z.string().trim().min(1).max(240)).max(12).optional(),
+  agency: z.object({
+    actorType: z.enum(["merchant", "guard", "traveler"]),
+    locationRef: worldContextEntityIdSchema,
+    schedule: z.array(z.object({
+      id: worldContextEntityIdSchema,
+      locationRef: worldContextEntityIdSchema,
+      startMinute: z.number().int().min(0).max(1_439),
+      endMinute: z.number().int().min(0).max(1_439),
+    }).strict()).max(12),
+    goals: z.array(z.object({
+      id: worldContextEntityIdSchema,
+      title: z.string().trim().min(1).max(240),
+      priority: z.number().int().min(0).max(100),
+      status: z.enum(["active", "blocked", "complete"]),
+    }).strict()).max(12),
+    resources: z.object({
+      inventory: z.array(engineInventoryItemInputSchema).max(40),
+      copper: z.number().int().nonnegative().max(100_000_000),
+      actionPoints: z.number().int().nonnegative().max(50),
+    }).strict(),
+    maxHp: z.number().int().positive().max(10_000),
+    hp: z.number().int().nonnegative().max(10_000),
+  }).strict().optional(),
   socialDc: z.number().int().min(1).max(30).optional(),
   // Rejection-only input: the domain rejects every supplied value as server-owned.
   relationshipScore: z.number().int().min(-100).max(100).optional(),
   memories: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
 }).strict();
 export type EngineNpcPatch = z.infer<typeof engineNpcPatchSchema>;
+
+export const engineNpcAgencyActionSchema = z.enum([
+  "move_to_schedule",
+  "report_crime",
+  "rest",
+  "trade_resource",
+  "no_op",
+]);
+export type EngineNpcAgencyAction = z.infer<typeof engineNpcAgencyActionSchema>;
+
+export const engineNpcTickCommandSchema = z.object({
+  kind: z.literal("npc_tick"),
+  trigger: z.enum(["time_advance", "scene_enter", "scene_exit", "witnessed_event", "quest_clock", "combat_turn", "operator_batch"]),
+  triggerId: worldContextEntityIdSchema,
+  npcId: worldContextEntityIdSchema.optional(),
+  offerId: engineNpcAgencyActionSchema.optional(),
+  provider: z.enum(["deterministic", "openrouter"]).optional(),
+}).strict();
+export type EngineNpcTickCommand = z.infer<typeof engineNpcTickCommandSchema>;
 
 export const engineMerchantPatchSchema = z.object({
   id: worldContextEntityIdSchema,
@@ -567,6 +609,7 @@ export const engineToolNameSchema = z.enum([
   "travel",
   "interact",
   "social_check",
+  "npc_tick",
   "merchant_trade",
   "social_action",
   "quest_create",
@@ -1083,6 +1126,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       goal: z.string().trim().min(1).max(2_000),
     })
     .strict(),
+  engineNpcTickCommandSchema,
   z
     .object({
       kind: z.literal("merchant_trade"),
@@ -1423,6 +1467,87 @@ export interface EngineWorldContext {
   objects: EngineWorldObjectInstance[];
 }
 
+export interface EngineNpcScheduleEntry {
+  id: string;
+  locationRef: string;
+  startMinute: number;
+  endMinute: number;
+}
+
+export interface EngineNpcGoal {
+  id: string;
+  title: string;
+  priority: number;
+  status: "active" | "blocked" | "complete";
+}
+
+export interface EngineNpcResourceState {
+  inventory: EngineInventoryItem[];
+  copper: number;
+  actionPoints: number;
+}
+
+export interface EngineNpcActionOffer {
+  id: EngineNpcAgencyAction;
+  label: string;
+  legal: true;
+  prerequisites: string[];
+  costs: { actionPoints: number; copper: number; itemIds: string[] };
+}
+
+export interface EngineNpcPendingAction {
+  triggerId: string;
+  trigger: EngineNpcTickCommand["trigger"];
+  offers: EngineNpcActionOffer[];
+  selectedOfferId: EngineNpcAgencyAction;
+  createdAt: string;
+}
+
+export interface EngineNpcInvocation {
+  id: string;
+  triggerId: string;
+  trigger: EngineNpcTickCommand["trigger"];
+  npcId: string;
+  provider: "deterministic" | "openrouter";
+  model: string;
+  inputTokens: number;
+  cacheTokens: number;
+  reasoningTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  latencyMs: number;
+  outcome: "selected" | "fallback" | "circuit_open" | "rejected";
+  fallback: boolean;
+  selectedOfferId: EngineNpcAgencyAction | null;
+  budget: {
+    maxInputTokens: number;
+    maxOutputTokens: number;
+    timeoutMs: number;
+    maxConsecutiveFailures: number;
+    maxInvocationsPerDay: number;
+  };
+  createdAt: string;
+}
+
+export interface EngineNpcAgencyState {
+  actorType: "merchant" | "guard" | "traveler";
+  locationRef: string;
+  schedule: EngineNpcScheduleEntry[];
+  goals: EngineNpcGoal[];
+  resources: EngineNpcResourceState;
+  hp: number;
+  maxHp: number;
+  lifecycleState: "conscious" | "dying" | "stable" | "dead";
+  pendingAction: EngineNpcPendingAction | null;
+  completedTriggerIds: string[];
+  reportedCrimeIds: string[];
+  invocations: EngineNpcInvocation[];
+  consecutiveFailures: number;
+  circuitState: "closed" | "open";
+  invocationDay: number;
+  invocationsToday: number;
+}
+
 export interface EngineNpc {
   id: string;
   name: string;
@@ -1432,6 +1557,7 @@ export interface EngineNpc {
   socialDc: number;
   relationshipScore: number;
   memories: string[];
+  agency?: EngineNpcAgencyState;
 }
 
 export interface EngineMerchantItem {

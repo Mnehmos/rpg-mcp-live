@@ -105,6 +105,15 @@ import type {
   EngineMerchantPatchOperations,
   EngineMerchantView,
   EngineNpc,
+  EngineNpcActionOffer,
+  EngineNpcAgencyAction,
+  EngineNpcAgencyState,
+  EngineNpcGoal,
+  EngineNpcInvocation,
+  EngineNpcPendingAction,
+  EngineNpcResourceState,
+  EngineNpcScheduleEntry,
+  EngineNpcTickCommand,
   EngineNpcPatch,
   EngineNpcPatchOperations,
   EngineMessage,
@@ -936,6 +945,191 @@ const SOCIAL_MAX = 100;
 const SOCIAL_COMMUNITY_ID = "local-community";
 const SOCIAL_RUMOR_DELAY_MINUTES = 60;
 const SOCIAL_CHECK_DC = 12;
+
+export const NPC_AGENCY_CONFIG = Object.freeze({
+  maxInputTokens: 8_000,
+  maxOutputTokens: 1_000,
+  timeoutMs: 10_000,
+  maxConsecutiveFailures: 3,
+  maxInvocationsPerDay: 50,
+});
+
+const NPC_AGENCY_ACTIONS: readonly EngineNpcAgencyAction[] = [
+  "move_to_schedule",
+  "report_crime",
+  "rest",
+  "trade_resource",
+  "no_op",
+];
+
+function npcAgencyAction(value: unknown): EngineNpcAgencyAction | null {
+  return NPC_AGENCY_ACTIONS.includes(value as EngineNpcAgencyAction) ? value as EngineNpcAgencyAction : null;
+}
+
+function normalizeNpcSchedule(value: unknown): EngineNpcScheduleEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const raw = entry as Partial<EngineNpcScheduleEntry>;
+    if (typeof raw.id !== "string" || typeof raw.locationRef !== "string") return [];
+    if (typeof raw.startMinute !== "number" || typeof raw.endMinute !== "number") return [];
+    return [{
+      id: raw.id,
+      locationRef: raw.locationRef,
+      startMinute: Math.max(0, Math.min(1_439, Math.trunc(raw.startMinute))),
+      endMinute: Math.max(0, Math.min(1_439, Math.trunc(raw.endMinute))),
+    }];
+  }).slice(0, 12);
+}
+
+function normalizeNpcGoals(value: unknown): EngineNpcGoal[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const raw = entry as Partial<EngineNpcGoal>;
+    if (typeof raw.id !== "string" || typeof raw.title !== "string") return [];
+    return [{
+      id: raw.id,
+      title: raw.title,
+      priority: typeof raw.priority === "number" ? Math.max(0, Math.min(100, Math.trunc(raw.priority))) : 0,
+      status: raw.status === "blocked" || raw.status === "complete" ? raw.status : "active" as const,
+    }];
+  }).slice(0, 12);
+}
+
+function normalizeNpcResources(value: unknown, npcId: string): EngineNpcResourceState {
+  const raw = value && typeof value === "object" ? value as Partial<EngineNpcResourceState> : {};
+  const inventory = Array.isArray(raw.inventory)
+    ? raw.inventory.flatMap((item) => {
+        try {
+          return [{
+            ...normalizeInventoryItem(item),
+            equipped: false,
+            ownerRef: { kind: "actor" as const, id: npcId },
+          }];
+        } catch {
+          return [];
+        }
+      }).slice(0, 40)
+    : [];
+  return {
+    inventory,
+    copper: typeof raw.copper === "number" ? Math.max(0, Math.min(100_000_000, Math.trunc(raw.copper))) : 0,
+    actionPoints: typeof raw.actionPoints === "number" ? Math.max(0, Math.min(50, Math.trunc(raw.actionPoints))) : 1,
+  };
+}
+
+function normalizeNpcOffers(value: unknown): EngineNpcActionOffer[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const raw = entry as Partial<EngineNpcActionOffer>;
+    const id = npcAgencyAction(raw.id);
+    if (!id || raw.legal !== true || typeof raw.label !== "string") return [];
+    return [{
+      id,
+      label: raw.label,
+      legal: true as const,
+      prerequisites: Array.isArray(raw.prerequisites) ? raw.prerequisites.filter((item): item is string => typeof item === "string").slice(0, 12) : [],
+      costs: {
+        actionPoints: typeof raw.costs?.actionPoints === "number" ? Math.max(0, Math.trunc(raw.costs.actionPoints)) : 0,
+        copper: typeof raw.costs?.copper === "number" ? Math.max(0, Math.trunc(raw.costs.copper)) : 0,
+        itemIds: Array.isArray(raw.costs?.itemIds) ? raw.costs!.itemIds!.filter((item): item is string => typeof item === "string").slice(0, 12) : [],
+      },
+    }];
+  }).slice(0, NPC_AGENCY_ACTIONS.length);
+}
+
+function normalizeNpcInvocation(value: unknown): EngineNpcInvocation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const raw = entry as Partial<EngineNpcInvocation>;
+    const action = raw.selectedOfferId === null ? null : npcAgencyAction(raw.selectedOfferId);
+    if (typeof raw.id !== "string" || typeof raw.triggerId !== "string" || typeof raw.npcId !== "string") return [];
+    return [{
+      id: raw.id,
+      triggerId: raw.triggerId,
+      trigger: ["time_advance", "scene_enter", "scene_exit", "witnessed_event", "quest_clock", "combat_turn", "operator_batch"].includes(raw.trigger as string)
+        ? raw.trigger as EngineNpcTickCommand["trigger"] : "operator_batch",
+      npcId: raw.npcId,
+      provider: raw.provider === "openrouter" ? "openrouter" as const : "deterministic" as const,
+      model: typeof raw.model === "string" ? raw.model : "npc-policy-v1",
+      inputTokens: typeof raw.inputTokens === "number" ? Math.max(0, Math.trunc(raw.inputTokens)) : 0,
+      cacheTokens: typeof raw.cacheTokens === "number" ? Math.max(0, Math.trunc(raw.cacheTokens)) : 0,
+      reasoningTokens: typeof raw.reasoningTokens === "number" ? Math.max(0, Math.trunc(raw.reasoningTokens)) : 0,
+      outputTokens: typeof raw.outputTokens === "number" ? Math.max(0, Math.trunc(raw.outputTokens)) : 0,
+      costUsd: typeof raw.costUsd === "number" ? Math.max(0, raw.costUsd) : 0,
+      latencyMs: typeof raw.latencyMs === "number" ? Math.max(0, Math.trunc(raw.latencyMs)) : 0,
+      outcome: raw.outcome === "selected" || raw.outcome === "circuit_open" || raw.outcome === "rejected" ? raw.outcome : "fallback" as const,
+      fallback: raw.fallback !== false,
+      selectedOfferId: action,
+      budget: {
+        maxInputTokens: typeof raw.budget?.maxInputTokens === "number" ? Math.max(0, Math.trunc(raw.budget.maxInputTokens)) : NPC_AGENCY_CONFIG.maxInputTokens,
+        maxOutputTokens: typeof raw.budget?.maxOutputTokens === "number" ? Math.max(0, Math.trunc(raw.budget.maxOutputTokens)) : NPC_AGENCY_CONFIG.maxOutputTokens,
+        timeoutMs: typeof raw.budget?.timeoutMs === "number" ? Math.max(0, Math.trunc(raw.budget.timeoutMs)) : NPC_AGENCY_CONFIG.timeoutMs,
+        maxConsecutiveFailures: typeof raw.budget?.maxConsecutiveFailures === "number" ? Math.max(0, Math.trunc(raw.budget.maxConsecutiveFailures)) : NPC_AGENCY_CONFIG.maxConsecutiveFailures,
+        maxInvocationsPerDay: typeof raw.budget?.maxInvocationsPerDay === "number" ? Math.max(0, Math.trunc(raw.budget.maxInvocationsPerDay)) : NPC_AGENCY_CONFIG.maxInvocationsPerDay,
+      },
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
+    }];
+  }).slice(-100);
+}
+
+function normalizeNpcAgency(value: unknown, npcId: string): EngineNpcAgencyState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<EngineNpcAgencyState>;
+  if (raw.actorType !== "merchant" && raw.actorType !== "guard" && raw.actorType !== "traveler") return undefined;
+  const maxHp = typeof raw.maxHp === "number" ? Math.max(1, Math.min(10_000, Math.trunc(raw.maxHp))) : 1;
+  const hp = typeof raw.hp === "number" ? Math.max(0, Math.min(maxHp, Math.trunc(raw.hp))) : maxHp;
+  const lifecycleState = raw.lifecycleState === "dead" || raw.lifecycleState === "dying" || raw.lifecycleState === "stable"
+    ? raw.lifecycleState : hp <= 0 ? "dead" as const : "conscious" as const;
+  const pendingRaw = raw.pendingAction && typeof raw.pendingAction === "object" ? raw.pendingAction as Partial<EngineNpcPendingAction> : null;
+  const selectedOfferId = pendingRaw ? npcAgencyAction(pendingRaw.selectedOfferId) : null;
+  const pendingAction = pendingRaw && typeof pendingRaw.triggerId === "string" && selectedOfferId
+    ? {
+        triggerId: pendingRaw.triggerId,
+        trigger: ["time_advance", "scene_enter", "scene_exit", "witnessed_event", "quest_clock", "combat_turn", "operator_batch"].includes(pendingRaw.trigger as string)
+          ? pendingRaw.trigger as EngineNpcTickCommand["trigger"] : "operator_batch",
+        offers: normalizeNpcOffers(pendingRaw.offers),
+        selectedOfferId,
+        createdAt: typeof pendingRaw.createdAt === "string" ? pendingRaw.createdAt : new Date(0).toISOString(),
+      }
+    : null;
+  return {
+    actorType: raw.actorType,
+    locationRef: typeof raw.locationRef === "string" ? raw.locationRef : "world",
+    schedule: normalizeNpcSchedule(raw.schedule),
+    goals: normalizeNpcGoals(raw.goals),
+    resources: normalizeNpcResources(raw.resources, npcId),
+    hp,
+    maxHp,
+    lifecycleState,
+    pendingAction,
+    completedTriggerIds: Array.isArray(raw.completedTriggerIds) ? raw.completedTriggerIds.filter((id): id is string => typeof id === "string").slice(-100) : [],
+    reportedCrimeIds: Array.isArray(raw.reportedCrimeIds) ? raw.reportedCrimeIds.filter((id): id is string => typeof id === "string").slice(-100) : [],
+    invocations: normalizeNpcInvocation(raw.invocations),
+    consecutiveFailures: typeof raw.consecutiveFailures === "number" ? Math.max(0, Math.min(NPC_AGENCY_CONFIG.maxConsecutiveFailures, Math.trunc(raw.consecutiveFailures))) : 0,
+    circuitState: raw.circuitState === "open" ? "open" : "closed",
+    invocationDay: typeof raw.invocationDay === "number" ? Math.max(0, Math.trunc(raw.invocationDay)) : 1,
+    invocationsToday: typeof raw.invocationsToday === "number" ? Math.max(0, Math.min(NPC_AGENCY_CONFIG.maxInvocationsPerDay, Math.trunc(raw.invocationsToday))) : 0,
+  };
+}
+
+function mergeNpcAgency(
+  existing: EngineNpcAgencyState | undefined,
+  input: NonNullable<EngineNpcPatch["agency"]>,
+  npcId: string,
+): EngineNpcAgencyState {
+  if (!existing) return normalizeNpcAgency(input, npcId)!;
+  return normalizeNpcAgency({
+    ...existing,
+    actorType: input.actorType,
+    locationRef: input.locationRef,
+    schedule: input.schedule,
+    goals: input.goals,
+  }, npcId)!;
+}
 
 function clampSocial(value: unknown, fallback = 0): number {
   const number = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback;
@@ -2028,7 +2222,7 @@ export function resolveEngineCommand(
   }
   if (
     state.character.lifecycleState === "stable"
-    && ["combat_action", "combat_move", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
+    && ["combat_action", "combat_move", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "npc_tick", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
   ) {
     return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
   }
@@ -2076,6 +2270,8 @@ export function resolveEngineCommand(
       return resolveSocialCheck(state, context, clientCommandId, command, tool);
     case "social_action":
       return resolveSocialAction(state, context, clientCommandId, command, tool);
+    case "npc_tick":
+      return resolveNpcTick(state, context, clientCommandId, command, tool);
     case "merchant_trade":
       return resolveMerchantTrade(state, context, clientCommandId, command, tool);
     case "quest_create":
@@ -2634,6 +2830,9 @@ function mergeNpcPatch(existing: EngineNpc | undefined, patch: EngineNpcPatch): 
     socialDc: patch.socialDc ?? existing?.socialDc ?? 12,
     relationshipScore: existing?.relationshipScore ?? 0,
     memories: patch.memories ?? existing?.memories ?? [],
+    ...(patch.agency
+      ? { agency: mergeNpcAgency(existing?.agency, patch.agency, patch.id) }
+      : existing?.agency ? { agency: existing.agency } : {}),
   });
 }
 
@@ -2964,6 +3163,254 @@ function resolveSocialAction(
   }
 
   return rejection(state, tool, "social_action_invalid", "That social action is not supported by the reviewed first slice.");
+}
+
+function npcScheduleEntryAt(npc: EngineNpc, totalMinutes: number): EngineNpcScheduleEntry | null {
+  const agency = npc.agency;
+  if (!agency) return null;
+  const minuteOfDay = ((Math.trunc(totalMinutes) % ONE_DAY_MINUTES) + ONE_DAY_MINUTES) % ONE_DAY_MINUTES;
+  return agency.schedule.find((entry) => entry.startMinute <= entry.endMinute
+    ? minuteOfDay >= entry.startMinute && minuteOfDay <= entry.endMinute
+    : minuteOfDay >= entry.startMinute || minuteOfDay <= entry.endMinute) ?? null;
+}
+
+function npcLocationReachable(state: LanternCampaignState, locationRef: string): boolean {
+  return locationRef === state.worldContext?.id
+    || Boolean(state.worldContext?.exits.some((exit) => exit.id === locationRef));
+}
+
+function npcLegalOffers(
+  state: LanternCampaignState,
+  npc: EngineNpc,
+): EngineNpcActionOffer[] {
+  const agency = npc.agency;
+  if (!agency || agency.lifecycleState !== "conscious" || agency.hp <= 0) return [];
+  const offers: EngineNpcActionOffer[] = [];
+  const scheduled = npcScheduleEntryAt(npc, state.time.gameTime.totalMinutes);
+  if (scheduled && scheduled.locationRef !== agency.locationRef && npcLocationReachable(state, scheduled.locationRef)) {
+    offers.push({
+      id: "move_to_schedule",
+      label: `Move to scheduled location ${scheduled.locationRef}.`,
+      legal: true,
+      prerequisites: [`schedule:${scheduled.id}`, `route:${agency.locationRef}->${scheduled.locationRef}`],
+      costs: { actionPoints: 1, copper: 0, itemIds: [] },
+    });
+  }
+  const social = normalizeSocialState(state.social);
+  const reportableCrime = social.crimes.find((crime) =>
+    crime.status === "proven"
+    && crime.witnessIds.includes(npc.id)
+    && !agency.reportedCrimeIds.includes(crime.id)
+  );
+  if (reportableCrime) {
+    offers.push({
+      id: "report_crime",
+      label: `Report witnessed crime ${reportableCrime.id}.`,
+      legal: true,
+      prerequisites: [`witness:${reportableCrime.id}`, "social:report-crime"],
+      costs: { actionPoints: 1, copper: 0, itemIds: [] },
+    });
+  }
+  if (agency.hp < agency.maxHp && agency.resources.actionPoints > 0) {
+    offers.push({
+      id: "rest",
+      label: "Rest and recover one bounded hit point.",
+      legal: true,
+      prerequisites: ["lifecycle:conscious", "resource:action-point"],
+      costs: { actionPoints: 1, copper: 0, itemIds: [] },
+    });
+  }
+  const tradeItem = agency.resources.inventory.find((item) => item.quantity > 0);
+  if (agency.actorType === "merchant" && tradeItem && agency.resources.actionPoints > 0) {
+    offers.push({
+      id: "trade_resource",
+      label: `Trade one ${materializeInventoryItem(tradeItem).name} for its reviewed value.`,
+      legal: true,
+      prerequisites: ["actor:merchant", "resource:inventory-item", "resource:action-point"],
+      costs: { actionPoints: 1, copper: 0, itemIds: [tradeItem.id] },
+    });
+  }
+  offers.push({
+    id: "no_op",
+    label: "Take no major action.",
+    legal: true,
+    prerequisites: ["policy:bounded-no-op"],
+    costs: { actionPoints: 0, copper: 0, itemIds: [] },
+  });
+  return offers;
+}
+
+function resolveNpcTick(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineNpcTickCommand,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const candidates = state.worldContext?.npcs ?? [];
+  const npc = command.npcId
+    ? candidates.find((candidate) => candidate.id === command.npcId)
+    : candidates.find((candidate) => Boolean(candidate.agency));
+  if (!npc) return rejection(state, tool, command.npcId ? "npc_not_found" : "npc_agency_unavailable", "The requested NPC does not have a persisted agency state.");
+  const agency = npc.agency;
+  if (!agency) return rejection(state, tool, "npc_agency_unavailable", "NPC agency must be explicitly configured before a tick can run.");
+  if (agency.completedTriggerIds.includes(command.triggerId)) return rejection(state, tool, "npc_trigger_replayed", "That authoritative NPC trigger has already been processed.");
+  const currentDay = Math.floor(state.time.gameTime.totalMinutes / ONE_DAY_MINUTES);
+  if (agency.circuitState === "open") return rejection(state, tool, "npc_circuit_open", "NPC agency is open-circuited for this session; deterministic fallback is not retried.");
+  if ((agency.invocationDay === currentDay ? agency.invocationsToday : 0) >= NPC_AGENCY_CONFIG.maxInvocationsPerDay) {
+    return rejection(state, tool, "npc_invocation_budget_exhausted", "The NPC invocation budget for this campaign day is exhausted.");
+  }
+  if (agency.lifecycleState !== "conscious" || agency.hp <= 0) return rejection(state, tool, "npc_incapacitated", "A dead or incapacitated NPC cannot take an agency action.");
+
+  const offers = npcLegalOffers(state, npc);
+  const selectedOfferId = command.offerId ?? offers[0]?.id ?? "no_op";
+  const selected = offers.find((offer) => offer.id === selectedOfferId);
+  if (!selected) return rejection(state, tool, "npc_offer_illegal", "The selected NPC offer is not legal in the current authoritative state.");
+  const provider = command.provider ?? "deterministic";
+
+  const promptProjection = actorKnowledgeProjection(npc.id, state);
+  const promptSocial = {
+    ...promptProjection.social,
+    rumors: promptProjection.social.rumors.filter((rumor) => rumor.targetId === npc.id),
+  };
+  const promptKnowledge = promptProjection.knowledge.filter((record) => !record.stale && record.tier !== "withheld" && record.tier !== "stale");
+  const now = new Date().toISOString();
+  const beforeAgency = JSON.parse(JSON.stringify(agency)) as EngineNpcAgencyState;
+  const beforeSocial = normalizeSocialState(state.social);
+  const next = cloneCampaign(state);
+  const nextNpc = next.worldContext?.npcs.find((candidate) => candidate.id === npc.id);
+  if (!nextNpc?.agency) return rejection(state, tool, "npc_agency_unavailable", "The NPC agency state disappeared before the tick could commit.");
+  const nextAgency = nextNpc.agency;
+  if (nextAgency.invocationDay !== currentDay) {
+    nextAgency.invocationDay = currentDay;
+    nextAgency.invocationsToday = 0;
+  }
+  const selectedCrime = selectedOfferId === "report_crime"
+    ? ensureSocialState(next).crimes.find((crime) => crime.status === "proven" && crime.witnessIds.includes(npc.id) && !nextAgency.reportedCrimeIds.includes(crime.id))
+    : null;
+  if (selectedOfferId === "move_to_schedule") {
+    const scheduled = npcScheduleEntryAt(nextNpc, next.time.gameTime.totalMinutes);
+    if (!scheduled || scheduled.locationRef === nextAgency.locationRef || !npcLocationReachable(next, scheduled.locationRef)) {
+      return rejection(state, tool, "npc_route_invalid", "The NPC cannot reach the selected scheduled location from its current authoritative location.");
+    }
+    nextAgency.locationRef = scheduled.locationRef;
+    nextAgency.resources.actionPoints = Math.max(0, nextAgency.resources.actionPoints - 1);
+  } else if (selectedOfferId === "report_crime") {
+    if (!selectedCrime) return rejection(state, tool, "npc_report_unavailable", "No witnessed proven crime is available for this NPC to report.");
+    nextAgency.reportedCrimeIds = [...nextAgency.reportedCrimeIds, selectedCrime.id].slice(-100);
+    nextNpc.memories = [...nextNpc.memories, `Reported ${selectedCrime.id} at ${next.time.gameTime.totalMinutes} minutes.`].slice(-20);
+    nextAgency.resources.actionPoints = Math.max(0, nextAgency.resources.actionPoints - 1);
+  } else if (selectedOfferId === "rest") {
+    if (nextAgency.resources.actionPoints <= 0 || nextAgency.hp >= nextAgency.maxHp) return rejection(state, tool, "npc_resource_unavailable", "The NPC lacks the action-point resource or does not need rest.");
+    nextAgency.resources.actionPoints -= 1;
+    nextAgency.hp = Math.min(nextAgency.maxHp, nextAgency.hp + 1);
+  } else if (selectedOfferId === "trade_resource") {
+    const item = nextAgency.resources.inventory.find((candidate) => candidate.quantity > 0);
+    if (nextAgency.resources.actionPoints <= 0 || !item) return rejection(state, tool, "npc_resource_unavailable", "The NPC cannot trade without an action point and an owned item.");
+    const itemValue = Math.max(0, materializeInventoryItem(item).valueCopper ?? 0);
+    item.quantity -= 1;
+    if (item.quantity <= 0) nextAgency.resources.inventory = nextAgency.resources.inventory.filter((candidate) => candidate.id !== item.id);
+    nextAgency.resources.copper = Math.min(100_000_000, nextAgency.resources.copper + itemValue);
+    nextAgency.resources.actionPoints -= 1;
+  }
+  const invocation: EngineNpcInvocation = {
+    id: `npc-invocation:${clientCommandId}`,
+    triggerId: command.triggerId,
+    trigger: command.trigger,
+    npcId: npc.id,
+    provider,
+    model: provider === "openrouter" ? "guarded-unavailable" : "npc-policy-v1",
+    inputTokens: 0,
+    cacheTokens: 0,
+    reasoningTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    latencyMs: 0,
+    outcome: provider === "openrouter" || command.offerId === undefined ? "fallback" : "selected",
+    fallback: provider === "openrouter" || command.offerId === undefined,
+    selectedOfferId,
+    budget: { ...NPC_AGENCY_CONFIG },
+    createdAt: now,
+  };
+  const pendingAction: EngineNpcPendingAction = {
+    triggerId: command.triggerId,
+    trigger: command.trigger,
+    offers,
+    selectedOfferId,
+    createdAt: now,
+  };
+  nextAgency.pendingAction = pendingAction;
+  nextAgency.completedTriggerIds = [...nextAgency.completedTriggerIds, command.triggerId].slice(-100);
+  nextAgency.invocations = [...nextAgency.invocations, invocation].slice(-100);
+  nextAgency.invocationsToday += 1;
+  nextAgency.consecutiveFailures = provider === "openrouter"
+    ? Math.min(NPC_AGENCY_CONFIG.maxConsecutiveFailures, nextAgency.consecutiveFailures + 1)
+    : 0;
+  nextAgency.circuitState = nextAgency.consecutiveFailures >= NPC_AGENCY_CONFIG.maxConsecutiveFailures ? "open" : "closed";
+  const afterSocial = ensureSocialState(next);
+  const stateChanges = [
+    { path: `/worldContext/npcs/${escapeJsonPointerSegment(npc.id)}/agency`, before: beforeAgency, after: nextAgency },
+    ...(JSON.stringify(npc.memories) !== JSON.stringify(nextNpc.memories)
+      ? [{ path: `/worldContext/npcs/${escapeJsonPointerSegment(npc.id)}/memories`, before: npc.memories, after: nextNpc.memories }]
+      : []),
+    ...socialStateChanges(beforeSocial, afterSocial),
+  ];
+  const actionMessage = selectedOfferId === "move_to_schedule"
+    ? `${npc.name} moves according to the reviewed schedule.`
+    : selectedOfferId === "report_crime"
+      ? `${npc.name} reports witnessed crime ${selectedCrime?.id ?? ""}.`
+      : selectedOfferId === "rest"
+        ? `${npc.name} takes a bounded rest and recovers one hit point.`
+        : selectedOfferId === "trade_resource"
+          ? `${npc.name} completes one bounded resource trade.`
+          : `${npc.name} takes no major off-screen action.`;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    actionMessage,
+    {
+      npcId: npc.id,
+      trigger: command.trigger,
+      triggerId: command.triggerId,
+      offers,
+      selectedOfferId,
+      promptContext: {
+        actorId: npc.id,
+        locationRef: agency.locationRef,
+        schedule: agency.schedule,
+        goals: agency.goals,
+        facts: promptProjection.facts,
+        knowledge: promptKnowledge,
+        social: promptSocial,
+      },
+      invocation,
+      action: selectedOfferId,
+    },
+    "npc_action_committed",
+    [],
+    [],
+    stateChanges,
+  );
+}
+
+function applyNpcTimeBoundary(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+): { stateChanges: Array<{ path: string; before: unknown; after: unknown }>; data: unknown } | null {
+  const boundaryCommand: EngineNpcTickCommand = {
+    kind: "npc_tick",
+    trigger: "time_advance",
+    triggerId: `time:${clientCommandId}`,
+  };
+  const resolution = resolveNpcTick(state, context, clientCommandId, boundaryCommand, "npc_tick");
+  if (!resolution.accepted || !resolution.event) return null;
+  state.worldContext = resolution.state.worldContext;
+  state.social = resolution.state.social;
+  return { stateChanges: resolution.event.stateChanges, data: resolution.data };
 }
 
 function resolveSocialCheck(
@@ -7742,6 +8189,7 @@ function resolveTravel(
   if (selectedEntryId === "roadside-rain") next.time.survival.weather = "rain";
   if (selectedEntryId === "roadside-cache") next.time.survival.exposure = Math.max(0, next.time.survival.exposure - 1);
   const advance = advanceGameTime(next, profile.elapsedMinutes, navigationSuccess ? "travel-arrival" : "travel-navigation-failure", clientCommandId);
+  const npcAgency = applyNpcTimeBoundary(next, context, clientCommandId);
   const randomEvent: EngineRandomEventResolution = {
     id: randomUUID(),
     trigger: "travel-watch",
@@ -7794,7 +8242,8 @@ function resolveTravel(
     ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffects, after: next.effects }] : []),
     ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
     ...(JSON.stringify(beforeWorldClocks) !== JSON.stringify(next.time.worldClocks) ? [{ path: "/time/worldClocks", before: beforeWorldClocks, after: next.time.worldClocks }] : []),
-    ...socialStateChanges(beforeSocial, ensureSocialState(next)),
+    ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
+    ...(npcAgency?.stateChanges ?? []),
   );
   const message = navigationSuccess
     ? `You travel ${profile.distanceMiles} miles toward ${exit.label} and arrive after ${profile.elapsedMinutes} minutes.`
@@ -7809,6 +8258,7 @@ function resolveTravel(
     {
       travel,
       randomEvent,
+      npcAgency: npcAgency?.data ?? null,
       timeAdvance: { before: advance.before, after: advance.after, minutes: profile.elapsedMinutes, reason: navigationSuccess ? "travel-arrival" : "travel-navigation-failure", processedEventIds: advance.processedEventIds },
     },
     navigationSuccess ? "travel_arrived" : "travel_navigation_failed",
@@ -7877,6 +8327,7 @@ function resolveProject(
   const beforeSocial = normalizeSocialState(state.social);
   if (existing.workCompletedMinutes === 0) consumeInventoryProperty(next, existing.materialProperty, existing.materialQuantity, changes);
   const advance = advanceGameTime(next, existing.workRequiredMinutes - existing.workCompletedMinutes, "downtime-project", clientCommandId);
+  const npcAgency = applyNpcTimeBoundary(next, context, clientCommandId);
   const project = next.time.projects.find((candidate) => candidate.id === existing.id);
   if (!project) return rejection(state, tool, "project_not_active", "That project is not active.");
   project.workCompletedMinutes = project.workRequiredMinutes;
@@ -7886,9 +8337,10 @@ function resolveProject(
   changes.push(
     { path: "/time/gameTime", before: advance.before, after: advance.after },
     { path: "/time/projects", before: state.time.projects, after: next.time.projects },
-    ...socialStateChanges(beforeSocial, ensureSocialState(next)),
+    ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
+    ...(npcAgency?.stateChanges ?? []),
   );
-  return commit(next, context, clientCommandId, command, tool, "The research project completes and its progress is recorded exactly once.", { project, timeAdvance: { before: advance.before, after: advance.after, minutes: advance.after.totalMinutes - advance.before.totalMinutes, reason: "downtime-project", processedEventIds: advance.processedEventIds } }, "project_completed", [], [], changes);
+  return commit(next, context, clientCommandId, command, tool, "The research project completes and its progress is recorded exactly once.", { project, npcAgency: npcAgency?.data ?? null, timeAdvance: { before: advance.before, after: advance.after, minutes: advance.after.totalMinutes - advance.before.totalMinutes, reason: "downtime-project", processedEventIds: advance.processedEventIds } }, "project_completed", [], [], changes);
 }
 
 function resolveRest(
@@ -7930,6 +8382,7 @@ function resolveRest(
     lastCompletedAtMinutes: state.time.rest.lastCompletedAtMinutes,
   };
   const advance = advanceGameTime(next, requiredMinutes, command.restType === "short" ? "short-rest" : "long-rest", clientCommandId);
+  const npcAgency = applyNpcTimeBoundary(next, context, clientCommandId);
   const beforeHp = next.character.hp;
   const beforeHitDice = next.character.hitDiceRemaining;
   const beforeSlots = next.character.spellcasting ? { ...next.character.spellcasting.slots } : null;
@@ -7950,6 +8403,7 @@ function resolveRest(
         restType: command.restType,
         interrupted: true,
         timeAdvance: { before: advance.before, after: advance.after, minutes: requiredMinutes, reason: command.restType === "short" ? "short-rest" : "long-rest", processedEventIds: advance.processedEventIds },
+        npcAgency: npcAgency?.data ?? null,
       },
       "rest_interrupted",
       [],
@@ -7960,7 +8414,8 @@ function resolveRest(
         ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
         ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
         ...(JSON.stringify(beforeEffectsForTime) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffectsForTime, after: next.effects }] : []),
-        ...socialStateChanges(beforeSocial, ensureSocialState(next)),
+        ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
+        ...(npcAgency?.stateChanges ?? []),
       ],
     );
   }
@@ -8010,7 +8465,7 @@ function resolveRest(
     command,
     tool,
     message,
-    { restType: command.restType, hpRestored: next.character.hp - beforeHp, hitDiceRemaining: next.character.hitDiceRemaining, character: characterData(next.character), timeAdvance: { before: advance.before, after: advance.after, minutes: requiredMinutes, reason: command.restType === "short" ? "short-rest" : "long-rest", processedEventIds: advance.processedEventIds } },
+    { restType: command.restType, hpRestored: next.character.hp - beforeHp, hitDiceRemaining: next.character.hitDiceRemaining, character: characterData(next.character), npcAgency: npcAgency?.data ?? null, timeAdvance: { before: advance.before, after: advance.after, minutes: requiredMinutes, reason: command.restType === "short" ? "short-rest" : "long-rest", processedEventIds: advance.processedEventIds } },
     outcome,
     rolls,
     [],
@@ -8032,7 +8487,8 @@ function resolveRest(
       { path: "/time/rest", before: beforeTime.rest, after: next.time.rest },
       ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
       ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
-      ...socialStateChanges(beforeSocial, ensureSocialState(next)),
+      ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
+      ...(npcAgency?.stateChanges ?? []),
     ]
   );
 }
@@ -9367,6 +9823,7 @@ function deriveArmorClass(character: EngineCharacter, effects: EngineEffectInsta
 }
 
 function normalizeNpc(npc: EngineNpc): EngineNpc {
+  const agency = normalizeNpcAgency(npc.agency, npc.id);
   return {
     id: npc.id,
     name: npc.name,
@@ -9376,6 +9833,7 @@ function normalizeNpc(npc: EngineNpc): EngineNpc {
     socialDc: npc.socialDc ?? 12,
     relationshipScore: npc.relationshipScore ?? 0,
     memories: npc.memories ?? [],
+    ...(agency ? { agency } : {}),
   };
 }
 
@@ -9580,6 +10038,15 @@ function redactResolutionData(data: unknown): unknown {
     projected.command = redactCommand(projected.command as Record<string, unknown>);
   }
   if (Object.hasOwn(projected, "data")) projected.data = redactResolutionData(projected.data);
+  if (projected.promptContext && typeof projected.promptContext === "object" && !Array.isArray(projected.promptContext)) {
+    const promptContext = projected.promptContext as Record<string, unknown>;
+    projected.promptContext = {
+      actorId: promptContext.actorId,
+      locationRef: promptContext.locationRef,
+      schedule: promptContext.schedule,
+      goals: promptContext.goals,
+    };
+  }
   if (Array.isArray(projected.effects)) {
     projected.effects = projected.effects.map((effect) => redactResolutionData(effect));
   }

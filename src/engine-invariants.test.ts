@@ -42,6 +42,7 @@ const ALL_COMMAND_KINDS = [
   "travel",
   "interact",
   "social_check",
+  "npc_tick",
   "merchant_trade",
   "social_action",
   "quest_create",
@@ -195,6 +196,29 @@ function worldState(): LanternCampaignState {
       }],
     }],
     objects: [],
+  };
+  return normalizeCampaignState(state);
+}
+
+function npcAgencyWorldState(): LanternCampaignState {
+  const state = worldState();
+  state.worldContext!.npcs[0]!.agency = {
+    actorType: "guard",
+    locationRef: "world-invariant-harbor",
+    schedule: [],
+    goals: [{ id: "guard-route", title: "Keep the route open", priority: 80, status: "active" }],
+    resources: { inventory: [], copper: 0, actionPoints: 1 },
+    hp: 5,
+    maxHp: 5,
+    lifecycleState: "conscious",
+    pendingAction: null,
+    completedTriggerIds: [],
+    reportedCrimeIds: [],
+    invocations: [],
+    consecutiveFailures: 0,
+    circuitState: "closed",
+    invocationDay: 0,
+    invocationsToday: 0,
   };
   return normalizeCampaignState(state);
 }
@@ -387,6 +411,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "social_check", tool: "social_check", expectedCode: "npc_not_found", state: createdState, rawCommand: () => ({ kind: "social_check", npcId: "missing-npc", ability: "cha", goal: "Ask for help." }) },
   { kind: "merchant_trade", tool: "merchant_trade", expectedCode: "merchant_not_found", state: createdState, rawCommand: () => ({ kind: "merchant_trade", merchantId: "missing-merchant", itemId: "lamp-oil", side: "buy", quantity: 1 }) },
   { kind: "social_action", tool: "social_action", expectedCode: "social_target_not_found", state: createdState, rawCommand: () => ({ kind: "social_action", action: "promise", targetId: "missing-npc", terms: "Return a sealed letter." }) },
+  { kind: "npc_tick", tool: "npc_tick", expectedCode: "npc_agency_unavailable", state: worldState, rawCommand: () => ({ kind: "npc_tick", trigger: "operator_batch", triggerId: "missing-agency" }) },
   { kind: "quest_update", tool: "quest_update", expectedCode: "quest_not_found", state: initialState, rawCommand: () => ({ kind: "quest_update", questId: "missing-quest", progress: 10 }) },
   { kind: "character_roll_stats", tool: "character_roll_stats", expectedCode: "ability_scores_already_rolled", state: rolledDraftState, rawCommand: () => ({ kind: "character_roll_stats", method: "rolled" }) },
   { kind: "character_create", tool: "character_create", expectedCode: "character_locked", state: createdState, rawCommand: () => ({ kind: "character_create", name: "Duplicate", species: "human", className: "fighter" }) },
@@ -449,6 +474,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "social_check", tool: "social_check", build: () => ({ state: worldState(), command: parseCommand({ kind: "social_check", npcId: "guide", ability: "cha", goal: "Ask for directions." }) }) },
   { kind: "merchant_trade", tool: "merchant_trade", build: () => ({ state: worldState(), command: parseCommand({ kind: "merchant_trade", merchantId: "trader", itemId: "lamp-oil", side: "buy", quantity: 1 }) }) },
   { kind: "social_action", tool: "social_action", build: () => ({ state: worldState(), command: parseCommand({ kind: "social_action", action: "theft", targetId: "guide", itemId: "lamp-oil" }) }) },
+  { kind: "npc_tick", tool: "npc_tick", build: () => ({ state: npcAgencyWorldState(), command: parseCommand({ kind: "npc_tick", trigger: "operator_batch", triggerId: "replay-npc" }) }) },
   { kind: "quest_create", tool: "quest_create", build: () => ({ state: initialState(), command: parseCommand({ kind: "quest_create", title: "Replay quest", objective: "Record it once.", rewardXp: 1, rewardCopper: 1 }) }) },
   { kind: "quest_update", tool: "quest_update", build: () => ({ state: initialState(), command: parseCommand({ kind: "quest_update", questId: "first-light", progress: 10 }) }) },
   { kind: "improvise", tool: "improvise", build: () => ({ state: initialState(), command: parseCommand({ kind: "improvise", title: "Replay detail", description: "A harmless detail.", effectType: "fictional" }) }) },
@@ -503,7 +529,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(45);
+    expect(ALL_COMMAND_KINDS).toHaveLength(46);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

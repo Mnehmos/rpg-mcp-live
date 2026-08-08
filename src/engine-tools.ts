@@ -17,6 +17,7 @@ import {
   engineTacticalPositionSchema,
   engineToolNameSchema,
   engineSocialActionCommandSchema,
+  engineNpcTickCommandSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   type EngineCommand,
@@ -116,6 +117,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       goal: z.string().trim().min(1).max(2_000),
     })
     .strict(),
+  npc_tick: engineNpcTickCommandSchema.omit({ kind: true }),
   merchant_trade: z
     .object({
       merchantId: z.string().trim().min(1).max(120),
@@ -624,6 +626,22 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     }
   ),
   tool(
+    "npc_tick",
+    "Run exactly one bounded NPC agency step at an explicit authoritative trigger. The engine computes finite legal offers, filters actor knowledge, applies deterministic fallback, and commits at most one action.",
+    {
+      type: "object",
+      properties: {
+        trigger: { type: "string", enum: ["time_advance", "scene_enter", "scene_exit", "witnessed_event", "quest_clock", "combat_turn", "operator_batch"] },
+        triggerId: { type: "string", description: "Stable trigger identifier; replaying it cannot repeat the action." },
+        npcId: { type: "string", description: "Optional agency-enabled NPC; omitted selects the first eligible actor." },
+        offerId: { type: "string", enum: ["move_to_schedule", "report_crime", "rest", "trade_resource", "no_op"], description: "Optional bounded offer selection. Omit to use deterministic policy fallback." },
+        provider: { type: "string", enum: ["deterministic", "openrouter"], description: "Deterministic policy is the default. OpenRouter is guarded and falls back without a network call in this first slice." },
+      },
+      required: ["trigger", "triggerId"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
     "merchant_trade",
     "Resolve an immediate purchase, sale, or explicit offer against a DM-authored merchant catalog. No pending merchant deliberation is stored: use the tool only when the deal is ready to resolve.",
     {
@@ -1102,6 +1120,8 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({ kind: "interact", targetId: args.targetId, goal: args.goal, affordance: args.affordance, sourceId: args.sourceId, destinationId: args.destinationId });
     case "social_check":
       return engineCommandSchema.parse({ kind: "social_check", npcId: args.npcId, ability: args.ability, skill: args.skill, goal: args.goal });
+    case "npc_tick":
+      return engineCommandSchema.parse({ kind: "npc_tick", trigger: args.trigger, triggerId: args.triggerId, npcId: args.npcId, offerId: args.offerId, provider: args.provider });
     case "merchant_trade":
       return engineCommandSchema.parse({ kind: "merchant_trade", merchantId: args.merchantId, itemId: args.itemId, side: args.side, quantity: args.quantity, offerUnitPriceCopper: args.offerUnitPriceCopper });
     case "social_action":
