@@ -125,6 +125,7 @@ import type {
   EngineNpcResourceState,
   EngineNpcScheduleEntry,
   EngineNpcTickCommand,
+  EngineOrchestrationCommand,
   EngineNpcPatch,
   EngineNpcPatchOperations,
   EngineMessage,
@@ -157,6 +158,19 @@ import type {
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
+import {
+  activateScene,
+  applyOrchestrationDecision,
+  authorizePacingRefs,
+  authorizedRandomEventRefs,
+  buildResumeProjection,
+  emptyOrchestrationState,
+  hooksForScene,
+  normalizeOrchestrationState,
+  refreshSceneFromEvents,
+  sceneStateFromProjection,
+  validateOrchestrationDecision,
+} from "./engine-orchestration.js";
 import {
   advanceSituationPressure,
   instantiateWatchtowerSituation,
@@ -1509,6 +1523,7 @@ export function createInitialCampaign(
     currentBeat: null,
     situation: null,
     productionRoom: null,
+    orchestration: emptyOrchestrationState(),
     suggestedActions: [],
     log: [
       makeMessage(
@@ -1536,6 +1551,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     worldObjects?: unknown;
     actorKnowledge?: unknown;
     productionRoom?: unknown;
+    orchestration?: unknown;
     time?: unknown;
   };
   next.time = normalizeTimeState(next.time);
@@ -1561,6 +1577,31 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   next.worldFacts = normalizeWorldFacts(next.worldFacts);
   next.actorKnowledge = normalizeKnowledgeRecords(next.actorKnowledge);
   next.productionRoom = next.productionRoom ? parseProductionRoomState(next.productionRoom) : null;
+  next.orchestration = normalizeOrchestrationState(next.orchestration, next.updatedAt);
+  const normalizedOrchestration = (next as LanternCampaignState).orchestration ?? emptyOrchestrationState();
+  const productionScene = (next as LanternCampaignState).productionRoom?.activeScene;
+  if (!normalizedOrchestration.activeScene && productionScene) {
+    const projection = projectSceneForActor(productionScene, next.actorId);
+    const migratedScene = sceneStateFromProjection({
+      sceneId: projection.sceneId,
+      revision: projection.revision,
+      campaignVersion: projection.campaignVersion,
+      mode: projection.mode,
+      immediateQuestion: projection.immediateQuestion,
+      pressureRefs: projection.pressureRefs,
+      committedEventRefs: projection.committedEventIds,
+      actorId: next.actorId,
+      situationRefs: next.situation ? [next.situation.id] : [],
+      now: next.updatedAt,
+    });
+    const migratedHooks = hooksForScene(migratedScene);
+    normalizedOrchestration.activeScene = {
+      ...activateScene(migratedScene, next.updatedAt),
+      hookRefs: migratedHooks.map((hook) => hook.id),
+    };
+    normalizedOrchestration.hooks = migratedHooks;
+    (next as LanternCampaignState).orchestration = normalizedOrchestration;
+  }
   next.corpses = normalizeCorpses((next as LanternCampaignState & { corpses?: unknown }).corpses);
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
@@ -1585,6 +1626,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.controlledActors = [];
     next.party = null;
     next.situation = null;
+    next.orchestration = emptyOrchestrationState();
     next.quest = {
       id: "first-light",
       title: "The first chapter",
@@ -2174,6 +2216,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     improvEffects: state.improvEffects,
     currentBeat: state.currentBeat,
     situation: state.situation ? projectSituationForActor(state.situation, state, activePartyViewpointId(state)) : null,
+    scene: state.orchestration?.activeScene ?? null,
     suggestedActions: state.suggestedActions,
     log: state.log.slice(-40),
     availableActions:
@@ -2296,6 +2339,8 @@ export function readToolData(
         improvEffects: state.improvEffects,
         currentBeat: state.currentBeat,
         situation: state.situation ? projectSituationForActor(state.situation, state, viewpointActorId) : null,
+        scene: state.orchestration?.activeScene ?? null,
+        resume: buildResumeProjection(state.orchestration ?? emptyOrchestrationState(), projectExperienceProfile(state.experienceProfile)),
         character: characterData(state.character),
         combat: combatData(state.combat),
         controlledActors: projectControlledActors(state),
@@ -2577,6 +2622,23 @@ export function resolveProductionRoomEnter(
     new Date(Date.parse(now) + 1).toISOString()
   );
   const committedRun: DmRun = completeDmRun(run, JSON.stringify(blueprint), "committed", now);
+  const sceneProjection = projectSceneForActor(snapshot, context.actorId);
+  const openedScene = activateScene(sceneStateFromProjection({
+    sceneId: sceneProjection.sceneId,
+    revision: sceneProjection.revision,
+    campaignVersion: committedCampaignVersion,
+    mode: sceneProjection.mode,
+    immediateQuestion: sceneProjection.immediateQuestion,
+    pressureRefs: sceneProjection.pressureRefs,
+    committedEventRefs: [],
+    actorId: context.actorId,
+    situationRefs: state.situation ? [state.situation.id] : [],
+    now,
+  }), new Date(Date.parse(now) + 1).toISOString());
+  const openedSceneWithHooks = {
+    ...openedScene,
+    hookRefs: hooksForScene(openedScene).map((hook) => hook.id),
+  };
   const nextRoom: ProductionRoomState = {
     ...existingRoom,
     activeScene: snapshot,
@@ -2585,6 +2647,11 @@ export function resolveProductionRoomEnter(
   };
   const next = cloneCampaign(state);
   next.productionRoom = nextRoom;
+  next.orchestration = {
+    ...(next.orchestration ?? emptyOrchestrationState()),
+    activeScene: openedSceneWithHooks,
+    hooks: hooksForScene(openedScene),
+  };
   const resolution = commit(
     next,
     context,
@@ -2600,7 +2667,10 @@ export function resolveProductionRoomEnter(
     "scene_snapshot_committed",
     [],
     [],
-    [{ path: "/productionRoom/activeScene", before: null, after: snapshot }]
+    [
+      { path: "/productionRoom/activeScene", before: null, after: snapshot },
+      { path: "/orchestration/activeScene", before: null, after: openedSceneWithHooks },
+    ]
   );
   const eventId = resolution.event?.id;
   const committedState = cloneCampaign(resolution.state);
@@ -2614,12 +2684,27 @@ export function resolveProductionRoomEnter(
       ? { ...candidate, committedEventIds: [eventId], publicEventRefs: [eventId] }
       : candidate);
     committedState.productionRoom = committedRoom;
+    const committedOrchestration = committedState.orchestration ?? emptyOrchestrationState();
+    if (committedOrchestration.activeScene) {
+      committedOrchestration.activeScene = {
+        ...committedOrchestration.activeScene,
+        committedEventRefs: [...new Set([...committedOrchestration.activeScene.committedEventRefs, eventId])],
+      };
+      committedState.orchestration = committedOrchestration;
+    }
   }
   return {
     ...resolution,
     state: committedState,
     event: resolution.event && eventId
-      ? { ...resolution.event, stateChanges: [...resolution.event.stateChanges, { path: "/productionRoom/activeScene/committedEventIds", before: [], after: [eventId] }] }
+      ? {
+          ...resolution.event,
+          stateChanges: [
+            ...resolution.event.stateChanges,
+            { path: "/productionRoom/activeScene/committedEventIds", before: [], after: [eventId] },
+            { path: "/orchestration/activeScene/committedEventRefs", before: [], after: [eventId] },
+          ],
+        }
       : resolution.event,
     data: {
       scene: committedRoom.activeScene ? projectSceneForActor(committedRoom.activeScene, context.actorId) : null,
@@ -2685,6 +2770,15 @@ export function resolveProductionRoomNarrationRelease(
     playback: [...room.playback, initialPlayback(released)],
     processedOperationIds: [...new Set([...room.processedOperationIds, clientCommandId])],
   };
+  const orchestration = next.orchestration ?? emptyOrchestrationState();
+  if (orchestration.activeScene?.sceneId === scene.sceneId) {
+    orchestration.activeScene = {
+      ...orchestration.activeScene,
+      releasedNarrationRefs: [...new Set([...orchestration.activeScene.releasedNarrationRefs, released.id])],
+      updatedAt: new Date().toISOString(),
+    };
+    next.orchestration = orchestration;
+  }
   const resolution = commit(
     next,
     context,
@@ -2696,9 +2790,123 @@ export function resolveProductionRoomNarrationRelease(
     "narration_released",
     [],
     [],
-    [{ path: `/productionRoom/releasedSequences/${released.id}`, before: null, after: released }]
+    [
+      { path: `/productionRoom/releasedSequences/${released.id}`, before: null, after: released },
+      ...(orchestration.activeScene?.sceneId === scene.sceneId
+        ? [{ path: "/orchestration/activeScene/releasedNarrationRefs", before: state.orchestration?.activeScene?.releasedNarrationRefs ?? [], after: orchestration.activeScene.releasedNarrationRefs }]
+        : []),
+    ]
   );
   return resolution;
+}
+
+function uniquePublicFactRefs(state: LanternCampaignState, actorId: string): string[] {
+  const known = new Set(state.actorKnowledge
+    .filter((record) => record.actorId === actorId && !record.stale && (record.tier === "known" || record.tier === "perceived"))
+    .map((record) => record.factId));
+  return [...new Set(state.worldFacts
+    .filter((fact) => fact.active && (fact.visibility === "public" || known.has(fact.id)))
+    .map((fact) => fact.id))];
+}
+
+export function resolveOrchestrationDecision(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineOrchestrationCommand,
+  events: EngineEvent[],
+): EngineResolution {
+  const orchestration = state.orchestration ?? emptyOrchestrationState();
+  const scene = orchestration.activeScene;
+  if (!scene) return rejection(state, "orchestration", "scene_missing", "There is no committed scene to orchestrate.");
+
+  const refreshedScene = refreshSceneFromEvents(scene, events);
+  const publicFactRefs = uniquePublicFactRefs(state, context.actorId);
+  const hiddenFactRefs = state.worldFacts
+    .filter((fact) => fact.active && fact.visibility === "hidden" && !publicFactRefs.includes(fact.id))
+    .map((fact) => fact.id);
+  const situationProjection = state.situation
+    ? projectSituationForActor(state.situation, state, context.actorId)
+    : null;
+  const foundClueRefs = situationProjection?.clues
+    .filter((clue) => clue.foundBy.includes(context.actorId))
+    .map((clue) => clue.id) ?? [];
+  const revealedRefs = situationProjection?.revelations
+    .filter((revelation) => revelation.status === "revealed")
+    .map((revelation) => revelation.id) ?? [];
+  const consequenceRefs = situationProjection?.outcome
+    ? [`situation-outcome:${situationProjection.id}`]
+    : [];
+  const authorized = authorizePacingRefs({
+    pressureRefs: [...refreshedScene.pressureRefs, ...(situationProjection ? [situationProjection.pressure.id] : [])],
+    clueRefs: [...foundClueRefs, ...revealedRefs],
+    consequenceRefs,
+    committedEventRefs: refreshedScene.committedEventRefs,
+    randomEventRefs: authorizedRandomEventRefs(state.time.randomEvents, refreshedScene.committedEventRefs, publicFactRefs),
+    hiddenRefs: hiddenFactRefs,
+    surfacedRefs: refreshedScene.surfacedRefs,
+  });
+  const validation = validateOrchestrationDecision(
+    refreshedScene,
+    command.decision,
+    authorized,
+    refreshedScene.noChangeTurns,
+    state.version,
+  );
+  if (!validation.valid) return rejection(state, "orchestration", "orchestration_rejected", validation.errors.join(" "), { errors: validation.errors, noChangeTurns: refreshedScene.noChangeTurns });
+
+  const sceneEvents = events.filter((event) => refreshedScene.committedEventRefs.includes(event.id));
+  const sceneWithFacts = { ...refreshedScene, discoveredFactRefs: [...new Set([...refreshedScene.discoveredFactRefs, ...publicFactRefs])] };
+  let applied: ReturnType<typeof applyOrchestrationDecision>;
+  try {
+    applied = applyOrchestrationDecision(
+      { ...orchestration, activeScene: sceneWithFacts },
+      command.decision,
+      authorized,
+      refreshedScene.noChangeTurns,
+      state.version + 1,
+      sceneEvents,
+      publicFactRefs,
+    );
+  } catch (error) {
+    return rejection(state, "orchestration", "orchestration_rejected", error instanceof Error ? error.message : "The orchestration decision was rejected.");
+  }
+  const next = cloneCampaign(state);
+  next.orchestration = {
+    ...applied.state,
+    processedOperationIds: [...new Set([...applied.state.processedOperationIds, clientCommandId])],
+  };
+  const stateChanges = [
+    { path: "/orchestration/activeScene", before: scene, after: next.orchestration.activeScene },
+    { path: "/orchestration/decisions", before: orchestration.decisions, after: next.orchestration.decisions },
+    ...(applied.recap ? [{ path: `/orchestration/recaps/${applied.recap.id}`, before: null, after: applied.recap }] : []),
+  ];
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    "orchestration",
+    command.decision.action === "transition"
+      ? "The scene transition is recorded without changing campaign mechanics."
+      : command.decision.action === "clarify"
+        ? "The scene is clarified with a neutral question."
+        : command.decision.action === "surface_existing"
+          ? "An existing authorized scene reference is surfaced."
+          : "The scene is reframed around an existing authorized reference.",
+    {
+      scene: next.orchestration.activeScene,
+      decision: applied.decision,
+      recap: applied.recap,
+      resume: buildResumeProjection(next.orchestration, projectExperienceProfile(next.experienceProfile)),
+      noChangeTurns: refreshedScene.noChangeTurns,
+      authorizedRefs: authorized.allRefs,
+    },
+    "orchestration_recorded",
+    [],
+    [],
+    stateChanges,
+  );
 }
 
 export function resolveEngineCommand(
@@ -10500,7 +10708,7 @@ function collectContentKeys(value: unknown): string[] {
 
 function readOnlyResolution(
   state: LanternCampaignState,
-  tool: EngineToolName | "declare" | "listen",
+  tool: EngineResolutionTool,
   message: string,
   data: unknown
 ): EngineResolution {
@@ -10519,7 +10727,7 @@ function readOnlyResolution(
 
 function rejection(
   state: LanternCampaignState,
-  tool: EngineToolName | "declare" | "listen",
+  tool: EngineResolutionTool,
   code: string,
   message: string,
   extraData?: Record<string, unknown>

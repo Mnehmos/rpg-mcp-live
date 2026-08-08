@@ -12,6 +12,7 @@ import type {
   EngineToolResult,
 } from "./engine-contracts.js";
 import type { ProductionRoomNarrationReleaseRequest } from "./engine-production-room.js";
+import type { OrchestrationDecisionRequest, OrchestrationState } from "./engine-orchestration.js";
 import type { Open5eCharacterOptions } from "./open5e-rules.js";
 import type { Open5eContentCatalog } from "./content/catalog.js";
 import type { ResolvedEngineEventEvidence } from "./content/registry.js";
@@ -241,6 +242,33 @@ export class LanternEngineClient {
   ): Promise<EngineCommandResult & { productionRoom?: unknown }> {
     const result = await this.request<EngineCommandResult & { productionRoom?: unknown }>(
       "/v1/campaigns/" + encodeURIComponent(campaignId) + "/production-room/narration",
+      { method: "POST", body: JSON.stringify(request) },
+      { accountId, actorId }
+    );
+    return result.data;
+  }
+
+  public async getOrchestration(
+    accountId: string,
+    actorId: string,
+    campaignId: string
+  ): Promise<{ orchestration: OrchestrationState & { resume: unknown } }> {
+    const result = await this.request<{ orchestration: OrchestrationState & { resume: unknown } }>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/orchestration",
+      { method: "GET" },
+      { accountId, actorId }
+    );
+    return result.data;
+  }
+
+  public async decideOrchestration(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    request: OrchestrationDecisionRequest
+  ): Promise<EngineCommandResult> {
+    const result = await this.request<EngineCommandResult>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/orchestration/decisions",
       { method: "POST", body: JSON.stringify(request) },
       { accountId, actorId }
     );

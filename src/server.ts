@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { EngineHttpError, LanternEngineClient } from "./engine-client.js";
 import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema, engineProductionRoomEnterRequestSchema } from "./engine-contracts.js";
 import { productionRoomNarrationReleaseRequestSchema } from "./engine-production-room.js";
+import { orchestrationDecisionRequestSchema } from "./engine-orchestration.js";
 import { gameActionSchema } from "./game.js";
 import { GameStore } from "./store.js";
 
@@ -509,6 +510,37 @@ app.post("/api/campaigns/:campaignId/production-room/narration", async (request,
   }
   try {
     const result = await engineClient.releaseProductionRoomNarration(userId, userId, request.params.campaignId, parsed.data);
+    response.json({ ...result, subscription: store.getSubscription(userId) });
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
+app.get("/api/campaigns/:campaignId/orchestration", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  try {
+    const result = await engineClient.getOrchestration(userId, userId, request.params.campaignId);
+    response.json({ ...result, subscription: store.getSubscription(userId) });
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
+app.post("/api/campaigns/:campaignId/orchestration/decisions", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const parsed = orchestrationDecisionRequestSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({
+      code: "invalid_orchestration_decision",
+      error: "An orchestration decision needs a current campaign version, scene revision, and typed facilitation action.",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+  try {
+    const result = await engineClient.decideOrchestration(userId, userId, request.params.campaignId, parsed.data);
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
     sendWebEngineError(response, error);

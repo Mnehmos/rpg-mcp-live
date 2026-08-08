@@ -2,6 +2,11 @@ import { z } from "zod";
 import type { NarrationEnvelope } from "./ai-contracts.js";
 import type { ProductionRoomState } from "./engine-production-room.js";
 import type {
+  OrchestrationDecisionInput,
+  OrchestrationState,
+  SceneState,
+} from "./engine-orchestration.js";
+import type {
   CompiledCreatureAttack,
   CompiledEffectDuration,
   CompiledEffectProgram,
@@ -1666,6 +1671,12 @@ export interface EngineProductionRoomCommand {
   kind: "production_room_enter";
 }
 
+/** Internal engine command used by the session-orchestration API; never model-facing. */
+export interface EngineOrchestrationCommand {
+  kind: "orchestration_decision";
+  decision: OrchestrationDecisionInput;
+}
+
 export interface EngineContentRepinCommand {
   kind: "content_repin";
   fromRulesVersion: string;
@@ -1685,8 +1696,8 @@ export interface EngineTurnEffectEvidence extends EngineTurnPlanEffect {
   data: unknown;
 }
 
-export type EnginePersistedCommand = EngineCommand | EngineTurnPlanCommand | EngineContentRepinCommand | EngineProductionRoomCommand;
-export type EngineResolutionTool = EngineToolName | "declare" | "listen" | "turn_plan" | "content_repin" | "production_room";
+export type EnginePersistedCommand = EngineCommand | EngineTurnPlanCommand | EngineContentRepinCommand | EngineProductionRoomCommand | EngineOrchestrationCommand;
+export type EngineResolutionTool = EngineToolName | "declare" | "listen" | "turn_plan" | "content_repin" | "production_room" | "orchestration";
 
 export const engineCommandRequestSchema = z
   .object({
@@ -2919,6 +2930,8 @@ export interface LanternCampaignState {
   situation: EngineSituation | null;
   /** Private production-room traces are persisted with the campaign but never projected publicly. */
   productionRoom?: ProductionRoomState | null;
+  /** Public facilitation metadata; it never contains model/private production-room traces. */
+  orchestration?: OrchestrationState | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
   log: EngineMessage[];
   lastRoll: number | null;
@@ -2977,6 +2990,7 @@ export interface EngineSessionView {
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
   situation: EngineSituationProjection | null;
+  scene: SceneState | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
   combat: EngineCombatView;
   controlledActors: EngineControlledActorView[];

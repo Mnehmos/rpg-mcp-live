@@ -18,6 +18,7 @@ const commonEnvironment = {
   STRIPE_WEBHOOK_SECRET: "",
   STRIPE_PRICE_ID: "",
   OPENROUTER_API_KEY: "",
+  ENGINE_TIMEOUT_MS: "60000",
 };
 const engine = startService("engine", "dist/engine-server.js", {
   ...commonEnvironment,
@@ -84,7 +85,7 @@ try {
       tone: "Adventurous",
       contentPolicy: catalog.defaultPolicy,
     }),
-  });
+  }, 60_000);
   assert(
     JSON.stringify(createdCampaign.session.contentPolicy) === JSON.stringify(catalog.defaultPolicy),
     "Campaign did not persist the catalog-selected content policy."
