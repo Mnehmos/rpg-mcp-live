@@ -1,0 +1,147 @@
+name: Deploy to staging
+
+# Auto-deploys to Railway staging after CI passes on main.
+# No human gate — the pipeline promotes automatically.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: railway-staging
+  cancel-in-progress: true
+
+jobs:
+  deploy-staging:
+    name: Staging deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Only run when CI actually succeeded on a push (not a PR).
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Checkout exact merged SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.18.x
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck and verify content pack
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      # -----------------------------------------------------------------
+      # Deploy engine FIRST, then web — the web service depends on engine.
+      # -----------------------------------------------------------------
+      - name: Deploy engine to Railway staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
+        run: |
+          railway up \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment staging \
+            --service "$RAILWAY_ENGINE_SERVICE" \
+            --detach
+        env:
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENGINE_SERVICE: ${{ vars.RAILWAY_ENGINE_SERVICE }}
+
+      - name: Wait for engine health
+        env:
+          ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -sf "${ENGINE_STAGING_URL}/health" || echo "")
+            if echo "$resp" | grep -q '"status":"ok"'; then
+              echo "$resp"
+              echo "::notice::Engine staging healthy"
+              # Extract deployment verification fields
+              echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> $GITHUB_ENV
+              echo "ENGINE_PACK_VERSION=$(echo "$resp" | jq -r '.rules.packVersion')" >> $GITHUB_ENV
+              echo "ENGINE_TOOL_COUNT=$(echo "$resp" | jq -r '.toolCount')" >> $GITHUB_ENV
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Engine did not become healthy in 5 min"
+          exit 1
+
+      - name: Deploy web to Railway staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE }}
+        run: |
+          railway up \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment staging \
+            --service "$RAILWAY_WEB_SERVICE" \
+            --detach
+
+      - name: Wait for web health
+        env:
+          WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -sf "${WEB_STAGING_URL}/api/health" || echo "")
+            if echo "$resp" | grep -q '"status":"ok"' && echo "$resp" | grep -q '"lanternEngine":true'; then
+              echo "$resp"
+              echo "::notice::Web staging healthy and engine reachable"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Web did not become healthy in 5 min"
+          exit 1
+
+      - name: Run two-service HTTP smoke
+        run: npm run smoke:http
+
+      # After #22 lands, uncomment:
+      # - name: Deterministic gauntlet
+      #   run: npm run test:gauntlet:ci
+
+      - name: Write deployment manifest
+        run: |
+          node tools/ci/write-deployment-manifest.mjs \
+            --env staging \
+            --git-sha "$SHA" \
+            --git-ref main \
+            --pack-version "$ENGINE_PACK_VERSION" \
+            --pack-hash "$ENGINE_PACK_HASH" \
+            --tool-count "$ENGINE_TOOL_COUNT" \
+            --engine-health pass \
+            --web-health pass \
+            --smoke pass \
+            --output deployment-manifest.json
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
+        with:
+          name: staging-manifest-${{ env.SHA }}
+          path: deployment-manifest.json
+          retention-days: 30

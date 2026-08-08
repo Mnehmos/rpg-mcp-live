@@ -1,0 +1,9 @@
+# CODEOWNERS — Lantern live repo
+# Every file is reviewed by the product owner until dedicated agent identities exist.
+
+*                           @Mnehmos
+
+# CI/CD and deployment infrastructure
+/.github/                   @Mnehmos
+/tools/ci/                  @Mnehmos
+/docs/                      @Mnehmos

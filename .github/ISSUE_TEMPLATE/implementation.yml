@@ -1,0 +1,49 @@
+name: Implementation task
+description: "A vertical-slice gameplay, engine, or infrastructure issue for an AI agent to implement."
+labels: ["status:ready"]
+body:
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk class
+      options:
+        - R0 — docs/audit
+        - R1 — pure logic
+        - R2 — state/contracts/rules
+        - R3 — auth/billing/secrets/migration
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0
+        - P1
+        - P2
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: "What needs to change and why."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: "Each line should map to a test or verification step."
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Contracts
+      description: "Schemas, API surfaces, or engine invariants added or consumed."
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Blocked by
+      description: "Issue numbers that must close first."
