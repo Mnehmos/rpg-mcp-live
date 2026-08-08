@@ -141,6 +141,22 @@ describe("effects and conditions kernel", () => {
     expect(JSON.stringify(result.state)).toBe(before);
   });
 
+  it("rejects a condition operation without a reviewed marker immutably", () => {
+    const state = createInitialCampaign("account-effects", "actor-effects");
+    const before = JSON.stringify(state);
+    const result = resolve(state, {
+      kind: "improvise",
+      title: "Unspecified affliction",
+      description: "The resolver must not invent a condition.",
+      effectType: "condition",
+      targetId: state.character.id,
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe("condition_required");
+    expect(result.state.version).toBe(state.version);
+    expect(JSON.stringify(result.state)).toBe(before);
+  });
+
   it("resolves Dodge through the substrate and expires it at the next turn boundary", () => {
     const state = createInitialCampaign("account-effects", "actor-effects");
     const started = resolve(state, {
