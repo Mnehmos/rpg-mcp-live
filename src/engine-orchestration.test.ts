@@ -256,6 +256,9 @@ describe("scene pacing and session orchestration", () => {
       expect(transitionResult.accepted).toBe(true);
       expect(transitionResult.state.orchestration?.activeScene?.status).toBe("resolved");
       expect(transitionResult.state.orchestration?.recaps).toHaveLength(1);
+      const recap = transitionResult.state.orchestration?.recaps[0];
+      expect(recap?.committedEventRefs.length).toBeGreaterThan(0);
+      expect(JSON.stringify(recap)).not.toContain("productionRoom");
 
       const duplicateTransitionId = randomUUID();
       const duplicateTransitionEvents = store.listCampaignEvents(context);
