@@ -56,6 +56,19 @@ function dyingState(): LanternCampaignState {
 }
 
 describe("authoritative actor death and recovery lifecycle", () => {
+  it("rejects a death save while HP is positive without changing state", () => {
+    const state = fighter();
+    state.character.hp = 1;
+    state.character.lifecycleState = "dying";
+    state.character.conditions = ["unconscious"];
+    const before = JSON.stringify(state);
+    const rejected = apply(state, { kind: "death_save" });
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.code).toBe("not_unconscious");
+    expect(JSON.stringify(rejected.state)).toBe(before);
+    expect(rejected.event).toBeNull();
+  });
+
   it("pins natural 1 to two failures and natural 20 to one healing HP", () => {
     const naturalOne = dyingState();
     queuedRolls.push(1);
