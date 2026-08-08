@@ -754,6 +754,12 @@ export const engineToolNameSchema = z.enum([
   "combat_state",
   "controlled_actor_context",
   "party_context",
+  "situation_context",
+  "situation_create",
+  "situation_visit",
+  "situation_clue_attempt",
+  "situation_ignore",
+  "situation_choose",
   "party_create",
   "party_set_viewpoint",
   "party_split",
@@ -866,6 +872,40 @@ export const enginePartyGroupCheckCommandSchema = z.object({
   actorIds: z.array(worldContextEntityIdSchema).min(1).max(3),
 }).strict();
 export type EnginePartyGroupCheckCommand = z.infer<typeof enginePartyGroupCheckCommandSchema>;
+
+export const engineSituationTemplateIdSchema = z.enum(["watchtower-relic-v1"]);
+export type EngineSituationTemplateId = z.infer<typeof engineSituationTemplateIdSchema>;
+
+export const engineSituationCreateCommandSchema = z.object({
+  kind: z.literal("situation_create"),
+  templateId: engineSituationTemplateIdSchema,
+  sourceRandomEventId: worldContextEntityIdSchema.optional(),
+}).strict();
+export type EngineSituationCreateCommand = z.infer<typeof engineSituationCreateCommandSchema>;
+
+export const engineSituationVisitCommandSchema = z.object({
+  kind: z.literal("situation_visit"),
+  locationId: worldContextEntityIdSchema,
+}).strict();
+export type EngineSituationVisitCommand = z.infer<typeof engineSituationVisitCommandSchema>;
+
+export const engineSituationClueAttemptCommandSchema = z.object({
+  kind: z.literal("situation_clue_attempt"),
+  clueId: worldContextEntityIdSchema,
+  approach: z.string().trim().min(1).max(2_000),
+}).strict();
+export type EngineSituationClueAttemptCommand = z.infer<typeof engineSituationClueAttemptCommandSchema>;
+
+export const engineSituationIgnoreCommandSchema = z.object({
+  kind: z.literal("situation_ignore"),
+}).strict();
+export type EngineSituationIgnoreCommand = z.infer<typeof engineSituationIgnoreCommandSchema>;
+
+export const engineSituationChoiceCommandSchema = z.object({
+  kind: z.literal("situation_choose"),
+  choice: z.enum(["solve", "expose", "bargain", "walk-away"]),
+}).strict();
+export type EngineSituationChoiceCommand = z.infer<typeof engineSituationChoiceCommandSchema>;
 
 export const engineTacticalBoundsSchema = z.object({
   minX: tacticalCoordinateSchema,
@@ -1547,6 +1587,11 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   enginePartyRejoinCommandSchema,
   enginePartySharedTransferCommandSchema,
   enginePartyGroupCheckCommandSchema,
+  engineSituationCreateCommandSchema,
+  engineSituationVisitCommandSchema,
+  engineSituationClueAttemptCommandSchema,
+  engineSituationIgnoreCommandSchema,
+  engineSituationChoiceCommandSchema,
   z.object({
     kind: z.literal("advance_turn"),
     combatantId: z.string().trim().min(1).max(120).optional(),
@@ -2694,6 +2739,134 @@ export interface EngineCampaignBeat {
   createdAt: string;
 }
 
+export type EngineSituationStatus = "active" | "resolved" | "walked-away";
+export type EngineSituationReactivityTier = "systemic" | "contextual" | "booster" | "major-branch";
+export type EngineSituationChoice = "solve" | "expose" | "bargain" | "walk-away";
+
+export interface EngineSituationNode {
+  id: string;
+  title: string;
+  description: string;
+  exitIds: string[];
+}
+
+export interface EngineSituationTruth {
+  id: string;
+  title: string;
+  description: string;
+  visibility: "public" | "hidden";
+  discoveredBy: string[];
+}
+
+export interface EngineSituationRevelation {
+  id: string;
+  title: string;
+  truthId: string;
+  clueIds: string[];
+  status: "hidden" | "revealed";
+}
+
+export interface EngineSituationClue {
+  id: string;
+  title: string;
+  locationId: string;
+  revelationId: string;
+  factId: string;
+  challengeId: "barred-door-v1";
+  difficultyBand: "gentle" | "standard" | "challenging";
+  foundBy: string[];
+  attempts: number;
+  failedAttempts: number;
+  lastComplication: string | null;
+}
+
+export interface EngineSituationRole {
+  id: string;
+  capability: "reveal_location";
+  preferredRef: string;
+  alternateRefs: string[];
+  fallbackRef: string;
+  activeSourceRef: string | null;
+  status: "preferred" | "fallback" | "impossible";
+}
+
+export interface EngineSituationPressure {
+  id: string;
+  title: string;
+  current: number;
+  max: number;
+  nextAdvanceAtMinutes: number;
+  lastAdvancedAtMinutes: number | null;
+  defaultDevelopmentId: string;
+  defaultDevelopmentApplied: boolean;
+}
+
+export interface EngineSituationCriticalObject {
+  objectId: string;
+  policy: EngineCriticalObjectPolicy;
+  acquiredByActorId: string | null;
+  destroyed: boolean;
+  reaction: "none" | "retained-early" | "declared-loss";
+}
+
+export interface EngineSituationOutcome {
+  choice: EngineSituationChoice;
+  committedAtMinutes: number;
+  sourceCommandId: string;
+  reactivityTier: EngineSituationReactivityTier;
+}
+
+export interface EngineSituation {
+  id: string;
+  templateId: EngineSituationTemplateId;
+  status: EngineSituationStatus;
+  currentLocationId: string;
+  visitedLocationIds: string[];
+  nodes: EngineSituationNode[];
+  truths: EngineSituationTruth[];
+  revelations: EngineSituationRevelation[];
+  clues: EngineSituationClue[];
+  role: EngineSituationRole;
+  pressure: EngineSituationPressure;
+  criticalObject: EngineSituationCriticalObject;
+  outcome: EngineSituationOutcome | null;
+  sourceRandomEventId: string | null;
+  revision: number;
+  complicationCount: number;
+  lastComplication: string | null;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+    rulesVersion: string;
+    sourceRandomEvent: {
+      id: string;
+      tableId: string;
+      tableVersion: string;
+      entryId: string;
+    } | null;
+  };
+}
+
+export interface EngineSituationProjection {
+  id: string;
+  templateId: EngineSituationTemplateId;
+  status: EngineSituationStatus;
+  currentLocationId: string;
+  visitedLocationIds: string[];
+  nodes: EngineSituationNode[];
+  truths: Array<Pick<EngineSituationTruth, "id" | "title" | "visibility"> & { description?: string; discovered: boolean }>;
+  revelations: Array<Pick<EngineSituationRevelation, "id" | "title" | "status">>;
+  clues: Array<Omit<EngineSituationClue, "factId">>;
+  role: Omit<EngineSituationRole, "preferredRef"> & { preferredAvailable: boolean };
+  pressure: Omit<EngineSituationPressure, "nextAdvanceAtMinutes">;
+  criticalObject: EngineSituationCriticalObject;
+  outcome: EngineSituationOutcome | null;
+  sourceRandomEventId: string | null;
+  revision: number;
+  complicationCount: number;
+  lastComplication: string | null;
+}
+
 export interface EngineMessage {
   id: string;
   kind: "narration" | "roll" | "system" | "player";
@@ -2734,6 +2907,7 @@ export interface LanternCampaignState {
   effects: EngineEffectInstance[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
+  situation: EngineSituation | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
   log: EngineMessage[];
   lastRoll: number | null;
@@ -2791,6 +2965,7 @@ export interface EngineSessionView {
   effects: EngineEffectInstance[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
+  situation: EngineSituationProjection | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
   combat: EngineCombatView;
   controlledActors: EngineControlledActorView[];
