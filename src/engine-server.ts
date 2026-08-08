@@ -172,7 +172,11 @@ app.post("/v1/campaigns", (request, response) => {
       response.status(400).json({ code: "invalid_campaign", error: "A campaign needs a name, premise, setting, and tone.", details: parsed.error.flatten() });
       return;
     }
-    const { contentPolicy: requestedPolicy, ...campaignProfile } = parsed.data;
+    const {
+      contentPolicy: requestedPolicy,
+      experienceProfile: requestedExperienceProfile,
+      ...campaignProfile
+    } = parsed.data;
     const contentPolicy = validateCampaignContentPolicy(
       contentPack,
       deploymentContentPolicy,
@@ -184,7 +188,8 @@ app.post("/v1/campaigns", (request, response) => {
       undefined,
       campaignProfile,
       contentPack.descriptor.rulesVersion,
-      contentPolicy
+      contentPolicy,
+      requestedExperienceProfile
     );
     const created = store.createCampaign(context, campaign);
     response.status(201).json({ campaign: toSessionView(created), state: created });

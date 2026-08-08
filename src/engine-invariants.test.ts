@@ -31,6 +31,9 @@ const ALL_COMMAND_KINDS = [
   "listen",
   "world_context",
   "player_note_add",
+  "experience_profile_update",
+  "experience_feedback_add",
+  "experience_boundary",
   "character_update",
   "move",
   "interact",
@@ -249,6 +252,13 @@ function rolledDraftState(): LanternCampaignState {
   return applyAccepted(initialState(), { kind: "character_roll_stats", method: "rolled" }, "character_roll_stats");
 }
 
+function experienceState(): LanternCampaignState {
+  const state = initialState();
+  state.experienceProfile.excludedThemes = ["graphic violence"];
+  state.experienceProfile.fadeToBlackThemes = ["torture"];
+  return normalizeCampaignState(state);
+}
+
 function consumableState(): LanternCampaignState {
   const state = createdState();
   state.character.hp = Math.max(0, state.character.maxHp - 1);
@@ -287,6 +297,25 @@ function createStore(state: LanternCampaignState): StoreHarness {
 }
 
 const invalidFixtures: readonly InvalidFixture[] = [
+  {
+    kind: "experience_profile_update",
+    tool: "experience_profile_update",
+    expectedCode: "invalid_experience_profile",
+    state: initialState,
+    rawCommand: () => ({
+      kind: "experience_profile_update",
+      profile: {
+        pillarWeights: { combat: 0, exploration: 0, social: 0, mystery: 0 },
+        difficulty: "standard",
+        narrationStyle: "compact",
+        verbosity: "compact",
+        guidance: "balanced",
+        rulesTransparency: "summary",
+        excludedThemes: [],
+        fadeToBlackThemes: [],
+      },
+    }),
+  },
   {
     kind: "world_context",
     tool: "world_context",
@@ -332,6 +361,8 @@ const controlFixtures: readonly ControlFixture[] = [
   { kind: "observe", tool: "observe", state: initialState, rawCommand: () => ({ kind: "observe" }), readOnly: true },
   { kind: "listen", tool: "listen", state: initialState, rawCommand: () => ({ kind: "listen" }) },
   { kind: "player_note_add", tool: "player_note_add", state: initialState, rawCommand: () => ({ kind: "player_note_add", text: "A durable clue.", source: "player" }) },
+  { kind: "experience_feedback_add", tool: "experience_feedback_add", state: initialState, rawCommand: () => ({ kind: "experience_feedback_add", rating: 5 }) },
+  { kind: "experience_boundary", tool: "experience_boundary", state: experienceState, rawCommand: () => ({ kind: "experience_boundary", theme: "graphic violence", action: "skip" }) },
   { kind: "interact", tool: "interact", state: initialState, rawCommand: () => ({ kind: "interact", targetId: "unbounded-fiction", goal: "Try the fixture interaction." }) },
   { kind: "quest_create", tool: "quest_create", state: initialState, rawCommand: () => ({ kind: "quest_create", title: "A bounded quest", objective: "Record a valid quest.", rewardXp: 1, rewardCopper: 1 }) },
   { kind: "improvise", tool: "improvise", state: initialState, rawCommand: () => ({ kind: "improvise", title: "A cosmetic detail", description: "The bell rings once.", effectType: "fictional" }) },
@@ -345,6 +376,9 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "listen", tool: "listen", build: () => ({ state: initialState(), command: parseCommand({ kind: "listen" }) }) },
   { kind: "world_context", tool: "world_context", build: () => ({ state: initialState(), command: parseCommand({ kind: "world_context", title: "Replay harbor", description: "A replay fixture.", features: ["bell"], exits: [] }) }) },
   { kind: "player_note_add", tool: "player_note_add", build: () => ({ state: initialState(), command: parseCommand({ kind: "player_note_add", text: "Replay note", source: "player" }) }) },
+  { kind: "experience_profile_update", tool: "experience_profile_update", build: () => ({ state: initialState(), command: parseCommand({ kind: "experience_profile_update", profile: { pillarWeights: { combat: 40, exploration: 20, social: 20, mystery: 20 }, difficulty: "gentle", narrationStyle: "immersive", verbosity: "standard", guidance: "guided", rulesTransparency: "explicit", excludedThemes: ["violence"], fadeToBlackThemes: [] } }) }) },
+  { kind: "experience_feedback_add", tool: "experience_feedback_add", build: () => ({ state: initialState(), command: parseCommand({ kind: "experience_feedback_add", rating: 4, note: "Replay feedback" }) }) },
+  { kind: "experience_boundary", tool: "experience_boundary", build: () => ({ state: experienceState(), command: parseCommand({ kind: "experience_boundary", theme: "graphic violence", action: "redirect" }) }) },
   { kind: "character_update", tool: "character_update", build: () => ({ state: createdState(), command: parseCommand({ kind: "character_update", name: "Replay Hero" }) }) },
   { kind: "move", tool: "move", build: () => ({ state: worldState(), command: parseCommand({ kind: "move", destinationId: "west-pier" }) }) },
   { kind: "interact", tool: "interact", build: () => ({ state: initialState(), command: parseCommand({ kind: "interact", targetId: "fixture-object", goal: "Touch the fixture." }) }) },
@@ -382,7 +416,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(35);
+    expect(ALL_COMMAND_KINDS).toHaveLength(38);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

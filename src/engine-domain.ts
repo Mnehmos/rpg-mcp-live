@@ -1,5 +1,9 @@
 import { randomInt, randomUUID } from "node:crypto";
 import type { NarrationEnvelope } from "./ai-contracts.js";
+import {
+  engineExperienceProfileInputSchema,
+  engineExperienceProfileSchema,
+} from "./engine-contracts.js";
 import type {
   CompiledCreatureAttack,
   CompiledEffectProgram,
@@ -32,6 +36,10 @@ import type {
   EngineTurnBudgetSlot,
   EngineMovementBudget,
   EngineContentPolicy,
+  EngineExperienceFeedback,
+  EngineExperienceProfile,
+  EngineExperienceProfileInput,
+  EngineExperienceProfileProjection,
   EngineContentReference,
   EngineEvent,
   EngineFeatureReference,
@@ -130,6 +138,151 @@ export function defaultCampaignProfile(): EngineCampaignProfile {
   };
 }
 
+export const REVIEWED_DIFFICULTY_POLICY_KEYS = {
+  gentle: "lantern-difficulty-gentle-v1",
+  standard: "lantern-difficulty-standard-v1",
+  challenging: "lantern-difficulty-challenging-v1",
+} as const;
+
+export function reviewedDifficultyPolicyKey(
+  difficulty: EngineExperienceProfileInput["difficulty"]
+): string {
+  return REVIEWED_DIFFICULTY_POLICY_KEYS[difficulty];
+}
+
+export function defaultExperienceProfile(now = new Date().toISOString()): EngineExperienceProfile {
+  return {
+    version: 1,
+    revision: 0,
+    source: "player",
+    pillarWeights: { combat: 25, exploration: 25, social: 25, mystery: 25 },
+    difficulty: "standard",
+    difficultyPolicyKey: reviewedDifficultyPolicyKey("standard"),
+    narrationStyle: "compact",
+    verbosity: "compact",
+    guidance: "balanced",
+    rulesTransparency: "summary",
+    excludedThemes: [],
+    fadeToBlackThemes: [],
+    feedback: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeExperienceThemes(themes: readonly string[] | undefined): string[] {
+  return [...new Set((themes ?? []).map((theme) => theme.trim()).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: "base" }) || a.localeCompare(b)
+  );
+}
+
+export function normalizeExperienceProfileInput(value: unknown): EngineExperienceProfileInput | null {
+  const candidate = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const parsed = engineExperienceProfileInputSchema.safeParse({
+    pillarWeights: candidate.pillarWeights,
+    difficulty: candidate.difficulty,
+    narrationStyle: candidate.narrationStyle,
+    verbosity: candidate.verbosity,
+    guidance: candidate.guidance,
+    rulesTransparency: candidate.rulesTransparency,
+    excludedThemes: candidate.excludedThemes,
+    fadeToBlackThemes: candidate.fadeToBlackThemes,
+  });
+  if (!parsed.success) return null;
+  const profile = parsed.data;
+  const total = Object.values(profile.pillarWeights).reduce((sum, weight) => sum + weight, 0);
+  const excludedThemes = normalizeExperienceThemes(profile.excludedThemes);
+  const fadeToBlackThemes = normalizeExperienceThemes(profile.fadeToBlackThemes);
+  const excluded = new Set(excludedThemes.map((theme) => theme.toLocaleLowerCase()));
+  if (total !== 100 || fadeToBlackThemes.some((theme) => excluded.has(theme.toLocaleLowerCase()))) return null;
+  return {
+    ...profile,
+    pillarWeights: { ...profile.pillarWeights },
+    excludedThemes,
+    fadeToBlackThemes,
+  };
+}
+
+export function experienceProfileInput(profile: EngineExperienceProfile): EngineExperienceProfileInput {
+  return {
+    pillarWeights: { ...profile.pillarWeights },
+    difficulty: profile.difficulty,
+    narrationStyle: profile.narrationStyle,
+    verbosity: profile.verbosity,
+    guidance: profile.guidance,
+    rulesTransparency: profile.rulesTransparency,
+    excludedThemes: [...profile.excludedThemes],
+    fadeToBlackThemes: [...profile.fadeToBlackThemes],
+  };
+}
+
+export function projectExperienceProfile(profile: EngineExperienceProfile): EngineExperienceProfileProjection {
+  return {
+    version: 1,
+    revision: profile.revision,
+    pillarWeights: { ...profile.pillarWeights },
+    difficulty: profile.difficulty,
+    difficultyPolicyKey: profile.difficultyPolicyKey,
+    narrationStyle: profile.narrationStyle,
+    verbosity: profile.verbosity,
+    guidance: profile.guidance,
+    rulesTransparency: profile.rulesTransparency,
+    excludedThemes: [...profile.excludedThemes],
+    fadeToBlackThemes: [...profile.fadeToBlackThemes],
+  };
+}
+
+function buildExperienceProfile(
+  input: EngineExperienceProfileInput,
+  now: string,
+  previous?: EngineExperienceProfile
+): EngineExperienceProfile {
+  return {
+    ...input,
+    version: 1,
+    revision: previous ? previous.revision + 1 : 0,
+    source: "player",
+    difficultyPolicyKey: reviewedDifficultyPolicyKey(input.difficulty),
+    feedback: previous?.feedback.map((entry) => ({ ...entry })) ?? [],
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+export function normalizeExperienceProfile(value: unknown, fallbackAt = new Date().toISOString()): EngineExperienceProfile {
+  const parsed = engineExperienceProfileSchema.safeParse(value);
+  if (!parsed.success) return defaultExperienceProfile(fallbackAt);
+  const input = normalizeExperienceProfileInput(parsed.data);
+  if (!input) return defaultExperienceProfile(fallbackAt);
+  const feedback = parsed.data.feedback.slice(-8).map((entry) => ({ ...entry }));
+  return {
+    ...buildExperienceProfile(input, parsed.data.updatedAt, {
+      ...parsed.data,
+      feedback,
+    }),
+    revision: parsed.data.revision,
+    createdAt: parsed.data.createdAt,
+    updatedAt: parsed.data.updatedAt,
+    feedback,
+  };
+}
+
+function redactedExperienceProfileEvidence(profile: EngineExperienceProfile): Record<string, unknown> {
+  return {
+    revision: profile.revision,
+    pillarWeights: { ...profile.pillarWeights },
+    difficulty: profile.difficulty,
+    difficultyPolicyKey: profile.difficultyPolicyKey,
+    narrationStyle: profile.narrationStyle,
+    verbosity: profile.verbosity,
+    guidance: profile.guidance,
+    rulesTransparency: profile.rulesTransparency,
+    excludedThemeCount: profile.excludedThemes.length,
+    fadeToBlackThemeCount: profile.fadeToBlackThemes.length,
+    feedbackCount: profile.feedback.length,
+  };
+}
+
 export function defaultContentPolicy(): EngineContentPolicy {
   return {
     gamesystem: "5e-2014",
@@ -174,10 +327,13 @@ export function createInitialCampaign(
   campaignId = randomUUID(),
   campaign: EngineCampaignProfile = defaultCampaignProfile(),
   rulesVersion = OPEN5E_RULES_VERSION,
-  contentPolicy: EngineContentPolicy = defaultContentPolicy()
+  contentPolicy: EngineContentPolicy = defaultContentPolicy(),
+  experienceProfile?: EngineExperienceProfileInput
 ): LanternCampaignState {
   const now = new Date().toISOString();
   const character = createUnconfiguredCharacter(randomUUID());
+  const normalizedExperienceProfile = normalizeExperienceProfileInput(experienceProfile)
+    ?? experienceProfileInput(defaultExperienceProfile(now));
   return {
     id: campaignId,
     accountId,
@@ -186,6 +342,7 @@ export function createInitialCampaign(
     rulesVersion,
     contentPolicy: normalizeContentPolicy(contentPolicy),
     campaign,
+    experienceProfile: buildExperienceProfile(normalizedExperienceProfile, now),
     phase: "character_creation",
     tutorialStep: 0,
     characterCreation: { abilityScoreDraft: null },
@@ -239,9 +396,11 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     scene?: unknown;
     playerNotes?: unknown;
     contentPolicy?: EngineContentPolicy;
+    experienceProfile?: unknown;
   };
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
+  next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
   if (!next.tutorialStep && next.tutorialStep !== 0) next.tutorialStep = 0;
@@ -491,6 +650,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     rulesVersion: state.rulesVersion,
     contentPolicy: state.contentPolicy,
     campaign: state.campaign,
+    experienceProfile: normalizeExperienceProfile(state.experienceProfile, state.updatedAt),
     phase: state.phase,
     tutorialStep: state.tutorialStep,
     characterCreation: state.characterCreation,
@@ -541,6 +701,7 @@ export function readToolData(
         campaignVersion: state.version,
         rulesVersion: state.rulesVersion,
         campaign: state.campaign,
+        experienceProfile: projectExperienceProfile(state.experienceProfile),
         phase: state.phase,
         tutorialStep: state.tutorialStep,
         advancementPolicy: state.advancementPolicy,
@@ -589,6 +750,185 @@ export function readToolData(
   }
 }
 
+function escapedThemePattern(theme: string): RegExp {
+  const escaped = theme.trim().toLocaleLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i");
+}
+
+function containsExperienceTheme(value: unknown, themes: readonly string[]): boolean {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return false;
+  return themes.some((theme) => Boolean(theme) && escapedThemePattern(theme).test(text));
+}
+
+export function commandContainsBlockedTheme(
+  profile: EngineExperienceProfile,
+  command: EngineCommand
+): boolean {
+  return containsExperienceTheme(command, [...profile.excludedThemes, ...profile.fadeToBlackThemes]);
+}
+
+export function sanitizeNarrationForProfile(
+  narration: NarrationEnvelope,
+  profile: EngineExperienceProfile
+): NarrationEnvelope {
+  const themes = [...profile.excludedThemes, ...profile.fadeToBlackThemes];
+  if (containsExperienceTheme(narration.text, themes) || containsExperienceTheme(narration.proposedFacts, themes)) {
+    return {
+      text: "Let's fade to black and continue with a safer thread.",
+      proposedFacts: [],
+      suggestedActions: [],
+    };
+  }
+  return {
+    ...narration,
+    proposedFacts: narration.proposedFacts.filter((fact) => !containsExperienceTheme(fact, themes)),
+    suggestedActions: narration.suggestedActions.filter((action) => !containsExperienceTheme(action, themes)),
+  };
+}
+
+function redactExperienceCommand(command: EngineCommand): EngineCommand {
+  switch (command.kind) {
+    case "experience_profile_update":
+      return {
+        ...command,
+        profile: {
+          ...command.profile,
+          excludedThemes: [],
+          fadeToBlackThemes: [],
+        },
+      };
+    case "experience_feedback_add":
+      return { kind: command.kind, rating: command.rating };
+    case "experience_boundary":
+      return { ...command, theme: "[redacted]" };
+    default:
+      return command;
+  }
+}
+
+function experiencePlayerOnlyRejection(
+  state: LanternCampaignState,
+  context: RequestContext,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution | null {
+  return context.capabilities.includes("player")
+    ? null
+    : rejection(state, tool, "profile_player_only", "Experience preferences can only be changed by an explicit player command.");
+}
+
+function resolveExperienceProfileUpdate(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "experience_profile_update" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const capabilityRejection = experiencePlayerOnlyRejection(state, context, tool);
+  if (capabilityRejection) return capabilityRejection;
+  const input = normalizeExperienceProfileInput(command.profile);
+  if (!input) return rejection(state, tool, "invalid_experience_profile", "That experience profile is not a valid normalized player preference set.");
+  const currentInput = experienceProfileInput(state.experienceProfile);
+  if (JSON.stringify(input) === JSON.stringify(currentInput)) {
+    return rejection(state, tool, "experience_profile_unchanged", "Those experience preferences are already active.");
+  }
+  const next = cloneCampaign(state);
+  next.experienceProfile = buildExperienceProfile(input, new Date().toISOString(), state.experienceProfile);
+  const before = redactedExperienceProfileEvidence(state.experienceProfile);
+  const after = redactedExperienceProfileEvidence(next.experienceProfile);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    "Experience preferences updated for future presentation and situation selection.",
+    { experienceProfile: next.experienceProfile },
+    "experience_profile_updated",
+    [],
+    [],
+    [
+      { path: "/experienceProfile/revision", before: state.experienceProfile.revision, after: next.experienceProfile.revision },
+      { path: "/experienceProfile/preferences", before, after },
+    ]
+  );
+}
+
+function resolveExperienceFeedbackAdd(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "experience_feedback_add" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const capabilityRejection = experiencePlayerOnlyRejection(state, context, tool);
+  if (capabilityRejection) return capabilityRejection;
+  const next = cloneCampaign(state);
+  const now = new Date().toISOString();
+  const feedback: EngineExperienceFeedback = {
+    id: clientCommandId,
+    rating: command.rating,
+    ...(command.note ? { note: command.note } : {}),
+    createdAt: now,
+  };
+  next.experienceProfile = buildExperienceProfile(
+    experienceProfileInput(state.experienceProfile),
+    now,
+    state.experienceProfile
+  );
+  next.experienceProfile.feedback = [...next.experienceProfile.feedback, feedback].slice(-8);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    "Feedback recorded for future experience tuning.",
+    { feedbackId: clientCommandId, rating: command.rating, feedbackCount: next.experienceProfile.feedback.length },
+    "experience_feedback_added",
+    [],
+    [],
+    [
+      { path: "/experienceProfile/revision", before: state.experienceProfile.revision, after: next.experienceProfile.revision },
+      { path: "/experienceProfile/feedbackCount", before: state.experienceProfile.feedback.length, after: next.experienceProfile.feedback.length },
+    ]
+  );
+}
+
+function resolveExperienceBoundary(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "experience_boundary" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const capabilityRejection = experiencePlayerOnlyRejection(state, context, tool);
+  if (capabilityRejection) return capabilityRejection;
+  const normalizedTheme = command.theme.trim().toLocaleLowerCase();
+  const configured = [...state.experienceProfile.excludedThemes, ...state.experienceProfile.fadeToBlackThemes]
+    .some((theme) => theme.toLocaleLowerCase() === normalizedTheme);
+  if (!configured) return rejection(state, tool, "experience_boundary_not_configured", "That boundary is not active in the player profile.");
+  const messages = {
+    redirect: "That thread is redirected before any sensitive detail is established. Choose a safer direction.",
+    fade_to_black: "The sensitive moment fades to black before detail is established. The story continues on a safer thread.",
+    skip: "That thread is skipped before any sensitive detail is established. Choose what happens next.",
+  } as const;
+  const next = cloneCampaign(state);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    messages[command.action],
+    { action: command.action, blocked: true },
+    "experience_boundary_applied",
+    [],
+    [],
+    [{ path: "/experienceBoundary/lastAction", before: null, after: command.action }]
+  );
+}
+
 export function resolveEngineCommand(
   state: LanternCampaignState,
   context: RequestContext,
@@ -597,10 +937,17 @@ export function resolveEngineCommand(
   tool: EngineToolName | "declare" | "listen",
   playerText?: string
 ): EngineResolution {
+  const experienceCommand = command.kind === "experience_profile_update"
+    || command.kind === "experience_feedback_add"
+    || command.kind === "experience_boundary";
+  if (commandContainsBlockedTheme(state.experienceProfile, command) && !experienceCommand) {
+    return rejection(state, tool, "experience_boundary_blocked", "That content crosses an active boundary; choose a safer direction.");
+  }
   if (
     state.combat.pendingReaction
     && command.kind !== "observe"
     && command.kind !== "reaction_response"
+    && !experienceCommand
     && !(command.kind === "cast_spell" && state.combat.pendingReaction.eligibleReactionIds.includes(command.spellKey))
   ) {
     return rejection(state, tool, "reaction_pending", "Resolve the offered incoming-hit reaction before taking another action.");
@@ -614,6 +961,12 @@ export function resolveEngineCommand(
       return resolveWorldContext(state, context, clientCommandId, command, tool);
     case "player_note_add":
       return resolvePlayerNoteAdd(state, context, clientCommandId, command, tool);
+    case "experience_profile_update":
+      return resolveExperienceProfileUpdate(state, context, clientCommandId, command, tool);
+    case "experience_feedback_add":
+      return resolveExperienceFeedbackAdd(state, context, clientCommandId, command, tool);
+    case "experience_boundary":
+      return resolveExperienceBoundary(state, context, clientCommandId, command, tool);
     case "character_update":
       return resolveCharacterUpdate(state, context, clientCommandId, command, tool);
     case "move":
@@ -4349,11 +4702,12 @@ function commit(
   next.version = state.version + 1;
   next.updatedAt = createdAt;
   next.log = [...state.log, makeMessage(messageKindForOutcome(outcome), message)].slice(-40);
+  const persistedCommand = redactExperienceCommand(command);
   const event: EngineEvent = {
     id: randomUUID(),
     kind: "command",
     tool,
-    command,
+    command: persistedCommand,
     accountId: context.accountId,
     campaignId: context.campaignId,
     actorId: context.actorId,
