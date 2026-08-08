@@ -11,6 +11,15 @@ updates:
       - "dependencies"
     commit-message:
       prefix: "chore(deps)"
+    # Major version bumps (better-sqlite3, vitest, typescript) break builds.
+    # Allow minor + patch only; evaluate majors manually.
+    ignore:
+      - update-types: ["version-update:semver-major"]
+    groups:
+      patch-and-minor:
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "github-actions"
     directory: "/"
