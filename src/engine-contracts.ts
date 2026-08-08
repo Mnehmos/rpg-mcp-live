@@ -333,6 +333,7 @@ export const engineToolNameSchema = z.enum([
   "quest_progress",
   "combat_state",
   "combat_start",
+  "encounter_decision",
   "spawn_creature",
   "learn_spell",
   "prepare_spell",
@@ -440,6 +441,93 @@ export interface EngineCombatTacticalState {
   actorPosition: EngineTacticalPosition;
   actorFootprint: EngineTacticalFootprint;
   lastPlan: EngineMovementPlan | null;
+}
+
+export const engineEncounterLifecycleProfileSchema = z.literal("guards-surrender-v1");
+export type EngineEncounterLifecycleProfile = z.infer<typeof engineEncounterLifecycleProfileSchema>;
+
+export const engineEncounterDecisionSchema = z.enum([
+  "accept_surrender",
+  "reject_surrender",
+  "capture",
+  "retreat",
+  "pursue",
+  "continue_attack",
+]);
+export type EngineEncounterDecision = z.infer<typeof engineEncounterDecisionSchema>;
+
+export type EngineEncounterPhase = "pre-combat" | "active" | "resolving" | "terminal";
+export type EngineEncounterOutcome = "killed" | "surrendered" | "captured" | "escaped";
+
+export interface EngineEncounterApproachEvidence {
+  challengeId: "stealth-perception-v1";
+  approach: string;
+  targetId: string;
+  actorRoll: number;
+  actorModifier: number;
+  actorTotal: number;
+  opponentRoll: number;
+  opponentModifier: number;
+  opponentTotal: number;
+  outcome: "success" | "failure-with-complication";
+  consumed: boolean;
+}
+
+export interface EngineEncounterSurprise {
+  eligible: boolean;
+  consumed: boolean;
+  source: "stealth-perception-v1" | "compatibility-default";
+  evidence: EngineEncounterApproachEvidence | null;
+}
+
+export interface EngineEncounterInitiativeEntry {
+  actorId: string;
+  roll: number;
+  modifier: number;
+  total: number;
+  tieBreaker: string;
+  surprised: boolean;
+}
+
+export interface EngineEncounterInitiative {
+  formulaRevision: "initiative-v1";
+  entries: EngineEncounterInitiativeEntry[];
+  order: string[];
+  activeIndex: number;
+  rolledAtVersion: number;
+}
+
+export interface EngineEncounterSurrenderOffer {
+  id: string;
+  targetId: string;
+  reason: "ally-fallen";
+  thresholdRatio: 0.5;
+  status: "offered" | "accepted" | "rejected" | "pursued" | "captured";
+  sourceVersion: number;
+}
+
+export interface EngineEncounterMorale {
+  policy: "guards-surrender-v1";
+  thresholdRatio: 0.5;
+  offers: EngineEncounterSurrenderOffer[];
+  lastTriggerId: string | null;
+}
+
+export interface EngineEncounterLifecycle {
+  profile: EngineEncounterLifecycleProfile;
+  phase: EngineEncounterPhase;
+  surprise: EngineEncounterSurprise;
+  initiative: EngineEncounterInitiative;
+  morale: EngineEncounterMorale;
+  objective: {
+    id: "resolve-without-killing";
+    status: "pending" | "succeeded" | "failed";
+  };
+  outcome: EngineEncounterOutcome | null;
+  outcomeId: string | null;
+  claimedRewards: string[];
+  nonlethalDefeatIds: string[];
+  retreatPlanRevision: number | null;
 }
 
 export const engineCampaignPhaseSchema = z.enum(["character_creation", "tutorial", "sandbox"]);
@@ -828,6 +916,13 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       kind: z.literal("combat_start"),
       encounterId: z.string().trim().min(1).max(120),
       encounterName: z.string().trim().min(1).max(160),
+      lifecycleProfile: engineEncounterLifecycleProfileSchema.optional(),
+      approach: z.object({
+        challengeId: z.literal("stealth-perception-v1"),
+        groupIndex: z.number().int().nonnegative().max(19),
+        goal: z.string().trim().min(1).max(2_000),
+        approach: z.string().trim().min(1).max(2_000),
+      }).strict().optional(),
       creatures: z
         .array(
           z
@@ -844,6 +939,11 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       tactical: engineTacticalGeometryInputSchema.optional(),
     })
     .strict(),
+  z.object({
+    kind: z.literal("encounter_decision"),
+    decision: engineEncounterDecisionSchema,
+    targetId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
   z
     .object({
       kind: z.literal("spawn_creature"),
@@ -887,7 +987,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("combat_action"),
-      action: z.enum(["attack", "dodge", "dash", "disengage", "help", "ready", "second_wind"]),
+      action: z.enum(["attack", "attack_nonlethal", "dodge", "dash", "disengage", "help", "ready", "second_wind"]),
       targetId: z.string().trim().min(1).max(80).optional(),
       weaponId: z.string().trim().min(1).max(120).optional(),
       goal: z.string().trim().min(1).max(2_000).optional(),
@@ -1592,6 +1692,7 @@ export interface EngineCombat {
   status: "none" | "active" | "ended";
   encounterId: string | null;
   encounterName: string | null;
+  lifecycle: EngineEncounterLifecycle | null;
   round: number;
   activeActorId: string | null;
   turnBudget: EngineTurnBudget;

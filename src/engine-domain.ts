@@ -60,6 +60,12 @@ import type {
   EngineTacticalPosition,
   EngineTacticalTerrain,
   EngineCombatTacticalState,
+  EngineEncounterApproachEvidence,
+  EngineEncounterInitiative,
+  EngineEncounterInitiativeEntry,
+  EngineEncounterLifecycle,
+  EngineEncounterOutcome,
+  EngineEncounterSurrenderOffer,
   EngineMovementPlan,
   EnginePathTrigger,
   EngineContentPolicy,
@@ -1231,10 +1237,12 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
   const combatActions = state.combat.status === "active"
     ? state.combat.pendingReaction
       ? ["reaction_response:accept", "reaction_response:decline"]
+      : state.combat.lifecycle?.phase === "resolving" && state.combat.activeActorId === state.actorId
+      ? ["encounter_decision:accept_surrender", "encounter_decision:reject_surrender", "encounter_decision:capture", "encounter_decision:retreat", "encounter_decision:pursue", "encounter_decision:continue_attack"]
       : state.combat.activeActorId === state.actorId
       ? [
           ...(state.combat.turnBudget.movementFeet.spent < state.combat.turnBudget.movementFeet.available ? ["combat_move"] : []),
-          ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", "combat_action:dodge"]),
+          ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", ...(state.combat.lifecycle ? ["combat_action:attack_nonlethal"] : []), "combat_action:dodge"]),
           ...(state.combat.turnBudget.bonusAction.spent || (state.character.featureUses.secondWind ?? 0) < 1 ? [] : ["combat_action:second_wind"]),
           "end_turn",
         ]
@@ -1632,6 +1640,8 @@ export function resolveEngineCommand(
       return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
     case "combat_start":
       return resolveCombatStart(state, context, clientCommandId, command, tool);
+    case "encounter_decision":
+      return resolveEncounterDecision(state, context, clientCommandId, command, tool);
     case "spawn_creature":
       return resolveSpawnCreature(state, context, clientCommandId, command, tool);
     case "learn_spell":
@@ -3562,6 +3572,118 @@ function tacticalMovementRemaining(budget: EngineTurnBudget): number {
   return Math.max(0, budget.movementFeet.available - budget.movementFeet.spent);
 }
 
+function encounterLifecycleForProfile(
+  state: LanternCampaignState,
+  enemies: EngineCombatant[],
+  profile: "guards-surrender-v1",
+  approach: Extract<EngineCommand, { kind: "combat_start" }>["approach"],
+  groupTargets: string[],
+): EngineEncounterLifecycle | EngineResolution {
+  if (!approach) {
+    return rejection(state, "combat_start", "approach_required", "The reviewed encounter profile requires an authoritative stealth-perception approach.");
+  }
+  const targetId = groupTargets[approach.groupIndex];
+  if (!targetId) {
+    return rejection(state, "combat_start", "approach_target_not_found", "The approach must select an established guard group.");
+  }
+  const target = enemies.find((enemy) => enemy.id === targetId);
+  if (!target) {
+    return rejection(state, "combat_start", "approach_target_not_found", "The approach target is not a living guard instance.");
+  }
+  const derived = deriveCheck(state, "dex", "stealth", null, "combat_start");
+  if ("accepted" in derived) return derived;
+  const targetView = materializeCombatant(target);
+  const actorRoll = randomInt(1, 21);
+  const opponentRoll = randomInt(1, 21);
+  const actorTotal = actorRoll + derived.modifier;
+  const opponentModifier = targetView.skillBonusesAll.perception ?? targetView.abilityModifiers.wis;
+  const opponentTotal = opponentRoll + opponentModifier;
+  const success = actorTotal > opponentTotal;
+  const evidence: EngineEncounterApproachEvidence = {
+    challengeId: "stealth-perception-v1",
+    approach: approach.approach,
+    targetId,
+    actorRoll,
+    actorModifier: derived.modifier,
+    actorTotal,
+    opponentRoll,
+    opponentModifier,
+    opponentTotal,
+    outcome: success ? "success" : "failure-with-complication",
+    consumed: true,
+  };
+  const actorEntry: EngineEncounterInitiativeEntry = {
+    actorId: state.actorId,
+    roll: randomInt(1, 21),
+    modifier: state.character.abilityModifiers.dex,
+    total: 0,
+    tieBreaker: state.actorId,
+    surprised: false,
+  };
+  actorEntry.total = actorEntry.roll + actorEntry.modifier;
+  const entries: EngineEncounterInitiativeEntry[] = [actorEntry];
+  for (const enemy of enemies) {
+    const view = materializeCombatant(enemy);
+    const roll = randomInt(1, 21);
+    entries.push({
+      actorId: enemy.id,
+      roll,
+      modifier: view.abilityModifiers.dex,
+      total: roll + view.abilityModifiers.dex,
+      tieBreaker: enemy.id,
+      surprised: success,
+    });
+  }
+  entries.sort((left, right) => right.total - left.total || right.roll - left.roll || left.tieBreaker.localeCompare(right.tieBreaker));
+  let order = entries.map((entry) => entry.actorId);
+  if (success) {
+    order = [state.actorId, ...order.filter((actorId) => actorId !== state.actorId)];
+  }
+  const initiative: EngineEncounterInitiative = {
+    formulaRevision: "initiative-v1",
+    entries,
+    order,
+    activeIndex: 0,
+    rolledAtVersion: state.version + 1,
+  };
+  return {
+    profile,
+    phase: "active",
+    surprise: {
+      eligible: success,
+      consumed: true,
+      source: "stealth-perception-v1",
+      evidence,
+    },
+    initiative,
+    morale: {
+      policy: "guards-surrender-v1",
+      thresholdRatio: 0.5,
+      offers: [],
+      lastTriggerId: null,
+    },
+    objective: { id: "resolve-without-killing", status: "pending" },
+    outcome: null,
+    outcomeId: null,
+    claimedRewards: [],
+    nonlethalDefeatIds: [],
+    retreatPlanRevision: null,
+  };
+}
+
+function lifecycleNextActorId(combat: EngineCombat, currentId: string, actorId: string): string | null {
+  const lifecycle = combat.lifecycle;
+  if (!lifecycle) return null;
+  const liveIds = new Set([actorId, ...combat.enemies.filter((enemy) => enemy.alive).map((enemy) => enemy.id)]);
+  const currentIndex = lifecycle.initiative.order.indexOf(currentId);
+  if (currentIndex < 0) return null;
+  for (let offset = 1; offset <= lifecycle.initiative.order.length; offset += 1) {
+    const candidate = lifecycle.initiative.order[(currentIndex + offset) % lifecycle.initiative.order.length];
+    if (candidate && liveIds.has(candidate)) return candidate;
+  }
+  return null;
+}
+
 function resolveCombatStart(
   state: LanternCampaignState,
   context: RequestContext,
@@ -3607,13 +3729,27 @@ function resolveCombatStart(
   const setupIssue = validateCombatantSetup(tactical, enemies);
   if (setupIssue) return rejection(state, tool, setupIssue.code, setupIssue.message);
   syncDerivedCombatDistances(tactical, enemies);
+  const groupTargets: string[] = [];
+  let groupOffset = 0;
+  for (const group of command.creatures) {
+    groupTargets.push(enemies[groupOffset]?.id ?? "");
+    groupOffset += group.count;
+  }
+  let lifecycle: EngineEncounterLifecycle | null = null;
+  if (command.lifecycleProfile) {
+    const lifecycleResult = encounterLifecycleForProfile(state, enemies, command.lifecycleProfile, command.approach, groupTargets);
+    if ("accepted" in lifecycleResult) return lifecycleResult;
+    lifecycle = lifecycleResult;
+  }
+  const activeActorId = lifecycle?.initiative.order[0] ?? state.actorId;
   const next = cloneCampaign(state);
   next.combat = {
     status: "active",
     encounterId: command.encounterId,
     encounterName: command.encounterName,
+    lifecycle,
     round: 1,
-    activeActorId: state.actorId,
+    activeActorId,
     turnBudget: emptyTurnBudget(state.character.speed),
     tactical,
     pendingReaction: null,
@@ -3627,13 +3763,170 @@ function resolveCombatStart(
     clientCommandId,
     command,
     tool,
-    "Encounter started: " + command.encounterName + ". " + describeCombatants(enemies) + " Your turn.",
+    "Encounter started: " + command.encounterName + ". " + describeCombatants(enemies) + (activeActorId === state.actorId ? " Your turn." : " The opposition acts first."),
     { combat: combatData(next.combat) },
     "encounter_started",
     [],
     [],
     [{ path: "/combat", before: state.combat, after: next.combat }]
   );
+}
+
+function resolveEncounterDecision(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "encounter_decision" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "encounter_terminal", "This encounter is already terminal.");
+  const lifecycle = state.combat.lifecycle;
+  if (!lifecycle) return rejection(state, tool, "encounter_profile_required", "This command is available only for the reviewed encounter lifecycle profile.");
+  if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "Only the player may choose the encounter response on the player's turn.");
+  if (lifecycle.phase === "terminal" || lifecycle.outcome) return rejection(state, tool, "encounter_terminal", "The encounter already has a terminal outcome.");
+  if (command.decision === "retreat") {
+    const plan = state.combat.tactical.lastPlan;
+    if (!plan || !plan.triggers.some((trigger) => trigger.boundary === "leaving-reach")) {
+      return rejection(state, tool, "retreat_path_required", "Retreat requires a committed #10 movement plan that leaves an enemy's reach.");
+    }
+    const next = cloneCampaign(state);
+    next.combat.lifecycle!.phase = "terminal";
+    next.combat.lifecycle!.outcome = "escaped";
+    next.combat.lifecycle!.outcomeId = `${next.combat.encounterId ?? "encounter"}:escaped`;
+    next.combat.lifecycle!.objective.status = "succeeded";
+    next.combat.lifecycle!.retreatPlanRevision = plan.geometryRevision;
+    next.combat.status = "ended";
+    next.combat.activeActorId = null;
+    next.combat.lastAction = "encounter_retreat";
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      "You retreat beyond the guards' reach. The encounter ends with an escape.",
+      { outcome: "escaped", retreat: plan, combat: combatData(next.combat) },
+      "encounter_escaped",
+      [],
+      [],
+      [
+        { path: "/combat/status", before: state.combat.status, after: next.combat.status },
+        { path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle },
+      ],
+    );
+  }
+  if (!command.targetId) return rejection(state, tool, "encounter_target_required", "Choose the guard who made the response offer.");
+  const offer = lifecycle.morale.offers.find((candidate) => candidate.targetId === command.targetId && candidate.status === "offered");
+  if (!offer) return rejection(state, tool, "surrender_not_offered", "That guard has no active surrender offer.");
+  const next = cloneCampaign(state);
+  const nextOffer = next.combat.lifecycle!.morale.offers.find((candidate) => candidate.id === offer.id);
+  if (!nextOffer) return rejection(state, tool, "surrender_not_offered", "That surrender offer is no longer active.");
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  let outcome: EngineEncounterOutcome | null = null;
+  let eventKind = "encounter_response";
+  let message = "The guard remains ready to answer.";
+  if (command.decision === "accept_surrender") {
+    nextOffer.status = "accepted";
+    outcome = "surrendered";
+    eventKind = "encounter_surrendered";
+    message = "You accept the guard's surrender. The encounter ends without killing the remaining guard.";
+  } else if (command.decision === "capture") {
+    nextOffer.status = "captured";
+    outcome = "captured";
+    eventKind = "encounter_captured";
+    const target = next.combat.enemies.find((enemy) => enemy.id === command.targetId);
+    if (target) {
+      const beforeConditions = [...target.conditions];
+      target.conditions = [...new Set([...target.conditions, "captured"])];
+      target.alive = false;
+      changes.push(
+        { path: `/combat/enemies/${target.id}/conditions`, before: beforeConditions, after: target.conditions },
+        { path: `/combat/enemies/${target.id}/alive`, before: true, after: false },
+      );
+    }
+    message = "You secure the guard as a captive. The encounter ends with a capture.";
+  } else {
+    nextOffer.status = command.decision === "pursue" ? "pursued" : "rejected";
+    message = command.decision === "pursue"
+      ? "You refuse surrender and pursue the retreating guard; the encounter remains active."
+      : "You refuse the surrender offer; the encounter remains active.";
+  }
+  if (outcome) {
+    next.combat.lifecycle!.phase = "terminal";
+    next.combat.lifecycle!.outcome = outcome;
+    next.combat.lifecycle!.outcomeId = `${next.combat.encounterId ?? "encounter"}:${outcome}`;
+    next.combat.lifecycle!.objective.status = outcome === "surrendered" || outcome === "captured" ? "succeeded" : "failed";
+    next.combat.status = "ended";
+    next.combat.activeActorId = null;
+    next.combat.lastAction = eventKind;
+  } else {
+    next.combat.lifecycle!.phase = "active";
+    next.combat.lastAction = "encounter_response";
+  }
+  changes.push(
+    { path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle },
+    ...(outcome ? [{ path: "/combat/status", before: state.combat.status, after: next.combat.status }] : []),
+  );
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    message,
+    { decision: command.decision, targetId: command.targetId, outcome, combat: combatData(next.combat) },
+    eventKind,
+    [],
+    [],
+    changes,
+  );
+}
+
+function maybeOfferSurrender(
+  next: LanternCampaignState,
+  defeatedTargetId: string,
+): boolean {
+  const lifecycle = next.combat.lifecycle;
+  if (!lifecycle || lifecycle.outcome || lifecycle.phase === "terminal") return false;
+  if (!next.combat.enemies.some((enemy) => enemy.id === defeatedTargetId && !enemy.alive)) return false;
+  const alreadyOffered = new Set(lifecycle.morale.offers.map((offer) => offer.targetId));
+  const candidate = next.combat.enemies.find((enemy) => {
+    if (!enemy.alive || alreadyOffered.has(enemy.id)) return false;
+    const view = materializeCombatant(enemy);
+    return enemy.hp <= Math.floor(view.maxHp * lifecycle.morale.thresholdRatio);
+  });
+  if (!candidate) return false;
+  const offer: EngineEncounterSurrenderOffer = {
+    id: randomUUID(),
+    targetId: candidate.id,
+    reason: "ally-fallen",
+    thresholdRatio: lifecycle.morale.thresholdRatio,
+    status: "offered",
+    sourceVersion: next.version + 1,
+  };
+  lifecycle.morale.offers.push(offer);
+  lifecycle.morale.lastTriggerId = offer.id;
+  lifecycle.phase = "resolving";
+  next.combat.lastAction = "surrender_offer";
+  return true;
+}
+
+function resolveProfileDefeatOutcome(
+  next: LanternCampaignState,
+  targetId: string,
+): "killed" | "surrender_offer" | null {
+  const lifecycle = next.combat.lifecycle;
+  if (!lifecycle) return null;
+  if (next.combat.enemies.some((enemy) => enemy.alive)) {
+    return maybeOfferSurrender(next, targetId) ? "surrender_offer" : null;
+  }
+  lifecycle.phase = "terminal";
+  lifecycle.outcome = "killed";
+  lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:killed`;
+  lifecycle.objective.status = "failed";
+  next.combat.status = "ended";
+  next.combat.activeActorId = null;
+  return "killed";
 }
 
 function resolveSpawnCreature(
@@ -4624,6 +4917,13 @@ function resolveCombatAction(
   if (state.combat.activeActorId !== state.actorId) {
     return rejection(state, tool, "off_turn", "It is not your turn. End the enemy turn before acting again.");
   }
+  if (state.combat.lifecycle?.phase === "resolving") {
+    return rejection(state, tool, "surrender_decision_required", "Resolve the server-owned surrender offer before taking another combat action.");
+  }
+  const isAttackAction = command.action === "attack" || command.action === "attack_nonlethal";
+  if (command.action === "attack_nonlethal" && !state.combat.lifecycle) {
+    return rejection(state, tool, "unsupported_action", "Nonlethal defeat is available only in the reviewed encounter lifecycle profile.");
+  }
   if (["dash", "disengage", "help", "ready"].includes(command.action)) {
     return rejection(state, tool, "unsupported_action", `${command.action} has no mechanical implementation in this combat profile yet.`);
   }
@@ -4645,14 +4945,14 @@ function resolveCombatAction(
     );
   }
   const sourceTarget = findLiveCombatant(state.combat, command.targetId);
-  if (command.action === "attack" && !sourceTarget) {
+  if (isAttackAction && !sourceTarget) {
     return rejection(state, tool, "target_required", "Choose a living target for the attack.");
   }
-  const derivedAttack = command.action === "attack" ? deriveWeaponAttack(state.character, command.weaponId) : null;
-  if (command.action === "attack" && !derivedAttack) {
+  const derivedAttack = isAttackAction ? deriveWeaponAttack(state.character, command.weaponId) : null;
+  if (isAttackAction && !derivedAttack) {
     return rejection(state, tool, command.weaponId ? "weapon_not_equipped" : "weapon_required", command.weaponId ? "The selected weapon must be an equipped weapon." : "Equip a weapon before attacking.");
   }
-  if (command.action === "attack" && sourceTarget && derivedAttack) {
+  if (isAttackAction && sourceTarget && derivedAttack) {
     const maximumRange = derivedAttack.longRangeFeet ?? derivedAttack.normalRangeFeet ?? derivedAttack.reachFeet;
     const distanceFeet = tacticalDistanceFeet(state.combat, sourceTarget);
     if (maximumRange !== null && distanceFeet > maximumRange) {
@@ -4664,13 +4964,13 @@ function resolveCombatAction(
       );
     }
   }
-  const ammunition = command.action === "attack" && derivedAttack?.ammunitionId
+  const ammunition = isAttackAction && derivedAttack?.ammunitionId
     ? findAmmunition(state.character.inventory, derivedAttack.ammunitionId)
     : null;
   if (ammunition && !isActorOwnedItem(ammunition, state.character.id)) {
     return rejection(state, tool, "ammunition_unavailable", "That ammunition is not owned by the character.");
   }
-  if (command.action === "attack" && derivedAttack?.ammunitionId && !ammunition) {
+  if (isAttackAction && derivedAttack?.ammunitionId && !ammunition) {
     return rejection(state, tool, "ammunition_unavailable", "That ranged weapon has no available ammunition.");
   }
   if (command.action === "second_wind" && (state.character.featureUses.secondWind ?? 0) < 1) {
@@ -4710,7 +5010,7 @@ function resolveCombatAction(
     );
     message = `You recover ${next.character.hp - beforeHp} hit points with Second Wind.`;
     outcome = "second_wind";
-  } else if (command.action === "attack" && target && targetView && derivedAttack) {
+  } else if (isAttackAction && target && targetView && derivedAttack) {
     const attackRoll = randomInt(1, 21);
     const attackModifierQuery = queryModifiers(next.effects, next.character.id, "attack-roll");
     const secondRoll = attackModifierQuery.mode === "advantage" || attackModifierQuery.mode === "disadvantage"
@@ -4732,18 +5032,34 @@ function resolveCombatAction(
       const damageDice = Array.from({ length: diceCount }, () => randomInt(1, dieSides + 1));
       const damage = Math.max(1, damageDice.reduce((sum, die) => sum + die, 0) + derivedAttack.abilityModifier);
       const beforeHp = target.hp;
+      const nonlethal = command.action === "attack_nonlethal";
       target.hp = Math.max(0, target.hp - damage);
       target.alive = target.hp > 0;
+      if (nonlethal && !target.alive) {
+        const beforeConditions = [...target.conditions];
+        target.conditions = [...new Set([...target.conditions, "unconscious"])];
+        next.combat.lifecycle!.nonlethalDefeatIds.push(target.id);
+        changes.push({ path: `/combat/enemies/${target.id}/conditions`, before: beforeConditions, after: target.conditions });
+      }
       damageDice.forEach((die) => rolls.push({ kind: `damage_${derivedAttack.damageDice}`, value: die, sides: dieSides }));
       modifiers.push({ name: "damage_modifier", value: derivedAttack.abilityModifier });
       changes.push({ path: `/combat/enemies/${target.id}/hp`, before: beforeHp, after: target.hp });
-      message = `Your ${derivedAttack.weaponName} attack ${critical ? "critically " : ""}hits ${targetView.name} for ${damage} ${derivedAttack.damageType.toLowerCase()} damage.`;
-      outcome = target.alive ? "hit" : "defeated";
-      if (!next.combat.enemies.some((combatant) => combatant.alive)) {
+      message = `Your ${derivedAttack.weaponName} ${nonlethal ? "nonlethal " : ""}attack ${critical ? "critically " : ""}hits ${targetView.name} for ${damage} ${derivedAttack.damageType.toLowerCase()} damage.`;
+      outcome = target.alive ? "hit" : nonlethal ? "nonlethal_defeated" : "defeated";
+      const lifecycleDefeat = next.combat.lifecycle && !target.alive
+        ? resolveProfileDefeatOutcome(next, target.id)
+        : null;
+      if (lifecycleDefeat === "surrender_offer") {
+        message += " A surviving guard reaches its reviewed morale threshold and offers surrender.";
+        changes.push({ path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle });
+      } else if (lifecycleDefeat === "killed" || (!next.combat.lifecycle && !next.combat.enemies.some((combatant) => combatant.alive))) {
         next.combat.status = "ended";
         next.combat.activeActorId = null;
         message += " The encounter ground falls silent.";
-        changes.push({ path: "/combat/status", before: "active", after: "ended" });
+        changes.push(
+          { path: "/combat/status", before: "active", after: "ended" },
+          ...(lifecycleDefeat === "killed" ? [{ path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle }] : []),
+        );
       } else {
         message += " Your turn remains open; end it when you are ready.";
       }
@@ -4795,16 +5111,22 @@ function resolvePlayerEndTurn(
 ): EngineResolution {
   if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active encounter to end.");
   if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "It is not your turn.");
+  if (state.combat.lifecycle?.phase === "resolving") return rejection(state, tool, "surrender_decision_required", "Resolve the server-owned surrender offer before ending the turn.");
   const next = cloneCampaign(state);
-  const nextEnemy = firstLiveCombatantId(next.combat);
-  if (!nextEnemy) {
+  const nextActor = next.combat.lifecycle
+    ? lifecycleNextActorId(next.combat, state.actorId, state.actorId)
+    : firstLiveCombatantId(next.combat);
+  if (!nextActor) {
     next.combat.status = "ended";
     next.combat.activeActorId = null;
     return commit(next, context, clientCommandId, command, tool, "With no foe left standing, the encounter ends.", { combat: combatData(next.combat) }, "encounter_ended", [], [], [{ path: "/combat/status", before: "active", after: "ended" }]);
   }
-  next.combat.activeActorId = nextEnemy;
+  next.combat.activeActorId = nextActor;
+  if (next.combat.lifecycle) {
+    next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(nextActor);
+  }
   next.combat.lastAction = "end_turn";
-  return commit(next, context, clientCommandId, command, tool, "Your turn ends. The opposition may act.", { combat: combatData(next.combat) }, "turn_ended", [], [], [{ path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextEnemy }]);
+  return commit(next, context, clientCommandId, command, tool, "Your turn ends. The opposition may act.", { combat: combatData(next.combat) }, "turn_ended", [], [], [{ path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextActor }]);
 }
 
 function resolveAdvanceTurn(
@@ -5070,16 +5392,20 @@ function resolveAdvanceTurn(
     message = enemyView.name + " misses with " + attack.name + ".";
   }
 
-  const nextEnemyId = nextLiveCombatantId(next.combat, enemy.id);
+  const nextEnemyId = next.combat.lifecycle
+    ? lifecycleNextActorId(next.combat, enemy.id, state.actorId)
+    : nextLiveCombatantId(next.combat, enemy.id);
   if (next.character.lifecycleState === "dead") {
     next.combat.status = "ended";
     next.combat.activeActorId = null;
-  } else if (nextEnemyId) {
+  } else if (nextEnemyId && (!next.combat.lifecycle || nextEnemyId !== state.actorId)) {
     next.combat.activeActorId = nextEnemyId;
+    if (next.combat.lifecycle) next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(nextEnemyId);
     message += " The next foe acts.";
   } else {
     next.combat.round += 1;
     next.combat.activeActorId = next.actorId;
+    if (next.combat.lifecycle) next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(next.actorId);
     resetTurnBudget(next.combat.turnBudget, next.character.speed);
     if (next.character.hp === 0) spendTurnSlot(next.combat.turnBudget, "action");
     message += next.character.hp === 0
@@ -6011,6 +6337,10 @@ function resolveLoot(
 ): EngineResolution {
   if (command.corpseId) return resolveCorpseLoot(state, context, clientCommandId, command, tool);
   if (state.combat.status !== "ended") return rejection(state, tool, "encounter_active", "There is no defeated encounter to loot.");
+  const lifecycleRewardKey = state.combat.lifecycle?.outcomeId ? `${state.combat.lifecycle.outcomeId}:loot` : null;
+  if (lifecycleRewardKey && state.combat.lifecycle?.claimedRewards.includes(lifecycleRewardKey)) {
+    return rejection(state, tool, "reward_claimed", "This encounter outcome's reward has already been claimed.");
+  }
   if (state.combat.lootClaimed) return rejection(state, tool, "loot_claimed", "The encounter area has already been searched.");
   const quest = command.questId ? state.quests.find((candidate) => candidate.id === command.questId) : null;
   if (command.questId && !quest) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
@@ -6039,6 +6369,7 @@ function resolveLoot(
   syncCurrencyProjection(next.character);
   next.character.xp += totalXp;
   next.combat.lootClaimed = true;
+  if (lifecycleRewardKey && next.combat.lifecycle) next.combat.lifecycle.claimedRewards.push(lifecycleRewardKey);
   if (quest) {
     const nextQuest = next.quests.find((candidate) => candidate.id === quest.id);
     if (nextQuest) {
@@ -6084,6 +6415,7 @@ function resolveLoot(
       { path: "/character/currency", before: state.character.currency, after: next.character.currency },
       { path: "/character/xp", before: state.character.xp, after: next.character.xp },
       { path: "/combat/lootClaimed", before: state.combat.lootClaimed, after: next.combat.lootClaimed },
+      ...(lifecycleRewardKey ? [{ path: "/combat/lifecycle/claimedRewards", before: state.combat.lifecycle?.claimedRewards ?? [], after: next.combat.lifecycle?.claimedRewards ?? [] }] : []),
       ...(quest ? [{ path: "/quests/" + quest.id, before: quest, after: next.quests.find((candidate) => candidate.id === quest.id) }] : []),
       ...(pendingAdvancement ? [{ path: "/pendingAdvancement", before: state.pendingAdvancement, after: pendingAdvancement }] : []),
     ]
@@ -8144,6 +8476,7 @@ function emptyCombat(): EngineCombat {
     status: "none",
     encounterId: null,
     encounterName: null,
+    lifecycle: null,
     round: 0,
     activeActorId: null,
     turnBudget: emptyTurnBudget(),
@@ -8200,6 +8533,7 @@ function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "act
     status: combat.status ?? "none",
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
+    lifecycle: normalizeEncounterLifecycle(combat.lifecycle),
     round: Math.max(0, combat.round ?? 0),
     activeActorId: combat.activeActorId ?? null,
     turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
@@ -8226,6 +8560,95 @@ function normalizeFootprint(value: unknown): EngineTacticalFootprint {
   return {
     width: Number.isInteger(footprint.width) && footprint.width! >= 1 && footprint.width! <= 2 ? footprint.width! : 1,
     height: Number.isInteger(footprint.height) && footprint.height! >= 1 && footprint.height! <= 2 ? footprint.height! : 1,
+  };
+}
+
+function normalizeEncounterLifecycle(value: unknown): EngineEncounterLifecycle | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EngineEncounterLifecycle>;
+  if (candidate.profile !== "guards-surrender-v1") return null;
+  const rawSurprise = (candidate.surprise && typeof candidate.surprise === "object" ? candidate.surprise : {}) as Partial<EngineEncounterLifecycle["surprise"]>;
+  const rawInitiative = (candidate.initiative && typeof candidate.initiative === "object" ? candidate.initiative : {}) as Partial<EngineEncounterLifecycle["initiative"]>;
+  const rawMorale = (candidate.morale && typeof candidate.morale === "object" ? candidate.morale : {}) as Partial<EngineEncounterLifecycle["morale"]>;
+  const entries = Array.isArray(rawInitiative.entries)
+    ? rawInitiative.entries.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const raw = entry as Partial<EngineEncounterInitiativeEntry>;
+        if (typeof raw.actorId !== "string" || !raw.actorId) return [];
+        const roll = typeof raw.roll === "number" && Number.isInteger(raw.roll) ? Math.max(1, Math.min(20, raw.roll)) : 1;
+        const modifier = typeof raw.modifier === "number" && Number.isInteger(raw.modifier) ? raw.modifier : 0;
+        const total = typeof raw.total === "number" && Number.isInteger(raw.total) ? raw.total : roll + modifier;
+        return [{
+          actorId: raw.actorId,
+          roll,
+          modifier,
+          total,
+          tieBreaker: typeof raw.tieBreaker === "string" ? raw.tieBreaker : raw.actorId,
+          surprised: Boolean(raw.surprised),
+        } satisfies EngineEncounterInitiativeEntry];
+      })
+    : [];
+  const order = Array.isArray(rawInitiative.order)
+    ? rawInitiative.order.filter((actorId): actorId is string => typeof actorId === "string" && actorId.length > 0)
+    : entries.map((entry) => entry.actorId);
+  const offers = Array.isArray(rawMorale.offers)
+    ? rawMorale.offers.flatMap((offer) => {
+        if (!offer || typeof offer !== "object") return [];
+        const raw = offer as Partial<EngineEncounterSurrenderOffer>;
+        if (typeof raw.id !== "string" || typeof raw.targetId !== "string") return [];
+        const status = ["offered", "accepted", "rejected", "pursued", "captured"].includes(raw.status ?? "")
+          ? raw.status as EngineEncounterSurrenderOffer["status"]
+          : "offered";
+        return [{
+          id: raw.id,
+          targetId: raw.targetId,
+          reason: "ally-fallen",
+          thresholdRatio: 0.5,
+          status,
+          sourceVersion: typeof raw.sourceVersion === "number" && Number.isInteger(raw.sourceVersion) ? raw.sourceVersion : 0,
+        } satisfies EngineEncounterSurrenderOffer];
+      })
+    : [];
+  const phase = ["pre-combat", "active", "resolving", "terminal"].includes(candidate.phase ?? "")
+    ? candidate.phase as EngineEncounterLifecycle["phase"]
+    : "active";
+  const outcome = ["killed", "surrendered", "captured", "escaped"].includes(candidate.outcome ?? "")
+    ? candidate.outcome as EngineEncounterOutcome
+    : null;
+  const evidence = rawSurprise.evidence && typeof rawSurprise.evidence === "object"
+    ? rawSurprise.evidence as EngineEncounterApproachEvidence
+    : null;
+  return {
+    profile: "guards-surrender-v1",
+    phase,
+    surprise: {
+      eligible: Boolean(rawSurprise.eligible),
+      consumed: Boolean(rawSurprise.consumed),
+      source: rawSurprise.source === "stealth-perception-v1" ? "stealth-perception-v1" : "compatibility-default",
+      evidence,
+    },
+    initiative: {
+      formulaRevision: "initiative-v1",
+      entries,
+      order,
+      activeIndex: typeof rawInitiative.activeIndex === "number" && Number.isInteger(rawInitiative.activeIndex) ? Math.max(0, rawInitiative.activeIndex) : 0,
+      rolledAtVersion: typeof rawInitiative.rolledAtVersion === "number" && Number.isInteger(rawInitiative.rolledAtVersion) ? rawInitiative.rolledAtVersion : 0,
+    },
+    morale: {
+      policy: "guards-surrender-v1",
+      thresholdRatio: 0.5,
+      offers,
+      lastTriggerId: typeof rawMorale.lastTriggerId === "string" ? rawMorale.lastTriggerId : null,
+    },
+    objective: {
+      id: "resolve-without-killing",
+      status: candidate.objective?.status === "succeeded" || candidate.objective?.status === "failed" ? candidate.objective.status : "pending",
+    },
+    outcome,
+    outcomeId: typeof candidate.outcomeId === "string" ? candidate.outcomeId : null,
+    claimedRewards: Array.isArray(candidate.claimedRewards) ? candidate.claimedRewards.filter((key): key is string => typeof key === "string") : [],
+    nonlethalDefeatIds: Array.isArray(candidate.nonlethalDefeatIds) ? candidate.nonlethalDefeatIds.filter((id): id is string => typeof id === "string") : [],
+    retreatPlanRevision: typeof candidate.retreatPlanRevision === "number" && Number.isInteger(candidate.retreatPlanRevision) ? candidate.retreatPlanRevision : null,
   };
 }
 
@@ -8765,6 +9188,7 @@ function combatData(combat: EngineCombat): EngineCombatView {
     status: combat.status,
     encounterId: combat.encounterId,
     encounterName: combat.encounterName,
+    lifecycle: combat.lifecycle,
     round: combat.round,
     activeActorId: combat.activeActorId,
     turnBudget: combat.turnBudget,
