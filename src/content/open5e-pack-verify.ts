@@ -872,14 +872,29 @@ function verifyCompiledReferences(
     if (record.sourceDescriptionSha256 !== sha256(spell.description)) {
       throw new Error(`${record.contentKey} source-description hash diverges from ${spell.contentKey}.`);
     }
-    const damageType = normalized.get(record.damageType.contentKey);
-    if (
-      !damageType
-      || damageType.kind !== "damage-type"
-      || damageType.sourceKey !== record.damageType.sourceKey
-      || damageType.name !== record.damageType.name
-    ) {
-      throw new Error(`${record.contentKey} references missing or divergent spell damage type.`);
+    if (record.effectKind === "damage") {
+      const damageType = normalized.get(record.damageType.contentKey);
+      if (
+        !damageType
+        || damageType.kind !== "damage-type"
+        || damageType.sourceKey !== record.damageType.sourceKey
+        || damageType.name !== record.damageType.name
+      ) {
+        throw new Error(`${record.contentKey} references missing or divergent spell damage type.`);
+      }
+    } else if (record.effectKind === "healing") {
+      if (spell.sourceKey !== "srd_cure-wounds" || record.targetPolicy !== "single-creature") {
+        throw new Error(`${record.contentKey} has an unreviewed healing producer.`);
+      }
+    } else if (record.effectKind === "stat-modifier") {
+      if (
+        spell.sourceKey !== "srd_shield"
+        || record.modifier.stat !== "armor-class"
+        || record.modifier.amount !== 5
+        || record.modifier.trigger !== "incoming-attack-would-hit"
+      ) {
+        throw new Error(`${record.contentKey} has an unreviewed stat-modifier producer.`);
+      }
     }
   }
   const speciesProfiles = new Map(

@@ -225,6 +225,7 @@ export const engineToolNameSchema = z.enum([
   "learn_spell",
   "prepare_spell",
   "cast_spell",
+  "reaction_response",
   "combat_action",
   "end_turn",
   "advance_turn",
@@ -472,6 +473,16 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
       slotLevel: z.number().int().min(1).max(9).optional(),
       targetIds: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
+      reactionId: z.string().trim().min(1).max(120).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("reaction_response"),
+      reactionId: z.string().trim().min(1).max(120),
+      decision: z.enum(["accept", "decline"]),
+      spellKey: z.string().trim().startsWith("open5e:spell:").max(300).optional(),
+      slotLevel: z.number().int().min(1).max(9).optional(),
     })
     .strict(),
   z
@@ -836,6 +847,7 @@ export type EngineEffectCategory = "attack-roll" | "ability-check" | "saving-thr
 
 export type EngineEffectOperation =
   | { kind: "advantage" | "disadvantage"; category: EngineEffectCategory }
+  | { kind: "stat-modifier"; stat: "armor-class"; value: number; stackingKey: string }
   | { kind: "condition"; condition: string; action: "apply" | "remove" };
 
 export type EngineEffectDuration =
@@ -1025,9 +1037,23 @@ export interface EnginePendingReaction {
   version: 1;
   id: string;
   kind: string;
+  trigger: "incoming-attack-would-hit";
   sourceCommandId: string;
   sourceVersion: number;
   actorId: string;
+  attackerId: string;
+  targetId: string;
+  sourceActionKey: string;
+  attackName: string;
+  attackRoll: number;
+  attackTotal: number;
+  attackBonus: number;
+  critical: boolean;
+  originalArmorClass: number;
+  damageDiceCount: number;
+  damageDieSides: number;
+  damageBonus: number;
+  damageType: string;
   eligibleReactionIds: string[];
   status: "offered" | "accepted" | "declined" | "resolved";
   resumeToken: string;

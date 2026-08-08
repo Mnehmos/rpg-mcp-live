@@ -26,12 +26,14 @@ slice admits only:
 
 - advantage/disadvantage for attack rolls, ability checks, and saving throws;
 - apply/remove a reviewed condition marker;
+- timed additive armor-class modifiers for reviewed reaction producers;
 - duration and source-linked cleanup.
 
-Generic AC modifiers, temporary HP, forced movement, summoning, spatial zones,
-and arbitrary scripting remain rejected and out of scope. ADR-H25's conservative
-spell-prose compilation fence remains in force; this ADR only supersedes its
-shared runtime-substrate sequencing for the operations listed above.
+Timed additive AC modifiers are now admitted for the reviewed Shield producer
+under ADR-H25; temporary HP, forced movement, summoning, spatial zones, and
+arbitrary scripting remain rejected and out of scope. ADR-H25's conservative
+spell-prose compilation fence remains in force; this ADR governs the shared
+runtime substrate for all admitted operations.
 
 ## Runtime rules
 

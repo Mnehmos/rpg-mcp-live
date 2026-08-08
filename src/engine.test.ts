@@ -151,7 +151,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(43);
+    expect(names).toHaveLength(44);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");
@@ -976,7 +976,7 @@ describe("Lantern engine boundary", () => {
     const optionsRead = executeReadTool(campaign, "character_options");
     expect(optionsRead).toMatchObject({ accepted: true, readOnly: true, campaignVersion: 0 });
     expect(optionsRead.data).toMatchObject({
-      packHash: "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f",
+      packHash: "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa",
       species: expect.arrayContaining([expect.objectContaining({ name: "Half-Elf", selectable: true })]),
       classes: expect.arrayContaining([expect.objectContaining({ name: "Bard", selectable: true })]),
       backgrounds: [expect.objectContaining({ name: "Acolyte", startingCurrencyCopper: 1_500 })],
@@ -1210,7 +1210,7 @@ describe("Lantern engine boundary", () => {
     expect(created.state.character.ac).toBe(18);
     const persistedInventory = JSON.stringify(created.state.character.inventory);
     expect(persistedInventory).toContain("open5e:item:5e-2014:srd-2014:srd_chain-mail");
-    expect(persistedInventory).toContain("56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f");
+    expect(persistedInventory).toContain("fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa");
     expect(persistedInventory).not.toContain('"name"');
     expect(persistedInventory).not.toContain('"weight"');
     expect(persistedInventory).not.toContain('"valueCopper"');
@@ -1328,7 +1328,7 @@ describe("Lantern engine boundary", () => {
     );
     expect(learned.accepted).toBe(true);
     expect(learned.state.character.spellcasting?.knownSpells).toEqual([
-      { contentKey: fireBoltKey, packHash: "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f" },
+      { contentKey: fireBoltKey, packHash: "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa" },
     ]);
     expect(JSON.stringify(learned.state.character.spellcasting)).not.toContain("Fire Bolt");
 

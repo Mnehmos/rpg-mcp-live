@@ -30,7 +30,7 @@ S8 captures the complete discovered API corpus. Reviewed S7 SRD records retain t
 | creaturesets | 1 | 1 | 0 | 0 |
 | creatures | 3541 | 325 | 3216 | 608 |
 | spellschools | 9 | 8 | 1 | 0 |
-| spells | 1955 | 319 | 1636 | 82 |
+| spells | 1955 | 319 | 1636 | 84 |
 | abilities | 6 | 6 | 12 | 0 |
 | languages | 19 | 18 | 1 | 0 |
 | alignments | 9 | 9 | 9 | 0 |
@@ -161,7 +161,7 @@ S8 captures the complete discovered API corpus. Reviewed S7 SRD records retain t
 | spells | kp | 5e-2014 | 31 | 0 | 0 |
 | spells | open5e | 5e-2014 | 2 | 0 | 0 |
 | spells | spells-that-dont-suck | 5e-2014 | 180 | 0 | 0 |
-| spells | srd-2014 | 5e-2014 | 0 | 247 | 72 |
+| spells | srd-2014 | 5e-2014 | 0 | 245 | 74 |
 | spells | toh | 5e-2014 | 91 | 0 | 0 |
 | spells | wz | 5e-2014 | 43 | 0 | 0 |
 | spells | srd-2024 | 5e-2024 | 339 | 0 | 0 |

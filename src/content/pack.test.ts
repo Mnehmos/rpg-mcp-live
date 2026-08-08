@@ -3,7 +3,7 @@ import { loadActiveOpen5eContentPack } from "./pack.js";
 import { ContentAccessError, Open5eContentResolver, type ContentPolicy } from "./resolve.js";
 import { OPEN5E_COLLECTIONS } from "./schema.js";
 
-const EXPECTED_HASH = "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f";
+const EXPECTED_HASH = "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa";
 
 const hostedPolicy: ContentPolicy = {
   gamesystem: "5e-2014",
