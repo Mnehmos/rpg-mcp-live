@@ -217,6 +217,11 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     })
     .strict(),
   end_turn: noArguments,
+  advancement_confirm: z.object({ pendingId: z.string().trim().min(1).max(120) }).strict(),
+  npc_advance: z.object({
+    combatantId: z.string().trim().min(1).max(120),
+    templateId: z.literal("veteran"),
+  }).strict(),
   advance_turn: z.object({
     combatantId: z.string().trim().min(1).max(120).optional(),
     actionKey: z.string().trim().min(1).max(300).optional(),
@@ -722,6 +727,29 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool("end_turn", "Explicitly end the player's combat turn and offer the opposition its turn.", {}),
   tool(
+    "advancement_confirm",
+    "Confirm the server-generated pending level-up preview. The engine derives every level consequence; callers cannot supply target stats or features.",
+    {
+      type: "object",
+      properties: { pendingId: { type: "string", description: "Pending advancement id from the campaign session." } },
+      required: ["pendingId"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "npc_advance",
+    "Apply the reviewed veteran v1 template once to one live encounter instance. Static Open5e content remains unchanged; revised CR/XP and instance provenance are persisted.",
+    {
+      type: "object",
+      properties: {
+        combatantId: { type: "string", description: "Live combatant instance id from combat_state." },
+        templateId: { type: "string", enum: ["veteran"] },
+      },
+      required: ["combatantId", "templateId"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
     "advance_turn",
     "Resolve the active creature's turn with a source-backed executable action. Choose actionKey from combat_state. Exact S7 multiattack and save/damage programs run atomically; incomplete prose, legendary timing, and unsupported fragments are rejected without mutation. attackKey remains a compatibility alias.",
     {
@@ -844,6 +872,10 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       });
     case "end_turn":
       return engineCommandSchema.parse({ kind: "end_turn" });
+    case "advancement_confirm":
+      return engineCommandSchema.parse({ kind: "advancement_confirm", pendingId: args.pendingId });
+    case "npc_advance":
+      return engineCommandSchema.parse({ kind: "npc_advance", combatantId: args.combatantId, templateId: args.templateId });
     case "combat_start":
       return engineCommandSchema.parse({
         kind: "combat_start",

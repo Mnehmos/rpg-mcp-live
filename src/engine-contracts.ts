@@ -229,6 +229,8 @@ export const engineToolNameSchema = z.enum([
   "combat_action",
   "end_turn",
   "advance_turn",
+  "advancement_confirm",
+  "npc_advance",
   "death_save",
   "loot",
   "rest",
@@ -500,6 +502,15 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     combatantId: z.string().trim().min(1).max(120).optional(),
     actionKey: z.string().trim().min(1).max(300).optional(),
     attackKey: z.string().trim().min(1).max(240).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("advancement_confirm"),
+    pendingId: z.string().trim().min(1).max(120),
+  }).strict(),
+  z.object({
+    kind: z.literal("npc_advance"),
+    combatantId: z.string().trim().min(1).max(120),
+    templateId: z.literal("veteran"),
   }).strict(),
   z.object({ kind: z.literal("death_save") }).strict(),
   z
@@ -824,6 +835,66 @@ export interface EngineCharacter {
   conditionEffects: EngineAppliedCondition[];
   deathSaveSuccesses: number;
   deathSaveFailures: number;
+  /** Revision of the server-owned progression formulas used for derived state. */
+  progressionFormulaRevision?: string;
+  /** Canonical max HP captured by the progression transition for load-time repair. */
+  progressionMaxHp?: number;
+}
+
+export interface EngineAdvancementPolicy {
+  version: 1;
+  mode: "milestone";
+  maxLevel: 2;
+  hpPolicy: "fixed-average";
+  formulaRevision: "progression-v1";
+}
+
+export interface EngineAdvancementPreview {
+  fromLevel: number;
+  toLevel: number;
+  hpGain: number;
+  maxHpBefore: number;
+  maxHpAfter: number;
+  currentHpBefore: number;
+  currentHpAfter: number;
+  hitDieBefore: number;
+  hitDieAfter: number;
+  hitDiceRemainingBefore: number;
+  hitDiceRemainingAfter: number;
+  proficiencyBonusBefore: number;
+  proficiencyBonusAfter: number;
+  savingThrowsBefore: Record<EngineAbility, number>;
+  savingThrowsAfter: Record<EngineAbility, number>;
+  skillsBefore: Record<string, EngineSkill>;
+  skillsAfter: Record<string, EngineSkill>;
+  spellSlotsBefore: Record<string, number> | null;
+  spellSlotsAfter: Record<string, number> | null;
+  featureRefsAdded: EngineFeatureReference[];
+  featuresAdded: string[];
+}
+
+export interface EnginePendingAdvancement {
+  version: 1;
+  id: string;
+  sourceKind: "quest-milestone";
+  sourceId: string;
+  sourceCommandId: string;
+  sourceVersion: number;
+  ownerActorId: string;
+  fromLevel: 1;
+  toLevel: 2;
+  className: string;
+  classRef: EngineContentReference | null;
+  rulesVersion: string;
+  formulaRevision: "progression-v1";
+  legalChoices: {
+    className: string;
+    classRef: EngineContentReference | null;
+  };
+  preview: EngineAdvancementPreview;
+  status: "pending" | "consumed";
+  consumedCommandId?: string;
+  consumedAt?: string;
 }
 
 export interface EngineAppliedCondition {
@@ -961,6 +1032,32 @@ export interface EngineCombatant {
   distanceFeet: number;
   conditions: string[];
   actionResources: Record<string, EngineActionResource>;
+  progression?: EngineCombatantProgression | null;
+}
+
+export interface EngineCombatantProgression {
+  templateId: "veteran";
+  templateVersion: "v1";
+  sourceCommandId: string;
+  sourceVersion: number;
+  base: {
+    maxHp: number;
+    armorClass: number;
+    challengeRating: number;
+    experiencePoints: number | null;
+  };
+  revised: {
+    maxHp: number;
+    armorClass: number;
+    challengeRating: number;
+    experiencePoints: number | null;
+  };
+  modifications: {
+    maxHp: number;
+    armorClass: number;
+    attackBonus: number;
+    damageBonus: number;
+  };
 }
 
 export interface EngineActionResource {
@@ -1126,6 +1223,8 @@ export interface LanternCampaignState {
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;
+  advancementPolicy: EngineAdvancementPolicy;
+  pendingAdvancement: EnginePendingAdvancement | null;
   worldContext: EngineWorldContext | null;
   playerNotes: EngineNote[];
   character: EngineCharacter;
@@ -1173,6 +1272,8 @@ export interface EngineSessionView {
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;
+  advancementPolicy: EngineAdvancementPolicy;
+  pendingAdvancement: EnginePendingAdvancement | null;
   characterCreated: boolean;
   worldContext: EngineWorldContextView | null;
   playerNotes: EngineNote[];
