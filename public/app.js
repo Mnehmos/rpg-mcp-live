@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null };
+  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [] };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -1089,6 +1089,54 @@
     }[action] || "I take my turn.";
   }
 
+  function renderSuggestedActions(actions, session, snapshot) {
+    var heading = $("#action-heading");
+    var row = $("#action-row");
+    if (!heading || !row) return;
+
+    var phase = session && session.phase;
+    var hasOpening = Boolean(session && (session.worldContext || (snapshot && snapshot.worldContext)));
+    var normalized = (Array.isArray(actions) ? actions : []).map(function (action, index) {
+      if (!action || typeof action !== "object") return null;
+      var label = String(action.label || "").trim();
+      var prompt = String(action.prompt || label).trim();
+      if (!label || !prompt) return null;
+      return {
+        id: String(action.id || "move-" + (index + 1)).trim(),
+        label: label,
+        prompt: prompt,
+        generated: Boolean(action.prompt)
+      };
+    }).filter(Boolean).filter(function (action, index, list) {
+      return list.findIndex(function (candidate) { return candidate.prompt.toLowerCase() === action.prompt.toLowerCase(); }) === index;
+    }).slice(0, 5);
+
+    if (!normalized.length && phase === "tutorial" && !hasOpening) {
+      normalized = [{
+        id: "continue",
+        label: "Begin the opening",
+        prompt: "I am ready to begin the story.",
+        opening: true
+      }];
+    }
+    if (!normalized.length && phase === "sandbox") {
+      normalized = [
+        { id: "observe", label: "Observe", prompt: actionLabel("observe") },
+        { id: "listen", label: "Listen", prompt: actionLabel("listen") },
+        { id: "roll", label: "Make a check", prompt: actionLabel("roll") }
+      ];
+    }
+
+    heading.hidden = normalized.length === 0;
+    row.hidden = normalized.length === 0;
+    setText("#action-subtitle", actions && actions.length ? "Suggested by the DM" : "Rules-aware fallback");
+    row.innerHTML = normalized.map(function (action, index) {
+      var glyph = action.id === "roll" ? "d20" : index === 0 ? "✦" : "↗";
+      var openingAttribute = action.opening ? ' data-game-action="continue"' : "";
+      return '<button class="action-button action-button-generated' + (action.id === "roll" ? " action-button-roll" : "") + '" type="button" data-suggested-prompt="' + escapeHtml(action.prompt) + '"' + openingAttribute + ' title="' + escapeHtml(action.prompt) + '"' + (state.pendingPlayerText ? " disabled" : "") + '><span>' + glyph + '</span><strong>' + escapeHtml(action.label) + '</strong><small class="action-prompt">' + escapeHtml(action.prompt) + '</small></button>';
+    }).join("");
+  }
+
   function isSignedIn() {
     return Boolean((state.clerk && state.clerk.isSignedIn) || (state.config && state.config.devAuthBypass));
   }
@@ -1256,6 +1304,13 @@
     renderBeat(session.currentBeat || snapshot.currentBeat || null);
     renderQuests(session.quests || snapshot.quests || []);
     renderCombat(combat);
+    var narrationActions = payload && payload.narration && Array.isArray(payload.narration.suggestedActions)
+      ? payload.narration.suggestedActions
+      : null;
+    var sessionActions = narrationActions || (Array.isArray(session.suggestedActions) ? session.suggestedActions : null)
+      || (Array.isArray(snapshot.suggestedActions) ? snapshot.suggestedActions : []);
+    state.suggestedActions = sessionActions;
+    renderSuggestedActions(sessionActions, session, snapshot);
 
     var entries = Array.isArray(session.log) ? session.log : [];
     var logHtml = entries.map(function (entry) {
@@ -1272,9 +1327,14 @@
     }
     var gameLog = $("#game-log");
     if (gameLog) {
+      var wasNearBottom = !gameLog.dataset.initialized
+        || gameLog.scrollHeight - gameLog.scrollTop - gameLog.clientHeight < 64;
       gameLog.classList.toggle("is-empty", !logHtml);
-      gameLog.innerHTML = logHtml || '<div id="log-empty" class="log-empty"><span class="empty-glyph">✦</span><strong>The table is ready.</strong><p>Your campaign will take shape here.</p></div>';
-      gameLog.scrollTop = gameLog.scrollHeight;
+      gameLog.innerHTML = logHtml
+        ? '<div class="log-stream">' + logHtml + '</div>'
+        : '<div id="log-empty" class="log-empty"><span class="empty-glyph">✦</span><strong>The table is ready.</strong><p>Your campaign will take shape here.</p></div>';
+      if (wasNearBottom) gameLog.scrollTop = gameLog.scrollHeight;
+      gameLog.dataset.initialized = "true";
     }
     $("#integration-state").textContent = state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY";
   }
@@ -1591,6 +1651,9 @@
   function playAction(action) {
     if (action === "continue" && state.session && state.session.phase === "tutorial" && !(state.session.worldContext || (state.engineState && state.engineState.worldContext))) {
       return beginCampaignOpening();
+    }
+    if (action === "observe" || action === "listen" || action === "roll") {
+      return submitCommand({ playerText: actionLabel(action) });
     }
     return submitCommand({ action: action });
   }
@@ -2053,11 +2116,15 @@
       playerInput.addEventListener("input", updateInputCounter);
       updateInputCounter();
     }
-    document.querySelectorAll("[data-game-action]").forEach(function (button) {
-      button.addEventListener("click", function () {
-        button.disabled = true;
-        playAction(button.dataset.gameAction).finally(function () { button.disabled = false; });
-      });
+    var actionRow = $("#action-row");
+    if (actionRow) actionRow.addEventListener("click", function (event) {
+      var button = event.target.closest("button[data-suggested-prompt]");
+      if (!button || !actionRow.contains(button) || button.disabled) return;
+      button.disabled = true;
+      var request = button.dataset.gameAction
+        ? playAction(button.dataset.gameAction)
+        : playText(button.dataset.suggestedPrompt || "I take the suggested action.");
+      request.finally(function () { button.disabled = false; });
     });
     $("#chat-form").addEventListener("submit", function (event) {
       event.preventDefault();

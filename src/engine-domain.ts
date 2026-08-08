@@ -173,6 +173,7 @@ export function createInitialCampaign(
     ],
     improvEffects: [],
     currentBeat: null,
+    suggestedActions: [],
     log: [
       makeMessage(
         "system",
@@ -237,6 +238,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   if (currentQuest) next.quest = currentQuest;
   if (!Array.isArray(next.improvEffects)) next.improvEffects = [];
   if (next.currentBeat === undefined) next.currentBeat = null;
+  if (!Array.isArray(next.suggestedActions)) next.suggestedActions = [];
   // Discard the former fixed scene graph. A campaign earns its current context
   // from play; old scene data must not leak back into the player experience.
   delete next.scene;
@@ -265,6 +267,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     quests: state.quests,
     improvEffects: state.improvEffects,
     currentBeat: state.currentBeat,
+    suggestedActions: state.suggestedActions,
     log: state.log.slice(-40),
     availableActions:
       state.phase === "character_creation"

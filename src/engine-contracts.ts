@@ -993,6 +993,7 @@ export interface LanternCampaignState {
   quests: EngineQuest[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
+  suggestedActions: NarrationEnvelope["suggestedActions"];
   log: EngineMessage[];
   lastRoll: number | null;
   updatedAt: string;
@@ -1040,6 +1041,7 @@ export interface EngineSessionView {
   quests: EngineQuest[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
+  suggestedActions: NarrationEnvelope["suggestedActions"];
   combat: EngineCombatView;
   updatedAt: string;
 }

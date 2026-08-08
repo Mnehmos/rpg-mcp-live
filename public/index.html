@@ -372,12 +372,8 @@
               </div>
               <p class="chat-hint">Speak naturally. The engine rolls only when the fiction calls for a risk.</p>
             </form>
-            <div class="action-heading"><span class="tiny-label">QUICK MOVES</span><span>Rules-aware shortcuts</span></div>
-            <div class="action-row" aria-label="Available actions">
-              <button class="action-button" data-game-action="observe"><span>◌</span><strong>Observe</strong><small>Read the moment</small></button>
-              <button class="action-button" data-game-action="listen"><span>◒</span><strong>Listen</strong><small>Test your senses</small></button>
-              <button class="action-button action-button-roll" data-game-action="roll"><span>d20</span><strong>Make a check</strong><small>Let the dice speak</small></button>
-            </div>
+            <div id="action-heading" class="action-heading"><span class="tiny-label">NEXT MOVES</span><span id="action-subtitle">Suggested by the DM</span></div>
+            <div id="action-row" class="action-row" aria-label="Suggested next moves"></div>
             <div class="table-footer"><span id="auth-state">Local table preview</span><button class="text-button" data-action="open-auth">Sign in to save your campaign</button></div>
           </section>
         </div>

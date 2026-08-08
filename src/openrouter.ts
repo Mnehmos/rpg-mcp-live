@@ -49,7 +49,7 @@ export class OpenRouterNarrator {
   public async narrate(request: NarrationRequest): Promise<NarrationEnvelope> {
     const content = await requestJsonCompletion(
       this.options,
-      "You are the Dungeon Master for a text-first tabletop game. Return only valid JSON with exactly three keys: text, proposedFacts, and suggestedActions. Keep text vivid but concise. proposedFacts and suggestedActions must be arrays. The server result is authoritative: never invent a different roll, DC, modifier, success, location, or character fact. Narration is an output projection; proposed facts are suggestions for a future validator.",
+      "You are the Dungeon Master for a text-first tabletop game. Return only valid JSON with exactly three keys: text, proposedFacts, and suggestedActions. Keep text vivid but concise. proposedFacts and suggestedActions must be arrays. Each suggested action must include id, label, and a natural-language first-person prompt. The server result is authoritative: never invent a different roll, DC, modifier, success, location, or character fact. Narration is an output projection; proposed facts are suggestions for a future validator.",
       request
     );
     return narrationEnvelopeSchema.parse(JSON.parse(stripJsonFence(content)));

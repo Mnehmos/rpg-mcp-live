@@ -76,17 +76,18 @@ export const narrativeFactProposalSchema = z.discriminatedUnion("kind", [
 
 export type NarrativeFactProposal = z.infer<typeof narrativeFactProposalSchema>;
 
+export const suggestedActionSchema = z.object({
+  id: identifierSchema,
+  label: z.string().trim().min(1).max(96),
+  prompt: z.string().trim().min(1).max(500).optional(),
+});
+
+export type SuggestedAction = z.infer<typeof suggestedActionSchema>;
+
 export const narrationEnvelopeSchema = z.object({
   text: z.string().trim().min(1).max(6_000),
   proposedFacts: z.array(narrativeFactProposalSchema).max(8),
-  suggestedActions: z
-    .array(
-      z.object({
-        id: identifierSchema,
-        label: shortTextSchema,
-      })
-    )
-    .max(6),
+  suggestedActions: z.array(suggestedActionSchema).max(6),
 });
 
 export type NarrationEnvelope = z.infer<typeof narrationEnvelopeSchema>;
