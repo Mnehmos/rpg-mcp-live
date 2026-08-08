@@ -47,6 +47,10 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     sceneId: z.string().trim().min(1).max(120).optional(),
     difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
     requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
+    helperId: z.string().trim().min(1).max(120).optional(),
+    opponentId: z.string().trim().min(1).max(120).optional(),
+    informationPolicy: z.enum(["public", "withheld"]).optional(),
+    tool: z.string().trim().min(1).max(120).optional(),
   }).strict(),
   content_search: z.object({
     query: z.string().trim().max(200).optional(),
@@ -131,6 +135,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       amount: z.number().int().min(0).max(1_000).optional(),
       durationRounds: z.number().int().min(1).max(1_000).optional(),
       condition: z.string().trim().min(1).max(80).optional(),
+      checkCategory: z.enum(["attack-roll", "ability-check", "saving-throw"]).optional(),
     })
     .strict(),
   campaign_beat: z
@@ -257,6 +262,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       ability: engineAbilitySchema,
       skill: z.string().trim().min(1).max(80).optional(),
       goal: z.string().trim().min(1).max(2_000),
+      passive: z.boolean().optional(),
     })
     .strict(),
 };
@@ -472,7 +478,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "challenge_attempt",
-    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, and barred-door-v1.",
+    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, and stealth-perception-v1.",
     {
       type: "object",
       properties: {
@@ -482,6 +488,10 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         sceneId: { type: "string", description: "Optional stable scene/situation id used for retry identity." },
         difficultyBand: { type: "string", enum: ["gentle", "standard", "challenging"], description: "Optional model proposal recorded as evidence; the active player profile selects the final band." },
         requestedStakes: { type: "array", items: { type: "string", enum: ["time", "noise", "exposure", "opportunity"] }, maxItems: 4, description: "Optional model-proposed stakes; the reviewed challenge definition controls the final stakes." },
+        helperId: { type: "string", description: "Optional legal helper actor/NPC; the engine validates eligibility and supplies at most one advantage source." },
+        opponentId: { type: "string", description: "Optional established opponent id for a reviewed opposed challenge." },
+        informationPolicy: { type: "string", enum: ["public", "withheld"], description: "Whether player-facing check details are public; full evidence remains authoritative." },
+        tool: { type: "string", description: "Optional tool proficiency key; the engine validates the character owns it." },
       },
       required: ["challengeId", "goal", "approach"],
       additionalProperties: false,
@@ -566,10 +576,10 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "improvise",
-    "Apply a DM-authored rule-of-cool stunt or effect. The engine records the creative description and applies only the typed mechanical consequence (damage, healing, condition, advantage, movement, or duration).",
+    "Apply a DM-authored rule-of-cool stunt or effect. The engine records the creative description and applies only the typed mechanical consequence (damage, healing, condition, advantage, movement, or duration). Advantage/disadvantage may target one bounded check category; fictional is explicitly non-mechanical.",
     {
       type: "object",
-      properties: { title: { type: "string" }, description: { type: "string" }, effectType: { type: "string", enum: ["fictional", "advantage", "disadvantage", "condition", "damage", "healing", "movement", "summoning"] }, targetId: { type: "string" }, amount: { type: "integer", minimum: 0 }, durationRounds: { type: "integer", minimum: 1 }, condition: { type: "string" } },
+      properties: { title: { type: "string" }, description: { type: "string" }, effectType: { type: "string", enum: ["fictional", "advantage", "disadvantage", "condition", "damage", "healing", "movement", "summoning"] }, targetId: { type: "string" }, amount: { type: "integer", minimum: 0 }, durationRounds: { type: "integer", minimum: 1 }, condition: { type: "string" }, checkCategory: { type: "string", enum: ["attack-roll", "ability-check", "saving-throw"] } },
       required: ["title", "description", "effectType"],
       additionalProperties: false,
     }
@@ -861,6 +871,10 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         sceneId: args.sceneId,
         difficultyBand: args.difficultyBand,
         requestedStakes: args.requestedStakes,
+        helperId: args.helperId,
+        opponentId: args.opponentId,
+        informationPolicy: args.informationPolicy,
+        tool: args.tool,
       });
     case "character_update":
       return engineCommandSchema.parse({ kind: "character_update", ...args });
@@ -875,7 +889,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "quest_update":
       return engineCommandSchema.parse({ kind: "quest_update", questId: args.questId, status: args.status, objective: args.objective, progress: args.progress });
     case "improvise":
-      return engineCommandSchema.parse({ kind: "improvise", title: args.title, description: args.description, effectType: args.effectType, targetId: args.targetId, amount: args.amount, durationRounds: args.durationRounds, condition: args.condition });
+      return engineCommandSchema.parse({ kind: "improvise", title: args.title, description: args.description, effectType: args.effectType, targetId: args.targetId, amount: args.amount, durationRounds: args.durationRounds, condition: args.condition, checkCategory: args.checkCategory });
     case "campaign_beat":
       return engineCommandSchema.parse({ kind: "campaign_beat", title: args.title, description: args.description, pressure: args.pressure, choices: args.choices });
     case "character_create":
@@ -987,6 +1001,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         ability: args.ability,
         skill: args.skill,
         goal: args.goal,
+        passive: args.passive,
       });
     case "campaign_context":
     case "content_search":

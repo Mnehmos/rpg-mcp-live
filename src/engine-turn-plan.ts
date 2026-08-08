@@ -114,6 +114,7 @@ function toEffectEvidence(effect: StagedEngineTurnEffect): EngineTurnEffectEvide
     rolls: event.rolls.map((roll) => ({ ...roll })),
     modifiers: event.modifiers.map((modifier) => ({ ...modifier })),
     ...(event.adjudication ? { adjudication: event.adjudication } : {}),
+    ...(event.check ? { check: event.check } : {}),
     outcome: effect.resolution.message,
     stateChanges: event.stateChanges.map((change) => ({ ...change })),
     data: effect.resolution.data,
