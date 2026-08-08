@@ -752,6 +752,7 @@ export const engineToolNameSchema = z.enum([
   "use_item",
   "quest_progress",
   "combat_state",
+  "controlled_actor_context",
   "combat_start",
   "encounter_decision",
   "spawn_creature",
@@ -762,6 +763,9 @@ export const engineToolNameSchema = z.enum([
   "combat_action",
   "combat_move",
   "end_turn",
+  "controlled_actor_create",
+  "controlled_actor_command",
+  "controlled_actor_dismiss",
   "advance_turn",
   "advancement_confirm",
   "npc_advance",
@@ -1485,6 +1489,9 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("end_turn") }).strict(),
+  engineControlledActorCreateCommandSchema,
+  engineControlledActorCommandSchema,
+  engineControlledActorDismissCommandSchema,
   z.object({
     kind: z.literal("advance_turn"),
     combatantId: z.string().trim().min(1).max(120).optional(),
@@ -2196,6 +2203,91 @@ export interface EngineCombatantView extends EngineCombatant {
   mechanicsStatus: "typed-statblock" | "basic-attacks-compiled" | "effect-programs-compiled";
 }
 
+export type EngineControlledActorKind = "companion" | "summon";
+export type EngineControlledActorStatus = "active" | "incapacitated" | "dead" | "dismissed" | "expired";
+export type EngineControlledActorTurnPolicy = "controller-turn";
+export type EngineControlledActorDefaultBehavior = "guard";
+export type EngineControlledActorBehavior = "idle" | "attack" | "guard" | "follow";
+export type EngineControlledActorCommandCost = "action" | "bonus-action";
+export type EngineControlledActorProgressionPolicy = "none";
+export type EngineControlledActorLootPolicy = "none";
+
+export interface EngineControlledActorAttack {
+  attackBonus: number;
+  damageDice: string;
+  damageBonus: number;
+  damageType: string;
+  rangeFeet: number;
+}
+
+export interface EngineControlledActor {
+  id: string;
+  profileId: EngineControlledActorProfile;
+  kind: EngineControlledActorKind;
+  name: string;
+  ownerActorId: string;
+  controllerActorId: string;
+  summonerActorId: string | null;
+  riderActorId: string | null;
+  passengerOfActorId: string | null;
+  employerActorId: string | null;
+  charmControllerActorId: string | null;
+  factionId: string | null;
+  sourceRef: string | null;
+  status: EngineControlledActorStatus;
+  hp: number;
+  maxHp: number;
+  position: EngineTacticalPosition;
+  footprint: EngineTacticalFootprint;
+  senses: EngineSenseCapabilities;
+  turnPolicy: EngineControlledActorTurnPolicy;
+  defaultBehavior: EngineControlledActorDefaultBehavior;
+  progressionPolicy: EngineControlledActorProgressionPolicy;
+  lootPolicy: EngineControlledActorLootPolicy;
+  turnBudget: EngineTurnBudget;
+  commandedThisTurn: boolean;
+  lastCommandId: string | null;
+  lastBehavior: EngineControlledActorBehavior;
+  guardedUntilRound: number | null;
+  attack: EngineControlledActorAttack;
+  inventory: EngineInventoryItem[];
+  createdAtMinutes: number;
+  expiresAtMinutes: number | null;
+  terminalAtMinutes: number | null;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+    profileRevision: string;
+  };
+}
+
+export interface EngineControlledActorCommandOffer {
+  action: EngineControlledActorCommandAction;
+  cost: EngineControlledActorCommandCost;
+  targetRequired: boolean;
+  legal: boolean;
+  reason: string | null;
+}
+
+export interface EngineControlledActorView extends Omit<
+  EngineControlledActor,
+  | "inventory"
+  | "ownerActorId"
+  | "controllerActorId"
+  | "summonerActorId"
+  | "riderActorId"
+  | "passengerOfActorId"
+  | "employerActorId"
+  | "charmControllerActorId"
+  | "factionId"
+  | "sourceRef"
+  | "provenance"
+> {
+  inventory: EngineInventoryItemView[];
+  knowledge: EngineKnowledgeRecord[];
+  legalCommands: EngineControlledActorCommandOffer[];
+}
+
 export interface EngineWeaponAttack {
   weaponId: string;
   weaponName: string;
@@ -2365,7 +2457,7 @@ export interface EngineGameTime {
 
 export interface EngineScheduledEvent {
   id: string;
-  kind: "rest-interruption" | "effect-expiry" | "world-clock" | "quest-deadline" | "social-propagation";
+  kind: "rest-interruption" | "effect-expiry" | "world-clock" | "quest-deadline" | "social-propagation" | "controlled-actor-expiry";
   dueAtMinutes: number;
   status: "pending" | "processed";
   sourceRef?: string;
@@ -2529,6 +2621,7 @@ export interface LanternCampaignState {
   pendingAdvancement: EnginePendingAdvancement | null;
   /** Shared exactly-once reward-key space used by encounters and quests. */
   claimedRewards: string[];
+  controlledActors: EngineControlledActor[];
   time: EngineTimeState;
   social?: EngineSocialState;
   worldContext: EngineWorldContext | null;
@@ -2602,6 +2695,7 @@ export interface EngineSessionView {
   currentBeat: EngineCampaignBeat | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
   combat: EngineCombatView;
+  controlledActors: EngineControlledActorView[];
   updatedAt: string;
 }
 

@@ -218,6 +218,14 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   use_item: z.object({ itemId: z.string().trim().min(1).max(80) }).strict(),
   quest_progress: noArguments,
   combat_state: noArguments,
+  controlled_actor_context: noArguments,
+  controlled_actor_create: z.object({ profileId: z.enum(["familiar-scout-v1", "summon-scout-v1"]) }).strict(),
+  controlled_actor_command: z.object({
+    actorId: z.string().trim().min(1).max(120),
+    action: z.enum(["attack", "guard", "follow"]),
+    targetId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
+  controlled_actor_dismiss: z.object({ actorId: z.string().trim().min(1).max(120) }).strict(),
   combat_start: z
     .object({
       encounterId: z.string().trim().min(1).max(120),
@@ -335,6 +343,7 @@ const readOnlyTools = new Set<EngineToolName>([
   "inventory",
   "quest_progress",
   "combat_state",
+  "controlled_actor_context",
 ]);
 
 const inventoryItemJsonSchema = {
@@ -802,6 +811,36 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool("quest_progress", "Read objective and reward progress. Read-only.", {}),
   tool("combat_state", "Read encounter status, turn owner, action economy, enemies, and target HP. Read-only.", {}),
+  tool("controlled_actor_context", "Read controlled companions and summons, their independent state, senses, knowledge, and legal controller-turn commands. Read-only.", {}),
+  tool(
+    "controlled_actor_create",
+    "Create one fixed familiar or temporary summon profile. The engine owns identity, stats, senses, duration, and source linkage; callers cannot author them.",
+    {
+      type: "object",
+      properties: { profileId: { type: "string", enum: ["familiar-scout-v1", "summon-scout-v1"] } },
+      required: ["profileId"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "controlled_actor_command",
+    "Command one controlled familiar or summon during the controller's turn. The engine owns action/bonus cost, target validation, fixed attack, guard, follow, and fallback behavior.",
+    {
+      type: "object",
+      properties: {
+        actorId: { type: "string" },
+        action: { type: "string", enum: ["attack", "guard", "follow"] },
+        targetId: { type: "string" },
+      },
+      required: ["actorId", "action"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "controlled_actor_dismiss",
+    "Dismiss one controlled companion or summon. Dismissal is authoritative, replay-safe, and removes source-linked effects.",
+    { type: "object", properties: { actorId: { type: "string" } }, required: ["actorId"], additionalProperties: false }
+  ),
   tool(
     "combat_start",
     "Start a DM-authored encounter using installed Open5e creature content keys. Search creatures first; never supply or invent stats.",
@@ -1214,6 +1253,12 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       });
     case "end_turn":
       return engineCommandSchema.parse({ kind: "end_turn" });
+    case "controlled_actor_create":
+      return engineCommandSchema.parse({ kind: "controlled_actor_create", profileId: args.profileId });
+    case "controlled_actor_command":
+      return engineCommandSchema.parse({ kind: "controlled_actor_command", actorId: args.actorId, action: args.action, targetId: args.targetId });
+    case "controlled_actor_dismiss":
+      return engineCommandSchema.parse({ kind: "controlled_actor_dismiss", actorId: args.actorId });
     case "advancement_confirm":
       return engineCommandSchema.parse({ kind: "advancement_confirm", pendingId: args.pendingId });
     case "npc_advance":
@@ -1311,6 +1356,8 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "inventory":
     case "quest_progress":
     case "combat_state":
+      return null;
+    case "controlled_actor_context":
       return null;
   }
   return null;
@@ -1497,6 +1544,7 @@ export function executeReadTool(
         | "inventory"
         | "quest_progress"
         | "combat_state"
+        | "controlled_actor_context"
     ),
     campaignVersion: state.version,
   };

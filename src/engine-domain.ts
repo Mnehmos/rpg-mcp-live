@@ -76,6 +76,12 @@ import type {
   EngineTacticalPosition,
   EngineTacticalTerrain,
   EngineCombatTacticalState,
+  EngineControlledActor,
+  EngineControlledActorAttack,
+  EngineControlledActorCommandAction,
+  EngineControlledActorCommandOffer,
+  EngineControlledActorProfile,
+  EngineControlledActorView,
   EngineEncounterApproachEvidence,
   EngineEncounterInitiative,
   EngineEncounterInitiativeEntry,
@@ -864,7 +870,7 @@ function normalizeTimeState(value: unknown): EngineTimeState {
         if (!candidate || typeof candidate !== "object") return [];
         const event = candidate as Partial<EngineScheduledEvent>;
         if (typeof event.id !== "string" || typeof event.kind !== "string" || typeof event.dueAtMinutes !== "number") return [];
-        if (!["rest-interruption", "effect-expiry", "world-clock", "quest-deadline", "social-propagation"].includes(event.kind)) return [];
+        if (!["rest-interruption", "effect-expiry", "world-clock", "quest-deadline", "social-propagation", "controlled-actor-expiry"].includes(event.kind)) return [];
         return [{
           id: event.id,
           kind: event.kind as EngineScheduledEvent["kind"],
@@ -1437,6 +1443,7 @@ export function createInitialCampaign(
     advancementPolicy: defaultAdvancementPolicy(),
     pendingAdvancement: null,
     claimedRewards: [],
+    controlledActors: [],
     time: defaultTimeState(),
     social: defaultSocialState(),
     worldContext: null,
@@ -1502,6 +1509,14 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   next.claimedRewards = Array.isArray((next as LanternCampaignState & { claimedRewards?: unknown }).claimedRewards)
     ? [...new Set((next as LanternCampaignState & { claimedRewards?: unknown }).claimedRewards!.filter((key): key is string => typeof key === "string"))]
     : [];
+  next.controlledActors = normalizeControlledActors((next as LanternCampaignState & { controlledActors?: unknown }).controlledActors, next);
+  const terminalControlledActorIds = new Set(next.controlledActors.filter((actor) => actor.status !== "active").map((actor) => actor.id));
+  for (const actor of next.controlledActors) {
+    if (actor.status !== "active" && actor.sourceRef) removeRuntimeSource(next, actor.sourceRef);
+  }
+  if (terminalControlledActorIds.size > 0) {
+    next.time.scheduledEvents = next.time.scheduledEvents.filter((event) => !(event.status === "pending" && event.targetRef && terminalControlledActorIds.has(event.targetRef)));
+  }
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
   next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
@@ -1531,6 +1546,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.advancementPolicy = defaultAdvancementPolicy();
     next.pendingAdvancement = null;
     next.claimedRewards = [];
+    next.controlledActors = [];
     next.quest = {
       id: "first-light",
       title: "The first chapter",
@@ -1571,6 +1587,117 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   // from play; old scene data must not leak back into the player experience.
   delete next.scene;
   return next;
+}
+
+const CONTROLLED_ACTOR_PROFILE_REVISION = "controlled-actors-v1";
+
+function controlledActorProfile(profileId: EngineControlledActorProfile): {
+  profileId: EngineControlledActorProfile;
+  kind: "companion" | "summon";
+  name: string;
+  maxHp: number;
+  attack: EngineControlledActorAttack;
+  expiresAfterMinutes: number | null;
+} {
+  if (profileId === "summon-scout-v1") {
+    return {
+      profileId,
+      kind: "summon",
+      name: "Arcane scout",
+      maxHp: 8,
+      attack: { attackBonus: 3, damageDice: "1d4", damageBonus: 1, damageType: "force", rangeFeet: 30 },
+      expiresAfterMinutes: 60,
+    };
+  }
+  return {
+    profileId: "familiar-scout-v1",
+    kind: "companion",
+    name: "Scout familiar",
+    maxHp: 5,
+    attack: { attackBonus: 4, damageDice: "1d4", damageBonus: 2, damageType: "piercing", rangeFeet: 5 },
+    expiresAfterMinutes: null,
+  };
+}
+
+function isControlledActorProfile(value: unknown): value is EngineControlledActorProfile {
+  return value === "familiar-scout-v1" || value === "summon-scout-v1";
+}
+
+function controlledActorPosition(state: LanternCampaignState): EngineTacticalPosition {
+  if (state.combat?.status === "active" && state.combat.tactical && isTacticalPosition(state.combat.tactical.actorPosition)) {
+    return { ...state.combat.tactical.actorPosition };
+  }
+  return { frameId: `campaign:${state.id}`, x: 0, y: 0, z: 0 };
+}
+
+function normalizeControlledActors(value: unknown, state: LanternCampaignState): EngineControlledActor[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Partial<EngineControlledActor>;
+    if (typeof raw.id !== "string" || !raw.id || !isControlledActorProfile(raw.profileId)) return [];
+    const profile = controlledActorProfile(raw.profileId);
+    const createdAtMinutes = typeof raw.createdAtMinutes === "number" && Number.isFinite(raw.createdAtMinutes)
+      ? Math.max(0, Math.trunc(raw.createdAtMinutes))
+      : state.time.gameTime.totalMinutes;
+    const position = isTacticalPosition(raw.position) ? { ...raw.position } : controlledActorPosition(state);
+    const hp = Math.max(0, Math.min(profile.maxHp, Math.trunc(typeof raw.hp === "number" ? raw.hp : profile.maxHp)));
+    const requestedStatus = raw.status === "incapacitated" || raw.status === "dead" || raw.status === "dismissed" || raw.status === "expired" ? raw.status : "active";
+    const status = requestedStatus === "active" && hp <= 0 ? "dead" : requestedStatus;
+    const expiresAtMinutes = profile.expiresAfterMinutes === null
+      ? null
+      : Math.max(createdAtMinutes, Math.trunc(typeof raw.expiresAtMinutes === "number" ? raw.expiresAtMinutes : createdAtMinutes + profile.expiresAfterMinutes));
+    const lastBehavior = raw.lastBehavior === "attack" || raw.lastBehavior === "guard" || raw.lastBehavior === "follow" ? raw.lastBehavior : "idle";
+    const terminalAtMinutes = typeof raw.terminalAtMinutes === "number" ? Math.max(0, Math.trunc(raw.terminalAtMinutes)) : null;
+    return [{
+      id: raw.id,
+      profileId: profile.profileId,
+      kind: profile.kind,
+      name: profile.name,
+      ownerActorId: typeof raw.ownerActorId === "string" && raw.ownerActorId ? raw.ownerActorId : state.actorId,
+      controllerActorId: typeof raw.controllerActorId === "string" && raw.controllerActorId ? raw.controllerActorId : state.actorId,
+      summonerActorId: profile.kind === "summon"
+        ? (typeof raw.summonerActorId === "string" && raw.summonerActorId ? raw.summonerActorId : state.actorId)
+        : null,
+      riderActorId: typeof raw.riderActorId === "string" && raw.riderActorId ? raw.riderActorId : null,
+      passengerOfActorId: typeof raw.passengerOfActorId === "string" && raw.passengerOfActorId ? raw.passengerOfActorId : null,
+      employerActorId: typeof raw.employerActorId === "string" && raw.employerActorId ? raw.employerActorId : null,
+      charmControllerActorId: typeof raw.charmControllerActorId === "string" && raw.charmControllerActorId ? raw.charmControllerActorId : null,
+      factionId: typeof raw.factionId === "string" && raw.factionId ? raw.factionId : null,
+      sourceRef: typeof raw.sourceRef === "string" && raw.sourceRef ? raw.sourceRef : profile.kind === "summon" ? `controlled-actor-source:${raw.id}` : null,
+      status,
+      hp,
+      maxHp: profile.maxHp,
+      position,
+      footprint: normalizeFootprint(raw.footprint),
+      senses: {
+        normalVision: raw.senses?.normalVision !== false,
+        darkvisionFeet: typeof raw.senses?.darkvisionFeet === "number" ? Math.max(0, Math.trunc(raw.senses.darkvisionFeet)) : 30,
+        blindsightFeet: typeof raw.senses?.blindsightFeet === "number" ? Math.max(0, Math.trunc(raw.senses.blindsightFeet)) : 0,
+        tremorsenseFeet: typeof raw.senses?.tremorsenseFeet === "number" ? Math.max(0, Math.trunc(raw.senses.tremorsenseFeet)) : 0,
+        hearing: raw.senses?.hearing !== false,
+      },
+      turnPolicy: "controller-turn",
+      defaultBehavior: "guard",
+      progressionPolicy: "none",
+      lootPolicy: "none",
+      turnBudget: normalizeTurnBudget(raw.turnBudget, 30),
+      commandedThisTurn: Boolean(raw.commandedThisTurn) && status === "active",
+      lastCommandId: typeof raw.lastCommandId === "string" ? raw.lastCommandId : null,
+      lastBehavior,
+      guardedUntilRound: typeof raw.guardedUntilRound === "number" ? Math.max(0, Math.trunc(raw.guardedUntilRound)) : null,
+      attack: { ...profile.attack },
+      inventory: Array.isArray(raw.inventory) ? raw.inventory.map((item) => normalizeInventoryItem(item)) : [],
+      createdAtMinutes,
+      expiresAtMinutes,
+      terminalAtMinutes,
+      provenance: {
+        sourceCommandId: typeof raw.provenance?.sourceCommandId === "string" ? raw.provenance.sourceCommandId : "legacy-controlled-actor",
+        sourceVersion: Math.max(0, Math.trunc(raw.provenance?.sourceVersion ?? 0)),
+        profileRevision: CONTROLLED_ACTOR_PROFILE_REVISION,
+      },
+    } satisfies EngineControlledActor];
+  });
 }
 
 function normalizeCorpses(value: unknown): EngineCorpse[] {
@@ -1900,7 +2027,11 @@ function recalculateProgressionOnLoad(character: EngineCharacter): EngineCharact
 
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
   const projection = actorKnowledgeProjection(state.actorId, state);
+  const controlledActors = projectControlledActors(state);
   const sandboxActions = ["observe", "listen", "roll"];
+  const controlledActorActions = state.character.created
+    ? ["controlled_actor_create", ...(controlledActors.some((actor) => actor.status === "active") ? ["controlled_actor_dismiss"] : [])]
+    : [];
   const advancementActions = state.pendingAdvancement?.status === "pending" ? ["advancement_confirm"] : [];
   const combatActions = state.combat.status === "active"
     ? state.combat.pendingReaction
@@ -1912,6 +2043,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
           ...(state.combat.turnBudget.movementFeet.spent < state.combat.turnBudget.movementFeet.available ? ["combat_move"] : []),
           ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", ...(state.combat.lifecycle ? ["combat_action:attack_nonlethal"] : []), "combat_action:dodge"]),
           ...(state.combat.turnBudget.bonusAction.spent || (state.character.featureUses.secondWind ?? 0) < 1 ? [] : ["combat_action:second_wind"]),
+          ...(controlledActors.some((actor) => actor.legalCommands.some((offer) => offer.legal)) ? ["controlled_actor_command"] : []),
           "end_turn",
         ]
       : ["advance_turn"]
@@ -1948,12 +2080,70 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
         ? ["create_character"]
         : state.phase === "tutorial"
           ? ["continue"]
-          : [...sandboxActions, ...advancementActions, ...combatActions],
+          : [...sandboxActions, ...advancementActions, ...controlledActorActions, ...combatActions],
     lastRoll: state.lastRoll,
     character: characterData(state.character) as EngineSessionView["character"],
     combat: combatData(state.combat),
+    controlledActors,
     updatedAt: state.updatedAt,
   };
+}
+
+function controlledActorLegalCommands(state: LanternCampaignState, actor: EngineControlledActor): EngineControlledActorCommandOffer[] {
+  const actions: Array<{ action: EngineControlledActorCommandAction; cost: "action" | "bonus-action"; targetRequired: boolean }> = [
+    { action: "attack", cost: "action", targetRequired: true },
+    { action: "guard", cost: "action", targetRequired: false },
+    { action: "follow", cost: "bonus-action", targetRequired: false },
+  ];
+  return actions.map(({ action, cost, targetRequired }) => {
+    let reason: string | null = null;
+    if (actor.status !== "active") reason = `Actor is ${actor.status}.`;
+    else if (actor.controllerActorId !== state.actorId) reason = "This actor has a different controller.";
+    else if (state.combat.status !== "active") reason = "A controller-turn command requires an active encounter.";
+    else if (state.combat.pendingReaction) reason = "Resolve the pending reaction first.";
+    else if (state.combat.activeActorId !== state.actorId) reason = "The controller's turn is not active.";
+    else if (state.combat.turnBudget[cost === "action" ? "action" : "bonusAction"].spent) reason = `The controller's ${cost} is already spent.`;
+    else if (actor.turnBudget[cost === "action" ? "action" : "bonusAction"].spent) reason = `The actor's ${cost} is already spent.`;
+    else if (action === "attack" && !state.combat.enemies.some((enemy) => enemy.alive && fiveESimpleDistanceFeet(actor.position, enemy.position) <= controlledActorRangeFeet(actor))) reason = "No living target is within the actor's fixed attack range.";
+    return { action, cost, targetRequired, legal: reason === null, reason };
+  });
+}
+
+function controlledActorView(state: LanternCampaignState, actor: EngineControlledActor): EngineControlledActorView {
+  return {
+    id: actor.id,
+    profileId: actor.profileId,
+    kind: actor.kind,
+    name: actor.name,
+    status: actor.status,
+    hp: actor.hp,
+    maxHp: actor.maxHp,
+    position: actor.position,
+    footprint: actor.footprint,
+    senses: actor.senses,
+    turnPolicy: actor.turnPolicy,
+    defaultBehavior: actor.defaultBehavior,
+    progressionPolicy: actor.progressionPolicy,
+    lootPolicy: actor.lootPolicy,
+    turnBudget: actor.turnBudget,
+    commandedThisTurn: actor.commandedThisTurn,
+    lastCommandId: actor.lastCommandId,
+    lastBehavior: actor.lastBehavior,
+    guardedUntilRound: actor.guardedUntilRound,
+    attack: actor.attack,
+    createdAtMinutes: actor.createdAtMinutes,
+    expiresAtMinutes: actor.expiresAtMinutes,
+    terminalAtMinutes: actor.terminalAtMinutes,
+    inventory: materializeInventory(actor.inventory),
+    knowledge: state.actorKnowledge.filter((record) => record.actorId === actor.id),
+    legalCommands: controlledActorLegalCommands(state, actor),
+  };
+}
+
+function projectControlledActors(state: LanternCampaignState): EngineControlledActorView[] {
+  return state.controlledActors
+    .filter((actor) => actor.ownerActorId === state.actorId || actor.controllerActorId === state.actorId)
+    .map((actor) => controlledActorView(state, actor));
 }
 
 export function readToolData(
@@ -1969,6 +2159,7 @@ export function readToolData(
     | "inventory"
     | "quest_progress"
     | "combat_state"
+    | "controlled_actor_context"
 ): unknown {
   const projection = actorKnowledgeProjection(state.actorId, state);
   switch (tool) {
@@ -1995,6 +2186,7 @@ export function readToolData(
         currentBeat: state.currentBeat,
         character: characterData(state.character),
         combat: combatData(state.combat),
+        controlledActors: projectControlledActors(state),
         quest: projectQuestForActor(state.quest, state, state.actorId),
         recentLog: state.log.slice(-8),
       };
@@ -2030,6 +2222,8 @@ export function readToolData(
       return projectQuestForActor(state.quest, state, state.actorId);
     case "combat_state":
       return combatData(state.combat);
+    case "controlled_actor_context":
+      return { controlledActors: projectControlledActors(state), campaignVersion: state.version };
   }
 }
 
@@ -2324,6 +2518,12 @@ export function resolveEngineCommand(
       return resolveCombatMove(state, context, clientCommandId, command, tool);
     case "end_turn":
       return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
+    case "controlled_actor_create":
+      return resolveControlledActorCreate(state, context, clientCommandId, command, tool);
+    case "controlled_actor_command":
+      return resolveControlledActorCommand(state, context, clientCommandId, command, tool);
+    case "controlled_actor_dismiss":
+      return resolveControlledActorDismiss(state, context, clientCommandId, command, tool);
     case "combat_start":
       return resolveCombatStart(state, context, clientCommandId, command, tool);
     case "encounter_decision":
@@ -5634,6 +5834,15 @@ function resolveCombatStart(
     lootClaimed: false,
     lastAction: null,
   };
+  const controlledActorChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+  for (const actor of next.controlledActors) {
+    if (actor.status !== "active") continue;
+    const beforePosition = actor.position;
+    const afterPosition = { ...tactical.actorPosition };
+    if (JSON.stringify(beforePosition) === JSON.stringify(afterPosition)) continue;
+    actor.position = afterPosition;
+    controlledActorChanges.push({ path: `/controlledActors/${actor.id}/position`, before: beforePosition, after: afterPosition });
+  }
   return commit(
     next,
     context,
@@ -5641,11 +5850,11 @@ function resolveCombatStart(
     command,
     tool,
     "Encounter started: " + command.encounterName + ". " + describeCombatants(enemies) + (activeActorId === state.actorId ? " Your turn." : " The opposition acts first."),
-    { combat: combatData(next.combat) },
+    { combat: combatData(next.combat), controlledActors: projectControlledActors(next) },
     "encounter_started",
     [],
     [],
-    [{ path: "/combat", before: state.combat, after: next.combat }]
+    [{ path: "/combat", before: state.combat, after: next.combat }, ...controlledActorChanges]
   );
 }
 
@@ -6979,6 +7188,289 @@ function resolveCombatAction(
   }, outcome, rolls, modifiers, changes);
 }
 
+function controlledActorCommandSlot(action: EngineControlledActorCommandAction): "action" | "bonusAction" {
+  return action === "follow" ? "bonusAction" : "action";
+}
+
+function controlledActorRangeFeet(actor: EngineControlledActor): number {
+  return actor.attack.rangeFeet;
+}
+
+function resetControlledActorTurns(
+  state: LanternCampaignState,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  for (const actor of state.controlledActors) {
+    if (actor.status !== "active" || actor.controllerActorId !== state.actorId) continue;
+    const beforeBudget = JSON.parse(JSON.stringify(actor.turnBudget)) as EngineControlledActor["turnBudget"];
+    const beforeCommanded = actor.commandedThisTurn;
+    const beforeLastCommandId = actor.lastCommandId;
+    const beforeLastBehavior = actor.lastBehavior;
+    resetTurnBudget(actor.turnBudget, 30);
+    actor.commandedThisTurn = false;
+    actor.lastCommandId = null;
+    actor.lastBehavior = "idle";
+    if (changes && (JSON.stringify(beforeBudget) !== JSON.stringify(actor.turnBudget) || beforeCommanded || beforeLastCommandId !== null || beforeLastBehavior !== "idle")) {
+      if (JSON.stringify(beforeBudget) !== JSON.stringify(actor.turnBudget)) changes.push({ path: `/controlledActors/${actor.id}/turnBudget`, before: beforeBudget, after: actor.turnBudget });
+      if (beforeCommanded) changes.push({ path: `/controlledActors/${actor.id}/commandedThisTurn`, before: true, after: false });
+      if (beforeLastCommandId !== null) changes.push({ path: `/controlledActors/${actor.id}/lastCommandId`, before: beforeLastCommandId, after: null });
+      if (beforeLastBehavior !== "idle") changes.push({ path: `/controlledActors/${actor.id}/lastBehavior`, before: beforeLastBehavior, after: "idle" });
+    }
+  }
+}
+
+function applyControlledActorFallback(
+  state: LanternCampaignState,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  for (const actor of state.controlledActors) {
+    if (actor.status !== "active" || actor.controllerActorId !== state.actorId || actor.commandedThisTurn) continue;
+    const beforeBudget = JSON.parse(JSON.stringify(actor.turnBudget)) as EngineControlledActor["turnBudget"];
+    const beforeBehavior = actor.lastBehavior;
+    const beforeGuardedUntilRound = actor.guardedUntilRound;
+    if (!actor.turnBudget.action.spent) spendTurnSlot(actor.turnBudget, "action");
+    actor.commandedThisTurn = true;
+    actor.lastBehavior = "guard";
+    actor.guardedUntilRound = state.combat.round + 1;
+    changes.push(
+      { path: `/controlledActors/${actor.id}/turnBudget/action`, before: beforeBudget.action, after: actor.turnBudget.action },
+      { path: `/controlledActors/${actor.id}/commandedThisTurn`, before: false, after: true },
+      { path: `/controlledActors/${actor.id}/lastBehavior`, before: beforeBehavior, after: "guard" },
+      { path: `/controlledActors/${actor.id}/guardedUntilRound`, before: beforeGuardedUntilRound, after: actor.guardedUntilRound },
+    );
+  }
+}
+
+function resolveControlledActorCreate(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "controlled_actor_create" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.character.created) return rejection(state, tool, "character_required", "Create the controlling character before creating a companion or summon.");
+  if (context.actorId !== state.actorId) return rejection(state, tool, "controlled_actor_unauthorized", "Only the owning actor may create a controlled actor in this slice.");
+  if (state.controlledActors.some((actor) => actor.profileId === command.profileId && actor.status === "active")) {
+    return rejection(state, tool, "controlled_actor_exists", "That fixed controlled-actor profile is already active.");
+  }
+  const profile = controlledActorProfile(command.profileId);
+  const id = `controlled:${randomUUID()}`;
+  const createdAtMinutes = state.time.gameTime.totalMinutes;
+  const actor: EngineControlledActor = {
+    id,
+    profileId: profile.profileId,
+    kind: profile.kind,
+    name: profile.name,
+    ownerActorId: state.actorId,
+    controllerActorId: state.actorId,
+    summonerActorId: profile.kind === "summon" ? state.actorId : null,
+    riderActorId: null,
+    passengerOfActorId: null,
+    employerActorId: null,
+    charmControllerActorId: null,
+    factionId: null,
+    sourceRef: profile.kind === "summon" ? `controlled-actor-source:${id}` : null,
+    status: "active",
+    hp: profile.maxHp,
+    maxHp: profile.maxHp,
+    position: controlledActorPosition(state),
+    footprint: { width: 1, height: 1 },
+    senses: { normalVision: true, darkvisionFeet: 30, blindsightFeet: 0, tremorsenseFeet: 0, hearing: true },
+    turnPolicy: "controller-turn",
+    defaultBehavior: "guard",
+    progressionPolicy: "none",
+    lootPolicy: "none",
+    turnBudget: emptyTurnBudget(30),
+    commandedThisTurn: false,
+    lastCommandId: null,
+    lastBehavior: "idle",
+    guardedUntilRound: null,
+    attack: { ...profile.attack },
+    inventory: [],
+    createdAtMinutes,
+    expiresAtMinutes: profile.expiresAfterMinutes === null ? null : createdAtMinutes + profile.expiresAfterMinutes,
+    terminalAtMinutes: null,
+    provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, profileRevision: CONTROLLED_ACTOR_PROFILE_REVISION },
+  };
+  const next = cloneCampaign(state);
+  next.controlledActors.push(actor);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: "/controlledActors", before: state.controlledActors, after: next.controlledActors },
+  ];
+  if (actor.expiresAtMinutes !== null && actor.sourceRef) {
+    const scheduledEvent: EngineScheduledEvent = {
+      id: `controlled-actor-expiry:${actor.id}`,
+      kind: "controlled-actor-expiry",
+      dueAtMinutes: actor.expiresAtMinutes,
+      status: "pending",
+      sourceRef: actor.sourceRef,
+      targetRef: actor.id,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version },
+    };
+    next.time.scheduledEvents.push(scheduledEvent);
+    changes.push({ path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents });
+  }
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `${actor.name} joins under the fixed ${actor.profileId} profile.`,
+    { controlledActor: controlledActorView(next, actor), controlledActors: projectControlledActors(next) },
+    "controlled_actor_created",
+    [],
+    [],
+    changes,
+  );
+}
+
+function resolveControlledActorCommand(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "controlled_actor_command" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const actor = state.controlledActors.find((candidate) => candidate.id === command.actorId);
+  if (!actor) return rejection(state, tool, "controlled_actor_not_found", "That controlled actor is not present in this campaign.");
+  if (actor.controllerActorId !== context.actorId) {
+    return rejection(state, tool, "controlled_actor_unauthorized", "You are not the controller of that actor.");
+  }
+  if (actor.status !== "active") return rejection(state, tool, "controlled_actor_terminal", `That actor is ${actor.status} and cannot receive commands.`);
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "Controlled commands use the controller-turn policy and require an active encounter.");
+  if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "The controller's turn is not active.");
+  if (state.combat.pendingReaction) return rejection(state, tool, "reaction_pending", "Resolve the pending reaction before commanding a controlled actor.");
+  if (state.combat.lifecycle?.phase === "resolving") return rejection(state, tool, "surrender_decision_required", "Resolve the encounter decision before commanding a controlled actor.");
+  const slot = controlledActorCommandSlot(command.action);
+  if (state.combat.turnBudget[slot].spent) return rejection(state, tool, slot === "action" ? "action_already_used" : "bonus_action_already_used", `The controller's ${slot === "action" ? "action" : "bonus action"} is already spent this turn.`);
+  if (actor.turnBudget[slot].spent) return rejection(state, tool, slot === "action" ? "controlled_actor_action_used" : "controlled_actor_bonus_used", `That actor's ${slot === "action" ? "action" : "bonus action"} is already spent this turn.`);
+
+  const target = command.action === "attack" ? findLiveCombatant(state.combat, command.targetId) : null;
+  if (command.action === "attack" && !target) return rejection(state, tool, "target_required", "Choose a living encounter target for the controlled attack.");
+  if (target && fiveESimpleDistanceFeet(actor.position, target.position) > controlledActorRangeFeet(actor)) {
+    return rejection(state, tool, "target_out_of_range", `That target is outside the ${actor.name}'s fixed ${controlledActorRangeFeet(actor)}-foot range.`);
+  }
+
+  const next = cloneCampaign(state);
+  const nextActor = next.controlledActors.find((candidate) => candidate.id === actor.id);
+  if (!nextActor) return rejection(state, tool, "controlled_actor_not_found", "That controlled actor disappeared before the command could commit.");
+  const nextTarget = target ? next.combat.enemies.find((candidate) => candidate.id === target.id && candidate.alive) ?? null : null;
+  const beforeControllerSlot = state.combat.turnBudget[slot];
+  const beforeActorSlot = actor.turnBudget[slot];
+  spendTurnSlot(next.combat.turnBudget, slot);
+  spendTurnSlot(nextActor.turnBudget, slot);
+  nextActor.commandedThisTurn = true;
+  nextActor.lastCommandId = clientCommandId;
+  nextActor.lastBehavior = command.action;
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: `/combat/turnBudget/${slot}`, before: beforeControllerSlot, after: next.combat.turnBudget[slot] },
+    { path: `/controlledActors/${nextActor.id}/turnBudget/${slot}`, before: beforeActorSlot, after: nextActor.turnBudget[slot] },
+    { path: `/controlledActors/${nextActor.id}/commandedThisTurn`, before: actor.commandedThisTurn, after: true },
+    { path: `/controlledActors/${nextActor.id}/lastCommandId`, before: actor.lastCommandId, after: clientCommandId },
+    { path: `/controlledActors/${nextActor.id}/lastBehavior`, before: actor.lastBehavior, after: command.action },
+  ];
+  const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+  const modifiers: Array<{ name: string; value: number }> = [];
+  let message = `${nextActor.name} follows the ${command.action} command.`;
+  let outcome = `controlled_actor_${command.action}`;
+  if (command.action === "follow") {
+    const beforePosition = nextActor.position;
+    nextActor.position = { ...next.combat.tactical.actorPosition };
+    changes.push({ path: `/controlledActors/${nextActor.id}/position`, before: beforePosition, after: nextActor.position });
+    message = `${nextActor.name} follows you to your current position.`;
+  } else if (command.action === "guard") {
+    const beforeGuardedUntilRound = nextActor.guardedUntilRound;
+    nextActor.guardedUntilRound = next.combat.round + 1;
+    changes.push({ path: `/controlledActors/${nextActor.id}/guardedUntilRound`, before: beforeGuardedUntilRound, after: nextActor.guardedUntilRound });
+    message = `${nextActor.name} takes a guarded stance until the next round.`;
+  } else if (nextTarget) {
+    const targetView = materializeCombatant(nextTarget);
+    const attackRoll = randomInt(1, 21);
+    const critical = attackRoll === 20;
+    const total = attackRoll + nextActor.attack.attackBonus;
+    const hit = attackRoll !== 1 && (critical || total >= targetView.armorClass);
+    rolls.push({ kind: "controlled_actor_attack_d20", value: attackRoll, sides: 20 });
+    modifiers.push({ name: "controlled_actor_attack_bonus", value: nextActor.attack.attackBonus }, { name: "target_ac", value: targetView.armorClass });
+    if (hit) {
+      const diceMatch = nextActor.attack.damageDice.match(/^(\d+)d(\d+)$/i);
+      const diceCount = (diceMatch ? Number(diceMatch[1]) : 1) * (critical ? 2 : 1);
+      const dieSides = diceMatch ? Number(diceMatch[2]) : 4;
+      const damageDice = Array.from({ length: diceCount }, () => randomInt(1, dieSides + 1));
+      const damage = Math.max(1, damageDice.reduce((sum, die) => sum + die, 0) + nextActor.attack.damageBonus);
+      const beforeHp = nextTarget.hp;
+      nextTarget.hp = Math.max(0, nextTarget.hp - damage);
+      nextTarget.alive = nextTarget.hp > 0;
+      damageDice.forEach((die) => rolls.push({ kind: "controlled_actor_damage", value: die, sides: dieSides }));
+      modifiers.push({ name: "controlled_actor_damage_bonus", value: nextActor.attack.damageBonus });
+      changes.push({ path: `/combat/enemies/${nextTarget.id}/hp`, before: beforeHp, after: nextTarget.hp });
+      message = `${nextActor.name} ${critical ? "critically " : ""}hits ${targetView.name} for ${damage} ${nextActor.attack.damageType} damage.`;
+      outcome = nextTarget.alive ? "controlled_actor_hit" : "controlled_actor_defeated";
+      if (!nextTarget.alive && !next.combat.enemies.some((candidate) => candidate.alive)) {
+        next.combat.status = "ended";
+        next.combat.activeActorId = null;
+        changes.push({ path: "/combat/status", before: "active", after: "ended" });
+      }
+    } else {
+      message = `${nextActor.name} misses ${targetView.name}.`;
+      outcome = "controlled_actor_miss";
+    }
+  }
+  next.combat.lastAction = `controlled_actor:${nextActor.id}:${command.action}`;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    message,
+    { controlledActor: controlledActorView(next, nextActor), targetId: nextTarget?.id ?? null, cost: slot, combat: combatData(next.combat) },
+    outcome,
+    rolls,
+    modifiers,
+    changes,
+  );
+}
+
+function resolveControlledActorDismiss(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "controlled_actor_dismiss" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const actor = state.controlledActors.find((candidate) => candidate.id === command.actorId);
+  if (!actor) return rejection(state, tool, "controlled_actor_not_found", "That controlled actor is not present in this campaign.");
+  if (actor.ownerActorId !== context.actorId && actor.controllerActorId !== context.actorId) return rejection(state, tool, "controlled_actor_unauthorized", "You are not the controller or owner of that actor.");
+  if (actor.status !== "active") return rejection(state, tool, "controlled_actor_terminal", `That actor is already ${actor.status}.`);
+  const next = cloneCampaign(state);
+  const nextActor = next.controlledActors.find((candidate) => candidate.id === actor.id);
+  if (!nextActor) return rejection(state, tool, "controlled_actor_not_found", "That controlled actor disappeared before dismissal could commit.");
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  nextActor.status = "dismissed";
+  nextActor.terminalAtMinutes = next.time.gameTime.totalMinutes;
+  nextActor.commandedThisTurn = false;
+  if (nextActor.sourceRef) removeRuntimeSource(next, nextActor.sourceRef, changes);
+  next.time.scheduledEvents = next.time.scheduledEvents.filter((event) => event.targetRef !== nextActor.id || event.status !== "pending");
+  changes.push(
+    { path: "/controlledActors", before: state.controlledActors, after: next.controlledActors },
+    { path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents },
+  );
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `${nextActor.name} is dismissed and no longer acts.`,
+    { controlledActor: controlledActorView(next, nextActor), controlledActors: projectControlledActors(next) },
+    "controlled_actor_dismissed",
+    [],
+    [],
+    changes,
+  );
+}
+
 function resolvePlayerEndTurn(
   state: LanternCampaignState,
   context: RequestContext,
@@ -6990,20 +7482,22 @@ function resolvePlayerEndTurn(
   if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "It is not your turn.");
   if (state.combat.lifecycle?.phase === "resolving") return rejection(state, tool, "surrender_decision_required", "Resolve the server-owned surrender offer before ending the turn.");
   const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  applyControlledActorFallback(next, changes);
   const nextActor = next.combat.lifecycle
     ? lifecycleNextActorId(next.combat, state.actorId, state.actorId)
     : firstLiveCombatantId(next.combat);
   if (!nextActor) {
     next.combat.status = "ended";
     next.combat.activeActorId = null;
-    return commit(next, context, clientCommandId, command, tool, "With no foe left standing, the encounter ends.", { combat: combatData(next.combat) }, "encounter_ended", [], [], [{ path: "/combat/status", before: "active", after: "ended" }]);
+    return commit(next, context, clientCommandId, command, tool, "With no foe left standing, the encounter ends.", { combat: combatData(next.combat), controlledActors: projectControlledActors(next) }, "encounter_ended", [], [], [...changes, { path: "/combat/status", before: "active", after: "ended" }]);
   }
   next.combat.activeActorId = nextActor;
   if (next.combat.lifecycle) {
     next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(nextActor);
   }
   next.combat.lastAction = "end_turn";
-  return commit(next, context, clientCommandId, command, tool, "Your turn ends. The opposition may act.", { combat: combatData(next.combat) }, "turn_ended", [], [], [{ path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextActor }]);
+  return commit(next, context, clientCommandId, command, tool, "Your turn ends. The opposition may act.", { combat: combatData(next.combat), controlledActors: projectControlledActors(next) }, "turn_ended", [], [], [...changes, { path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextActor }]);
 }
 
 function resolveAdvanceTurn(
@@ -7284,6 +7778,7 @@ function resolveAdvanceTurn(
     next.combat.activeActorId = next.actorId;
     if (next.combat.lifecycle) next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(next.actorId);
     resetTurnBudget(next.combat.turnBudget, next.character.speed);
+    resetControlledActorTurns(next, changes);
     if (next.character.hp === 0) spendTurnSlot(next.combat.turnBudget, "action");
     message += next.character.hp === 0
       ? " Your turn arrives; make a death save."
@@ -7317,6 +7812,7 @@ function resolveSkippedCharacterTurn(
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
   const modifiers: Array<{ name: string; value: number }> = [];
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  applyControlledActorFallback(next, changes);
   resolveTargetEndConditionEffects(next, rolls, modifiers, changes);
   const beforeActor = next.combat.activeActorId;
   next.combat.activeActorId = firstLiveCombatantId(next.combat);
@@ -7334,7 +7830,7 @@ function resolveSkippedCharacterTurn(
     command,
     tool,
     `${next.character.name || "The character"} is ${condition}; the turn passes to the opposition.`,
-    { skipped: true, condition, combat: combatData(next.combat), character: characterData(next.character) },
+    { skipped: true, condition, combat: combatData(next.combat), character: characterData(next.character), controlledActors: projectControlledActors(next) },
     "turn_skipped_by_condition",
     rolls,
     modifiers,
@@ -7974,6 +8470,7 @@ function finishCreatureTurn(
   state.combat.round += 1;
   state.combat.activeActorId = state.actorId;
   resetTurnBudget(state.combat.turnBudget, state.character.speed);
+  resetControlledActorTurns(state, changes);
   if (state.character.hp === 0) spendTurnSlot(state.combat.turnBudget, "action");
   const beforeConditions = [...state.character.conditions];
   expireAtCharacterTurnStart(state, changes);
@@ -8452,7 +8949,27 @@ function advanceGameTime(
     }
   }
   next.time.gameTime = after;
+  const beforeControlledActors = sourceState.controlledActors;
+  for (const actor of next.controlledActors) {
+    if (actor.status !== "active" || actor.expiresAtMinutes === null || actor.expiresAtMinutes > after.totalMinutes) continue;
+    actor.status = "expired";
+    actor.terminalAtMinutes = actor.expiresAtMinutes;
+    actor.commandedThisTurn = false;
+    if (actor.sourceRef) removeRuntimeSource(next, actor.sourceRef);
+    const expiryEvent = next.time.scheduledEvents.find((event) => event.kind === "controlled-actor-expiry" && event.targetRef === actor.id && event.status === "processed");
+    if (!expiryEvent) {
+      const matchingEvent = next.time.scheduledEvents.find((event) => event.kind === "controlled-actor-expiry" && event.targetRef === actor.id);
+      if (matchingEvent) {
+        matchingEvent.status = "processed";
+        matchingEvent.processedAtMinutes = actor.expiresAtMinutes;
+        processedEventIds.push(matchingEvent.id);
+      }
+    }
+  }
   const questStateChanges = applyQuestDeadlineTransitions(next, sourceState, after, sourceCommandId);
+  if (JSON.stringify(beforeControlledActors) !== JSON.stringify(next.controlledActors)) {
+    questStateChanges.push({ path: "/controlledActors", before: beforeControlledActors, after: next.controlledActors });
+  }
   questStateChanges.push(...advanceQuestTimeClocks(next, sourceState, before, after));
   next.time.worldClocks = next.time.worldClocks.map((clock) => ({
     ...clock,
@@ -10416,12 +10933,41 @@ function redactEventForActor(event: EngineEvent): EngineEvent {
           ...(effectWithheld && effect.check ? { check: redactWithheldCheck(effect.check) } : {}),
           ...(effectWithheld && effect.adjudication ? { adjudication: redactWithheldAdjudication(effect.adjudication) } : {}),
           data: redactResolutionData(effect.data),
-          stateChanges: effect.stateChanges.filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge")),
+          stateChanges: redactStateChanges(effect.stateChanges),
         };
       }),
     } : {}),
-    stateChanges: event.stateChanges.filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge")),
+    stateChanges: redactStateChanges(event.stateChanges),
   };
+}
+
+const CONTROLLED_ACTOR_PRIVATE_FIELDS = [
+  "ownerActorId",
+  "controllerActorId",
+  "summonerActorId",
+  "riderActorId",
+  "passengerOfActorId",
+  "employerActorId",
+  "charmControllerActorId",
+  "factionId",
+  "sourceRef",
+  "provenance",
+] as const;
+
+function redactControlledActorValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => redactControlledActorValue(entry));
+  if (!value || typeof value !== "object") return value;
+  const projected = JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  for (const field of CONTROLLED_ACTOR_PRIVATE_FIELDS) delete projected[field];
+  return projected;
+}
+
+function redactStateChanges(changes: Array<{ path: string; before: unknown; after: unknown }>): Array<{ path: string; before: unknown; after: unknown }> {
+  return changes
+    .filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge"))
+    .map((change) => change.path.startsWith("/controlledActors") || change.path.startsWith("/time/scheduledEvents")
+      ? { ...change, before: redactControlledActorValue(change.before), after: redactControlledActorValue(change.after) }
+      : change);
 }
 
 function redactResolutionData(data: unknown): unknown {
@@ -11817,6 +12363,14 @@ function removeRuntimeSource(
   syncConditionProjections(state);
   if (changes && JSON.stringify(before) !== JSON.stringify(state.effects)) {
     changes.push({ path: "/effects", before, after: state.effects });
+  }
+  const beforeActors = state.controlledActors;
+  const now = state.time.gameTime.totalMinutes;
+  state.controlledActors = state.controlledActors.map((actor) => actor.status === "active" && actor.sourceRef === sourceRef
+    ? { ...actor, status: "expired", terminalAtMinutes: now, commandedThisTurn: false }
+    : actor);
+  if (changes && JSON.stringify(beforeActors) !== JSON.stringify(state.controlledActors)) {
+    changes.push({ path: "/controlledActors", before: beforeActors, after: state.controlledActors });
   }
 }
 
