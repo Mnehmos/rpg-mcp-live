@@ -24,8 +24,9 @@ import {
   type LanternCampaignState,
   type RequestContext,
 } from "./engine-contracts.js";
-import { createInitialCampaign, projectEventForActor, projectResolutionForActor, projectStateForActor, resolveEngineCommand, resolveProductionRoomEnter, resolveProductionRoomNarrationRelease, toSessionView } from "./engine-domain.js";
+import { createInitialCampaign, projectEventForActor, projectExperienceProfile, projectResolutionForActor, projectStateForActor, resolveEngineCommand, resolveOrchestrationDecision, resolveProductionRoomEnter, resolveProductionRoomNarrationRelease, toSessionView } from "./engine-domain.js";
 import { parseProductionRoomState, productionRoomNarrationReleaseRequestSchema, projectNarrationSequenceForActor, projectSceneForActor } from "./engine-production-room.js";
+import { buildResumeProjection, emptyOrchestrationState, orchestrationDecisionRequestSchema, refreshSceneFromEvents } from "./engine-orchestration.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
 import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js";
 import {
@@ -414,6 +415,55 @@ app.post("/v1/campaigns/:campaignId/production-room/narration", (request, respon
           }
         : null,
     });
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+app.get("/v1/campaigns/:campaignId/orchestration", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const state = store.getCampaign(context);
+    const base = state.orchestration ?? emptyOrchestrationState();
+    const events = store.listCampaignEvents(context);
+    const activeScene = base.activeScene ? refreshSceneFromEvents(base.activeScene, events) : null;
+    const orchestration = { ...base, activeScene };
+    response.json({
+      orchestration: {
+        ...orchestration,
+        resume: buildResumeProjection(orchestration, projectExperienceProfile(state.experienceProfile)),
+      },
+    });
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+app.post("/v1/campaigns/:campaignId/orchestration/decisions", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const parsed = orchestrationDecisionRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({
+        code: "invalid_orchestration_decision",
+        error: "An orchestration decision needs a command id, current campaign version, scene revision, and typed facilitation action.",
+        details: parsed.error.flatten(),
+      });
+      return;
+    }
+    const state = store.getCampaign(context);
+    assertCampaignUsesActivePack(state);
+    const events = store.listCampaignEvents(context);
+    const command = { kind: "orchestration_decision" as const, decision: parsed.data.decision };
+    const result = store.executeCommand({
+      context,
+      clientCommandId: parsed.data.clientCommandId,
+      expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+      command,
+      tool: "orchestration",
+      resolve: (current) => resolveOrchestrationDecision(current, context, parsed.data.clientCommandId, command, events),
+    });
+    response.json(projectResolutionForActor(result, context.actorId));
   } catch (error) {
     sendError(response, error);
   }
