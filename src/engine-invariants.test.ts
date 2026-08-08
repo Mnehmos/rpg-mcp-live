@@ -76,6 +76,11 @@ const ALL_COMMAND_KINDS = [
   "party_rejoin",
   "party_shared_transfer",
   "party_group_check",
+  "situation_create",
+  "situation_visit",
+  "situation_clue_attempt",
+  "situation_ignore",
+  "situation_choose",
   "advance_turn",
   "advancement_confirm",
   "npc_advance",
@@ -245,6 +250,10 @@ function travelState(): LanternCampaignState {
 function worldObjectState(): LanternCampaignState {
   const state = createdState();
   return applyAccepted(state, ruinedGatehouseWorldContextCommand(), "world_context");
+}
+
+function situationState(): LanternCampaignState {
+  return applyAccepted(createdState(), { kind: "situation_create", templateId: "watchtower-relic-v1" }, "situation_create");
 }
 
 function activeCombatState(): LanternCampaignState {
@@ -486,6 +495,11 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "party_rejoin", tool: "party_rejoin", expectedCode: "party_already_together", state: partyState, rawCommand: () => ({ kind: "party_rejoin" }) },
   { kind: "party_shared_transfer", tool: "party_shared_transfer", expectedCode: "item_not_found", state: partyState, rawCommand: () => ({ kind: "party_shared_transfer", actorId: "actor-invariants", itemId: "missing-party-item", direction: "to_shared" }) },
   { kind: "party_group_check", tool: "party_group_check", expectedCode: "party_member_not_found", state: partyState, rawCommand: () => ({ kind: "party_group_check", ability: "wis", goal: "Check together", actorIds: ["actor-invariants", "missing-party-member"] }) },
+  { kind: "situation_create", tool: "situation_create", expectedCode: "random_event_not_found", state: createdState, rawCommand: () => ({ kind: "situation_create", templateId: "watchtower-relic-v1", sourceRandomEventId: "missing-event" }) },
+  { kind: "situation_visit", tool: "situation_visit", expectedCode: "location_not_found", state: situationState, rawCommand: () => ({ kind: "situation_visit", locationId: "missing-location" }) },
+  { kind: "situation_clue_attempt", tool: "situation_clue_attempt", expectedCode: "clue_not_found", state: situationState, rawCommand: () => ({ kind: "situation_clue_attempt", clueId: "missing-clue", approach: "Search the fixture." }) },
+  { kind: "situation_ignore", tool: "situation_ignore", expectedCode: "situation_not_found", state: createdState, rawCommand: () => ({ kind: "situation_ignore" }) },
+  { kind: "situation_choose", tool: "situation_choose", expectedCode: "situation_choice_unavailable", state: situationState, rawCommand: () => ({ kind: "situation_choose", choice: "solve" }) },
   { kind: "advance_turn", tool: "advance_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "advance_turn" }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", expectedCode: "advancement_not_pending", state: createdState, rawCommand: () => ({ kind: "advancement_confirm", pendingId: "missing-pending" }) },
   { kind: "npc_advance", tool: "npc_advance", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "npc_advance", combatantId: "missing-combatant", templateId: "veteran" }) },
@@ -601,6 +615,11 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "party_rejoin", tool: "party_rejoin", build: () => ({ state: partySplitState(), command: parseCommand({ kind: "party_rejoin" }) }) },
   { kind: "party_shared_transfer", tool: "party_shared_transfer", build: () => ({ state: partySharedItemState(), command: parseCommand({ kind: "party_shared_transfer", actorId: "actor-invariants", itemId: "party-census-item", direction: "to_shared" }) }) },
   { kind: "party_group_check", tool: "party_group_check", build: () => { const state = partyState(); return { state, command: parseCommand({ kind: "party_group_check", ability: "wis", goal: "Check together", actorIds: [state.actorId, state.controlledActors[0]!.id] }) }; } },
+  { kind: "situation_create", tool: "situation_create", build: () => ({ state: createdState(), command: parseCommand({ kind: "situation_create", templateId: "watchtower-relic-v1" }) }) },
+  { kind: "situation_visit", tool: "situation_visit", build: () => ({ state: situationState(), command: parseCommand({ kind: "situation_visit", locationId: "watchtower-yard" }) }) },
+  { kind: "situation_clue_attempt", tool: "situation_clue_attempt", build: () => ({ state: situationState(), command: parseCommand({ kind: "situation_clue_attempt", clueId: "watchtower-clue-boots", approach: "Replay the road search." }) }) },
+  { kind: "situation_ignore", tool: "situation_ignore", build: () => ({ state: situationState(), command: parseCommand({ kind: "situation_ignore" }) }) },
+  { kind: "situation_choose", tool: "situation_choose", build: () => ({ state: situationState(), command: parseCommand({ kind: "situation_choose", choice: "walk-away" }) }) },
   { kind: "advance_turn", tool: "advance_turn", build: () => ({ state: enemyTurnState(), command: parseCommand({ kind: "advance_turn", actionKey: "scimitar" }) }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", build: () => { const state = pendingAdvancementState(); return { state, command: parseCommand({ kind: "advancement_confirm", pendingId: state.pendingAdvancement!.id }) }; } },
   { kind: "npc_advance", tool: "npc_advance", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "npc_advance", combatantId: state.combat.enemies[0]!.id, templateId: "veteran" }) }; } },
@@ -616,7 +635,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(56);
+    expect(ALL_COMMAND_KINDS).toHaveLength(61);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

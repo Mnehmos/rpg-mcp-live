@@ -10,6 +10,7 @@ import {
   sanitizeNarrationForProfile,
 } from "./engine-domain.js";
 import { hasActiveCondition } from "./engine-effects.js";
+import { projectSituationForActor } from "./engine-situations.js";
 import {
   compileAtomicTurnResolution,
   provisionalState,
@@ -100,6 +101,7 @@ export function buildDmContext(
     quests: state.quests,
     improvEffects: state.improvEffects,
     currentBeat: state.currentBeat,
+    situation: state.situation ? projectSituationForActor(state.situation, state, activeViewpointActorId) : null,
     suggestedActions: state.suggestedActions,
     character: state.character,
     combat: state.combat,
@@ -355,6 +357,7 @@ export class LanternDungeonMaster {
           "For social contests use social_check. For a new quest use quest_create; graph-quest branches advance only through quest_transition from committed predicates, while legacy flat quests may use quest_update. For a proactive story turn use campaign_beat, and for a rule-of-cool stunt use improvise with a typed mechanical effect when one exists.",
           "For an established world object, use interact with its typed affordance and stable targetId; the engine owns object state, material prerequisites, ownership, and consequences. Do not invent a final object state in prose. Use legacy interact only for non-mechanical features.",
           "For travel, use the reviewed travel tool with route/destination references and normal or fast pace; the engine owns elapsed time, navigation, supplies, watches, weather, random events, deadlines, and world clocks. Use project only with the reviewed project id; never author time, distance, rolls, supplies, or completion in prose.",
+          "For the reviewed watchtower situation, use situation_context, situation_create, situation_visit, situation_clue_attempt, situation_ignore, and situation_choose. The engine owns clues, discoveries, pressure, fallback roles, object loss, and outcomes; never invent those commitments in narration.",
           "Quest completion may create a server-owned pending level 1-to-2 milestone. Show the pending preview and use advancement_confirm only with its exact id; never author HP, proficiency, slots, level, or feature consequences. NPC progression is separate: use npc_advance only for the reviewed veteran template on a live encounter instance, never alter the pinned statblock.",
           "The player speaks naturally, but the engine is authoritative.",
           "Use read tools to inspect context before acting when needed.",

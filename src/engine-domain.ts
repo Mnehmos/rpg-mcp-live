@@ -34,6 +34,7 @@ import type {
   EngineDeathRecord,
   EngineLifecycleState,
   EngineCampaignBeat,
+  EngineSituationChoice,
   EngineCommand,
   EngineChallengeAttemptCommand,
   EngineCombatant,
@@ -154,6 +155,15 @@ import type {
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
+import {
+  advanceSituationPressure,
+  instantiateWatchtowerSituation,
+  normalizeSituation,
+  projectSituationForActor,
+  reconcileSituation,
+  situationChoiceAllowed,
+  situationClueFactIds,
+} from "./engine-situations.js";
 import type { EffectApplyInput } from "./engine-effects.js";
 import {
   activeConditionNames,
@@ -1480,6 +1490,7 @@ export function createInitialCampaign(
     effects: [],
     improvEffects: [],
     currentBeat: null,
+    situation: null,
     suggestedActions: [],
     log: [
       makeMessage(
@@ -1553,6 +1564,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.claimedRewards = [];
     next.controlledActors = [];
     next.party = null;
+    next.situation = null;
     next.quest = {
       id: "first-light",
       title: "The first chapter",
@@ -1573,6 +1585,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.worldContext.merchants = next.worldContext.merchants.map(normalizeMerchant);
     next.worldContext.npcs = next.worldContext.npcs.map(normalizeNpc);
   }
+  next.situation = normalizeSituation((next as LanternCampaignState & { situation?: unknown }).situation, next);
   next.character = recalculateProgressionOnLoad(normalizeCharacter(next.character));
   next.combat = normalizeCombat(next.combat, next.actorId, next.character.speed);
   next.quest = normalizeQuest(next.quest ?? ({} as EngineQuest));
@@ -2140,6 +2153,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     effects: state.effects.filter((effect) => effect.status === "active"),
     improvEffects: state.improvEffects,
     currentBeat: state.currentBeat,
+    situation: state.situation ? projectSituationForActor(state.situation, state, activePartyViewpointId(state)) : null,
     suggestedActions: state.suggestedActions,
     log: state.log.slice(-40),
     availableActions:
@@ -2235,6 +2249,7 @@ export function readToolData(
     | "combat_state"
     | "controlled_actor_context"
     | "party_context"
+    | "situation_context"
 ): unknown {
   const viewpointActorId = activePartyViewpointId(state);
   const projection = actorKnowledgeProjection(viewpointActorId, state);
@@ -2260,6 +2275,7 @@ export function readToolData(
         effects: state.effects.filter((effect) => effect.status === "active"),
         improvEffects: state.improvEffects,
         currentBeat: state.currentBeat,
+        situation: state.situation ? projectSituationForActor(state.situation, state, viewpointActorId) : null,
         character: characterData(state.character),
         combat: combatData(state.combat),
         controlledActors: projectControlledActors(state),
@@ -2303,6 +2319,10 @@ export function readToolData(
       return { controlledActors: projectControlledActors(state), campaignVersion: state.version };
     case "party_context":
       return { ...partyStateData(state), worldContext: projection.worldContext, campaignVersion: state.version };
+    case "situation_context":
+      return state.situation
+        ? projectSituationForActor(state.situation, state, viewpointActorId)
+        : null;
   }
 }
 
@@ -2615,6 +2635,16 @@ export function resolveEngineCommand(
       return resolvePartySharedTransfer(state, context, clientCommandId, command, tool);
     case "party_group_check":
       return resolvePartyGroupCheck(state, context, clientCommandId, command, tool);
+    case "situation_create":
+      return resolveSituationCreate(state, context, clientCommandId, command, tool);
+    case "situation_visit":
+      return resolveSituationVisit(state, context, clientCommandId, command, tool);
+    case "situation_clue_attempt":
+      return resolveSituationClueAttempt(state, context, clientCommandId, command, tool);
+    case "situation_ignore":
+      return resolveSituationIgnore(state, context, clientCommandId, command, tool);
+    case "situation_choose":
+      return resolveSituationChoice(state, context, clientCommandId, command, tool);
     case "combat_start":
       return resolveCombatStart(state, context, clientCommandId, command, tool);
     case "encounter_decision":
@@ -2685,6 +2715,11 @@ function resolveMove(
     );
   }
   const next = cloneCampaign(state);
+  if (next.situation?.status === "active" && next.situation.nodes.some((node) => node.id === exit.id)) {
+    next.situation.currentLocationId = exit.id;
+    next.situation.visitedLocationIds = [...new Set([...next.situation.visitedLocationIds, exit.id])];
+    next.situation.revision += 1;
+  }
   return commit(
     next,
     context,
@@ -2692,11 +2727,13 @@ function resolveMove(
     command,
     tool,
     "You move toward " + exit.label + ". The DM must establish the next context.",
-    { exit, worldContext: state.worldContext },
+    { exit, worldContext: state.worldContext, situation: next.situation ? projectSituationForActor(next.situation, next, context.actorId) : null },
     "moved",
     [],
     [],
-    []
+    next.situation && JSON.stringify(state.situation) !== JSON.stringify(next.situation)
+      ? [{ path: "/situation", before: projectSituationForActor(state.situation!, state, context.actorId), after: projectSituationForActor(next.situation, next, context.actorId) }]
+      : []
   );
 }
 
@@ -2750,6 +2787,18 @@ function resolveWorldContext(
   const next = cloneCampaign(state);
   next.worldContext = worldContext;
   next.worldFacts = factPatch.entities;
+  if (next.situation) {
+    const beforeSituation = next.situation;
+    next.situation = reconcileSituation(next.situation, next);
+    if (JSON.stringify(beforeSituation) !== JSON.stringify(next.situation)) {
+      next.situation.revision += 1;
+      stateChanges.push({
+        path: "/situation",
+        before: projectSituationForActor(state.situation!, state, context.actorId),
+        after: projectSituationForActor(next.situation, next, context.actorId),
+      });
+    }
+  }
   markKnowledgeStale(next, factPatch.changedFactIds);
   evaluatePassiveKnowledge(next, context.actorId, state.version + 1);
   if (JSON.stringify(state.actorKnowledge) !== JSON.stringify(next.actorKnowledge)) {
@@ -2762,7 +2811,7 @@ function resolveWorldContext(
     command,
     tool,
     "The DM establishes the current context: " + worldContext.title + ".",
-    { worldContext: actorKnowledgeProjection(context.actorId, next).worldContext },
+    { worldContext: actorKnowledgeProjection(context.actorId, next).worldContext, situation: next.situation ? projectSituationForActor(next.situation, next, context.actorId) : null },
     "world_context_updated",
     [],
     [],
@@ -4596,6 +4645,239 @@ function resolveInteract(
   );
 }
 
+function resolveSituationCreate(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "situation_create" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!context.capabilities.includes("dm")) return rejection(state, tool, "dm_required", "Only the DM may instantiate the reviewed situation template.");
+  if (state.situation) return rejection(state, tool, "situation_exists", "A campaign can hold one active situation in this first slice.");
+  const sourceRandomEvent = command.sourceRandomEventId
+    ? state.time.randomEvents.find((event) => event.id === command.sourceRandomEventId) ?? null
+    : null;
+  if (command.sourceRandomEventId) {
+    if (!sourceRandomEvent) return rejection(state, tool, "random_event_not_found", "The situation source random event is not committed in this campaign.");
+    if (sourceRandomEvent.createdSituationIds.length > 0) return rejection(state, tool, "random_event_replayed", "That random event has already seeded a situation.");
+  }
+  const existingObject = state.worldContext?.objects.find((object) => object.id === "watchtower-relic");
+  if (existingObject && existingObject.definition.sourceRef !== "reviewed-situation:watchtower-relic-v1") {
+    return rejection(state, tool, "critical_object_conflict", "The reviewed situation cannot replace an existing object with the same identity.");
+  }
+  const built = instantiateWatchtowerSituation(state, clientCommandId, state.version, command.sourceRandomEventId ?? null, sourceRandomEvent);
+  const next = cloneCampaign(state);
+  next.worldContext = built.worldContext;
+  next.situation = reconcileSituation(built.situation, { ...next, worldContext: built.worldContext });
+  const existingFacts = new Map(state.worldFacts.map((fact) => [fact.id, fact]));
+  for (const fact of built.worldFacts) {
+    const previous = existingFacts.get(fact.id);
+    if (previous && previous.description !== fact.description) return rejection(state, tool, "situation_fact_conflict", "A committed fact identity cannot be replaced by the reviewed situation template.");
+    existingFacts.set(fact.id, fact);
+  }
+  next.worldFacts = [...existingFacts.values()];
+  const source = sourceRandomEvent ? next.time.randomEvents.find((event) => event.id === sourceRandomEvent.id) : null;
+  const sourceBeforeSituationIds = source ? [...source.createdSituationIds] : null;
+  if (source) source.createdSituationIds = [...source.createdSituationIds, built.situation.id];
+  const situationEvidence = projectSituationForActor(next.situation, next, context.actorId);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: "/situation", before: null, after: situationEvidence },
+    { path: "/worldContext", before: state.worldContext, after: next.worldContext },
+    { path: "/worldFacts", before: { activeCount: state.worldFacts.filter((fact) => fact.active).length }, after: { activeCount: next.worldFacts.filter((fact) => fact.active).length } },
+  ];
+  if (source) changes.push({ path: `/time/randomEvents/${source.id}/createdSituationIds`, before: sourceBeforeSituationIds, after: source.createdSituationIds });
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    "The reviewed watchtower situation is now in motion.",
+    { situation: situationEvidence },
+    "situation_created",
+    [],
+    [],
+    changes,
+  );
+}
+
+function resolveSituationVisit(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "situation_visit" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const situation = state.situation;
+  if (!situation) return rejection(state, tool, "situation_not_found", "There is no committed situation to visit.");
+  if (situation.status !== "active") return rejection(state, tool, "situation_terminal", "The situation has already reached a terminal outcome.");
+  const node = situation.nodes.find((candidate) => candidate.id === command.locationId);
+  if (!node) return rejection(state, tool, "location_not_found", "That location is not part of the reviewed situation.");
+  if (situation.currentLocationId !== command.locationId && !situation.visitedLocationIds.includes(command.locationId)) {
+    const current = situation.nodes.find((candidate) => candidate.id === situation.currentLocationId);
+    if (!current?.exitIds.includes(command.locationId)) return rejection(state, tool, "location_not_reachable", "That situation location is not connected to the current node.");
+  }
+  const next = cloneCampaign(state);
+  const nextSituation = next.situation!;
+  nextSituation.currentLocationId = node.id;
+  nextSituation.visitedLocationIds = [...new Set([...nextSituation.visitedLocationIds, node.id])];
+  nextSituation.revision += 1;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `You reach ${node.title}.`,
+    { situation: projectSituationForActor(nextSituation, next, context.actorId), node },
+    "situation_visited",
+    [],
+    [],
+    [{ path: "/situation", before: projectSituationForActor(situation, state, context.actorId), after: projectSituationForActor(nextSituation, next, context.actorId) }],
+  );
+}
+
+function resolveSituationClueAttempt(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "situation_clue_attempt" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const situation = state.situation;
+  if (!situation) return rejection(state, tool, "situation_not_found", "There is no committed situation to investigate.");
+  if (situation.status !== "active") return rejection(state, tool, "situation_terminal", "The situation has already reached a terminal outcome.");
+  const clue = situation.clues.find((candidate) => candidate.id === command.clueId);
+  if (!clue) return rejection(state, tool, "clue_not_found", "That clue is not part of the reviewed situation.");
+  if (!situation.visitedLocationIds.includes(clue.locationId)) return rejection(state, tool, "clue_location_unvisited", "Visit the clue's location before attempting to investigate it.");
+  if (clue.foundBy.includes(context.actorId)) return rejection(state, tool, "clue_already_found", "That clue has already been found by this actor.");
+  const challenge: EngineChallengeAttemptCommand = {
+    kind: "challenge_attempt",
+    challengeId: clue.challengeId,
+    goal: `Investigate ${clue.title}.`,
+    approach: command.approach,
+    sceneId: state.worldContext?.id,
+    difficultyBand: clue.difficultyBand,
+    informationPolicy: "public",
+  };
+  const checked = resolveChallengeAttempt(state, context, clientCommandId, challenge, tool);
+  if (!checked.accepted || !checked.event) return rejection(state, tool, checked.code ?? "clue_attempt_rejected", checked.message);
+  const next = checked.state;
+  const nextSituation = next.situation!;
+  const nextClue = nextSituation.clues.find((candidate) => candidate.id === clue.id)!;
+  const success = checked.event.outcome === "success";
+  nextClue.attempts += 1;
+  if (success) {
+    nextClue.foundBy = [...new Set([...nextClue.foundBy, context.actorId])];
+    nextClue.lastComplication = null;
+    const revelation = nextSituation.revelations.find((candidate) => candidate.id === nextClue.revelationId);
+    if (revelation) revelation.status = "revealed";
+    for (const factId of situationClueFactIds(nextSituation, nextClue.id)) {
+      const fact = next.worldFacts.find((candidate) => candidate.id === factId && candidate.active);
+      if (!fact) continue;
+      if (!fact.id || next.actorKnowledge.some((record) => record.actorId === context.actorId && record.factId === fact.id && !record.stale && record.factRevision === fact.revision)) continue;
+      const record = appendKnowledgeRecord(next, context.actorId, fact, "known", "active-search", `situation:${nextSituation.id}:${nextClue.id}`, next.version);
+      nextSituation.truths = nextSituation.truths.map((truth) => truth.id === fact.id ? { ...truth, discoveredBy: [...new Set([...truth.discoveredBy, context.actorId])] } : truth);
+      checked.event.stateChanges.push({ path: `/actorKnowledge/${record.id}`, before: null, after: { actorId: record.actorId, tier: record.tier, source: record.source, confidence: record.confidence } });
+    }
+  } else {
+    nextClue.failedAttempts += 1;
+    nextClue.lastComplication = "The search draws attention; another clue path remains available.";
+    nextSituation.complicationCount += 1;
+    nextSituation.lastComplication = nextClue.lastComplication;
+  }
+  nextSituation.revision += 1;
+  const beforeProjection = projectSituationForActor(situation, state, context.actorId);
+  const afterProjection = projectSituationForActor(nextSituation, next, context.actorId);
+  const message = success
+    ? `You establish evidence from ${nextClue.title}; another part of the situation becomes clear.`
+    : `The attempt at ${nextClue.title} fails with a complication, but the situation remains playable through another clue path.`;
+  next.log = [...next.log, makeMessage(success ? "narration" : "system", message)].slice(-40);
+  checked.event.tool = tool;
+  checked.event.command = command;
+  checked.event.outcome = success ? "situation_clue_found" : "situation_clue_failed_forward";
+  checked.event.stateChanges.push({ path: "/situation", before: beforeProjection, after: afterProjection });
+  checked.event.stateChanges.push({ path: "/log", before: state.log, after: next.log });
+  checked.tool = tool;
+  checked.message = message;
+  checked.data = {
+    situation: afterProjection,
+    clueId: nextClue.id,
+    success,
+    complication: success ? null : nextClue.lastComplication,
+    check: checked.event.check,
+  };
+  checked.narration = rulesNarration(message);
+  return checked;
+}
+
+function resolveSituationIgnore(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "situation_ignore" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.situation) return rejection(state, tool, "situation_not_found", "There is no committed situation to ignore.");
+  if (state.situation.status !== "active") return rejection(state, tool, "situation_terminal", "The situation has already reached a terminal outcome.");
+  const next = cloneCampaign(state);
+  const advance = advanceGameTime(next, 60, "situation-ignore", clientCommandId);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    "You leave the situation unattended for one reviewed time boundary; its pressure advances if due.",
+    { situation: next.situation ? projectSituationForActor(next.situation, next, context.actorId) : null, timeAdvance: advance },
+    "situation_ignored",
+    [],
+    [],
+    [
+      { path: "/time/gameTime", before: advance.before, after: advance.after },
+      ...(advance.questStateChanges),
+    ],
+  );
+}
+
+function resolveSituationChoice(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "situation_choose" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.situation) return rejection(state, tool, "situation_not_found", "There is no committed situation to resolve.");
+  const reconciled = reconcileSituation(state.situation, state);
+  const allowed = situationChoiceAllowed(reconciled, state, command.choice as EngineSituationChoice);
+  if (!allowed.allowed) return rejection(state, tool, "situation_choice_unavailable", allowed.reason);
+  const next = cloneCampaign(state);
+  next.situation = reconciled;
+  next.situation.status = command.choice === "walk-away" ? "walked-away" : "resolved";
+  next.situation.outcome = {
+    choice: command.choice as EngineSituationChoice,
+    committedAtMinutes: next.time.gameTime.totalMinutes,
+    sourceCommandId: clientCommandId,
+    reactivityTier: command.choice === "walk-away" ? "contextual" : "booster",
+  };
+  next.situation.revision += 1;
+  const beforeProjection = projectSituationForActor(state.situation, state, context.actorId);
+  const afterProjection = projectSituationForActor(next.situation, next, context.actorId);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    command.choice === "walk-away" ? "You walk away; the situation continues according to its committed world state." : `The situation resolves through the ${command.choice} outcome.`,
+    { situation: afterProjection, outcome: next.situation.outcome },
+    `situation_${command.choice.replace("-", "_")}`,
+    [],
+    [],
+    [{ path: "/situation", before: beforeProjection, after: afterProjection }],
+  );
+}
+
 function resolveWorldObjectAffordance(
   state: LanternCampaignState,
   context: RequestContext,
@@ -4798,6 +5080,18 @@ function resolveWorldObjectAffordance(
     case "give":
       return rejection(state, tool, "unsupported_affordance", "Giving a world object requires an actor or merchant inventory transfer; this first slice does not invent a second transfer path.");
   }
+  if (next.situation) {
+    const beforeSituation = next.situation;
+    next.situation = reconcileSituation(next.situation, next);
+    if (JSON.stringify(beforeSituation) !== JSON.stringify(next.situation)) {
+      next.situation.revision += 1;
+      changes.push({
+        path: "/situation",
+        before: projectSituationForActor(state.situation!, state, context.actorId),
+        after: projectSituationForActor(next.situation, next, context.actorId),
+      });
+    }
+  }
   return commit(
     next,
     context,
@@ -4805,7 +5099,7 @@ function resolveWorldObjectAffordance(
     command,
     tool,
     message,
-    { object: nextWorld.objects.find((candidate) => candidate.id === object.id), affordance: command.affordance, sourceId: command.sourceId ?? null, destinationId: command.destinationId ?? null },
+    { object: nextWorld.objects.find((candidate) => candidate.id === object.id), affordance: command.affordance, sourceId: command.sourceId ?? null, destinationId: command.destinationId ?? null, situation: next.situation ? projectSituationForActor(next.situation, next, context.actorId) : null },
     outcome,
     [],
     [],
@@ -9359,6 +9653,19 @@ function advanceGameTime(
     }
   }
   const questStateChanges = applyQuestDeadlineTransitions(next, sourceState, after, sourceCommandId);
+  if (sourceState.situation && next.situation) {
+    const beforeSituation = next.situation;
+    const advancedSituation = advanceSituationPressure(next.situation, before.totalMinutes, after.totalMinutes);
+    if (JSON.stringify(beforeSituation) !== JSON.stringify(advancedSituation)) {
+      next.situation = advancedSituation;
+      next.situation.revision += 1;
+      questStateChanges.push({
+        path: "/situation",
+        before: projectSituationForActor(sourceState.situation, sourceState, sourceState.actorId),
+        after: projectSituationForActor(next.situation, next, next.actorId),
+      });
+    }
+  }
   if (JSON.stringify(beforeControlledActors) !== JSON.stringify(next.controlledActors)) {
     questStateChanges.push({ path: "/controlledActors", before: beforeControlledActors, after: next.controlledActors });
   }
@@ -9511,6 +9818,45 @@ function resolveTravel(
     campaignVersion: state.version + 1,
   };
   next.time.randomEvents = [...next.time.randomEvents, randomEvent].slice(-100);
+  if (selectedEntryId === "roadside-sign") {
+    if (next.situation) {
+      const beforeSituation = projectSituationForActor(next.situation, next, context.actorId);
+      next.situation.complicationCount += 1;
+      next.situation.lastComplication = "A newly posted sign changes the pressure around the active situation without replacing its established truths.";
+      next.situation.revision += 1;
+      changes.push({
+        path: "/situation",
+        before: beforeSituation,
+        after: projectSituationForActor(next.situation, next, context.actorId),
+      });
+    } else {
+      const existingObject = next.worldContext?.objects.find((object) => object.id === "watchtower-relic");
+      const objectConflict = existingObject && existingObject.definition.sourceRef !== "reviewed-situation:watchtower-relic-v1";
+      if (!objectConflict) {
+        const beforeWorldContext = state.worldContext;
+        const beforeWorldFacts = state.worldFacts;
+        const existingEntityIds = new Set([
+          ...(state.worldContext?.npcs.map((npc) => npc.id) ?? []),
+          ...(state.worldContext?.objects.map((object) => object.id) ?? []),
+        ]);
+        const built = instantiateWatchtowerSituation(next, clientCommandId, state.version, randomEvent.id, randomEvent);
+        next.worldContext = built.worldContext;
+        next.situation = reconcileSituation(built.situation, next);
+        const facts = new Map(next.worldFacts.map((fact) => [fact.id, fact]));
+        for (const fact of built.worldFacts) facts.set(fact.id, fact);
+        next.worldFacts = [...facts.values()];
+        randomEvent.createdSituationIds = [next.situation.id];
+        randomEvent.instantiatedEntityIds = ["watchtower-warden", "watchtower-relic"].filter((id) => !existingEntityIds.has(id));
+        randomEvent.reusedEntityIds = ["watchtower-warden", "watchtower-relic"].filter((id) => existingEntityIds.has(id));
+        randomEvent.createdFactIds = built.worldFacts.map((fact) => fact.id);
+        changes.push(
+          { path: "/worldContext", before: beforeWorldContext, after: next.worldContext },
+          { path: "/worldFacts", before: beforeWorldFacts, after: next.worldFacts },
+          { path: "/situation", before: null, after: projectSituationForActor(next.situation, next, context.actorId) },
+        );
+      }
+    }
+  }
   const travel: EngineTravelPlan = {
     id: randomUUID(),
     routeId: command.routeId,
