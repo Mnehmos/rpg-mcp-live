@@ -2,17 +2,18 @@
 
 ## Overview
 
-Production releases are **automatic** — promoted when staging smoke and gauntlet pass. The human is the playtester and vision-holder, not a deployment approver.
+Production release material is automated only after the owner enables the
+production promotion guard. The issue #67 cutover proves staging while that
+guard remains disabled.
 
 ```
 PR merges to main
      → staging deploys (engine first, then web)
      → staging smoke + gauntlet pass
-     → production deploys (engine first, then web)
+     → (owner enables promotion guard)
+     → production consumes the same staging manifest and SHA
      → changelog generated (fails if empty)
-     → CHANGELOG.md committed to main
-     → annotated tag created
-     → GitHub release published with changelog body
+     → annotated tag and GitHub release published
 ```
 
 ## Automated changelog (release gate)
@@ -21,7 +22,8 @@ Every production release generates a changelog from the conventional-commit squa
 
 - `tools/ci/generate-changelog.mjs --version <tag> --fail-empty` runs before the tag is created.
 - If no changelog-worthy commits exist (`feat`, `fix`, `perf`, `refactor`, `audit`, `docs`, `test`, `ci`, `ops`, `build`), the release **aborts**.
-- The generated changelog entry is prepended to `CHANGELOG.md`, committed to `main`, used as the GitHub release body, and attached as a release asset.
+- The generated changelog is used as the GitHub release body and attached as a
+  release asset. It is not committed back to `main` by a deployment workflow.
 
 Because the repo uses **squash merge** and the PR title **is** the commit message, every merged PR must follow `type(scope): description (#NN)`. The CI metadata gate (`verify-pr-metadata.mjs`) enforces this on every PR — there is no way for a commit to reach `main` without a conventional-commit title that the changelog generator can parse.
 
@@ -54,17 +56,18 @@ Because the repo uses **squash merge** and the PR title **is** the commit messag
 
 Deploy engine and web from the **same Git SHA**.
 
-## Production deployment (automatic)
+## Production deployment (guarded)
 
-Triggered when staging completes successfully.
+Triggered only when staging completes successfully and
+`RAILWAY_PRODUCTION_PROMOTION_ENABLED=true` in the production environment.
 
 1. Verify SHA is reachable from `main`.
 2. Verify SHA was deployed to staging.
 3. Deploy engine to Railway production. Verify health + backward compatibility.
 4. Run safe read + synthetic safe mutation against a dedicated acceptance campaign.
 5. Deploy web to Railway production. Verify health + engine reachability.
-6. Create annotated release tag (`vMAJOR.MINOR.PATCH`).
-7. Publish deployment manifest.
+6. Create annotated release tag (`vMAJOR.MINOR.PATCH`) without pushing `main`.
+7. Publish deployment manifest with both Railway deployment IDs.
 
 ## Health endpoints expose deployed SHA
 
@@ -112,6 +115,8 @@ Every deployment saves:
   "toolCount": 42,
   "engineDeploymentId": "...",
   "webDeploymentId": "...",
+  "engineRailwayCommitSha": "...",
+  "webRailwayCommitSha": "...",
   "engineHealth": "pass",
   "webHealth": "pass",
   "smoke": "pass",

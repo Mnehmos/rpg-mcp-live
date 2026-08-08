@@ -10,6 +10,10 @@
  *       --env staging \
  *       --git-sha abc123 \
  *       --git-ref main \
+ *       --engine-deployment-id railway-engine-deployment \
+ *       --web-deployment-id railway-web-deployment \
+ *       --engine-railway-commit-sha abc123 \
+ *       --web-railway-commit-sha abc123 \
  *       --pack-version open5e-v2-full-corpus-s8 \
  *       --pack-hash 56bdfbda... \
  *       --tool-count 42 \
@@ -40,6 +44,8 @@ const manifest = {
   toolCount: Number(args["tool-count"] ?? 0),
   engineDeploymentId: args["engine-deployment-id"] ?? null,
   webDeploymentId: args["web-deployment-id"] ?? null,
+  engineRailwayCommitSha: args["engine-railway-commit-sha"] ?? null,
+  webRailwayCommitSha: args["web-railway-commit-sha"] ?? null,
   engineHealth: args["engine-health"] ?? "unknown",
   webHealth: args["web-health"] ?? "unknown",
   smoke: args["smoke"] ?? "unknown",

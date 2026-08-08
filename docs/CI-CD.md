@@ -72,38 +72,36 @@ No live provider calls happen nightly.
 
 ## Staging deployment
 
-`.github/workflows/deploy-staging.yml` triggers automatically when CI passes on `main` (`workflow_run`).
+`.github/workflows/deploy-staging.yml` triggers when the required CI workflow
+passes on `main`. It is the normal deployment controller; Railway native
+autodeploy is disabled.
 
 ```
-checkout exact merged SHA
+checkout exact CI-proven SHA
 → npm ci → check → build
-→ deploy engine to Railway staging
-→ wait for engine /health
-→ verify SHA, pack hash, tool count
-→ deploy web to Railway staging
-→ wait for /api/health (web reaches engine)
-→ run two-service smoke
-→ run deterministic gauntlet (after #22)
-→ write deployment manifest
+→ validate existing Railway project/environment/service/source scope
+→ deploy exact SHA: engine first, then web
+→ wait for health, pack/tool evidence, and web→engine reachability
+→ run HTTP smoke, invariants, and deterministic gauntlet
+→ write manifest with both Railway deployment IDs and commit metadata
 ```
 
-Concurrency: `group: railway-staging, cancel-in-progress: true`.
+The deploy helper uses environment-scoped Railway project tokens and the
+`serviceInstanceDeployV2` exact-commit mutation. It never logs token values,
+uploads a local archive, or calls `railway up`. Concurrency is
+`group: railway-staging, cancel-in-progress: true`.
 
 ## Production deployment
 
-`.github/workflows/deploy-production.yml` triggers automatically when staging completes successfully (`workflow_run`).
+`.github/workflows/deploy-production.yml` consumes only the successful staging
+manifest for the same SHA. The job is skipped unless the production GitHub
+environment variable `RAILWAY_PRODUCTION_PROMOTION_ENABLED` is exactly `true`.
+It is therefore disabled by default for the issue #67 cutover.
 
-```
-verify SHA reachable from main
-→ verify SHA deployed to staging
-→ deploy engine to Railway production
-→ verify health + backward compatibility
-→ safe read + synthetic safe mutation
-→ deploy web to Railway production
-→ verify health + engine reachability
-→ create annotated release tag
-→ publish deployment manifest
-```
+When explicitly enabled by the owner, it validates the staging manifest,
+deploys engine then web through the same exact-SHA helper, runs the production
+health/smoke/gauntlet checks, and publishes a release tag/manifest. It does
+not push to `main` or commit a generated `CHANGELOG.md` back to the branch.
 
 Concurrency: `group: railway-production, cancel-in-progress: false`.
 

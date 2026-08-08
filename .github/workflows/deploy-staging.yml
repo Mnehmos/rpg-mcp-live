@@ -1,7 +1,8 @@
 name: Deploy to staging
 
-# Auto-deploys to Railway staging after CI passes on main.
-# No human gate — the pipeline promotes automatically.
+# GitHub Actions is the normal deployment controller. Railway native
+# autodeploy remains disabled; this workflow requests the exact CI-proven SHA
+# from the connected GitHub source through the Railway GraphQL API.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -20,22 +21,25 @@ jobs:
   deploy-staging:
     name: Staging deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    # Only run when CI actually succeeded on a push to main (not a PR).
+    timeout-minutes: 35
+    environment: staging
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
-
     env:
       SHA: ${{ github.event.workflow_run.head_sha }}
+      EXPECTED_REPOSITORY: Mnehmos/rpg-mcp-live
 
     steps:
-      - name: Checkout exact merged SHA
+      - name: Checkout exact CI-proven SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.SHA }}
           persist-credentials: false
+
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$SHA"
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -52,94 +56,99 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      # -----------------------------------------------------------------
-      # Deploy engine FIRST, then web — the web service depends on engine.
-      # -----------------------------------------------------------------
+      # Engine is intentionally first: web health depends on private engine reachability.
       - name: Deploy engine to Railway staging
+        id: engine
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
-        run: |
-          railway up \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment staging \
-            --service "$RAILWAY_ENGINE_SERVICE" \
-            --detach
-        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
-          RAILWAY_ENGINE_SERVICE: ${{ vars.RAILWAY_ENGINE_SERVICE }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_STAGING_ENVIRONMENT_ID }}
+          RAILWAY_ENVIRONMENT_NAME: staging
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_ENGINE_SERVICE_ID }}
+          RAILWAY_COMMIT_SHA: ${{ env.SHA }}
+          RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+        run: npx tsx tools/railway-deploy.ts
 
-      - name: Wait for engine health
+      - name: Verify engine deployment SHA
+        run: test "${{ steps.engine.outputs.railway_commit_sha }}" = "$SHA"
+
+      - name: Wait for engine health and capture pack evidence
         env:
           ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
         run: |
           for i in $(seq 1 60); do
-            resp=$(curl -sf "${ENGINE_STAGING_URL}/health" || echo "")
-            if echo "$resp" | grep -q '"status":"ok"'; then
-              echo "$resp"
-              echo "::notice::Engine staging healthy"
-              # Extract deployment verification fields
-              echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> $GITHUB_ENV
-              echo "ENGINE_PACK_VERSION=$(echo "$resp" | jq -r '.rules.packVersion')" >> $GITHUB_ENV
-              echo "ENGINE_TOOL_COUNT=$(echo "$resp" | jq -r '.toolCount')" >> $GITHUB_ENV
+            resp=$(curl -fsS "$ENGINE_STAGING_URL/health" || true)
+            if echo "$resp" | jq -e '.status == "ok"' >/dev/null; then
+              echo "$resp" | jq '{status,service,environment,rules,toolCount,openRouter:{enabled:.openRouter.enabled}}'
+              echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> "$GITHUB_ENV"
+              echo "ENGINE_PACK_VERSION=$(echo "$resp" | jq -r '.rules.packVersion')" >> "$GITHUB_ENV"
+              echo "ENGINE_TOOL_COUNT=$(echo "$resp" | jq -r '.toolCount')" >> "$GITHUB_ENV"
               exit 0
             fi
             sleep 5
           done
-          echo "::error::Engine did not become healthy in 5 min"
+          echo "::error::Engine staging did not become healthy in 5 minutes"
           exit 1
 
       - name: Deploy web to Railway staging
+        id: web
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
-          RAILWAY_WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE }}
-        run: |
-          railway up \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment staging \
-            --service "$RAILWAY_WEB_SERVICE" \
-            --detach
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_STAGING_ENVIRONMENT_ID }}
+          RAILWAY_ENVIRONMENT_NAME: staging
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
+          RAILWAY_COMMIT_SHA: ${{ env.SHA }}
+          RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+        run: npx tsx tools/railway-deploy.ts
 
-      - name: Wait for web health
+      - name: Verify web deployment SHA
+        run: test "${{ steps.web.outputs.railway_commit_sha }}" = "$SHA"
+
+      - name: Wait for web health and engine reachability
         env:
           WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
         run: |
           for i in $(seq 1 60); do
-            resp=$(curl -sf "${WEB_STAGING_URL}/api/health" || echo "")
-            if echo "$resp" | grep -q '"status":"ok"' && echo "$resp" | grep -q '"lanternEngine":true'; then
-              echo "$resp"
-              echo "::notice::Web staging healthy and engine reachable"
+            resp=$(curl -fsS "$WEB_STAGING_URL/api/health" || true)
+            if echo "$resp" | jq -e '.status == "ok" and .integrations.lanternEngine == true' >/dev/null; then
+              echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
               exit 0
             fi
             sleep 5
           done
-          echo "::error::Web did not become healthy in 5 min"
+          echo "::error::Web staging did not become healthy or reach the engine in 5 minutes"
           exit 1
 
       - name: Run two-service HTTP smoke
         run: npm run smoke:http
 
-      - name: Deterministic gauntlet
+      - name: Run invariant suite
+        run: npm run test:invariants
+
+      - name: Run deterministic evaluation suite
         run: npm run test:gauntlet:ci
 
-      - name: Write deployment manifest
+      - name: Write staging deployment manifest
         run: |
           node tools/ci/write-deployment-manifest.mjs \
             --env staging \
             --git-sha "$SHA" \
             --git-ref main \
+            --engine-deployment-id "${{ steps.engine.outputs.deployment_id }}" \
+            --web-deployment-id "${{ steps.web.outputs.deployment_id }}" \
+            --engine-railway-commit-sha "${{ steps.engine.outputs.railway_commit_sha }}" \
+            --web-railway-commit-sha "${{ steps.web.outputs.railway_commit_sha }}" \
             --pack-version "$ENGINE_PACK_VERSION" \
             --pack-hash "$ENGINE_PACK_HASH" \
             --tool-count "$ENGINE_TOOL_COUNT" \
+            --gauntlet-version open-ended-gauntlet-v1 \
             --engine-health pass \
             --web-health pass \
             --smoke pass \
             --output deployment-manifest.json
 
-      - name: Upload manifest
+      - name: Upload staging manifest
         uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
         with:
           name: staging-manifest-${{ env.SHA }}
