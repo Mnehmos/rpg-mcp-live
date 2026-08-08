@@ -17,7 +17,7 @@ import { Open5ePackRegistry } from "./registry.js";
 
 const S8_VERSION = "open5e-v2-full-corpus-s8";
 const ATHLETICS_KEY = "open5e:skill:5e-2014:srd-2014:athletics";
-const LEGACY_REVIEW_SHA = "1c7e72b9b6d57e2ca9de10e6bed524e2ba62272ef09adc1e4cffbceb86c8f38d";
+const LEGACY_REVIEW_SHA = "df0258d1b44820b249c332e126396cb1ba4c3ef9a1b4494b4dc655cbb41fdc0c";
 
 let s8: Open5eContentPack;
 

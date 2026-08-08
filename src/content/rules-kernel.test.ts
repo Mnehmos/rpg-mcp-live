@@ -12,7 +12,7 @@ describe("pack-backed Open5e rules kernel", () => {
     const kernel = loadActiveRulesKernel();
 
     expect(kernel.rulesVersion).toBe(
-      "open5e-pack@56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f"
+      "open5e-pack@fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa"
     );
     expect(kernel.skills).toEqual({
       acrobatics: "dex",

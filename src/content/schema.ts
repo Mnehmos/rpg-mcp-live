@@ -828,22 +828,6 @@ const compiledDamageExpressionSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-export const compiledSpellEffectSchema = z.object({
-  kind: z.literal("spell-effect"),
-  fidelityTier: z.literal(2),
-  ...normalizedProvenanceFields,
-  sourceContentKey: z.string().min(1),
-  resolution: z.enum(["spell-attack", "saving-throw", "automatic"]),
-  saveOnSuccess: z.enum(["half", "none"]).nullable(),
-  damageType: normalizedContentReferenceSchema,
-  baseDamage: compiledDamageExpressionSchema,
-  slotLevelVariants: z.record(z.string().regex(/^[1-9]$/), compiledDamageExpressionSchema),
-  playerLevelVariants: z.record(z.string().regex(/^(?:[1-9]|1\d|20)$/), compiledDamageExpressionSchema),
-  sourceDescriptionSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  resolutionScope: z.literal("primary-damage"),
-  hasDeferredProseEffects: z.boolean(),
-});
-
 export const compiledEffectDurationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("persistent") }),
   z.object({
@@ -861,6 +845,70 @@ export const compiledEffectDurationSchema = z.discriminatedUnion("kind", [
     kind: z.literal("source-lifetime"),
   }),
 ]);
+
+const compiledSpellEffectProvenance = {
+  kind: z.literal("spell-effect"),
+  fidelityTier: z.literal(2),
+  ...normalizedProvenanceFields,
+  sourceContentKey: z.string().min(1),
+  sourceDescriptionSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  hasDeferredProseEffects: z.boolean(),
+};
+
+const compiledSpellDamageEffectSchema = z.object({
+  ...compiledSpellEffectProvenance,
+  effectKind: z.literal("damage"),
+  resolution: z.enum(["spell-attack", "saving-throw", "automatic"]),
+  saveOnSuccess: z.enum(["half", "none"]).nullable(),
+  damageType: normalizedContentReferenceSchema,
+  baseDamage: compiledDamageExpressionSchema,
+  slotLevelVariants: z.record(z.string().regex(/^[1-9]$/), compiledDamageExpressionSchema),
+  playerLevelVariants: z.record(z.string().regex(/^(?:[1-9]|1\d|20)$/), compiledDamageExpressionSchema),
+  resolutionScope: z.literal("primary-damage"),
+});
+
+const compiledSpellHealingEffectSchema = z.object({
+  ...compiledSpellEffectProvenance,
+  effectKind: z.literal("healing"),
+  healingAbility: z.enum(["str", "dex", "con", "int", "wis", "cha", "spellcasting"]),
+  baseHealing: compiledDamageExpressionSchema,
+  slotLevelVariants: z.record(z.string().regex(/^[1-9]$/), compiledDamageExpressionSchema),
+  targetPolicy: z.literal("single-creature"),
+  resolutionScope: z.literal("single-target-healing"),
+});
+
+const compiledSpellStatModifierEffectSchema = z.object({
+  ...compiledSpellEffectProvenance,
+  effectKind: z.literal("stat-modifier"),
+  modifier: z.object({
+    stat: z.literal("armor-class"),
+    amount: z.number().int(),
+    duration: compiledEffectDurationSchema,
+    stackingKey: z.string().min(1),
+    trigger: z.literal("incoming-attack-would-hit"),
+  }),
+  resolutionScope: z.literal("incoming-hit-reaction"),
+});
+
+export const compiledSpellEffectSchema = z.preprocess(
+  (value) => {
+    // S7 remains a pinned migration base. Its reviewed damage records predate
+    // the explicit effect discriminator; normalize those records at the
+    // schema boundary while new S8 output is always written with effectKind.
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const candidate = value as Record<string, unknown>;
+      if (candidate.kind === "spell-effect" && candidate.effectKind === undefined) {
+        return { ...candidate, effectKind: "damage" };
+      }
+    }
+    return value;
+  },
+  z.discriminatedUnion("effectKind", [
+    compiledSpellDamageEffectSchema,
+    compiledSpellHealingEffectSchema,
+    compiledSpellStatModifierEffectSchema,
+  ])
+);
 
 export const compiledEffectOperationSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -1028,7 +1076,7 @@ export const compiledBackgroundProfileSchema = z.object({
   sourceBenefitsSha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
-export const compiledContentRecordSchema = z.discriminatedUnion("kind", [
+export const compiledContentRecordSchema = z.union([
   compiledCurrencyTableSchema,
   compiledEquipmentEffectSchema,
   compiledCreatureAttackSchema,

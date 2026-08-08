@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "packVersion": "open5e-v2-full-corpus-s8",
-  "packHash": "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f",
+  "packHash": "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa",
   "targetDocumentKey": "srd-2014",
   "taxonomyDocumentKey": "core",
   "gamesystems": [
@@ -558,8 +558,8 @@
       },
       "compiled": {
         "path": "compiled/spells.ndjson",
-        "sha256": "e11711d106a449aca8628b1d278227862d1dee743afd59c6f6f9687a925d639a",
-        "recordCount": 82
+        "sha256": "8295faa227664e95f25ddc8033ff8915dd344c6450067d06ac51f55656105dc8",
+        "recordCount": 84
       }
     },
     "abilities": {
@@ -1237,6 +1237,6 @@
   ],
   "reports": {
     "attributionSha256": "eb53a69699ab49fb1f6f3380fb3e071ba0692201dad9266bd754e02777857d67",
-    "coverageSha256": "2d6dd466a0774103030f2196c731b9b2bbe3216f9bf6bdfa22ed93d83f840821"
+    "coverageSha256": "d6bebbb29abb86a486ebd2eb3b1026e76a0f890e8f0fe7dc98510899037ef900"
   }
 }

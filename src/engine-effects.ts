@@ -32,6 +32,11 @@ export function isAdmittedEffectOperation(operation: EngineEffectOperation): boo
       || operation.category === "ability-check"
       || operation.category === "saving-throw";
   }
+  if (operation.kind === "stat-modifier") {
+    return operation.stat === "armor-class"
+      && Number.isInteger(operation.value)
+      && operation.stackingKey.trim().length > 0;
+  }
   return operation.kind === "condition"
     && (operation.action === "apply" || operation.action === "remove")
     && typeof operation.condition === "string"
@@ -147,6 +152,33 @@ export function queryModifiers(
           ? "disadvantage"
           : "normal",
     effectIds: relevant.map((effect) => effect.id),
+  };
+}
+
+export function queryStatModifier(
+  effects: EngineEffectInstance[],
+  actorId: string,
+  stat: "armor-class",
+): { total: number; effectIds: string[]; components: Array<{ effectId: string; value: number; stackingKey: string }> } {
+  const components: Array<{ effectId: string; value: number; stackingKey: string }> = [];
+  for (const effect of effects) {
+    if (effect.status !== "active" || !effectTargets(effect, actorId)) continue;
+    for (const operation of effect.operations) {
+      if (operation.kind === "stat-modifier" && operation.stat === stat) {
+        components.push({ effectId: effect.id, value: operation.value, stackingKey: operation.stackingKey });
+      }
+    }
+  }
+  const byStackingKey = new Map<string, { effectId: string; value: number; stackingKey: string }>();
+  for (const component of components) {
+    const existing = byStackingKey.get(component.stackingKey);
+    if (!existing || component.value > existing.value) byStackingKey.set(component.stackingKey, component);
+  }
+  const selected = [...byStackingKey.values()];
+  return {
+    total: selected.reduce((sum, component) => sum + component.value, 0),
+    effectIds: selected.map((component) => component.effectId),
+    components: selected,
   };
 }
 

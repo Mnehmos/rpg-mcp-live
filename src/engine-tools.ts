@@ -200,6 +200,13 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
     slotLevel: z.number().int().min(1).max(9).optional(),
     targetIds: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
+    reactionId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
+  reaction_response: z.object({
+    reactionId: z.string().trim().min(1).max(120),
+    decision: z.enum(["accept", "decline"]),
+    spellKey: z.string().trim().startsWith("open5e:spell:").max(300).optional(),
+    slotLevel: z.number().int().min(1).max(9).optional(),
   }).strict(),
   combat_action: z
     .object({
@@ -670,15 +677,31 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "cast_spell",
-    "Cast a learned or prepared Open5e spell. The engine owns slots, action economy, attacks, saves, typed damage, target count, concentration, and exact structured upcasting. Tier-0 prose is rejected without mutation.",
+    "Cast a learned or prepared Open5e spell. The engine owns slots, action economy, attacks, saves, typed damage or healing, target count, concentration, reactions, and exact structured upcasting. Tier-0 prose is rejected without mutation.",
     {
       type: "object",
       properties: {
         spellKey: { type: "string", description: "Exact open5e:spell contentKey from the character spell list." },
         slotLevel: { type: "integer", minimum: 1, maximum: 9, description: "Optional slot level. Omit to use the lowest legal available slot." },
         targetIds: { type: "array", items: { type: "string" }, maxItems: 20, description: "Combatant ids selected by the DM as affected targets." },
+        reactionId: { type: "string", description: "Pending reaction id when resolving Shield through cast_spell." },
       },
       required: ["spellKey"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "reaction_response",
+    "Resolve one server-offered incoming-hit reaction exactly once. Accept Shield to rederive armor class before the stored attack resolves, or decline to take the stored hit without spending a slot or reaction.",
+    {
+      type: "object",
+      properties: {
+        reactionId: { type: "string" },
+        decision: { type: "string", enum: ["accept", "decline"] },
+        spellKey: { type: "string", description: "Exact Shield spell content key when accepting." },
+        slotLevel: { type: "integer", minimum: 1, maximum: 9 },
+      },
+      required: ["reactionId", "decision"],
       additionalProperties: false,
     }
   ),
@@ -849,6 +872,15 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         spellKey: args.spellKey,
         slotLevel: args.slotLevel,
         targetIds: args.targetIds ?? [],
+        reactionId: args.reactionId,
+      });
+    case "reaction_response":
+      return engineCommandSchema.parse({
+        kind: "reaction_response",
+        reactionId: args.reactionId,
+        decision: args.decision,
+        spellKey: args.spellKey,
+        slotLevel: args.slotLevel,
       });
     case "advance_turn":
       return engineCommandSchema.parse({

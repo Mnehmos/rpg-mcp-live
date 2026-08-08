@@ -15,7 +15,7 @@ const packDirectory = join(process.cwd(), "content", "open5e", "open5e-v2-full-c
 describe("Open5e S8 full-corpus pack", () => {
   it("verifies the pinned corpus and preserves the reviewed S7 kernel", async () => {
     const verified = await verifyOpen5eS8Pack(packDirectory);
-    expect(verified.packHash).toBe("56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f");
+    expect(verified.packHash).toBe("fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa");
     expect(verified.collections.documents?.raw).toBe(24);
     expect(verified.collections.creatures?.raw).toBe(3_541);
     expect(verified.collections.spells?.raw).toBe(1_955);

@@ -146,6 +146,10 @@ const REVIEWED_IMMEDIATE_PRIMARY_DAMAGE_SPELLS = new Set([
 const CURRENCY_RULE_KEY = "srd_coins_exchange-rates";
 const SHIELD_ITEM_KEY = "srd_shield";
 
+type CompiledSpellDamageEffect = Extract<CompiledSpellEffect, { effectKind: "damage" }>;
+type CompiledSpellHealingEffect = Extract<CompiledSpellEffect, { effectKind: "healing" }>;
+type CompiledSpellStatModifierEffect = Extract<CompiledSpellEffect, { effectKind: "stat-modifier" }>;
+
 const rawPublisherSchema = z.object({
   key: z.string().min(1),
   name: z.string().min(1),
@@ -3522,61 +3526,139 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
-function compileSpellEffects(records: NormalizedContentRecord[]): CompiledSpellEffect[] {
+export function compileSpellEffects(records: NormalizedContentRecord[]): CompiledSpellEffect[] {
   const programs: CompiledSpellEffect[] = [];
   for (const spell of records) {
-    if (spell.kind !== "spell" || !spell.damageRoll || spell.damageTypes.length !== 1) continue;
-    if (!REVIEWED_IMMEDIATE_PRIMARY_DAMAGE_SPELLS.has(spell.sourceKey)) continue;
-    const baseDamage = parseDamageExpression(spell.damageRoll);
-    if (!baseDamage) continue;
-    const damageType = spell.damageTypes[0];
-    if (!damageType) continue;
-    const resolution = classifySpellDamageResolution(spell, spell.damageRoll, damageType.name);
-    if (!resolution) continue;
-    const slotLevelVariants: Record<string, CompiledSpellEffect["baseDamage"]> = {};
-    const playerLevelVariants: Record<string, CompiledSpellEffect["baseDamage"]> = {};
-    for (const option of spell.castingOptions) {
-      if (!option.damageRoll || option.description) continue;
-      const damage = parseDamageExpression(option.damageRoll);
-      if (!damage) continue;
-      const slotMatch = /^slot_level_([1-9])$/.exec(option.type);
-      if (slotMatch?.[1]) slotLevelVariants[slotMatch[1]] = damage;
-      const playerMatch = /^player_level_((?:[1-9]|1\d|20))$/.exec(option.type);
-      if (playerMatch?.[1]) playerLevelVariants[playerMatch[1]] = damage;
-    }
-    programs.push({
-      kind: "spell-effect",
-      fidelityTier: 2,
-      key: `${spell.key}_primary-damage`,
-      contentKey: `open5e:spell-effect:${spell.gamesystem}:${spell.documentKey}:${spell.sourceKey}/primary-damage`,
-      sourceKey: `${spell.sourceKey}/primary-damage`,
-      documentKey: spell.documentKey,
-      gamesystem: spell.gamesystem,
-      publisher: spell.publisher,
-      licenseKeys: spell.licenseKeys,
-      permalink: spell.permalink,
-      sourceApiVersion: spell.sourceApiVersion,
-      sourceFetchedAt: spell.sourceFetchedAt,
-      sourceContentKey: spell.contentKey,
-      resolution: resolution.kind,
-      saveOnSuccess: resolution.saveOnSuccess,
-      damageType,
-      baseDamage,
-      slotLevelVariants,
-      playerLevelVariants,
-      sourceDescriptionSha256: sha256(spell.description),
-      resolutionScope: "primary-damage",
-      hasDeferredProseEffects: true,
-    });
+    if (spell.kind !== "spell") continue;
+    const damage = compileSpellDamageEffect(spell);
+    if (damage) programs.push(damage);
+    const healing = compileSpellHealingEffect(spell);
+    if (healing) programs.push(healing);
+    const statModifier = compileSpellStatModifierEffect(spell);
+    if (statModifier) programs.push(statModifier);
   }
   return programs.sort(compareByKey);
+}
+
+function compileSpellDamageEffect(spell: NormalizedSpell): CompiledSpellDamageEffect | null {
+  if (!spell.damageRoll || spell.damageTypes.length !== 1) return null;
+  if (!REVIEWED_IMMEDIATE_PRIMARY_DAMAGE_SPELLS.has(spell.sourceKey)) return null;
+  const baseDamage = parseDamageExpression(spell.damageRoll);
+  if (!baseDamage) return null;
+  const damageType = spell.damageTypes[0];
+  if (!damageType) return null;
+  const resolution = classifySpellDamageResolution(spell, spell.damageRoll, damageType.name);
+  if (!resolution) return null;
+  const slotLevelVariants: Record<string, CompiledSpellDamageEffect["baseDamage"]> = {};
+  const playerLevelVariants: Record<string, CompiledSpellDamageEffect["baseDamage"]> = {};
+  for (const option of spell.castingOptions) {
+    if (!option.damageRoll || option.description) continue;
+    const damage = parseDamageExpression(option.damageRoll);
+    if (!damage) continue;
+    const slotMatch = /^slot_level_([1-9])$/.exec(option.type);
+    if (slotMatch?.[1]) slotLevelVariants[slotMatch[1]] = damage;
+    const playerMatch = /^player_level_((?:[1-9]|1\d|20))$/.exec(option.type);
+    if (playerMatch?.[1]) playerLevelVariants[playerMatch[1]] = damage;
+  }
+  return {
+    kind: "spell-effect",
+    effectKind: "damage",
+    fidelityTier: 2,
+    key: `${spell.key}_primary-damage`,
+    contentKey: `open5e:spell-effect:${spell.gamesystem}:${spell.documentKey}:${spell.sourceKey}/primary-damage`,
+    sourceKey: `${spell.sourceKey}/primary-damage`,
+    documentKey: spell.documentKey,
+    gamesystem: spell.gamesystem,
+    publisher: spell.publisher,
+    licenseKeys: spell.licenseKeys,
+    permalink: spell.permalink,
+    sourceApiVersion: spell.sourceApiVersion,
+    sourceFetchedAt: spell.sourceFetchedAt,
+    sourceContentKey: spell.contentKey,
+    resolution: resolution.kind,
+    saveOnSuccess: resolution.saveOnSuccess,
+    damageType,
+    baseDamage,
+    slotLevelVariants,
+    playerLevelVariants,
+    sourceDescriptionSha256: sha256(spell.description),
+    resolutionScope: "primary-damage",
+    hasDeferredProseEffects: true,
+  };
+}
+
+function compileSpellHealingEffect(spell: NormalizedSpell): CompiledSpellHealingEffect | null {
+  if (spell.sourceKey !== "srd_cure-wounds") return null;
+  const normalized = spell.description.replace(/\s+/g, " ");
+  if (!/regains\s+a\s+number\s+of\s+hit\s+points\s+equal\s+to\s+1d8\s*\+\s+your\s+spellcasting\s+ability\s+modifier/i.test(normalized)) return null;
+  const baseHealing = parseDamageExpression("1d8");
+  if (!baseHealing) return null;
+  const slotLevelVariants: Record<string, CompiledSpellHealingEffect["baseHealing"]> = {};
+  for (let slotLevel = 2; slotLevel <= 9; slotLevel += 1) {
+    slotLevelVariants[String(slotLevel)] = { kind: "dice", diceCount: slotLevel, dieSides: 8, bonus: 0 };
+  }
+  return {
+    kind: "spell-effect",
+    effectKind: "healing",
+    fidelityTier: 2,
+    key: `${spell.key}_single-target-healing`,
+    contentKey: `open5e:spell-effect:${spell.gamesystem}:${spell.documentKey}:${spell.sourceKey}/single-target-healing`,
+    sourceKey: `${spell.sourceKey}/single-target-healing`,
+    documentKey: spell.documentKey,
+    gamesystem: spell.gamesystem,
+    publisher: spell.publisher,
+    licenseKeys: spell.licenseKeys,
+    permalink: spell.permalink,
+    sourceApiVersion: spell.sourceApiVersion,
+    sourceFetchedAt: spell.sourceFetchedAt,
+    sourceContentKey: spell.contentKey,
+    healingAbility: "spellcasting",
+    baseHealing,
+    slotLevelVariants,
+    targetPolicy: "single-creature",
+    sourceDescriptionSha256: sha256(spell.description),
+    resolutionScope: "single-target-healing",
+    hasDeferredProseEffects: true,
+  };
+}
+
+function compileSpellStatModifierEffect(spell: NormalizedSpell): CompiledSpellStatModifierEffect | null {
+  if (spell.sourceKey !== "srd_shield") return null;
+  const normalized = spell.description.replace(/\s+/g, " ");
+  if (!/\+5\s+bonus\s+to\s+AC.*triggering\s+attack/i.test(normalized)) return null;
+  return {
+    kind: "spell-effect",
+    effectKind: "stat-modifier",
+    fidelityTier: 2,
+    key: `${spell.key}_incoming-hit-reaction`,
+    contentKey: `open5e:spell-effect:${spell.gamesystem}:${spell.documentKey}:${spell.sourceKey}/incoming-hit-reaction`,
+    sourceKey: `${spell.sourceKey}/incoming-hit-reaction`,
+    documentKey: spell.documentKey,
+    gamesystem: spell.gamesystem,
+    publisher: spell.publisher,
+    licenseKeys: spell.licenseKeys,
+    permalink: spell.permalink,
+    sourceApiVersion: spell.sourceApiVersion,
+    sourceFetchedAt: spell.sourceFetchedAt,
+    sourceContentKey: spell.contentKey,
+    modifier: {
+      stat: "armor-class",
+      amount: 5,
+      duration: { kind: "turn-boundary", boundary: "start", subject: "target", offsetTurns: 1 },
+      stackingKey: "stat:armor-class:shield",
+      trigger: "incoming-attack-would-hit",
+    },
+    sourceDescriptionSha256: sha256(spell.description),
+    resolutionScope: "incoming-hit-reaction",
+    hasDeferredProseEffects: true,
+  };
 }
 
 function classifySpellDamageResolution(
   spell: NormalizedSpell,
   damageRoll: string,
   damageTypeName: string
-): { kind: CompiledSpellEffect["resolution"]; saveOnSuccess: CompiledSpellEffect["saveOnSuccess"] } | null {
+): { kind: CompiledSpellDamageEffect["resolution"]; saveOnSuccess: CompiledSpellDamageEffect["saveOnSuccess"] } | null {
   const normalized = spell.description.replace(/\s+/g, " ");
   const roll = escapeRegExp(damageRoll).replaceAll("\\+", "\\s*\\+\\s*");
   const damageType = escapeRegExp(damageTypeName);
@@ -3626,7 +3708,7 @@ function classifySpellDamageResolution(
   return null;
 }
 
-function parseDamageExpression(value: string): CompiledSpellEffect["baseDamage"] | null {
+function parseDamageExpression(value: string): CompiledSpellDamageEffect["baseDamage"] | null {
   const compact = value.replace(/\s+/g, "");
   const dice = /^(\d+)d(\d+)(?:([+-])(\d+))?$/.exec(compact);
   if (dice) {

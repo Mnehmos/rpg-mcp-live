@@ -66,6 +66,7 @@ import {
   isAdmittedEffectOperation,
   normalizeCondition,
   queryModifiers,
+  queryStatModifier,
   removeConditionEffects,
   removeEffectsBySource,
 } from "./engine-effects.js";
@@ -264,6 +265,9 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   if (currentQuest) next.quest = currentQuest;
   if (!Array.isArray(next.improvEffects)) next.improvEffects = [];
   next.effects = normalizeEffects((next as LanternCampaignState & { effects?: unknown }).effects, next);
+  // Persisted timed stat effects (for example Shield) are authoritative for
+  // the derived AC projection after a save/load or process restart.
+  next.character.ac = deriveArmorClass(next.character, next.effects);
   syncConditionProjections(next);
   if (next.currentBeat === undefined) next.currentBeat = null;
   if (!Array.isArray(next.suggestedActions)) next.suggestedActions = [];
@@ -280,7 +284,9 @@ export function cloneCampaign(state: LanternCampaignState): LanternCampaignState
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
   const sandboxActions = ["observe", "listen", "roll"];
   const combatActions = state.combat.status === "active"
-    ? state.combat.activeActorId === state.actorId
+    ? state.combat.pendingReaction
+      ? ["reaction_response:accept", "reaction_response:decline"]
+      : state.combat.activeActorId === state.actorId
       ? [
           ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", "combat_action:dodge"]),
           ...(state.combat.turnBudget.bonusAction.spent || (state.character.featureUses.secondWind ?? 0) < 1 ? [] : ["combat_action:second_wind"]),
@@ -308,7 +314,9 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     suggestedActions: state.suggestedActions,
     log: state.log.slice(-40),
     availableActions:
-      state.phase === "character_creation"
+      state.combat.pendingReaction
+        ? ["reaction_response:accept", "reaction_response:decline"]
+        : state.phase === "character_creation"
         ? ["create_character"]
         : state.phase === "tutorial"
           ? ["continue"]
@@ -450,6 +458,8 @@ export function resolveEngineCommand(
       return resolvePrepareSpell(state, context, clientCommandId, command, tool);
     case "cast_spell":
       return resolveCastSpell(state, context, clientCommandId, command, tool);
+    case "reaction_response":
+      return resolveReactionResponse(state, context, clientCommandId, command, tool);
     case "advance_turn":
       return resolveAdvanceTurn(state, context, clientCommandId, command, tool);
     case "death_save":
@@ -1134,7 +1144,11 @@ function resolveImprovise(
     if (targetIsPlayer) {
       const amount = command.amount ?? 0;
       if (command.effectType === "damage") next.character.hp = Math.max(0, next.character.hp - amount);
-      else next.character.hp = Math.min(next.character.maxHp, next.character.hp + amount);
+      else {
+        if (amount <= 0) return rejection(state, tool, "healing_amount_required", "Healing must provide a positive amount.");
+        if (state.character.hp >= state.character.maxHp) return rejection(state, tool, "already_full_health", "The target is already at full hit points.");
+        applyHealing(next, amount, "improvise", changes);
+      }
       if (next.character.hp === 0 && command.effectType === "damage") {
         applyConditionRuntimeEffect(next, "unconscious", `actor:${state.actorId}`, next.character.id, { kind: "persistent" }, "condition:unconscious", ["never"], clientCommandId, changes);
       }
@@ -1296,7 +1310,7 @@ function resolveEquipItem(
   if (!equipped) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
   equipped.slot = command.slot;
   equipped.equipped = true;
-  next.character.ac = deriveArmorClass(next.character);
+  next.character.ac = deriveArmorClass(next.character, next.effects);
   return commit(next, context, clientCommandId, command, tool, "You equip the " + itemView.name + ".", { item: materializeInventoryItem(equipped), character: characterData(next.character) }, "item_equipped", [], [], [
     { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
     { path: "/character/ac", before: state.character.ac, after: next.character.ac },
@@ -1316,7 +1330,7 @@ function resolveUnequipItem(
   const next = cloneCampaign(state);
   const target = next.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (target) target.equipped = false;
-  next.character.ac = deriveArmorClass(next.character);
+  next.character.ac = deriveArmorClass(next.character, next.effects);
   return commit(next, context, clientCommandId, command, tool, "You unequip the " + materializeInventoryItem(item).name + ".", { item: target ? materializeInventoryItem(target) : null, character: characterData(next.character) }, "item_unequipped", [], [], [
     { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
     { path: "/character/ac", before: state.character.ac, after: next.character.ac },
@@ -1763,6 +1777,13 @@ function resolveCastSpell(
     return rejection(state, tool, "reaction_already_used", "Your reaction is already spent this round.");
   }
 
+  if (spell.effect.effectKind === "healing") {
+    return resolveHealingSpell(state, context, clientCommandId, command, tool, spell, spellcasting);
+  }
+  if (spell.effect.effectKind === "stat-modifier") {
+    return resolveShieldCast(state, context, clientCommandId, command, tool, spell, spellcasting);
+  }
+
   const slotSelection = selectSpellSlot(spell.definition.level, command.slotLevel, spellcasting.slots);
   if ("code" in slotSelection) return rejection(state, tool, slotSelection.code, slotSelection.message);
   const selectedSlotLevel = slotSelection.slotLevel;
@@ -1945,12 +1966,346 @@ function resolveCastSpell(
   );
 }
 
+function resolveHealingSpell(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "cast_spell" }>,
+  tool: EngineToolName | "declare" | "listen",
+  spell: NonNullable<ReturnType<typeof getOpen5eSpell>>,
+  spellcasting: NonNullable<EngineCharacter["spellcasting"]>
+): EngineResolution {
+  const effect = spell.effect;
+  if (!effect || effect.effectKind !== "healing") {
+    return rejection(state, tool, "unsupported_effect", "That spell does not contain a reviewed healing effect.");
+  }
+  const selectedIds = command.targetIds.length > 0 ? [...new Set(command.targetIds)] : [state.character.id];
+  if (selectedIds.length !== 1 || selectedIds[0] !== state.character.id) {
+    return rejection(state, tool, "invalid_spell_target", "This healing slice currently resolves one touch target: the player character.");
+  }
+  if (state.character.hp >= state.character.maxHp) {
+    return rejection(state, tool, "already_full_health", "The target is already at full hit points.");
+  }
+  const slotSelection = selectSpellSlot(spell.definition.level, command.slotLevel, spellcasting.slots);
+  if ("code" in slotSelection) return rejection(state, tool, slotSelection.code, slotSelection.message);
+  const selectedSlotLevel = slotSelection.slotLevel;
+  if (selectedSlotLevel !== null && selectedSlotLevel > spell.definition.level && !effect.slotLevelVariants[String(selectedSlotLevel)]) {
+    return rejection(
+      state,
+      tool,
+      "content_tier_insufficient",
+      `${spell.definition.name}'s level-${selectedSlotLevel} upcast is not executable from reviewed structured data.`
+    );
+  }
+  const expression = selectSpellHealing(effect, spell.definition.level, selectedSlotLevel);
+  const ability = effect.healingAbility === "spellcasting" ? spellcasting.ability : effect.healingAbility;
+  const abilityBonus = open5eAbilityModifier(state.character.abilities[ability]);
+  const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+  const modifiers: Array<{ name: string; value: number }> = [];
+  const amount = rollHealing(expression, abilityBonus, rolls);
+  modifiers.push({ name: `${ability}_modifier`, value: abilityBonus });
+  const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  if (selectedSlotLevel !== null) {
+    next.character.spellcasting!.slots[String(selectedSlotLevel)] -= 1;
+    changes.push({
+      path: `/character/spellcasting/slots/${selectedSlotLevel}`,
+      before: spellcasting.slots[String(selectedSlotLevel)],
+      after: next.character.spellcasting!.slots[String(selectedSlotLevel)],
+    });
+  }
+  const castingTime = spell.definition.castingTime;
+  if (castingTime === "action") spendTurnSlot(next.combat.turnBudget, "action");
+  else if (castingTime === "bonus-action") spendTurnSlot(next.combat.turnBudget, "bonusAction");
+  else spendTurnSlot(next.combat.turnBudget, "reaction");
+  changes.push({
+    path: `/combat/turnBudget/${castingTime === "bonus-action" ? "bonusAction" : castingTime === "reaction" ? "reaction" : "action"}/spent`,
+    before: false,
+    after: true,
+  });
+  const healing = applyHealing(next, amount, `spell:${spell.contentKey}`, changes);
+  if (healing.healed <= 0) {
+    return rejection(state, tool, "already_full_health", "The target is already at full hit points.");
+  }
+  if (castingTime === "action") next.combat.activeActorId = firstLiveCombatantId(next.combat);
+  next.combat.lastAction = `cast:${spell.contentKey}`;
+  const slotText = selectedSlotLevel === null ? " as a cantrip" : ` with a level-${selectedSlotLevel} slot`;
+  const turnText = castingTime === "action" ? " The opposition now has the turn." : "";
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `${spell.definition.name} resolves${slotText}: ${healing.healed} hit points restored.${turnText}`,
+    {
+      spell: spell.definition,
+      effectKind: "healing",
+      slotLevel: selectedSlotLevel,
+      targetId: state.character.id,
+      healing,
+      range: { source: spell.definition.range, executableFeet: executableSpellRangeFeet(spell.definition) },
+      combat: combatData(next.combat),
+      character: characterData(next.character),
+      deferredProseEffects: effect.hasDeferredProseEffects,
+    },
+    "spell_healing",
+    rolls,
+    modifiers,
+    changes
+  );
+}
+
+function resolveShieldCast(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "cast_spell" }>,
+  tool: EngineToolName | "declare" | "listen",
+  spell: NonNullable<ReturnType<typeof getOpen5eSpell>>,
+  _spellcasting: NonNullable<EngineCharacter["spellcasting"]>
+): EngineResolution {
+  if (!state.combat.pendingReaction) {
+    return rejection(state, tool, "reaction_trigger_required", "Shield can only be cast in response to a server-offered incoming hit.");
+  }
+  return resolveReactionResponse(
+    state,
+    context,
+    clientCommandId,
+    {
+      kind: "reaction_response",
+      reactionId: command.reactionId ?? state.combat.pendingReaction.id,
+      decision: "accept",
+      spellKey: spell.contentKey,
+      slotLevel: command.slotLevel,
+    },
+    tool
+  );
+}
+
+function resolveReactionResponse(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "reaction_response" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active encounter.");
+  const pending = state.combat.pendingReaction;
+  if (!pending) return rejection(state, tool, "reaction_not_found", "There is no pending reaction to resolve.");
+  if (pending.status !== "offered") return rejection(state, tool, "reaction_already_resolved", "That reaction offer has already been resolved.");
+  if (pending.id !== command.reactionId) return rejection(state, tool, "reaction_mismatch", "That reaction id does not match the pending incoming hit.");
+  if (pending.actorId !== context.actorId || pending.targetId !== state.character.id) {
+    return rejection(state, tool, "reaction_not_authorized", "Only the targeted character may resolve this reaction.");
+  }
+  const enemy = findLiveCombatant(state.combat, pending.attackerId);
+  if (!enemy) return rejection(state, tool, "combatant_not_found", "The attacker for this reaction is no longer in the encounter.");
+
+  if (command.decision === "decline") {
+    const next = cloneCampaign(state);
+    const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+    const modifiers: Array<{ name: string; value: number }> = [{ name: "armor_class", value: pending.originalArmorClass }];
+    const changes: Array<{ path: string; before: unknown; after: unknown }> = [
+      { path: "/combat/pendingReaction", before: pending, after: null },
+    ];
+    next.combat.pendingReaction = null;
+    const damage = rollStoredReactionDamage(pending, rolls);
+    const beforeHp = next.character.hp;
+    next.character.hp = Math.max(0, next.character.hp - damage);
+    if (beforeHp !== next.character.hp) changes.push({ path: "/character/hp", before: beforeHp, after: next.character.hp });
+    applyConcentrationAndDownedState(next, damage, rolls, modifiers, changes);
+    next.combat.lastAction = `reaction:${pending.id}:declined`;
+    const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `You decline Shield. ${pending.attackName} hits for ${damage} ${pending.damageType.toLocaleLowerCase("en-US")} damage.${turnSuffix}`,
+      {
+        reactionId: pending.id,
+        decision: "decline",
+        attackTotal: pending.attackTotal,
+        armorClass: pending.originalArmorClass,
+        damage: { rolled: damage, applied: damage, type: pending.damageType },
+        combat: combatData(next.combat),
+        character: characterData(next.character),
+      },
+      next.character.hp === 0 ? "downed" : "reaction_declined",
+      rolls,
+      modifiers,
+      changes,
+      [pending.sourceActionKey]
+    );
+  }
+
+  const spellKey = command.spellKey ?? pending.eligibleReactionIds[0];
+  if (!spellKey || !pending.eligibleReactionIds.includes(spellKey)) {
+    return rejection(state, tool, "reaction_not_eligible", "The selected reaction spell was not offered for this incoming hit.");
+  }
+  const spell = getOpen5eSpell(spellKey);
+  const spellcasting = state.character.spellcasting;
+  if (!spell || !spell.effect || spell.effect.effectKind !== "stat-modifier") {
+    return rejection(state, tool, "unsupported_effect", "Only a reviewed Shield stat modifier can resolve this reaction.");
+  }
+  if (spell.effect.modifier.trigger !== pending.trigger || spell.definition.castingTime !== "reaction") {
+    return rejection(state, tool, "reaction_not_eligible", "That spell is not a reviewed incoming-hit reaction.");
+  }
+  if (!spellcasting) return rejection(state, tool, "spellcasting_unavailable", "This character cannot cast a reaction spell.");
+  const progression = getOpen5eSpellProgression(state.character.className);
+  if (!progression) return rejection(state, tool, "spellcasting_unavailable", "This character has no installed spellcasting progression.");
+  const references = spell.definition.level === 0 || progression.selectionMode === "known"
+    ? spellcasting.knownSpells
+    : spellcasting.preparedSpells;
+  if (!hasPinnedSpell(references, spell.contentKey, spell.packHash)) {
+    return rejection(state, tool, "spell_not_available", `${spell.definition.name} is not currently available to cast.`);
+  }
+  if (state.combat.turnBudget.reaction.spent) return rejection(state, tool, "reaction_already_used", "Your reaction is already spent this round.");
+  const slotSelection = selectSpellSlot(spell.definition.level, command.slotLevel, spellcasting.slots);
+  if ("code" in slotSelection) return rejection(state, tool, slotSelection.code, slotSelection.message);
+  const selectedSlotLevel = slotSelection.slotLevel;
+  const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: "/combat/pendingReaction", before: pending, after: null },
+  ];
+  next.combat.pendingReaction = null;
+  if (selectedSlotLevel !== null) {
+    next.character.spellcasting!.slots[String(selectedSlotLevel)] -= 1;
+    changes.push({
+      path: `/character/spellcasting/slots/${selectedSlotLevel}`,
+      before: spellcasting.slots[String(selectedSlotLevel)],
+      after: next.character.spellcasting!.slots[String(selectedSlotLevel)],
+    });
+  }
+  spendTurnSlot(next.combat.turnBudget, "reaction");
+  changes.push({ path: "/combat/turnBudget/reaction/spent", before: false, after: true });
+  applyRuntimeEffect(
+    next,
+    effectInput(
+      next,
+      `spell:${spell.contentKey}`,
+      `spell:${spell.contentKey}`,
+      [next.character.id],
+      [{ kind: "stat-modifier", stat: "armor-class", value: spell.effect.modifier.amount, stackingKey: spell.effect.modifier.stackingKey }],
+      spell.effect.modifier.duration,
+      spell.effect.modifier.stackingKey,
+      "replace",
+      ["duration"],
+      clientCommandId,
+    ),
+    changes,
+  );
+  const acBefore = pending.originalArmorClass;
+  const acAfter = deriveArmorClass(next.character, next.effects);
+  next.character.ac = acAfter;
+  changes.push({ path: "/character/ac", before: acBefore, after: acAfter });
+  const hitAfter = pending.attackRoll !== 1 && (pending.critical || pending.attackTotal >= acAfter);
+  const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+  const modifiers: Array<{ name: string; value: number }> = [
+    { name: "attack_total", value: pending.attackTotal },
+    { name: "armor_class_before", value: acBefore },
+    { name: "armor_class_after", value: acAfter },
+  ];
+  let damage = 0;
+  if (hitAfter) {
+    damage = rollStoredReactionDamage(pending, rolls);
+    const beforeHp = next.character.hp;
+    next.character.hp = Math.max(0, next.character.hp - damage);
+    if (beforeHp !== next.character.hp) changes.push({ path: "/character/hp", before: beforeHp, after: next.character.hp });
+    applyConcentrationAndDownedState(next, damage, rolls, modifiers, changes);
+  }
+  next.combat.lastAction = `reaction:${pending.id}:shield`;
+  const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `Shield resolves: AC rises from ${acBefore} to ${acAfter}; the stored attack ${hitAfter ? "still hits" : "misses"}${hitAfter ? ` for ${damage} ${pending.damageType.toLocaleLowerCase("en-US")} damage` : ""}.${turnSuffix}`,
+    {
+      reactionId: pending.id,
+      decision: "accept",
+      spell: spell.definition,
+      slotLevel: selectedSlotLevel,
+      attackTotal: pending.attackTotal,
+      acBefore,
+      acAfter,
+      armorClassComponents: queryStatModifier(next.effects, next.character.id, "armor-class").components,
+      hitAfter,
+      damage: { rolled: damage, applied: damage, type: pending.damageType },
+      combat: combatData(next.combat),
+      character: characterData(next.character),
+    },
+    next.character.hp === 0 ? "downed" : hitAfter ? "reaction_resolved_hit" : "reaction_resolved_miss",
+    rolls,
+    modifiers,
+    changes,
+    [spell.contentKey, pending.sourceActionKey]
+  );
+}
+
+function selectSpellHealing(
+  effect: Extract<CompiledSpellEffect, { effectKind: "healing" }>,
+  spellLevel: number,
+  slotLevel: number | null
+): Extract<CompiledSpellEffect, { effectKind: "healing" }>["baseHealing"] {
+  if (spellLevel > 0 && slotLevel !== null) return effect.slotLevelVariants[String(slotLevel)] ?? effect.baseHealing;
+  return effect.baseHealing;
+}
+
+function rollHealing(
+  expression: Extract<CompiledSpellEffect, { effectKind: "healing" }>["baseHealing"],
+  abilityBonus: number,
+  rolls: Array<{ kind: string; value: number; sides?: number }>
+): number {
+  if (expression.kind === "flat") return Math.max(0, expression.amount + abilityBonus);
+  let total = expression.bonus + abilityBonus;
+  for (let index = 0; index < expression.diceCount; index += 1) {
+    const die = randomInt(1, expression.dieSides + 1);
+    total += die;
+    rolls.push({ kind: "healing_dice", value: die, sides: expression.dieSides });
+  }
+  return Math.max(0, total);
+}
+
+function rollStoredReactionDamage(
+  pending: EnginePendingReaction,
+  rolls: Array<{ kind: string; value: number; sides?: number }>
+): number {
+  let total = pending.damageBonus;
+  for (let index = 0; index < pending.damageDiceCount; index += 1) {
+    const die = randomInt(1, pending.damageDieSides + 1);
+    total += die;
+    rolls.push({ kind: "reaction_damage", value: die, sides: pending.damageDieSides });
+  }
+  return Math.max(0, total);
+}
+
 function spellReference(contentKey: string, packHash: string): EngineSpellReference {
   return { contentKey, packHash };
 }
 
 function hasPinnedSpell(references: EngineSpellReference[], contentKey: string, packHash: string): boolean {
   return references.some((reference) => reference.contentKey === contentKey && reference.packHash === packHash);
+}
+
+function eligibleShieldReaction(state: LanternCampaignState): NonNullable<ReturnType<typeof getOpen5eSpell>> | null {
+  const spellcasting = state.character.spellcasting;
+  if (!spellcasting || state.combat.turnBudget.reaction.spent) return null;
+  const spell = getOpen5eSpell("open5e:spell:5e-2014:srd-2014:srd_shield");
+  if (!spell || !spell.effect || spell.effect.effectKind !== "stat-modifier") return null;
+  const progression = getOpen5eSpellProgression(state.character.className);
+  if (!progression) return null;
+  const references = spell.definition.level === 0 || progression.selectionMode === "known"
+    ? spellcasting.knownSpells
+    : spellcasting.preparedSpells;
+  return spell.definition.castingTime === "reaction"
+    && spell.effect.modifier.trigger === "incoming-attack-would-hit"
+    && hasPinnedSpell(references, spell.contentKey, spell.packHash)
+    ? spell
+    : null;
 }
 
 function highestAvailableSlotLevel(slotMaximums: Record<string, number>): number {
@@ -1997,11 +2352,11 @@ function selectSpellSlot(
 }
 
 function selectSpellDamage(
-  effect: CompiledSpellEffect,
+  effect: Extract<CompiledSpellEffect, { effectKind: "damage" }>,
   spellLevel: number,
   slotLevel: number | null,
   playerLevel: number
-): CompiledSpellEffect["baseDamage"] {
+): Extract<CompiledSpellEffect, { effectKind: "damage" }>["baseDamage"] {
   if (spellLevel === 0) {
     const applicableLevel = Object.keys(effect.playerLevelVariants)
       .map(Number)
@@ -2014,7 +2369,7 @@ function selectSpellDamage(
 }
 
 function rollSpellDamage(
-  expression: CompiledSpellEffect["baseDamage"],
+  expression: Extract<CompiledSpellEffect, { effectKind: "damage" }>["baseDamage"],
   critical: boolean,
   rolls: Array<{ kind: string; value: number; sides?: number }>,
   targetIndex: number
@@ -2187,12 +2542,11 @@ function resolveCombatAction(
     const die = randomInt(1, 11);
     const beforeHp = next.character.hp;
     const healed = die + next.character.level;
-    next.character.hp = Math.min(next.character.maxHp, next.character.hp + healed);
+    applyHealing(next, healed, "second-wind", changes);
     next.character.featureUses.secondWind = 0;
     rolls.push({ kind: "second_wind_d10", value: die, sides: 10 });
     modifiers.push({ name: "level", value: next.character.level });
     changes.push(
-      { path: "/character/hp", before: beforeHp, after: next.character.hp },
       { path: "/character/featureUses/secondWind", before: 1, after: 0 },
     );
     message = `You recover ${next.character.hp - beforeHp} hit points with Second Wind.`;
@@ -2335,6 +2689,9 @@ function resolveAdvanceTurn(
   if (command.combatantId && command.combatantId !== enemy.id) {
     return rejection(state, tool, "off_turn", `It is ${enemy.id}'s turn, not ${command.combatantId}'s.`);
   }
+  if (state.combat.pendingReaction) {
+    return rejection(state, tool, "reaction_pending", "Resolve the offered incoming-hit reaction before advancing the enemy turn.");
+  }
 
   const enemyView = materializeCombatant(enemy);
   if (command.actionKey && command.attackKey && command.actionKey !== command.attackKey) {
@@ -2453,6 +2810,57 @@ function resolveAdvanceTurn(
   let outcome = "enemy_miss";
 
   if (hit) {
+    const shield = eligibleShieldReaction(state);
+    if (shield) {
+      const pending: EnginePendingReaction = {
+        version: 1,
+        id: randomUUID(),
+        kind: "incoming-hit",
+        trigger: "incoming-attack-would-hit",
+        sourceCommandId: clientCommandId,
+        sourceVersion: state.version,
+        actorId: state.actorId,
+        attackerId: enemy.id,
+        targetId: state.character.id,
+        sourceActionKey: attack.actionKey,
+        attackName: attack.name,
+        attackRoll: effectiveRoll,
+        attackTotal: total,
+        attackBonus: attackModifier,
+        critical,
+        originalArmorClass: next.character.ac,
+        damageDiceCount: attack.damage.diceCount * (critical ? 2 : 1),
+        damageDieSides: attack.damage.dieSides,
+        damageBonus: attack.damage.bonus,
+        damageType: attack.damage.typeName,
+        eligibleReactionIds: [shield.contentKey],
+        status: "offered",
+        resumeToken: randomUUID(),
+      };
+      next.combat.pendingReaction = pending;
+      next.combat.lastAction = `reaction:${pending.id}:offered`;
+      changes.push({ path: "/combat/pendingReaction", before: state.combat.pendingReaction, after: pending });
+      return commit(
+        next,
+        context,
+        clientCommandId,
+        command,
+        tool,
+        `${enemyView.name} hits with ${attack.name}; Shield may be cast before damage resolves.`,
+        {
+          reactionId: pending.id,
+          pendingReaction: pending,
+          attack: { attackRoll: effectiveRoll, attackTotal: total, attackBonus: attackModifier, critical, armorClass: next.character.ac },
+          combat: combatData(next.combat),
+          character: characterData(next.character),
+        },
+        "reaction_offered",
+        rolls,
+        modifiers,
+        changes,
+        [attack.contentKey, shield.contentKey]
+      );
+    }
     const diceCount = attack.damage.diceCount * (critical ? 2 : 1);
     const damageDice = Array.from(
       { length: diceCount },
@@ -3086,6 +3494,36 @@ function applyConcentrationAndDownedState(
   }
 }
 
+function applyHealing(
+  state: LanternCampaignState,
+  amount: number,
+  source: string,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>
+): { source: string; requested: number; healed: number; beforeHp: number; afterHp: number } {
+  const requested = Number.isFinite(amount) ? Math.max(0, Math.trunc(amount)) : 0;
+  const beforeHp = state.character.hp;
+  const afterHp = Math.min(state.character.maxHp, beforeHp + requested);
+  state.character.hp = afterHp;
+  if (changes && beforeHp !== afterHp) changes.push({ path: "/character/hp", before: beforeHp, after: afterHp });
+  const recoveredFromZero = beforeHp === 0 && afterHp > 0;
+  if (afterHp > beforeHp) {
+    const hadDownedMarker = hasRuntimeCondition(state, state.character.id, "unconscious")
+      || hasRuntimeCondition(state, state.character.id, "stable");
+    removeRuntimeCondition(state, state.character.id, "unconscious", changes);
+    removeRuntimeCondition(state, state.character.id, "stable", changes);
+    if (recoveredFromZero || hadDownedMarker) {
+      const beforeSuccesses = state.character.deathSaveSuccesses;
+      const beforeFailures = state.character.deathSaveFailures;
+      state.character.deathSaveSuccesses = 0;
+      state.character.deathSaveFailures = 0;
+      if (changes && beforeSuccesses !== 0) changes.push({ path: "/character/deathSaveSuccesses", before: beforeSuccesses, after: 0 });
+      if (changes && beforeFailures !== 0) changes.push({ path: "/character/deathSaveFailures", before: beforeFailures, after: 0 });
+    }
+    syncConditionProjections(state);
+  }
+  return { source, requested, healed: afterHp - beforeHp, beforeHp, afterHp };
+}
+
 function finishCreatureTurn(
   state: LanternCampaignState,
   enemyId: string,
@@ -3215,6 +3653,9 @@ function expireAtCharacterTurnStart(
     new Set([...liveSourceIds].map((id) => `combatant:${id}`)),
   );
   syncConditionProjections(state);
+  const beforeAc = state.character.ac;
+  state.character.ac = deriveArmorClass(state.character, state.effects);
+  if (beforeAc !== state.character.ac) changes.push({ path: "/character/ac", before: beforeAc, after: state.character.ac });
   if (JSON.stringify(beforeEffects) !== JSON.stringify(state.effects)) {
     changes.push({ path: "/effects", before: beforeEffects, after: state.effects });
   }
@@ -3394,6 +3835,7 @@ function resolveRest(
   const beforeConcentration = next.character.spellcasting?.concentration ?? null;
   const beforeFeatureUses = { ...next.character.featureUses };
   const beforeEffects = next.effects;
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   let message = "You complete a long rest. Your wounds close and your resources recover.";
   let outcome = "long_rest";
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
@@ -3407,7 +3849,7 @@ function resolveRest(
     if (next.character.hitDiceRemaining > 0) {
       const die = randomInt(1, next.character.hitDie + 1);
       const healing = Math.max(0, die + open5eAbilityModifier(next.character.abilities.con));
-      next.character.hp = Math.min(next.character.maxHp, next.character.hp + healing);
+      applyHealing(next, healing, "short-rest", changes);
       next.character.hitDiceRemaining -= 1;
       rolls.push({ kind: "hit_die", value: die, sides: next.character.hitDie });
     }
@@ -3418,7 +3860,7 @@ function resolveRest(
       + (pactRecovery ? "; your pact spell slots also return." : ".");
     outcome = "short_rest";
   } else {
-    next.character.hp = next.character.maxHp;
+    applyHealing(next, next.character.maxHp - next.character.hp, "long-rest", changes);
     next.character.hitDiceRemaining = Math.min(next.character.level, next.character.hitDiceRemaining + Math.max(1, Math.floor(next.character.level / 2)));
     next.character.deathSaveSuccesses = 0;
     next.character.deathSaveFailures = 0;
@@ -3442,7 +3884,7 @@ function resolveRest(
     rolls,
     [],
     [
-      { path: "/character/hp", before: beforeHp, after: next.character.hp },
+      ...changes,
       { path: "/character/hitDiceRemaining", before: beforeHitDice, after: next.character.hitDiceRemaining },
       ...(beforeSlots ? [{ path: "/character/spellcasting/slots", before: beforeSlots, after: next.character.spellcasting?.slots ?? null }] : []),
       ...(beforeConcentration ? [{ path: "/character/spellcasting/concentration", before: beforeConcentration, after: next.character.spellcasting?.concentration ?? null }] : []),
@@ -3473,8 +3915,8 @@ function resolveUseItem(
   if (state.character.hp >= state.character.maxHp) return rejection(state, tool, "already_full_health", "You are already at full health.");
 
   const next = cloneCampaign(state);
-  const beforeHp = next.character.hp;
-  next.character.hp = Math.min(next.character.maxHp, next.character.hp + itemView.healing);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const healing = applyHealing(next, itemView.healing, "consumable", changes);
   const consumed = next.character.inventory.find((candidate) => candidate.id === item.id);
   if (!consumed) return rejection(state, tool, "item_not_found", "That item is no longer in your inventory.");
   consumed.quantity -= 1;
@@ -3485,13 +3927,13 @@ function resolveUseItem(
     clientCommandId,
     command,
     tool,
-    "You drink the " + itemView.name + " and recover " + (next.character.hp - beforeHp) + " HP.",
-    { itemId: item.id, healing: next.character.hp - beforeHp, character: characterData(next.character) },
+    "You drink the " + itemView.name + " and recover " + healing.healed + " HP.",
+    { itemId: item.id, healing: healing.healed, character: characterData(next.character) },
     "item_used",
     [],
     [],
     [
-      { path: "/character/hp", before: beforeHp, after: next.character.hp },
+      ...changes,
       { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
     ]
   );
@@ -4565,26 +5007,27 @@ function defaultSkillProficiencies(className: string): string[] {
   }
 }
 
-function deriveArmorClass(character: EngineCharacter): number {
+function deriveArmorClass(character: EngineCharacter, effects: EngineEffectInstance[] = []): number {
   const dexterity = open5eAbilityModifier(character.abilities.dex);
   const equipped = materializeInventory(character.inventory).filter((item) => item.equipped);
   const armor = equipped.find((item) => item.kind === "armor" && item.slot === "armor");
   const shieldBonus = equipped
     .filter((item) => item.kind === "armor" && item.properties?.includes("shield"))
     .reduce((total, item) => total + (item.armorClass ?? 0), 0);
-  if (!armor) return 10 + dexterity + shieldBonus;
-  if (armor.armorProfile) {
-    const dexBonus = armor.armorProfile.addDexterityModifier
-      ? armor.armorProfile.dexterityModifierCap === null
-        ? dexterity
-        : Math.min(armor.armorProfile.dexterityModifierCap, dexterity)
-      : 0;
-    return armor.armorProfile.base + dexBonus + shieldBonus;
-  }
-  const heavy = armor.properties?.includes("heavy");
-  const medium = armor.properties?.includes("medium");
-  const dexBonus = heavy ? 0 : medium ? Math.min(2, dexterity) : dexterity;
-  return (armor.armorClass ?? 10) + dexBonus + shieldBonus;
+  const base = !armor
+    ? 10 + dexterity + shieldBonus
+    : armor.armorProfile
+      ? armor.armorProfile.base
+        + (armor.armorProfile.addDexterityModifier
+          ? armor.armorProfile.dexterityModifierCap === null
+            ? dexterity
+            : Math.min(armor.armorProfile.dexterityModifierCap, dexterity)
+          : 0)
+        + shieldBonus
+      : (armor.armorClass ?? 10)
+        + (armor.properties?.includes("heavy") ? 0 : armor.properties?.includes("medium") ? Math.min(2, dexterity) : dexterity)
+        + shieldBonus;
+  return base + queryStatModifier(effects, character.id, "armor-class").total;
 }
 
 function normalizeNpc(npc: EngineNpc): EngineNpc {
@@ -4795,9 +5238,23 @@ function normalizePendingReaction(value: unknown): EnginePendingReaction | null 
     candidate.version !== 1
     || typeof candidate.id !== "string"
     || typeof candidate.kind !== "string"
+    || candidate.trigger !== "incoming-attack-would-hit"
     || typeof candidate.sourceCommandId !== "string"
     || typeof candidate.sourceVersion !== "number"
     || typeof candidate.actorId !== "string"
+    || typeof candidate.attackerId !== "string"
+    || typeof candidate.targetId !== "string"
+    || typeof candidate.sourceActionKey !== "string"
+    || typeof candidate.attackName !== "string"
+    || typeof candidate.attackRoll !== "number"
+    || typeof candidate.attackTotal !== "number"
+    || typeof candidate.attackBonus !== "number"
+    || typeof candidate.critical !== "boolean"
+    || typeof candidate.originalArmorClass !== "number"
+    || typeof candidate.damageDiceCount !== "number"
+    || typeof candidate.damageDieSides !== "number"
+    || typeof candidate.damageBonus !== "number"
+    || typeof candidate.damageType !== "string"
     || !Array.isArray(candidate.eligibleReactionIds)
     || !["offered", "accepted", "declined", "resolved"].includes(candidate.status ?? "")
     || typeof candidate.resumeToken !== "string"
@@ -4806,9 +5263,23 @@ function normalizePendingReaction(value: unknown): EnginePendingReaction | null 
     version: 1,
     id: candidate.id,
     kind: candidate.kind,
+    trigger: "incoming-attack-would-hit",
     sourceCommandId: candidate.sourceCommandId,
     sourceVersion: Math.max(0, Math.trunc(candidate.sourceVersion)),
     actorId: candidate.actorId,
+    attackerId: candidate.attackerId,
+    targetId: candidate.targetId,
+    sourceActionKey: candidate.sourceActionKey,
+    attackName: candidate.attackName,
+    attackRoll: Math.max(1, Math.min(20, Math.trunc(candidate.attackRoll))),
+    attackTotal: Math.trunc(candidate.attackTotal),
+    attackBonus: Math.trunc(candidate.attackBonus),
+    critical: candidate.critical,
+    originalArmorClass: Math.trunc(candidate.originalArmorClass),
+    damageDiceCount: Math.max(0, Math.trunc(candidate.damageDiceCount)),
+    damageDieSides: Math.max(1, Math.trunc(candidate.damageDieSides)),
+    damageBonus: Math.trunc(candidate.damageBonus),
+    damageType: candidate.damageType,
     eligibleReactionIds: candidate.eligibleReactionIds.filter((id): id is string => typeof id === "string"),
     status: candidate.status!,
     resumeToken: candidate.resumeToken,

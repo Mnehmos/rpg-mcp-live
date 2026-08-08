@@ -14,7 +14,7 @@ import { assessCampaignRepin, collectCampaignContentReferences, resolveCampaignR
 const S1_VERSION = "open5e-v2-srd-2014-s1";
 const S7_VERSION = "open5e-v2-srd-2014-s7";
 const S8_VERSION = "open5e-v2-full-corpus-s8";
-const REVIEW_SHA = "4400d8a1109150d4fc7adfa410fabaec12c79eda3c465b26cc7eb7e2897f0056";
+const REVIEW_SHA = "b80b3ed1ac62f64d39f3cfcee2ff204f0dbdcaced4a9997c118dd55f872db985";
 const BEDROLL_KEY = "open5e:item:5e-2014:srd-2014:srd_bedroll";
 const GOBLIN_KEY = "open5e:creature:5e-2014:srd-2014:srd_goblin";
 

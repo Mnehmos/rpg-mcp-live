@@ -15,7 +15,7 @@ import {
   type Open5eCollection,
   type Open5ePackManifest,
 } from "./schema.js";
-import { promoteOpen5e2014Backgrounds, type Open5eImportOptions, type Open5eImportResult } from "./open5e-import.js";
+import { compileSpellEffects, promoteOpen5e2014Backgrounds, type Open5eImportOptions, type Open5eImportResult } from "./open5e-import.js";
 
 const S8_V2_COLLECTIONS: readonly Open5eCollection[] = [
   "conditions",
@@ -235,8 +235,12 @@ export async function importOpen5eS8(
     assertUniqueContentRecords(collection, normalized);
     normalizedByCollection.set(collection, normalized);
 
+    const baseCompiled = await readBaseArtifact(basePackDirectory, baseManifest, collection, "compiled");
     const compiled = [
-      ...(await readBaseArtifact(basePackDirectory, baseManifest, collection, "compiled")),
+      ...(collection === "spells"
+        ? baseCompiled.filter((record) => !record || typeof record !== "object" || (record as { kind?: unknown }).kind !== "spell-effect")
+        : baseCompiled),
+      ...(collection === "spells" ? compileSpellEffects(normalized) : []),
       ...promotedCompiled,
     ]
       .map((record) => compiledContentRecordSchema.parse({
