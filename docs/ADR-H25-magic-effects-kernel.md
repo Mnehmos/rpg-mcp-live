@@ -1,6 +1,6 @@
 # ADR-H25: Magic effects kernel — generic effect operations, canonical healing, and the first pending-reaction trigger
 
-Status: Accepted; implementation pending
+Status: Accepted; issue #4 implementation slice
 Date: 2026-08-07
 See also: `docs/hosted-handoff/magic-and-caster-classes-audit.md` (the audit this ADR responds to) and `docs/hosted-handoff/magic-effects-kernel-design-intent.md` (the fuller research/checklist this ADR distills).
 
