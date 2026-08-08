@@ -48,13 +48,13 @@ try {
   assert(engineHealth.status === "ok", "Engine health was not ok.");
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa", "Engine booted an unexpected pack hash.");
-  assert(engineHealth.toolCount === 49, "Engine tool count drifted.");
+  assert(engineHealth.toolCount === 50, "Engine tool count drifted.");
 
   const page = await fetch(`${webBaseUrl}/play`);
   const pageHtml = await page.text();
   assert(page.ok && pageHtml.includes("character-background-choice"), "Web did not serve the source-backed character builder.");
 
-  const catalogEnvelope = await requestJson<{ catalog: ContentCatalog }>(`${webBaseUrl}/api/content-catalog`);
+  const catalogEnvelope = await waitForEngineBackedJson<{ catalog: ContentCatalog }>(`${webBaseUrl}/api/content-catalog`);
   const catalog = catalogEnvelope.catalog;
   assert(catalog.packHash === engineHealth.rules.packHash, "Web catalog and engine health disagree on the active pack.");
   assert(catalog.defaultPolicy.gamesystem === "5e-2014", "Catalog default game system drifted.");
@@ -62,7 +62,7 @@ try {
   assert(catalog.defaultPolicy.allowedDocumentKeys.includes("srd-2014"), "Catalog default policy omitted its base document.");
   assert(catalog.documents.some((document) => document.key === "srd-2014" && document.canBeBase), "Catalog did not expose the reviewed SRD base.");
 
-  const optionsEnvelope = await requestJson<{ options: CharacterOptions }>(`${webBaseUrl}/api/character-options`);
+  const optionsEnvelope = await waitForEngineBackedJson<{ options: CharacterOptions }>(`${webBaseUrl}/api/character-options`);
   const options = optionsEnvelope.options;
   const species = requireNamed(options.species.filter((option) => option.selectable), "Human");
   const characterClass = requireNamed(options.classes.filter((option) => option.selectable), "Fighter");
@@ -372,6 +372,20 @@ async function requestJson<T>(url: string, init?: RequestInit, timeoutMs = 10_00
   const data = await response.json().catch(() => ({})) as T & { error?: string };
   if (!response.ok) throw new Error(data.error ?? `${response.status} ${response.statusText}`);
   return data;
+}
+
+async function waitForEngineBackedJson<T>(url: string, attempts = 12): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await requestJson<T>(url, undefined, 2_000);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("The Lantern engine is unavailable")) throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("The Lantern engine did not become ready for the smoke probe.");
 }
 
 function requireNamed<T extends CharacterReferenceOption>(options: T[], name: string): T {

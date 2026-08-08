@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import {
   engineCommandSchema,
   type EngineCommand,
+  type EngineEncounterLifecycle,
   type EngineToolName,
   type LanternCampaignState,
   type RequestContext,
@@ -53,6 +54,7 @@ const ALL_COMMAND_KINDS = [
   "use_item",
   "roll_check",
   "combat_start",
+  "encounter_decision",
   "spawn_creature",
   "learn_spell",
   "prepare_spell",
@@ -205,6 +207,31 @@ function activeCombatState(): LanternCampaignState {
   );
 }
 
+function lifecycleOfferState(): LanternCampaignState {
+  const state = activeCombatState();
+  state.combat.enemies[0]!.id = "fixture";
+  const enemyId = "fixture";
+  state.combat.lifecycle = {
+    profile: "guards-surrender-v1",
+    phase: "resolving",
+    surprise: { eligible: true, consumed: true, source: "compatibility-default", evidence: null },
+    initiative: { formulaRevision: "initiative-v1", entries: [], order: [state.actorId, enemyId], activeIndex: 0, rolledAtVersion: state.version },
+    morale: {
+      policy: "guards-surrender-v1",
+      thresholdRatio: 0.5,
+      offers: [{ id: "offer-fixture", targetId: enemyId, reason: "ally-fallen", thresholdRatio: 0.5, status: "offered", sourceVersion: state.version }],
+      lastTriggerId: "offer-fixture",
+    },
+    objective: { id: "resolve-without-killing", status: "pending" },
+    outcome: null,
+    outcomeId: null,
+    claimedRewards: [],
+    nonlethalDefeatIds: [],
+    retreatPlanRevision: null,
+  } satisfies EngineEncounterLifecycle;
+  return state;
+}
+
 function pendingAdvancementState(): LanternCampaignState {
   return applyAccepted(
     createdState(),
@@ -347,6 +374,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "drop_item", tool: "drop_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "drop_item", itemId: "missing-item", quantity: 1 }) },
   { kind: "use_item", tool: "use_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "use_item", itemId: "missing-item" }) },
   { kind: "combat_start", tool: "combat_start", expectedCode: "encounter_too_large", state: createdState, rawCommand: () => ({ kind: "combat_start", encounterId: "too-large", encounterName: "Too Large", creatures: [{ creatureKey: GOBLIN, count: 20 }, { creatureKey: GOBLIN, count: 1 }] }) },
+  { kind: "encounter_decision", tool: "encounter_decision", expectedCode: "encounter_terminal", state: createdState, rawCommand: () => ({ kind: "encounter_decision", decision: "retreat" }) },
   { kind: "spawn_creature", tool: "spawn_creature", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "spawn_creature", creatureKey: GOBLIN, count: 1 }) },
   { kind: "learn_spell", tool: "learn_spell", expectedCode: "spellcasting_unavailable", state: initialState, rawCommand: () => ({ kind: "learn_spell", spellKey: FIRE_BOLT }) },
   { kind: "prepare_spell", tool: "prepare_spell", expectedCode: "spellcasting_unavailable", state: initialState, rawCommand: () => ({ kind: "prepare_spell", spellKey: BURNING_HANDS, prepared: true }) },
@@ -376,6 +404,7 @@ const controlFixtures: readonly ControlFixture[] = [
   { kind: "campaign_beat", tool: "campaign_beat", state: initialState, rawCommand: () => ({ kind: "campaign_beat", title: "A pressure", description: "The tide turns.", pressure: "The window is closing.", choices: ["Wait", "Act"] }) },
   { kind: "roll_check", tool: "roll_check", state: initialState, rawCommand: () => ({ kind: "roll_check", ability: "wis", goal: "Study the fixture." }) },
   { kind: "declare", tool: "declare", state: initialState, rawCommand: () => ({ kind: "declare", goal: "Take a fictional action." }) },
+  { kind: "encounter_decision", tool: "encounter_decision", state: lifecycleOfferState, rawCommand: () => ({ kind: "encounter_decision", decision: "reject_surrender", targetId: "fixture" }) },
 ];
 
 const replayFixtures: readonly ReplayFixture[] = [
@@ -423,6 +452,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "use_item", tool: "use_item", build: () => ({ state: consumableState(), command: parseCommand({ kind: "use_item", itemId: "healing-draught" }) }) },
   { kind: "roll_check", tool: "roll_check", build: () => ({ state: initialState(), command: parseCommand({ kind: "roll_check", ability: "wis", goal: "Replay a check." }) }) },
   { kind: "combat_start", tool: "combat_start", build: () => ({ state: createdState(), command: parseCommand({ kind: "combat_start", encounterId: "replay-encounter", encounterName: "Replay Encounter", creatures: [{ creatureKey: GOBLIN, count: 1 }] }) }) },
+  { kind: "encounter_decision", tool: "encounter_decision", build: () => ({ state: lifecycleOfferState(), command: parseCommand({ kind: "encounter_decision", decision: "reject_surrender", targetId: "fixture" }) }) },
   { kind: "spawn_creature", tool: "spawn_creature", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "spawn_creature", creatureKey: GOBLIN, count: 1 }) }) },
   { kind: "learn_spell", tool: "learn_spell", build: () => ({ state: createdState("wizard"), command: parseCommand({ kind: "learn_spell", spellKey: FIRE_BOLT }) }) },
   { kind: "prepare_spell", tool: "prepare_spell", build: () => ({ state: (() => { const state = createdState("wizard"); return applyAccepted(state, { kind: "learn_spell", spellKey: BURNING_HANDS }, "learn_spell"); })(), command: parseCommand({ kind: "prepare_spell", spellKey: BURNING_HANDS, prepared: true }) }) },
@@ -444,7 +474,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(41);
+    expect(ALL_COMMAND_KINDS).toHaveLength(42);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

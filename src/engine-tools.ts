@@ -10,6 +10,8 @@ import {
   engineCharacterDetailsSchema,
   engineCommandSchema,
   engineExperienceProfileInputSchema,
+  engineEncounterDecisionSchema,
+  engineEncounterLifecycleProfileSchema,
   engineInventoryItemInputSchema,
   engineTacticalGeometryInputSchema,
   engineTacticalPositionSchema,
@@ -197,6 +199,13 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     .object({
       encounterId: z.string().trim().min(1).max(120),
       encounterName: z.string().trim().min(1).max(160),
+      lifecycleProfile: engineEncounterLifecycleProfileSchema.optional(),
+      approach: z.object({
+        challengeId: z.literal("stealth-perception-v1"),
+        groupIndex: z.number().int().nonnegative().max(19),
+        goal: z.string().trim().min(1).max(2_000),
+        approach: z.string().trim().min(1).max(2_000),
+      }).strict().optional(),
       creatures: z
         .array(
           z
@@ -213,6 +222,10 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       tactical: engineTacticalGeometryInputSchema.optional(),
     })
     .strict(),
+  encounter_decision: z.object({
+    decision: engineEncounterDecisionSchema,
+    targetId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
   spawn_creature: z.object({
     creatureKey: z.string().trim().startsWith("open5e:creature:").max(300),
     count: z.number().int().min(1).max(20),
@@ -240,7 +253,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   }).strict(),
   combat_action: z
     .object({
-      action: z.enum(["attack", "dodge", "dash", "disengage", "help", "ready", "second_wind"]),
+      action: z.enum(["attack", "attack_nonlethal", "dodge", "dash", "disengage", "help", "ready", "second_wind"]),
       targetId: z.string().trim().min(1).max(80).optional(),
       weaponId: z.string().trim().min(1).max(120).optional(),
       goal: z.string().trim().min(1).max(2_000).optional(),
@@ -708,6 +721,18 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       properties: {
         encounterId: { type: "string" },
         encounterName: { type: "string" },
+        lifecycleProfile: { type: "string", enum: ["guards-surrender-v1"], description: "Opt into the reviewed non-kill encounter lifecycle slice." },
+        approach: {
+          type: "object",
+          properties: {
+            challengeId: { type: "string", enum: ["stealth-perception-v1"] },
+            groupIndex: { type: "integer", minimum: 0, maximum: 19 },
+            goal: { type: "string" },
+            approach: { type: "string" },
+          },
+          required: ["challengeId", "groupIndex", "goal", "approach"],
+          additionalProperties: false,
+        },
         creatures: {
           type: "array",
           items: {
@@ -758,6 +783,19 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         },
       },
       required: ["encounterId", "encounterName", "creatures"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "encounter_decision",
+    "Choose one legal response to a server-owned surrender or retreat offer. The engine validates morale, movement evidence, terminal outcome, and exactly-once reward state.",
+    {
+      type: "object",
+      properties: {
+        decision: { type: "string", enum: ["accept_surrender", "reject_surrender", "capture", "retreat", "pursue", "continue_attack"] },
+        targetId: { type: "string", description: "Guard id for surrender, capture, pursuit, or continued attack; omit for retreat." },
+      },
+      required: ["decision"],
       additionalProperties: false,
     }
   ),
@@ -847,7 +885,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["attack", "dodge", "dash", "disengage", "help", "ready", "second_wind"] },
+        action: { type: "string", enum: ["attack", "attack_nonlethal", "dodge", "dash", "disengage", "help", "ready", "second_wind"] },
         targetId: { type: "string" },
         weaponId: { type: "string", description: "Optional id of an equipped weapon; omitted uses mainhand." },
         goal: { type: "string" },
@@ -1067,8 +1105,16 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         kind: "combat_start",
         encounterId: args.encounterId,
         encounterName: args.encounterName,
+        lifecycleProfile: args.lifecycleProfile,
+        approach: args.approach,
         creatures: args.creatures,
         tactical: args.tactical,
+      });
+    case "encounter_decision":
+      return engineCommandSchema.parse({
+        kind: "encounter_decision",
+        decision: args.decision,
+        targetId: args.targetId,
       });
     case "spawn_creature":
       return engineCommandSchema.parse({
