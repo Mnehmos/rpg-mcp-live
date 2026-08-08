@@ -1,5 +1,7 @@
 # Agent Workflow
 
+> **Current-goal override — Epic #1 fast-KISS:** The role table, nested-delegation guidance, and separate fresh-critic step below are historical defaults and are superseded for this goal. Work stays in one Codex instance, only in `Mnehmos/rpg-mcp-live`; a fresh-context critique is a same-instance reread after reset. Do not spawn subagents or touch DevWiki.
+
 ## The complete delivery flow
 
 ```
