@@ -27,6 +27,9 @@ import type {
   EngineContentReference,
   EngineEvent,
   EngineFeatureReference,
+  EngineEffectInstance,
+  EngineEffectDuration,
+  EngineEffectOperation,
   EngineImprovEffect,
   EngineInventoryItem,
   EngineMerchant,
@@ -47,6 +50,20 @@ import type {
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
+import type { EffectApplyInput } from "./engine-effects.js";
+import {
+  activeConditionNames,
+  applyEffect,
+  clearEffectsByPolicy,
+  expireEffectsAtBoundary,
+  expireSourceLifetimeEffects,
+  hasActiveCondition,
+  isAdmittedEffectOperation,
+  normalizeCondition,
+  queryModifiers,
+  removeConditionEffects,
+  removeEffectsBySource,
+} from "./engine-effects.js";
 import {
   ENGINE_ABILITIES,
   OPEN5E_CLASS_PRESETS,
@@ -175,6 +192,7 @@ export function createInitialCampaign(
         progress: 0,
       },
     ],
+    effects: [],
     improvEffects: [],
     currentBeat: null,
     suggestedActions: [],
@@ -241,6 +259,8 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   const currentQuest = next.quests.find((quest) => quest.id === next.quest.id);
   if (currentQuest) next.quest = currentQuest;
   if (!Array.isArray(next.improvEffects)) next.improvEffects = [];
+  next.effects = normalizeEffects((next as LanternCampaignState & { effects?: unknown }).effects, next);
+  syncConditionProjections(next);
   if (next.currentBeat === undefined) next.currentBeat = null;
   if (!Array.isArray(next.suggestedActions)) next.suggestedActions = [];
   // Discard the former fixed scene graph. A campaign earns its current context
@@ -269,6 +289,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     worldContext: projectWorldContext(state.worldContext),
     playerNotes: state.playerNotes,
     quests: state.quests,
+    effects: state.effects.filter((effect) => effect.status === "active"),
     improvEffects: state.improvEffects,
     currentBeat: state.currentBeat,
     suggestedActions: state.suggestedActions,
@@ -312,6 +333,7 @@ export function readToolData(
         worldContext: projectWorldContext(state.worldContext),
         playerNotes: state.playerNotes,
         quests: state.quests,
+        effects: state.effects.filter((effect) => effect.status === "active"),
         improvEffects: state.improvEffects,
         currentBeat: state.currentBeat,
         character: characterData(state.character),
@@ -840,7 +862,16 @@ function resolveSocialCheck(
 ): EngineResolution {
   const npc = state.worldContext?.npcs.find((candidate) => candidate.id === command.npcId);
   if (!npc) return rejection(state, tool, "npc_not_found", "That NPC is not established in the current context.");
-  const roll = randomInt(1, 21);
+  const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
+  const firstRoll = randomInt(1, 21);
+  const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
+    ? randomInt(1, 21)
+    : null;
+  const roll = secondRoll === null
+    ? firstRoll
+    : modifierQuery.mode === "advantage"
+      ? Math.max(firstRoll, secondRoll)
+      : Math.min(firstRoll, secondRoll);
   const baseModifier = open5eAbilityModifier(state.character.abilities[command.ability]);
   const skillBonus = command.skill ? state.character.skills[command.skill]?.bonus : undefined;
   const modifier = skillBonus ?? baseModifier;
@@ -863,7 +894,10 @@ function resolveSocialCheck(
     message,
     { npc: nextNpc ?? npc, goal: command.goal, roll, modifier, dc: npc.socialDc, total, success },
     success ? "social_success" : "social_failure",
-    [{ kind: "social_d20", value: roll, sides: 20 }],
+    [
+      { kind: "social_d20", value: roll, sides: 20 },
+      ...(secondRoll === null ? [] : [{ kind: `social_${modifierQuery.mode}_d20`, value: secondRoll, sides: 20 }]),
+    ],
     [{ name: command.ability + "_modifier", value: modifier }, { name: "social_dc", value: npc.socialDc }],
     nextNpc ? [{ path: "/worldContext/npcs/" + npc.id + "/relationshipScore", before: npc.relationshipScore, after: nextNpc.relationshipScore }] : []
   );
@@ -1013,6 +1047,26 @@ function resolveImprovise(
   command: Extract<EngineCommand, { kind: "improvise" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
+  if (command.effectType === "movement" || command.effectType === "summoning") {
+    return rejection(
+      state,
+      tool,
+      "unsupported_effect",
+      `${command.effectType} is not admitted by the effects kernel; use a reviewed producer slice first.`
+    );
+  }
+  const targetIsPlayer = !command.targetId || command.targetId === state.actorId || command.targetId === state.character.id;
+  const targetEnemy = command.targetId ? state.combat.enemies.find((enemy) => enemy.id === command.targetId && enemy.alive) : null;
+  if (command.targetId && !targetIsPlayer && !targetEnemy) {
+    return rejection(state, tool, "target_not_found", "That effect target is not a living player or creature.");
+  }
+  const targetRef = targetEnemy?.id ?? state.character.id;
+  if (command.effectType === "condition" && !command.condition) {
+    return rejection(state, tool, "condition_required", "A condition effect must name its reviewed condition marker.");
+  }
+  if ((command.effectType === "damage" || command.effectType === "healing") && !targetIsPlayer) {
+    return rejection(state, tool, "unsupported_effect_target", `${command.effectType} currently has no creature resolver.`);
+  }
   const next = cloneCampaign(state);
   const effect: EngineImprovEffect = {
     id: randomUUID(),
@@ -1022,26 +1076,60 @@ function resolveImprovise(
     targetId: command.targetId,
     amount: command.amount,
     condition: command.condition,
-    remainingRounds: command.durationRounds,
     createdAt: new Date().toISOString(),
   };
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  if (command.effectType === "advantage" || command.effectType === "disadvantage") {
+    const operation: EngineEffectOperation = { kind: command.effectType, category: "attack-roll" };
+    applyRuntimeEffect(
+      next,
+      effectInput(
+        next,
+        `improvise:${command.effectType}`,
+        `actor:${state.actorId}`,
+        [targetRef],
+        [operation],
+        command.durationRounds
+          ? { kind: "fixed", amount: command.durationRounds, unit: "round" }
+          : { kind: "persistent" },
+        `improvise:${command.effectType}`,
+        "ignore",
+        command.durationRounds ? ["duration"] : ["never"],
+        clientCommandId,
+      ),
+      changes,
+    );
+  }
+  if (command.effectType === "condition" && command.condition) {
+    applyConditionRuntimeEffect(
+      next,
+      command.condition,
+      `actor:${state.actorId}`,
+      targetRef,
+      command.durationRounds
+        ? { kind: "fixed", amount: command.durationRounds, unit: "round" }
+        : { kind: "persistent" },
+      `condition:${normalizeCondition(command.condition)}`,
+      command.durationRounds ? ["duration"] : ["never"],
+      clientCommandId,
+      changes,
+    );
+  }
   if (command.effectType === "damage" || command.effectType === "healing") {
-    const targetIsPlayer = !command.targetId || command.targetId === state.actorId || command.targetId === state.character.id;
     if (targetIsPlayer) {
       const amount = command.amount ?? 0;
       if (command.effectType === "damage") next.character.hp = Math.max(0, next.character.hp - amount);
       else next.character.hp = Math.min(next.character.maxHp, next.character.hp + amount);
-      if (next.character.hp === 0 && command.effectType === "damage") next.character.conditions = addCondition(next.character.conditions, "unconscious");
+      if (next.character.hp === 0 && command.effectType === "damage") {
+        applyConditionRuntimeEffect(next, "unconscious", `actor:${state.actorId}`, next.character.id, { kind: "persistent" }, "condition:unconscious", ["never"], clientCommandId, changes);
+      }
     }
   }
-  if (command.effectType === "condition" && command.condition) {
-    const targetIsPlayer = !command.targetId || command.targetId === state.actorId || command.targetId === state.character.id;
-    if (targetIsPlayer) next.character.conditions = addCondition(next.character.conditions, command.condition);
-  }
   next.improvEffects = [...state.improvEffects, effect].slice(-100);
-  return commit(next, context, clientCommandId, command, tool, "Improv effect applied: " + command.title + ".", { effect, character: characterData(next.character) }, "improv_effect_applied", [], [], [
+  return commit(next, context, clientCommandId, command, tool, "Improv effect applied: " + command.title + ".", { effect, effects: next.effects.filter((candidate) => candidate.status === "active"), character: characterData(next.character) }, "improv_effect_applied", [], [], [
     { path: "/improvEffects", before: state.improvEffects, after: next.improvEffects },
     { path: "/character", before: state.character, after: next.character },
+    ...changes,
   ]);
 }
 
@@ -1308,7 +1396,16 @@ function resolveCheck(
   skill: string | null,
   goal: string
 ): EngineResolution {
-  const roll = randomInt(1, 21);
+  const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
+  const firstRoll = randomInt(1, 21);
+  const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
+    ? randomInt(1, 21)
+    : null;
+  const roll = secondRoll === null
+    ? firstRoll
+    : modifierQuery.mode === "advantage"
+      ? Math.max(firstRoll, secondRoll)
+      : Math.min(firstRoll, secondRoll);
   const modifier = skill && state.character.skills[skill]
     ? state.character.skills[skill].bonus
     : abilityModifier(state.character.abilities[ability]);
@@ -1340,7 +1437,10 @@ function resolveCheck(
     text,
     { ability, skill, goal, dc, roll, modifier, total, success },
     success ? "success" : "failure",
-    [{ kind: "d20", value: roll, sides: 20 }],
+    [
+      { kind: "d20", value: roll, sides: 20 },
+      ...(secondRoll === null ? [] : [{ kind: `d20_${modifierQuery.mode}`, value: secondRoll, sides: 20 }]),
+    ],
     [{ name: ability + "_modifier", value: modifier }, { name: "dc", value: dc }],
     [{ path: "/lastRoll", before: state.lastRoll, after: roll }]
   );
@@ -1628,7 +1728,7 @@ function resolveCastSpell(
   if (state.combat.status !== "active") {
     return rejection(state, tool, "no_active_combat", "S4 executable spell effects currently resolve against combatants in an active encounter.");
   }
-  if (state.character.conditions.includes("unconscious")) {
+  if (hasRuntimeCondition(state, state.character.id, "unconscious")) {
     return rejection(state, tool, "unconscious", "You cannot cast while unconscious.");
   }
 
@@ -1951,15 +2051,11 @@ function resolveCombatAction(
   if (state.combat.activeActorId !== state.actorId) {
     return rejection(state, tool, "off_turn", "It is not your turn. Advance the encounter before acting again.");
   }
-  if (state.character.conditions.includes("unconscious")) {
+  if (hasRuntimeCondition(state, state.character.id, "unconscious")) {
     return rejection(state, tool, "unconscious", "You are unconscious and must make a death save.");
   }
-  const preventingCondition = state.character.conditions.find((condition) =>
-    condition === "incapacitated"
-    || condition === "paralyzed"
-    || condition === "petrified"
-    || condition === "stunned"
-  );
+  const preventingCondition = ["incapacitated", "paralyzed", "petrified", "stunned"]
+    .find((condition) => hasRuntimeCondition(state, state.character.id, condition));
   if (preventingCondition) {
     return rejection(
       state,
@@ -1990,11 +2086,21 @@ function resolveCombatAction(
 
   if (command.action === "attack" && target) {
     const attackRoll = randomInt(1, 21);
+    const attackModifierQuery = queryModifiers(next.effects, next.character.id, "attack-roll");
+    const secondRoll = attackModifierQuery.mode === "advantage" || attackModifierQuery.mode === "disadvantage"
+      ? randomInt(1, 21)
+      : null;
+    const effectiveRoll = secondRoll === null
+      ? attackRoll
+      : attackModifierQuery.mode === "advantage"
+        ? Math.max(attackRoll, secondRoll)
+        : Math.min(attackRoll, secondRoll);
     const attackModifier = abilityModifier(next.character.abilities.str) + proficiencyBonus;
-    const total = attackRoll + attackModifier;
-    const critical = attackRoll === 20;
+    const total = effectiveRoll + attackModifier;
+    const critical = effectiveRoll === 20;
     const hit = critical || total >= targetView!.armorClass;
-    rolls.push({ kind: "attack_d20", value: attackRoll, sides: 20 });
+    rolls.push({ kind: "attack_d20", value: effectiveRoll, sides: 20 });
+    if (secondRoll !== null) rolls.push({ kind: `attack_${attackModifierQuery.mode}_d20`, value: secondRoll, sides: 20 });
     modifiers.push({ name: "attack_bonus", value: attackModifier }, { name: "target_ac", value: targetView!.armorClass });
     if (hit) {
       const damageRoll = randomInt(1, 9);
@@ -2031,8 +2137,29 @@ function resolveCombatAction(
     }
   } else {
     if (command.action === "dodge") {
-      next.character.conditions = addCondition(next.character.conditions, "dodging");
-      changes.push({ path: "/character/conditions", before: state.character.conditions, after: next.character.conditions });
+      const beforeConditions = [...next.character.conditions];
+      applyRuntimeEffect(
+        next,
+        effectInput(
+          next,
+          "combat:dodge",
+          next.character.id,
+          [next.character.id],
+          [
+            { kind: "condition", condition: "dodging", action: "apply" },
+            { kind: "disadvantage", category: "attack-roll" },
+          ],
+          { kind: "turn-boundary", boundary: "start", subject: "target", offsetTurns: 1 },
+          "condition:dodging",
+          "ignore",
+          ["duration"],
+          clientCommandId,
+        ),
+        changes,
+      );
+      if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
+        changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
+      }
       message = "You take a guarded stance. The next incoming attack is made at disadvantage.";
     } else if (command.action === "dash") {
       message = "You gain ground across the encounter ground. The sentry watches for an opening.";
@@ -2056,6 +2183,7 @@ function resolveCombatAction(
       action: command.action,
       targetId: target?.id ?? null,
       combat: combatData(next.combat),
+      effects: next.effects.filter((candidate) => candidate.status === "active"),
       character: characterData(next.character),
     },
     outcome,
@@ -2074,12 +2202,8 @@ function resolveAdvanceTurn(
 ): EngineResolution {
   if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active encounter to advance.");
   if (state.combat.activeActorId === state.actorId) {
-    if (state.character.conditions.some((condition) =>
-      condition === "incapacitated"
-      || condition === "paralyzed"
-      || condition === "petrified"
-      || condition === "stunned"
-    )) {
+    if (["incapacitated", "paralyzed", "petrified", "stunned"]
+      .some((condition) => hasRuntimeCondition(state, state.character.id, condition))) {
       return resolveSkippedCharacterTurn(state, context, clientCommandId, command, tool);
     }
     return rejection(state, tool, "not_enemy_turn", "The enemy has not been given the turn yet.");
@@ -2207,14 +2331,20 @@ function resolveAdvanceTurn(
   const next = cloneCampaign(state);
   const attackRoll = randomInt(1, 21);
   const attackModifier = attack.toHit;
-  const dodging = state.character.conditions.includes("dodging");
-  const secondRoll = dodging ? randomInt(1, 21) : null;
-  const effectiveRoll = secondRoll === null ? attackRoll : Math.min(attackRoll, secondRoll);
+  const attackModifiers = queryModifiers(state.effects, state.character.id, "attack-roll");
+  const secondRoll = attackModifiers.mode === "advantage" || attackModifiers.mode === "disadvantage"
+    ? randomInt(1, 21)
+    : null;
+  const effectiveRoll = secondRoll === null
+    ? attackRoll
+    : attackModifiers.mode === "advantage"
+      ? Math.max(attackRoll, secondRoll)
+      : Math.min(attackRoll, secondRoll);
   const total = effectiveRoll + attackModifier;
   const critical = effectiveRoll === 20;
   const hit = effectiveRoll !== 1 && (critical || total >= next.character.ac);
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [{ kind: "enemy_attack_d20", value: effectiveRoll, sides: 20 }];
-  if (secondRoll !== null) rolls.push({ kind: "enemy_attack_disadvantage_d20", value: secondRoll, sides: 20 });
+  if (secondRoll !== null) rolls.push({ kind: `enemy_attack_${attackModifiers.mode}_d20`, value: secondRoll, sides: 20 });
   const modifiers = [{ name: "enemy_attack_bonus", value: attackModifier }, { name: "armor_class", value: next.character.ac }];
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   let message = enemyView.name + " uses " + attack.name + ".";
@@ -2243,7 +2373,7 @@ function resolveAdvanceTurn(
         changes.push({ path: "/character/spellcasting/concentration", before: beforeConcentration, after: null });
         message += " Concentration ends.";
       }
-      next.character.conditions = addCondition(next.character.conditions, "unconscious");
+      applyConditionRuntimeEffect(next, "unconscious", `combatant:${enemy.id}`, next.character.id, { kind: "persistent" }, "condition:unconscious", ["never"], clientCommandId, changes);
       message += " You fall unconscious.";
       outcome = "downed";
     } else if (damage > 0 && next.character.spellcasting?.concentration) {
@@ -2275,10 +2405,10 @@ function resolveAdvanceTurn(
     next.combat.actionUsed = next.character.hp === 0;
     next.combat.bonusActionUsed = false;
     next.combat.reactionUsed = false;
-    next.character.conditions = removeCondition(next.character.conditions, "dodging");
     message += next.character.hp === 0
       ? " Your turn arrives; make a death save."
       : " The initiative returns to you.";
+    expireAtCharacterTurnStart(next, changes);
   }
 
   return commit(
@@ -2315,12 +2445,8 @@ function resolveSkippedCharacterTurn(
     { path: "/combat/activeActorId", before: beforeActor, after: next.combat.activeActorId },
     { path: "/combat/actionUsed", before: state.combat.actionUsed, after: true }
   );
-  const condition = state.character.conditions.find((candidate) =>
-    candidate === "incapacitated"
-    || candidate === "paralyzed"
-    || candidate === "petrified"
-    || candidate === "stunned"
-  ) ?? "incapacitated";
+  const condition = ["incapacitated", "paralyzed", "petrified", "stunned"]
+    .find((candidate) => hasRuntimeCondition(state, state.character.id, candidate)) ?? "incapacitated";
   return commit(
     next,
     context,
@@ -2606,22 +2732,35 @@ function resolveCompiledSaveCondition(
   if (!succeeded) {
     const beforeConditions = [...next.character.conditions];
     const beforeEffects = [...next.character.conditionEffects];
-    const conditionName = condition.condition.name.toLocaleLowerCase("en-US");
-    next.character.conditions = addCondition(next.character.conditions, conditionName);
-    next.character.conditionEffects = next.character.conditionEffects.filter((effect) =>
-      effect.conditionContentKey !== condition.condition.contentKey || effect.sourceCombatantId !== enemy.id
+    const conditionName = normalizeCondition(condition.condition.name);
+    const runtime = applyConditionRuntimeEffect(
+      next,
+      conditionName,
+      `combatant:${enemy.id}`,
+      next.character.id,
+      condition.duration,
+      `condition:${condition.condition.contentKey}`,
+      ["duration", "source-removal"],
+      clientCommandId,
+      changes,
     );
-    next.character.conditionEffects.push({
-      id: randomUUID(),
-      conditionContentKey: condition.condition.contentKey,
-      packHash: enemy.packHash,
-      name: condition.condition.name,
-      sourceContentKey: enemy.contentKey,
-      sourceCombatantId: enemy.id,
-      appliedRound: next.combat.round,
-      duration: condition.duration,
-      repeatSave: condition.repeatSave,
-    });
+    if (runtime.decision !== "ignored") {
+      next.character.conditionEffects = next.character.conditionEffects.filter((effect) =>
+        effect.conditionContentKey !== condition.condition.contentKey || effect.sourceCombatantId !== enemy.id
+      );
+      next.character.conditionEffects.push({
+        id: runtime.effect.id,
+        conditionContentKey: condition.condition.contentKey,
+        packHash: enemy.packHash,
+        name: condition.condition.name,
+        sourceContentKey: enemy.contentKey,
+        sourceCombatantId: enemy.id,
+        appliedRound: next.combat.round,
+        duration: condition.duration,
+        repeatSave: condition.repeatSave,
+      });
+    }
+    syncConditionProjections(next);
     changes.push(
       { path: "/character/conditions", before: beforeConditions, after: next.character.conditions },
       { path: "/character/conditionEffects", before: beforeEffects, after: next.character.conditionEffects }
@@ -2644,6 +2783,7 @@ function resolveCompiledSaveCondition(
       programKey: program.contentKey,
       save: { ability: save.ability, dc: save.dc, roll: savingRoll, modifier: savingModifier, total: savingTotal, succeeded },
       condition: succeeded ? null : condition,
+      effects: next.effects.filter((candidate) => candidate.status === "active"),
       combat: combatData(next.combat),
       character: characterData(next.character),
     },
@@ -2748,14 +2888,20 @@ function resolveOneCreatureAttack(
   changes: Array<{ path: string; before: unknown; after: unknown }>
 ): { hit: boolean; message: string } {
   const attackRoll = randomInt(1, 21);
-  const dodging = state.character.conditions.includes("dodging");
-  const secondRoll = dodging ? randomInt(1, 21) : null;
-  const effectiveRoll = secondRoll === null ? attackRoll : Math.min(attackRoll, secondRoll);
+  const modifierQuery = queryModifiers(state.effects, state.character.id, "attack-roll");
+  const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
+    ? randomInt(1, 21)
+    : null;
+  const effectiveRoll = secondRoll === null
+    ? attackRoll
+    : modifierQuery.mode === "advantage"
+      ? Math.max(attackRoll, secondRoll)
+      : Math.min(attackRoll, secondRoll);
   const total = effectiveRoll + attack.toHit;
   const critical = effectiveRoll === 20;
   const hit = effectiveRoll !== 1 && (critical || total >= state.character.ac);
-  rolls.push({ kind: `enemy_attack_${sequenceNumber}_d20`, value: attackRoll, sides: 20 });
-  if (secondRoll !== null) rolls.push({ kind: `enemy_attack_${sequenceNumber}_disadvantage_d20`, value: secondRoll, sides: 20 });
+  rolls.push({ kind: `enemy_attack_${sequenceNumber}_d20`, value: effectiveRoll, sides: 20 });
+  if (secondRoll !== null) rolls.push({ kind: `enemy_attack_${sequenceNumber}_${modifierQuery.mode}_d20`, value: secondRoll, sides: 20 });
   modifiers.push(
     { name: `enemy_attack_${sequenceNumber}_bonus`, value: attack.toHit },
     { name: `enemy_attack_${sequenceNumber}_armor_class`, value: state.character.ac }
@@ -2809,8 +2955,18 @@ function applyConcentrationAndDownedState(
       changes.push({ path: "/character/spellcasting/concentration", before, after: null });
     }
     const beforeConditions = [...state.character.conditions];
-    state.character.conditions = addCondition(state.character.conditions, "unconscious");
-    if (beforeConditions.length !== state.character.conditions.length) {
+    applyConditionRuntimeEffect(
+      state,
+      "unconscious",
+      "system:downed",
+      state.character.id,
+      { kind: "persistent" },
+      "condition:unconscious",
+      ["never"],
+      null,
+      changes,
+    );
+    if (JSON.stringify(beforeConditions) !== JSON.stringify(state.character.conditions)) {
       changes.push({ path: "/character/conditions", before: beforeConditions, after: state.character.conditions });
     }
     return;
@@ -2849,7 +3005,6 @@ function finishCreatureTurn(
   state.combat.bonusActionUsed = false;
   state.combat.reactionUsed = false;
   const beforeConditions = [...state.character.conditions];
-  state.character.conditions = removeCondition(state.character.conditions, "dodging");
   expireAtCharacterTurnStart(state, changes);
   changes.push(
     { path: "/combat/round", before: beforeRound, after: state.combat.round },
@@ -2890,6 +3045,12 @@ function resolveTargetEndConditionEffects(
     if (total >= effect.repeatSave.dc) removeIds.add(effect.id);
   }
   removeAppliedConditions(state, removeIds, changes);
+  const beforeEffects = state.effects;
+  state.effects = expireEffectsAtBoundary(state.effects, state.character.id, "end", state.combat.round);
+  syncConditionProjections(state);
+  if (JSON.stringify(beforeEffects) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before: beforeEffects, after: state.effects });
+  }
 }
 
 function expireSourceEndConditionEffects(
@@ -2909,6 +3070,12 @@ function expireSourceEndConditionEffects(
       .map((effect) => effect.id)
   );
   removeAppliedConditions(state, removeIds, changes);
+  const beforeEffects = state.effects;
+  state.effects = expireEffectsAtBoundary(state.effects, sourceCombatantId, "end", state.combat.round);
+  syncConditionProjections(state);
+  if (JSON.stringify(beforeEffects) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before: beforeEffects, after: state.effects });
+  }
 }
 
 function expireAtCharacterTurnStart(
@@ -2938,6 +3105,19 @@ function expireAtCharacterTurnStart(
       .map((effect) => effect.id)
   );
   removeAppliedConditions(state, removeIds, changes);
+  const beforeEffects = state.effects;
+  for (const enemy of state.combat.enemies.filter((candidate) => !candidate.alive)) {
+    removeRuntimeSource(state, `combatant:${enemy.id}`, changes);
+  }
+  state.effects = expireEffectsAtBoundary(state.effects, state.character.id, "start", state.combat.round);
+  state.effects = expireSourceLifetimeEffects(
+    state.effects,
+    new Set([...liveSourceIds].map((id) => `combatant:${id}`)),
+  );
+  syncConditionProjections(state);
+  if (JSON.stringify(beforeEffects) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before: beforeEffects, after: state.effects });
+  }
 }
 
 function removeAppliedConditions(
@@ -2947,20 +3127,19 @@ function removeAppliedConditions(
 ): void {
   if (removeIds.size === 0) return;
   const beforeEffects = [...state.character.conditionEffects];
-  const removed = beforeEffects.filter((effect) => removeIds.has(effect.id));
   state.character.conditionEffects = beforeEffects.filter((effect) => !removeIds.has(effect.id));
+  const beforeCanonicalEffects = state.effects;
+  state.effects = state.effects.map((effect) => removeIds.has(effect.id) && effect.status === "active"
+    ? { ...effect, status: "expired" as const }
+    : effect);
   const beforeConditions = [...state.character.conditions];
-  for (const effect of removed) {
-    const conditionName = effect.name.toLocaleLowerCase("en-US");
-    if (!state.character.conditionEffects.some((candidate) =>
-      candidate.name.toLocaleLowerCase("en-US") === conditionName
-    )) {
-      state.character.conditions = removeCondition(state.character.conditions, conditionName);
-    }
-  }
+  syncConditionProjections(state);
   changes.push({ path: "/character/conditionEffects", before: beforeEffects, after: state.character.conditionEffects });
   if (JSON.stringify(beforeConditions) !== JSON.stringify(state.character.conditions)) {
     changes.push({ path: "/character/conditions", before: beforeConditions, after: state.character.conditions });
+  }
+  if (JSON.stringify(beforeCanonicalEffects) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before: beforeCanonicalEffects, after: state.effects });
   }
 }
 
@@ -2971,26 +3150,35 @@ function resolveDeathSave(
   command: Extract<EngineCommand, { kind: "death_save" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
-  if (!state.character.conditions.includes("unconscious")) {
+  if (!hasRuntimeCondition(state, state.character.id, "unconscious")) {
     return rejection(state, tool, "not_unconscious", "Death saves are only made when your character is unconscious at 0 HP.");
   }
   const roll = randomInt(1, 21);
   const success = roll >= 10;
   const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   if (success) next.character.deathSaveSuccesses += 1;
   else next.character.deathSaveFailures += 1;
   let outcome = success ? "death_save_success" : "death_save_failure";
   let message = "Death save: d20 " + roll + ". " + (success ? "A success." : "A failure.");
   if (next.character.deathSaveSuccesses >= 3) {
-    next.character.conditions = removeCondition(next.character.conditions, "unconscious");
-    next.character.conditions = addCondition(next.character.conditions, "stable");
+    const beforeConditions = [...next.character.conditions];
+    removeRuntimeCondition(next, next.character.id, "unconscious", changes);
+    applyConditionRuntimeEffect(next, "stable", "system:death-save", next.character.id, { kind: "persistent" }, "condition:stable", ["never"], clientCommandId, changes);
+    if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
+      changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
+    }
     next.combat.activeActorId = firstLiveCombatantId(next.combat);
     next.combat.actionUsed = true;
     message += " You stabilize.";
     outcome = "stable";
   } else if (next.character.deathSaveFailures >= 3) {
-    next.character.conditions = removeCondition(next.character.conditions, "unconscious");
-    next.character.conditions = addCondition(next.character.conditions, "dead");
+    const beforeConditions = [...next.character.conditions];
+    removeRuntimeCondition(next, next.character.id, "unconscious", changes);
+    applyConditionRuntimeEffect(next, "dead", "system:death-save", next.character.id, { kind: "persistent" }, "condition:dead", ["never"], clientCommandId, changes);
+    if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
+      changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
+    }
     next.combat.status = "ended";
     next.combat.activeActorId = null;
     message += " The character dies.";
@@ -3017,7 +3205,10 @@ function resolveDeathSave(
     outcome,
     [{ kind: "death_save_d20", value: roll, sides: 20 }],
     [],
-    [{ path: "/character/deathSaveSuccesses", before: state.character.deathSaveSuccesses, after: next.character.deathSaveSuccesses }]
+    [
+      { path: "/character/deathSaveSuccesses", before: state.character.deathSaveSuccesses, after: next.character.deathSaveSuccesses },
+      ...changes,
+    ]
   );
 }
 
@@ -3095,12 +3286,13 @@ function resolveRest(
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
   if (state.combat.status === "active") return rejection(state, tool, "combat_active", "You cannot rest during an active encounter.");
-  if (state.character.conditions.includes("dead")) return rejection(state, tool, "dead", "A dead character cannot rest.");
+  if (hasRuntimeCondition(state, state.character.id, "dead")) return rejection(state, tool, "dead", "A dead character cannot rest.");
   const next = cloneCampaign(state);
   const beforeHp = next.character.hp;
   const beforeHitDice = next.character.hitDiceRemaining;
   const beforeSlots = next.character.spellcasting ? { ...next.character.spellcasting.slots } : null;
   const beforeConcentration = next.character.spellcasting?.concentration ?? null;
+  const beforeEffects = next.effects;
   let message = "You complete a long rest. Your wounds close and your resources recover.";
   let outcome = "long_rest";
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
@@ -3127,7 +3319,6 @@ function resolveRest(
   } else {
     next.character.hp = next.character.maxHp;
     next.character.hitDiceRemaining = Math.min(next.character.level, next.character.hitDiceRemaining + Math.max(1, Math.floor(next.character.level / 2)));
-    next.character.conditions = next.character.conditions.filter((condition) => condition === "stable");
     next.character.deathSaveSuccesses = 0;
     next.character.deathSaveFailures = 0;
     if (next.character.spellcasting) {
@@ -3135,6 +3326,8 @@ function resolveRest(
       next.character.spellcasting.concentration = null;
     }
   }
+  next.effects = clearEffectsByPolicy(next.effects, command.restType === "short" ? "short-rest" : "long-rest");
+  syncConditionProjections(next);
   return commit(
     next,
     context,
@@ -3151,6 +3344,9 @@ function resolveRest(
       { path: "/character/hitDiceRemaining", before: beforeHitDice, after: next.character.hitDiceRemaining },
       ...(beforeSlots ? [{ path: "/character/spellcasting/slots", before: beforeSlots, after: next.character.spellcasting?.slots ?? null }] : []),
       ...(beforeConcentration ? [{ path: "/character/spellcasting/concentration", before: beforeConcentration, after: next.character.spellcasting?.concentration ?? null }] : []),
+      ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects)
+        ? [{ path: "/effects", before: beforeEffects, after: next.effects }]
+        : []),
     ]
   );
 }
@@ -3960,6 +4156,116 @@ function normalizeAppliedConditions(value: unknown): EngineCharacter["conditionE
   });
 }
 
+function normalizeEffects(value: unknown, state: LanternCampaignState): EngineEffectInstance[] {
+  const parsed: EngineEffectInstance[] = Array.isArray(value)
+    ? value.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const candidate = entry as Partial<EngineEffectInstance>;
+        if (
+          typeof candidate.id !== "string"
+          || typeof candidate.definitionKey !== "string"
+          || typeof candidate.sourceRef !== "string"
+          || !Array.isArray(candidate.targetRefs)
+          || !Array.isArray(candidate.operations)
+          || !candidate.startAnchor
+          || !candidate.duration
+          || typeof candidate.stackingKey !== "string"
+          || !["stack", "replace", "ignore"].includes(candidate.stackingRule ?? "")
+          || !Array.isArray(candidate.clearedBy)
+          || !["active", "expired", "removed"].includes(candidate.status ?? "")
+          || !candidate.provenance
+        ) return [];
+        const operations = candidate.operations.filter(isAdmittedEffectOperation);
+        if (operations.length !== candidate.operations.length) return [];
+        return [{
+          id: candidate.id,
+          definitionKey: candidate.definitionKey,
+          sourceRef: candidate.sourceRef,
+          targetRefs: candidate.targetRefs.filter((ref): ref is string => typeof ref === "string"),
+          operations,
+          startAnchor: candidate.startAnchor,
+          duration: candidate.duration,
+          stackingKey: candidate.stackingKey,
+          stackingRule: candidate.stackingRule!,
+          clearedBy: candidate.clearedBy.filter((policy): policy is EngineEffectInstance["clearedBy"][number] =>
+            ["short-rest", "long-rest", "duration", "source-removal", "never"].includes(policy as string)
+          ),
+          status: candidate.status!,
+          provenance: candidate.provenance,
+        }];
+      })
+    : [];
+
+  for (const conditionEffect of state.character.conditionEffects) {
+    if (parsed.some((effect) => effect.id === conditionEffect.id)) continue;
+    parsed.push({
+      id: conditionEffect.id,
+      definitionKey: `condition:${conditionEffect.conditionContentKey}`,
+      sourceRef: `combatant:${conditionEffect.sourceCombatantId}`,
+      targetRefs: [state.character.id],
+      operations: [{ kind: "condition", condition: normalizeCondition(conditionEffect.name), action: "apply" }],
+      startAnchor: { kind: "campaign-round", round: conditionEffect.appliedRound },
+      duration: conditionEffect.duration,
+      stackingKey: `condition:${conditionEffect.conditionContentKey}`,
+      stackingRule: "ignore",
+      clearedBy: ["duration", "source-removal"],
+      status: "active",
+      provenance: {
+        sourceContentKey: conditionEffect.sourceContentKey,
+        sourceCommandId: null,
+        rulesVersion: state.rulesVersion,
+        formulaRevision: "legacy-condition-v1",
+      },
+    });
+  }
+  const seedLegacy = (condition: string, targetRef: string) => {
+    const normalized = normalizeCondition(condition);
+    if (!normalized || parsed.some((effect) =>
+      effect.status === "active"
+      && effect.targetRefs.some((ref) => refMatches(ref, targetRef))
+      && effect.operations.some((operation) => operation.kind === "condition" && operation.action === "apply" && normalizeCondition(operation.condition) === normalized)
+    )) return;
+    parsed.push({
+      id: `legacy-condition:${targetRef}:${normalized}`,
+      definitionKey: `legacy-condition:${normalized}`,
+      sourceRef: "legacy",
+      targetRefs: [targetRef],
+      operations: [{ kind: "condition", condition: normalized, action: "apply" }],
+      startAnchor: { kind: "campaign-round", round: state.combat.round },
+      duration: { kind: "persistent" },
+      stackingKey: `condition:${normalized}`,
+      stackingRule: "ignore",
+      clearedBy: ["never"],
+      status: "active",
+      provenance: {
+        sourceContentKey: null,
+        sourceCommandId: null,
+        rulesVersion: state.rulesVersion,
+        formulaRevision: "legacy-condition-v1",
+      },
+    });
+  };
+  for (const condition of state.character.conditions) seedLegacy(condition, state.character.id);
+  for (const enemy of state.combat.enemies) {
+    for (const condition of enemy.conditions) seedLegacy(condition, enemy.id);
+  }
+  return parsed;
+}
+
+function syncConditionProjections(state: LanternCampaignState): void {
+  const characterNames = activeConditionNames(state.effects, state.character.id);
+  state.character.conditions = characterNames;
+  const activeIds = new Set(state.effects.filter((effect) => effect.status === "active").map((effect) => effect.id));
+  state.character.conditionEffects = state.character.conditionEffects.filter((effect) => activeIds.has(effect.id));
+  for (const enemy of state.combat.enemies) {
+    enemy.conditions = activeConditionNames(state.effects, enemy.id);
+  }
+}
+
+function refMatches(ref: string, actorId: string): boolean {
+  return ref === actorId || ref === `character:${actorId}` || ref === `combatant:${actorId}`;
+}
+
 function normalizeContentReference(value: unknown): EngineContentReference | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as { contentKey?: unknown; packHash?: unknown };
@@ -4650,12 +4956,110 @@ function signed(value: number): string {
   return value >= 0 ? "+ " + value : "- " + Math.abs(value);
 }
 
-function addCondition(conditions: string[], condition: string): string[] {
-  return conditions.includes(condition) ? conditions : [...conditions, condition];
+function applyRuntimeEffect(
+  state: LanternCampaignState,
+  input: EffectApplyInput,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>
+): { effect: EngineEffectInstance; decision: "applied" | "ignored" | "replaced" } {
+  const before = state.effects;
+  const result = applyEffect(before, input);
+  state.effects = result.effects;
+  syncConditionProjections(state);
+  if (changes && JSON.stringify(before) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before, after: state.effects });
+  }
+  return { effect: result.effect, decision: result.decision };
 }
 
-function removeCondition(conditions: string[], condition: string): string[] {
-  return conditions.filter((candidate) => candidate !== condition);
+function effectInput(
+  state: LanternCampaignState,
+  definitionKey: string,
+  sourceRef: string,
+  targetRefs: string[],
+  operations: EngineEffectOperation[],
+  duration: EngineEffectDuration = { kind: "persistent" },
+  stackingKey = definitionKey,
+  stackingRule: EngineEffectInstance["stackingRule"] = "ignore",
+  clearedBy: EngineEffectInstance["clearedBy"] = ["never"],
+  sourceCommandId: string | null = null
+): EffectApplyInput {
+  return {
+    definitionKey,
+    sourceRef,
+    targetRefs,
+    operations,
+    startAnchor: { kind: "campaign-round", round: state.combat.round },
+    duration,
+    stackingKey,
+    stackingRule,
+    clearedBy,
+    provenance: {
+      sourceContentKey: null,
+      sourceCommandId,
+      rulesVersion: state.rulesVersion,
+      formulaRevision: "effects-conditions-v1",
+    },
+  };
+}
+
+function applyConditionRuntimeEffect(
+  state: LanternCampaignState,
+  condition: string,
+  sourceRef: string,
+  targetRef: string,
+  duration: EngineEffectDuration = { kind: "persistent" },
+  stackingKey = `condition:${normalizeCondition(condition)}`,
+  clearedBy: EngineEffectInstance["clearedBy"] = ["never"],
+  sourceCommandId: string | null = null,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>
+): { effect: EngineEffectInstance; decision: "applied" | "ignored" | "replaced" } {
+  const normalized = normalizeCondition(condition);
+  const operations: EngineEffectOperation[] = [
+    { kind: "condition", condition: normalized, action: "apply" },
+  ];
+  if (normalized === "poisoned") {
+    operations.push(
+      { kind: "disadvantage", category: "attack-roll" },
+      { kind: "disadvantage", category: "ability-check" },
+    );
+  }
+  return applyRuntimeEffect(
+    state,
+    effectInput(state, `condition:${normalized}`, sourceRef, [targetRef], operations, duration, stackingKey, "ignore", clearedBy, sourceCommandId),
+    changes
+  );
+}
+
+function removeRuntimeCondition(
+  state: LanternCampaignState,
+  targetRef: string,
+  condition: string,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>
+): void {
+  const before = state.effects;
+  state.effects = removeConditionEffects(before, targetRef, condition);
+  syncConditionProjections(state);
+  if (changes && JSON.stringify(before) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before, after: state.effects });
+  }
+}
+
+function removeRuntimeSource(
+  state: LanternCampaignState,
+  sourceRef: string,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>
+): void {
+  const before = state.effects;
+  state.effects = removeEffectsBySource(before, sourceRef);
+  syncConditionProjections(state);
+  if (changes && JSON.stringify(before) !== JSON.stringify(state.effects)) {
+    changes.push({ path: "/effects", before, after: state.effects });
+  }
+}
+
+function hasRuntimeCondition(state: LanternCampaignState, actorId: string, condition: string): boolean {
+  return hasActiveCondition(state.effects, actorId, condition)
+    || (actorId === state.character.id && state.character.conditions.some((candidate) => normalizeCondition(candidate) === normalizeCondition(condition)));
 }
 
 function messageKindForOutcome(outcome: string): EngineMessage["kind"] {
