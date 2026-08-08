@@ -366,6 +366,105 @@ export interface EngineKnowledgeRecord {
   updatedAt: string;
 }
 
+export interface EngineSocialProvenance {
+  sourceCommandId: string;
+  sourceVersion: number;
+  occurredAt: string;
+}
+
+export interface EngineSocialRelationship {
+  id: string;
+  actorA: string;
+  actorB: string;
+  trust: number;
+  fear: number;
+  loyalty: number;
+  hostility: number;
+  updatedAt: string;
+  provenance: EngineSocialProvenance;
+}
+
+export interface EngineSocialFactionMember {
+  actorId: string;
+  role: string | null;
+  standing: number;
+}
+
+export interface EngineSocialFaction {
+  id: string;
+  name: string;
+  communityId: string;
+  members: EngineSocialFactionMember[];
+  provenance: EngineSocialProvenance;
+}
+
+export interface EngineSocialReputation {
+  id: string;
+  actorId: string;
+  communityId: string;
+  score: number;
+  provenance: EngineSocialProvenance;
+}
+
+export interface EngineSocialObligation {
+  id: string;
+  kind: "promise" | "debt" | "favor";
+  actorId: string;
+  counterpartyId: string;
+  terms: string;
+  status: "open" | "fulfilled" | "breached";
+  deadlineAtMinutes: number | null;
+  consequenceApplied: boolean;
+  createdAt: string;
+  resolvedAt: string | null;
+  provenance: EngineSocialProvenance;
+}
+
+export interface EngineSocialCrimeEvidence {
+  id: string;
+  kind: "theft" | "promise-breach";
+  actorId: string;
+  victimId: string;
+  itemId: string | null;
+  status: "allegation" | "proven";
+  witnessIds: string[];
+  evidenceIds: string[];
+  createdAt: string;
+  provenance: EngineSocialProvenance;
+}
+
+export interface EngineSocialRumor {
+  id: string;
+  sourceRef: string;
+  sourceActorId: string;
+  targetId: string;
+  text: string;
+  confidence: number;
+  truthRelation: "true" | "false" | "unknown";
+  status: "pending" | "propagated" | "corroborated";
+  createdAt: string;
+  propagateAtMinutes: number;
+  propagatedAtMinutes: number | null;
+  provenance: EngineSocialProvenance;
+}
+
+export interface EngineSocialState {
+  relationships: EngineSocialRelationship[];
+  factions: EngineSocialFaction[];
+  reputations: EngineSocialReputation[];
+  obligations: EngineSocialObligation[];
+  crimes: EngineSocialCrimeEvidence[];
+  rumors: EngineSocialRumor[];
+}
+
+export interface EngineSocialProjection {
+  relationships: Array<Pick<EngineSocialRelationship, "id" | "actorA" | "actorB" | "trust" | "fear" | "loyalty" | "hostility" | "updatedAt">>;
+  factions: Array<{ id: string; name: string; communityId: string; standing: number }>;
+  reputations: EngineSocialReputation[];
+  obligations: EngineSocialObligation[];
+  rumors: EngineSocialRumor[];
+}
+
 export const engineMerchantListingInputSchema = z.object({
   item: engineInventoryItemInputSchema,
   stock: z.number().int().min(-1),
@@ -414,6 +513,20 @@ export const engineMerchantPatchOperationsSchema = z.object({
 );
 export type EngineMerchantPatchOperations = z.infer<typeof engineMerchantPatchOperationsSchema>;
 
+export const engineSocialActionCommandSchema = z.object({
+  kind: z.literal("social_action"),
+  action: z.enum(["promise", "fulfill_promise", "breach_promise", "theft", "rumor"]),
+  targetId: z.string().trim().min(1).max(120).optional(),
+  promiseId: z.string().trim().min(1).max(120).optional(),
+  terms: z.string().trim().min(1).max(2_000).optional(),
+  deadlineMinutes: z.number().int().min(1).max(100_000).optional(),
+  itemId: z.string().trim().min(1).max(120).optional(),
+  witnessId: z.string().trim().min(1).max(120).optional(),
+  rumorText: z.string().trim().min(1).max(1_000).optional(),
+  truthRelation: z.enum(["true", "false", "unknown"]).optional(),
+}).strict();
+export type EngineSocialActionCommand = z.infer<typeof engineSocialActionCommandSchema>;
+
 export const engineWorldContextArgsSchema = z.object({
   title: z.string().trim().min(1).max(160),
   description: z.string().trim().min(1).max(6_000),
@@ -455,6 +568,7 @@ export const engineToolNameSchema = z.enum([
   "interact",
   "social_check",
   "merchant_trade",
+  "social_action",
   "quest_create",
   "quest_update",
   "improvise",
@@ -979,6 +1093,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       offerUnitPriceCopper: z.number().int().nonnegative().optional(),
     })
     .strict(),
+  engineSocialActionCommandSchema,
   z
     .object({
       kind: z.literal("quest_create"),
@@ -1427,6 +1542,7 @@ export interface PublicProjection {
   worldContext: EngineWorldContextView | null;
   facts: EngineWorldFact[];
   knowledge: EngineKnowledgeRecord[];
+  social: EngineSocialProjection;
 }
 
 export interface EngineSpellReference {
@@ -1900,7 +2016,7 @@ export interface EngineGameTime {
 
 export interface EngineScheduledEvent {
   id: string;
-  kind: "rest-interruption" | "effect-expiry" | "world-clock" | "quest-deadline";
+  kind: "rest-interruption" | "effect-expiry" | "world-clock" | "quest-deadline" | "social-propagation";
   dueAtMinutes: number;
   status: "pending" | "processed";
   sourceRef?: string;
@@ -2063,6 +2179,7 @@ export interface LanternCampaignState {
   advancementPolicy: EngineAdvancementPolicy;
   pendingAdvancement: EnginePendingAdvancement | null;
   time: EngineTimeState;
+  social?: EngineSocialState;
   worldContext: EngineWorldContext | null;
   worldFacts: EngineWorldFact[];
   actorKnowledge: EngineKnowledgeRecord[];
@@ -2119,6 +2236,7 @@ export interface EngineSessionView {
   advancementPolicy: EngineAdvancementPolicy;
   pendingAdvancement: EnginePendingAdvancement | null;
   time: EngineTimeState;
+  social: EngineSocialProjection;
   characterCreated: boolean;
   worldContext: EngineWorldContextView | null;
   playerNotes: EngineNote[];

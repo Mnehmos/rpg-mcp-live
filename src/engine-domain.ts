@@ -115,6 +115,15 @@ import type {
   EngineSpellcastingView,
   EngineToolName,
   EngineWorldContextView,
+  EngineSocialActionCommand,
+  EngineSocialCrimeEvidence,
+  EngineSocialFaction,
+  EngineSocialObligation,
+  EngineSocialProjection,
+  EngineSocialRelationship,
+  EngineSocialReputation,
+  EngineSocialRumor,
+  EngineSocialState,
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
@@ -837,7 +846,7 @@ function normalizeTimeState(value: unknown): EngineTimeState {
         if (!candidate || typeof candidate !== "object") return [];
         const event = candidate as Partial<EngineScheduledEvent>;
         if (typeof event.id !== "string" || typeof event.kind !== "string" || typeof event.dueAtMinutes !== "number") return [];
-        if (!["rest-interruption", "effect-expiry", "world-clock", "quest-deadline"].includes(event.kind)) return [];
+        if (!["rest-interruption", "effect-expiry", "world-clock", "quest-deadline", "social-propagation"].includes(event.kind)) return [];
         return [{
           id: event.id,
           kind: event.kind as EngineScheduledEvent["kind"],
@@ -922,6 +931,263 @@ function normalizeTimeState(value: unknown): EngineTimeState {
   };
 }
 
+const SOCIAL_MIN = -100;
+const SOCIAL_MAX = 100;
+const SOCIAL_COMMUNITY_ID = "local-community";
+const SOCIAL_RUMOR_DELAY_MINUTES = 60;
+const SOCIAL_CHECK_DC = 12;
+
+function clampSocial(value: unknown, fallback = 0): number {
+  const number = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.max(SOCIAL_MIN, Math.min(SOCIAL_MAX, number));
+}
+
+function socialProvenance(value: unknown, fallbackCommandId = "legacy-social", fallbackVersion = 0): { sourceCommandId: string; sourceVersion: number; occurredAt: string } {
+  const raw = value && typeof value === "object" ? value as { sourceCommandId?: unknown; sourceVersion?: unknown; occurredAt?: unknown } : {};
+  return {
+    sourceCommandId: typeof raw.sourceCommandId === "string" ? raw.sourceCommandId : fallbackCommandId,
+    sourceVersion: typeof raw.sourceVersion === "number" ? Math.max(0, Math.trunc(raw.sourceVersion)) : fallbackVersion,
+    occurredAt: typeof raw.occurredAt === "string" ? raw.occurredAt : new Date(0).toISOString(),
+  };
+}
+
+function defaultSocialState(): EngineSocialState {
+  return { relationships: [], factions: [], reputations: [], obligations: [], crimes: [], rumors: [] };
+}
+
+function normalizeSocialState(value: unknown): EngineSocialState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return defaultSocialState();
+  const raw = value as Partial<EngineSocialState>;
+  const relationships = Array.isArray(raw.relationships)
+    ? raw.relationships.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const relation = candidate as Partial<EngineSocialRelationship>;
+        if (typeof relation.id !== "string" || typeof relation.actorA !== "string" || typeof relation.actorB !== "string") return [];
+        return [{
+          id: relation.id,
+          actorA: relation.actorA,
+          actorB: relation.actorB,
+          trust: clampSocial(relation.trust),
+          fear: clampSocial(relation.fear),
+          loyalty: clampSocial(relation.loyalty),
+          hostility: clampSocial(relation.hostility),
+          updatedAt: typeof relation.updatedAt === "string" ? relation.updatedAt : new Date(0).toISOString(),
+          provenance: socialProvenance(relation.provenance),
+        }];
+      })
+    : [];
+  const factions = Array.isArray(raw.factions)
+    ? raw.factions.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const faction = candidate as Partial<EngineSocialFaction>;
+        if (typeof faction.id !== "string" || typeof faction.name !== "string") return [];
+        const members = Array.isArray(faction.members)
+          ? faction.members.flatMap((member) => {
+              if (!member || typeof member !== "object" || typeof (member as { actorId?: unknown }).actorId !== "string") return [];
+              const entry = member as { actorId: string; role?: unknown; standing?: unknown };
+              return [{ actorId: entry.actorId, role: typeof entry.role === "string" ? entry.role : null, standing: clampSocial(entry.standing) }];
+            }).slice(0, 100)
+          : [];
+        return [{
+          id: faction.id,
+          name: faction.name,
+          communityId: typeof faction.communityId === "string" ? faction.communityId : SOCIAL_COMMUNITY_ID,
+          members,
+          provenance: socialProvenance(faction.provenance),
+        }];
+      })
+    : [];
+  const reputations = Array.isArray(raw.reputations)
+    ? raw.reputations.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const reputation = candidate as Partial<EngineSocialReputation>;
+        if (typeof reputation.id !== "string" || typeof reputation.actorId !== "string") return [];
+        return [{
+          id: reputation.id,
+          actorId: reputation.actorId,
+          communityId: typeof reputation.communityId === "string" ? reputation.communityId : SOCIAL_COMMUNITY_ID,
+          score: clampSocial(reputation.score),
+          provenance: socialProvenance(reputation.provenance),
+        }];
+      })
+    : [];
+  const obligations = Array.isArray(raw.obligations)
+    ? raw.obligations.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const obligation = candidate as Partial<EngineSocialObligation>;
+        if (typeof obligation.id !== "string" || typeof obligation.actorId !== "string" || typeof obligation.counterpartyId !== "string" || typeof obligation.terms !== "string") return [];
+        return [{
+          id: obligation.id,
+          kind: obligation.kind === "debt" || obligation.kind === "favor" ? obligation.kind : "promise" as const,
+          actorId: obligation.actorId,
+          counterpartyId: obligation.counterpartyId,
+          terms: obligation.terms,
+          status: obligation.status === "fulfilled" || obligation.status === "breached" ? obligation.status : "open" as const,
+          deadlineAtMinutes: typeof obligation.deadlineAtMinutes === "number" ? Math.max(0, Math.trunc(obligation.deadlineAtMinutes)) : null,
+          consequenceApplied: obligation.consequenceApplied === true,
+          createdAt: typeof obligation.createdAt === "string" ? obligation.createdAt : new Date(0).toISOString(),
+          resolvedAt: typeof obligation.resolvedAt === "string" ? obligation.resolvedAt : null,
+          provenance: socialProvenance(obligation.provenance),
+        }];
+      }).slice(-200)
+    : [];
+  const crimes = Array.isArray(raw.crimes)
+    ? raw.crimes.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const crime = candidate as Partial<EngineSocialCrimeEvidence>;
+        if (typeof crime.id !== "string" || typeof crime.actorId !== "string" || typeof crime.victimId !== "string") return [];
+        return [{
+          id: crime.id,
+          kind: crime.kind === "promise-breach" ? "promise-breach" as const : "theft" as const,
+          actorId: crime.actorId,
+          victimId: crime.victimId,
+          itemId: typeof crime.itemId === "string" ? crime.itemId : null,
+          status: crime.status === "proven" ? "proven" as const : "allegation" as const,
+          witnessIds: Array.isArray(crime.witnessIds) ? crime.witnessIds.filter((id): id is string => typeof id === "string").slice(0, 10) : [],
+          evidenceIds: Array.isArray(crime.evidenceIds) ? crime.evidenceIds.filter((id): id is string => typeof id === "string").slice(0, 20) : [],
+          createdAt: typeof crime.createdAt === "string" ? crime.createdAt : new Date(0).toISOString(),
+          provenance: socialProvenance(crime.provenance),
+        }];
+      }).slice(-200)
+    : [];
+  const rumors = Array.isArray(raw.rumors)
+    ? raw.rumors.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const rumor = candidate as Partial<EngineSocialRumor>;
+        if (typeof rumor.id !== "string" || typeof rumor.sourceRef !== "string" || typeof rumor.sourceActorId !== "string" || typeof rumor.targetId !== "string" || typeof rumor.text !== "string") return [];
+        return [{
+          id: rumor.id,
+          sourceRef: rumor.sourceRef,
+          sourceActorId: rumor.sourceActorId,
+          targetId: rumor.targetId,
+          text: rumor.text,
+          confidence: Math.max(0, Math.min(1, typeof rumor.confidence === "number" ? rumor.confidence : 0.5)),
+          truthRelation: rumor.truthRelation === "true" || rumor.truthRelation === "false" ? rumor.truthRelation : "unknown" as const,
+          status: rumor.status === "propagated" || rumor.status === "corroborated" ? rumor.status : "pending" as const,
+          createdAt: typeof rumor.createdAt === "string" ? rumor.createdAt : new Date(0).toISOString(),
+          propagateAtMinutes: typeof rumor.propagateAtMinutes === "number" ? Math.max(0, Math.trunc(rumor.propagateAtMinutes)) : 0,
+          propagatedAtMinutes: typeof rumor.propagatedAtMinutes === "number" ? Math.max(0, Math.trunc(rumor.propagatedAtMinutes)) : null,
+          provenance: socialProvenance(rumor.provenance),
+        }];
+      }).slice(-200)
+    : [];
+  return { relationships: relationships.slice(-200), factions: factions.slice(-100), reputations: reputations.slice(-200), obligations, crimes, rumors };
+}
+
+function ensureSocialState(state: LanternCampaignState): EngineSocialState {
+  state.social = normalizeSocialState(state.social);
+  return state.social;
+}
+
+function socialTargetExists(state: LanternCampaignState, targetId: string): boolean {
+  return targetId === state.actorId
+    || Boolean(state.worldContext?.npcs.some((npc) => npc.id === targetId))
+    || Boolean(state.worldContext?.merchants.some((merchant) => merchant.id === targetId));
+}
+
+function socialRelationshipId(actorA: string, actorB: string): string {
+  return `relationship:${actorA}:${actorB}`;
+}
+
+function socialRelationship(
+  state: LanternCampaignState,
+  actorA: string,
+  actorB: string,
+  sourceCommandId = "legacy-social",
+  sourceVersion = state.version,
+): EngineSocialRelationship {
+  const social = ensureSocialState(state);
+  const existing = social.relationships.find((candidate) =>
+    (candidate.actorA === actorA && candidate.actorB === actorB)
+    || (candidate.actorA === actorB && candidate.actorB === actorA)
+  );
+  if (existing) return existing;
+  const npc = state.worldContext?.npcs.find((candidate) => candidate.id === actorB || candidate.id === actorA);
+  const relation: EngineSocialRelationship = {
+    id: socialRelationshipId(actorA, actorB),
+    actorA,
+    actorB,
+    trust: clampSocial(npc?.relationshipScore ?? 0),
+    fear: 0,
+    loyalty: 0,
+    hostility: 0,
+    updatedAt: new Date().toISOString(),
+    provenance: { sourceCommandId, sourceVersion, occurredAt: new Date().toISOString() },
+  };
+  social.relationships.push(relation);
+  return relation;
+}
+
+function adjustSocialRelationship(
+  state: LanternCampaignState,
+  actorA: string,
+  actorB: string,
+  delta: number,
+  sourceCommandId: string,
+  sourceVersion: number,
+): { before: EngineSocialRelationship; after: EngineSocialRelationship } {
+  const relation = socialRelationship(state, actorA, actorB, sourceCommandId, sourceVersion);
+  const before = { ...relation, provenance: { ...relation.provenance } };
+  relation.trust = clampSocial(relation.trust + delta);
+  relation.hostility = clampSocial(relation.hostility + (delta < 0 ? Math.min(10, Math.abs(delta)) : -Math.min(5, delta)));
+  relation.loyalty = clampSocial(relation.loyalty + (delta > 0 ? Math.min(5, delta) : 0));
+  relation.updatedAt = new Date().toISOString();
+  relation.provenance = { sourceCommandId, sourceVersion, occurredAt: relation.updatedAt };
+  const npc = state.worldContext?.npcs.find((candidate) => candidate.id === actorB || candidate.id === actorA);
+  if (npc && npc.id === actorB) npc.relationshipScore = relation.trust;
+  return { before, after: { ...relation, provenance: { ...relation.provenance } } };
+}
+
+function adjustSocialReputation(
+  state: LanternCampaignState,
+  actorId: string,
+  communityId: string,
+  delta: number,
+  sourceCommandId: string,
+  sourceVersion: number,
+): { before: EngineSocialReputation | null; after: EngineSocialReputation } {
+  const social = ensureSocialState(state);
+  const existing = social.reputations.find((candidate) => candidate.actorId === actorId && candidate.communityId === communityId);
+  const now = new Date().toISOString();
+  const before = existing ? { ...existing, provenance: { ...existing.provenance } } : null;
+  const reputation = existing ?? {
+    id: `reputation:${actorId}:${communityId}`,
+    actorId,
+    communityId,
+    score: 0,
+    provenance: { sourceCommandId, sourceVersion, occurredAt: now },
+  };
+  if (!existing) social.reputations.push(reputation);
+  reputation.score = clampSocial(reputation.score + delta);
+  reputation.provenance = { sourceCommandId, sourceVersion, occurredAt: now };
+  for (const faction of social.factions) {
+    if (faction.communityId !== communityId) continue;
+    const member = faction.members.find((candidate) => candidate.actorId === actorId);
+    if (member) member.standing = clampSocial(member.standing + delta);
+  }
+  return { before, after: { ...reputation, provenance: { ...reputation.provenance } } };
+}
+
+function projectSocialForActor(actorId: string, state: LanternCampaignState): EngineSocialProjection {
+  const social = normalizeSocialState(state.social);
+  return {
+    relationships: social.relationships
+      .filter((relation) => relation.actorA === actorId || relation.actorB === actorId)
+      .map(({ id, actorA, actorB, trust, fear, loyalty, hostility, updatedAt }) => ({ id, actorA, actorB, trust, fear, loyalty, hostility, updatedAt })),
+    factions: social.factions.flatMap((faction) => {
+      const member = faction.members.find((candidate) => candidate.actorId === actorId);
+      return member ? [{ id: faction.id, name: faction.name, communityId: faction.communityId, standing: member.standing }] : [];
+    }),
+    reputations: social.reputations.filter((reputation) => reputation.actorId === actorId).map((reputation) => ({ ...reputation, provenance: { ...reputation.provenance } })),
+    obligations: social.obligations
+      .filter((obligation) => obligation.status === "open" && (obligation.actorId === actorId || obligation.counterpartyId === actorId))
+      .map((obligation) => ({ ...obligation, provenance: { ...obligation.provenance } })),
+    rumors: social.rumors
+      .filter((rumor) => rumor.status !== "pending")
+      .map((rumor) => ({ ...rumor, provenance: { ...rumor.provenance } })),
+  };
+}
+
 export function normalizeContentPolicy(policy: EngineContentPolicy): EngineContentPolicy {
   const gamesystem = policy.gamesystem?.trim();
   const baseDocumentKey = policy.baseDocumentKey?.trim();
@@ -968,6 +1234,7 @@ export function createInitialCampaign(
     advancementPolicy: defaultAdvancementPolicy(),
     pendingAdvancement: null,
     time: defaultTimeState(),
+    social: defaultSocialState(),
     worldContext: null,
     worldFacts: [],
     actorKnowledge: [],
@@ -1027,6 +1294,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     time?: unknown;
   };
   next.time = normalizeTimeState(next.time);
+  next.social = normalizeSocialState(next.social);
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
   next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
@@ -1454,6 +1722,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     advancementPolicy: state.advancementPolicy,
     pendingAdvancement: state.pendingAdvancement,
     time: state.time,
+    social: projection.social,
     characterCreated: state.character.created,
     worldContext: projection.worldContext,
     playerNotes: state.playerNotes,
@@ -1507,6 +1776,7 @@ export function readToolData(
         advancementPolicy: state.advancementPolicy,
         pendingAdvancement: state.pendingAdvancement,
         time: state.time,
+        social: projection.social,
         worldContext: projection.worldContext,
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
@@ -1525,6 +1795,7 @@ export function readToolData(
         worldContext: projection.worldContext,
         campaignVersion: state.version,
         time: state.time,
+        social: projection.social,
         combat: combatData(state.combat),
       };
     case "world_context":
@@ -1757,7 +2028,7 @@ export function resolveEngineCommand(
   }
   if (
     state.character.lifecycleState === "stable"
-    && ["combat_action", "combat_move", "cast_spell", "move", "travel", "interact", "social_check", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
+    && ["combat_action", "combat_move", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
   ) {
     return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
   }
@@ -1803,6 +2074,8 @@ export function resolveEngineCommand(
       return resolveInteract(state, context, clientCommandId, command, tool);
     case "social_check":
       return resolveSocialCheck(state, context, clientCommandId, command, tool);
+    case "social_action":
+      return resolveSocialAction(state, context, clientCommandId, command, tool);
     case "merchant_trade":
       return resolveMerchantTrade(state, context, clientCommandId, command, tool);
     case "quest_create":
@@ -2473,6 +2746,226 @@ function resolveCharacterUpdate(
   );
 }
 
+function socialStateChanges(before: EngineSocialState, after: EngineSocialState): Array<{ path: string; before: unknown; after: unknown }> {
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const collections: Array<[keyof EngineSocialState, string]> = [
+    ["relationships", "relationships"],
+    ["factions", "factions"],
+    ["reputations", "reputations"],
+    ["obligations", "obligations"],
+    ["crimes", "crimes"],
+    ["rumors", "rumors"],
+  ];
+  for (const [key, pathKey] of collections) {
+    const beforeValues = before[key] as Array<{ id: string }>;
+    const afterValues = after[key] as Array<{ id: string }>;
+    const ids = new Set([...beforeValues, ...afterValues].map((value) => value.id));
+    for (const id of ids) {
+      const previous = beforeValues.find((value) => value.id === id) ?? null;
+      const current = afterValues.find((value) => value.id === id) ?? null;
+      if (JSON.stringify(previous) !== JSON.stringify(current)) {
+        changes.push({ path: `/social/${pathKey}/${escapeJsonPointerSegment(id)}`, before: previous, after: current });
+      }
+    }
+  }
+  return changes;
+}
+
+function socialGuardId(state: LanternCampaignState): string | null {
+  return state.worldContext?.npcs.find((npc) => npc.id.toLocaleLowerCase().includes("guard") || npc.name.toLocaleLowerCase().includes("guard") || npc.name.toLocaleLowerCase().includes("watch"))?.id ?? null;
+}
+
+function scheduleSocialRumor(
+  next: LanternCampaignState,
+  rumor: EngineSocialRumor,
+  sourceCommandId: string,
+  sourceVersion: number,
+): void {
+  const social = ensureSocialState(next);
+  social.rumors.push(rumor);
+  next.time.scheduledEvents.push({
+    id: `social-propagation:${rumor.id}`,
+    kind: "social-propagation",
+    dueAtMinutes: rumor.propagateAtMinutes,
+    status: "pending",
+    sourceRef: rumor.id,
+    targetRef: rumor.targetId,
+    provenance: { sourceCommandId, sourceVersion },
+  });
+}
+
+function resolveSocialAction(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineSocialActionCommand,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const beforeSocial = normalizeSocialState(state.social);
+  const now = new Date().toISOString();
+  const next = cloneCampaign(state);
+  const social = ensureSocialState(next);
+  const target = command.targetId && state.worldContext
+    ? state.worldContext.npcs.find((npc) => npc.id === command.targetId)
+      ?? state.worldContext.merchants.find((merchant) => merchant.id === command.targetId)
+    : null;
+
+  if (command.action === "promise") {
+    if (!command.targetId || !socialTargetExists(state, command.targetId) || command.targetId === context.actorId) {
+      return rejection(state, tool, "social_target_not_found", "A promise needs one established NPC or merchant counterparty.");
+    }
+    if (!command.terms) return rejection(state, tool, "promise_terms_required", "A promise needs concrete terms.");
+    const obligation: EngineSocialObligation = {
+      id: `promise:${clientCommandId}`,
+      kind: "promise",
+      actorId: context.actorId,
+      counterpartyId: command.targetId,
+      terms: command.terms,
+      status: "open",
+      deadlineAtMinutes: state.time.gameTime.totalMinutes + (command.deadlineMinutes ?? 24 * 60),
+      consequenceApplied: false,
+      createdAt: now,
+      resolvedAt: null,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
+    };
+    social.obligations.push(obligation);
+    adjustSocialRelationship(next, context.actorId, command.targetId, 5, clientCommandId, state.version);
+    const afterSocial = ensureSocialState(next);
+    const targetNpc = target && "relationshipScore" in target ? target.id : null;
+    const changes = [
+      ...socialStateChanges(beforeSocial, afterSocial),
+      ...(targetNpc ? [{ path: `/worldContext/npcs/${escapeJsonPointerSegment(targetNpc)}/relationshipScore`, before: state.worldContext?.npcs.find((npc) => npc.id === targetNpc)?.relationshipScore ?? 0, after: next.worldContext?.npcs.find((npc) => npc.id === targetNpc)?.relationshipScore ?? 0 }] : []),
+    ];
+    return commit(next, context, clientCommandId, command, tool, `You make a promise to ${target && "name" in target ? target.name : command.targetId}; trust rises by a bounded amount.`, { social: projectSocialForActor(context.actorId, next), obligation }, "promise_created", [], [], changes);
+  }
+
+  if (command.action === "fulfill_promise" || command.action === "breach_promise") {
+    if (!command.promiseId) return rejection(state, tool, "promise_id_required", "Resolve an existing promise by id.");
+    const obligation = social.obligations.find((candidate) => candidate.id === command.promiseId);
+    if (!obligation) return rejection(state, tool, "promise_not_found", "That promise is not established.");
+    if (obligation.status !== "open" || obligation.actorId !== context.actorId) return rejection(state, tool, "promise_already_resolved", "That promise is already resolved or belongs to another actor.");
+    if (command.witnessId && !socialTargetExists(state, command.witnessId)) return rejection(state, tool, "witness_not_found", "The claimed witness is not established in the current context.");
+    obligation.status = command.action === "fulfill_promise" ? "fulfilled" : "breached";
+    obligation.resolvedAt = now;
+    obligation.consequenceApplied = true;
+    const delta = obligation.status === "fulfilled" ? 8 : -20;
+    adjustSocialRelationship(next, context.actorId, obligation.counterpartyId, delta, clientCommandId, state.version);
+    if (obligation.status === "fulfilled" || command.witnessId) {
+      adjustSocialReputation(next, context.actorId, SOCIAL_COMMUNITY_ID, obligation.status === "fulfilled" ? 5 : -15, clientCommandId, state.version);
+    }
+    if (obligation.status === "breached") {
+      const evidenceId = `evidence:${clientCommandId}`;
+      const crime: EngineSocialCrimeEvidence = {
+        id: `crime:${clientCommandId}`,
+        kind: "promise-breach",
+        actorId: context.actorId,
+        victimId: obligation.counterpartyId,
+        itemId: null,
+        status: command.witnessId ? "proven" : "allegation",
+        witnessIds: command.witnessId ? [command.witnessId] : [],
+        evidenceIds: [evidenceId],
+        createdAt: now,
+        provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
+      };
+      social.crimes.push(crime);
+      const guardId = command.witnessId ? socialGuardId(state) : null;
+      if (guardId) {
+        const rumor: EngineSocialRumor = {
+          id: `rumor:${clientCommandId}`,
+          sourceRef: crime.id,
+          sourceActorId: context.actorId,
+          targetId: guardId,
+          text: `Witnessed promise breach by ${context.actorId}.`,
+          confidence: 1,
+          truthRelation: "true",
+          status: "pending",
+          createdAt: now,
+          propagateAtMinutes: state.time.gameTime.totalMinutes + SOCIAL_RUMOR_DELAY_MINUTES,
+          propagatedAtMinutes: null,
+          provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
+        };
+        scheduleSocialRumor(next, rumor, clientCommandId, state.version);
+      }
+    }
+    const afterSocial = ensureSocialState(next);
+    return commit(next, context, clientCommandId, command, tool, obligation.status === "fulfilled" ? "The promise is fulfilled; trust and reputation improve." : "The promise is breached; evidence and bounded social consequences are recorded.", { social: projectSocialForActor(context.actorId, next), obligation, crime: afterSocial.crimes.at(-1) ?? null }, obligation.status === "fulfilled" ? "promise_fulfilled" : "promise_breached", [], [], [
+      ...socialStateChanges(beforeSocial, afterSocial),
+      ...(JSON.stringify(state.time.scheduledEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents }] : []),
+    ]);
+  }
+
+  if (command.action === "theft") {
+    if (!command.targetId || !socialTargetExists(state, command.targetId) || command.targetId === context.actorId) return rejection(state, tool, "victim_not_found", "A theft record needs an established victim.");
+    if (!command.itemId) return rejection(state, tool, "item_id_required", "A theft record needs an item identifier.");
+    if (command.witnessId && !socialTargetExists(state, command.witnessId)) return rejection(state, tool, "witness_not_found", "The claimed witness is not established in the current context.");
+    const crime: EngineSocialCrimeEvidence = {
+      id: `crime:${clientCommandId}`,
+      kind: "theft",
+      actorId: context.actorId,
+      victimId: command.targetId,
+      itemId: command.itemId,
+      status: command.witnessId ? "proven" : "allegation",
+      witnessIds: command.witnessId ? [command.witnessId] : [],
+      evidenceIds: [`evidence:${clientCommandId}`],
+      createdAt: now,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
+    };
+    social.crimes.push(crime);
+    adjustSocialRelationship(next, context.actorId, command.targetId, command.witnessId ? -25 : -10, clientCommandId, state.version);
+    if (command.witnessId) adjustSocialReputation(next, context.actorId, SOCIAL_COMMUNITY_ID, -20, clientCommandId, state.version);
+    const guardId = command.witnessId ? socialGuardId(state) : null;
+    if (guardId) {
+      scheduleSocialRumor(next, {
+        id: `rumor:${clientCommandId}`,
+        sourceRef: crime.id,
+        sourceActorId: context.actorId,
+        targetId: guardId,
+        text: `Witnessed theft of ${command.itemId} by ${context.actorId}.`,
+        confidence: 1,
+        truthRelation: "true",
+        status: "pending",
+        createdAt: now,
+        propagateAtMinutes: state.time.gameTime.totalMinutes + SOCIAL_RUMOR_DELAY_MINUTES,
+        propagatedAtMinutes: null,
+        provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
+      }, clientCommandId, state.version);
+    }
+    const afterSocial = ensureSocialState(next);
+    return commit(next, context, clientCommandId, command, tool, command.witnessId ? "Witnessed theft evidence is recorded and a delayed guard rumor is scheduled." : "The alleged theft is recorded privately; without a witness it does not become proven reputation.", { social: projectSocialForActor(context.actorId, next), crime }, command.witnessId ? "theft_proven" : "theft_alleged", [], [], [
+      ...socialStateChanges(beforeSocial, afterSocial),
+      ...(JSON.stringify(state.time.scheduledEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents }] : []),
+    ]);
+  }
+
+  if (command.action === "rumor") {
+    if (!context.capabilities.includes("dm")) return rejection(state, tool, "dm_required", "Only the DM may introduce an authoritative rumor source.");
+    if (!command.targetId || !socialTargetExists(state, command.targetId)) return rejection(state, tool, "rumor_target_not_found", "A rumor needs an established recipient.");
+    if (!command.rumorText || !command.truthRelation) return rejection(state, tool, "rumor_fields_required", "A rumor needs text and an explicit source truth relation.");
+    const rumor: EngineSocialRumor = {
+      id: `rumor:${clientCommandId}`,
+      sourceRef: `source:${clientCommandId}`,
+      sourceActorId: context.actorId,
+      targetId: command.targetId,
+      text: command.rumorText,
+      confidence: 0.5,
+      truthRelation: command.truthRelation,
+      status: "pending",
+      createdAt: now,
+      propagateAtMinutes: state.time.gameTime.totalMinutes + SOCIAL_RUMOR_DELAY_MINUTES,
+      propagatedAtMinutes: null,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
+    };
+    scheduleSocialRumor(next, rumor, clientCommandId, state.version);
+    const afterSocial = ensureSocialState(next);
+    return commit(next, context, clientCommandId, command, tool, "The rumor is recorded as pending; repetition cannot change its truth relation.", { recorded: true, social: projectSocialForActor(context.actorId, next) }, "rumor_recorded", [], [], [
+      ...socialStateChanges(beforeSocial, afterSocial),
+      { path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents },
+    ]);
+  }
+
+  return rejection(state, tool, "social_action_invalid", "That social action is not supported by the reviewed first slice.");
+}
+
 function resolveSocialCheck(
   state: LanternCampaignState,
   context: RequestContext,
@@ -2496,15 +2989,15 @@ function resolveSocialCheck(
       : Math.min(firstRoll, secondRoll);
   const modifier = derived.modifier;
   const total = roll + modifier;
-  const success = total >= npc.socialDc;
+  const success = total >= SOCIAL_CHECK_DC;
+  const beforeSocial = normalizeSocialState(state.social);
   const next = cloneCampaign(state);
   const nextNpc = next.worldContext?.npcs.find((candidate) => candidate.id === command.npcId);
-  if (nextNpc) {
-    nextNpc.relationshipScore = Math.max(-100, Math.min(100, nextNpc.relationshipScore + (success ? 5 : -2)));
-  }
+  adjustSocialRelationship(next, context.actorId, command.npcId, success ? 5 : -2, clientCommandId, state.version);
+  const afterSocial = ensureSocialState(next);
   const message =
     "You make a social check with " + npc.name + ": d20 " + roll + " " + signed(modifier) + " = " + total +
-    " against DC " + npc.socialDc + ". " + (success ? "Success." : "Failure.");
+    " against reviewed social challenge DC " + SOCIAL_CHECK_DC + ". " + (success ? "Success." : "Failure.");
   return commit(
     next,
     context,
@@ -2512,14 +3005,17 @@ function resolveSocialCheck(
     command,
     tool,
     message,
-    { npc: nextNpc ?? npc, goal: command.goal, roll, modifier, dc: npc.socialDc, total, success },
+    { npc: nextNpc ?? npc, goal: command.goal, roll, modifier, dc: SOCIAL_CHECK_DC, dcProvenance: "reviewed-challenge:social-check-v1:dc-band-v1", total, success, social: projectSocialForActor(context.actorId, next) },
     success ? "social_success" : "social_failure",
     [
       { kind: "social_d20", value: roll, sides: 20 },
       ...(secondRoll === null ? [] : [{ kind: `social_${modifierQuery.mode}_d20`, value: secondRoll, sides: 20 }]),
     ],
-    [{ name: command.ability + "_modifier", value: modifier }, { name: "social_dc", value: npc.socialDc }],
-    nextNpc ? [{ path: "/worldContext/npcs/" + npc.id + "/relationshipScore", before: npc.relationshipScore, after: nextNpc.relationshipScore }] : [],
+    [{ name: command.ability + "_modifier", value: modifier }, { name: "social_dc", value: SOCIAL_CHECK_DC }],
+    [
+      ...socialStateChanges(beforeSocial, afterSocial),
+      ...(nextNpc ? [{ path: "/worldContext/npcs/" + escapeJsonPointerSegment(npc.id) + "/relationshipScore", before: npc.relationshipScore, after: nextNpc.relationshipScore }] : []),
+    ],
     [],
     undefined,
     {
@@ -2555,7 +3051,18 @@ function resolveMerchantTrade(
   const isBuying = command.side === "buy" || command.side === "offer";
   const unitPrice = command.side === "offer" ? command.offerUnitPriceCopper : isBuying ? listing.buyPriceCopper : listing.sellPriceCopper;
   if (unitPrice === undefined) return rejection(state, tool, "offer_price_required", "An offer needs an explicit unit price.");
-  const total = unitPrice * command.quantity;
+  const social = normalizeSocialState(state.social);
+  const relationship = social.relationships.find((candidate) =>
+    (candidate.actorA === context.actorId && candidate.actorB === merchant.id)
+    || (candidate.actorA === merchant.id && candidate.actorB === context.actorId)
+  );
+  const reputation = social.reputations.find((candidate) => candidate.actorId === context.actorId && candidate.communityId === SOCIAL_COMMUNITY_ID);
+  const socialScore = clampSocial((relationship?.trust ?? 0) + Math.trunc((reputation?.score ?? 0) / 2));
+  if (socialScore <= -75) return rejection(state, tool, "merchant_access_denied", "The merchant refuses service while your local reputation remains severely negative.");
+  const adjustment = Math.max(-10, Math.min(10, Math.trunc(socialScore / 10)));
+  const priceMultiplier = isBuying ? 1 - adjustment / 100 : 1 + adjustment / 100;
+  const finalUnitPrice = Math.max(0, Math.round(unitPrice * priceMultiplier));
+  const total = finalUnitPrice * command.quantity;
   if (!Number.isSafeInteger(total)) return rejection(state, tool, "price_out_of_range", "That transaction is too large to resolve safely.");
   if (listing.stock >= 0 && isBuying && listing.stock < command.quantity) {
     return rejection(state, tool, "insufficient_stock", "The merchant does not have that quantity available.");
@@ -2611,8 +3118,12 @@ function resolveMerchantTrade(
       item: listingView,
       side: command.side,
       quantity: command.quantity,
-      unitPriceCopper: unitPrice,
+      baseUnitPriceCopper: unitPrice,
+      unitPriceCopper: finalUnitPrice,
       totalCopper: total,
+      socialScore,
+      priceMultiplier,
+      ruleKey: "merchant-social-v1",
       currency: next.character.currency,
       currencyBreakdown: currencyBreakdown(next.character.currency.copper),
       inventory: materializeInventory(next.character.inventory),
@@ -7108,6 +7619,7 @@ function advanceGameTime(
   sourceCommandId: string,
 ): { before: EngineGameTime; after: EngineGameTime; processedEventIds: string[]; expiredEffectIds: string[]; interrupted: boolean } {
   void reason;
+  const social = ensureSocialState(next);
   const before = next.time.gameTime;
   const after = gameTimeAt(before.totalMinutes + Math.max(0, Math.trunc(minutes)));
   const processedEventIds: string[] = [];
@@ -7137,6 +7649,13 @@ function advanceGameTime(
         ? { ...quest, status: "failed" as const }
         : quest);
       if (next.quest.id === event.targetRef && next.quest.status === "active") next.quest = { ...next.quest, status: "failed" };
+    }
+    if (event.kind === "social-propagation" && event.sourceRef) {
+      const rumor = social.rumors.find((candidate) => candidate.id === event.sourceRef && candidate.status === "pending");
+      if (rumor) {
+        rumor.status = "propagated";
+        rumor.propagatedAtMinutes = event.dueAtMinutes;
+      }
     }
   }
   for (const effect of next.effects) {
@@ -7211,6 +7730,7 @@ function resolveTravel(
   const beforeEffects = state.effects;
   const beforeEvents = state.time.scheduledEvents;
   const beforeWorldClocks = state.time.worldClocks;
+  const beforeSocial = normalizeSocialState(state.social);
   consumeInventoryProperty(next, "ration", 1, changes);
   consumeInventoryProperty(next, "water", 1, changes);
   const beforeSurvival = state.time.survival;
@@ -7274,6 +7794,7 @@ function resolveTravel(
     ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffects, after: next.effects }] : []),
     ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
     ...(JSON.stringify(beforeWorldClocks) !== JSON.stringify(next.time.worldClocks) ? [{ path: "/time/worldClocks", before: beforeWorldClocks, after: next.time.worldClocks }] : []),
+    ...socialStateChanges(beforeSocial, ensureSocialState(next)),
   );
   const message = navigationSuccess
     ? `You travel ${profile.distanceMiles} miles toward ${exit.label} and arrive after ${profile.elapsedMinutes} minutes.`
@@ -7353,6 +7874,7 @@ function resolveProject(
   if (!material || material.quantity < existing.materialQuantity) return rejection(state, tool, "project_material_shortage", "The project lacks its reviewed material cost.");
   const next = cloneCampaign(state);
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const beforeSocial = normalizeSocialState(state.social);
   if (existing.workCompletedMinutes === 0) consumeInventoryProperty(next, existing.materialProperty, existing.materialQuantity, changes);
   const advance = advanceGameTime(next, existing.workRequiredMinutes - existing.workCompletedMinutes, "downtime-project", clientCommandId);
   const project = next.time.projects.find((candidate) => candidate.id === existing.id);
@@ -7364,6 +7886,7 @@ function resolveProject(
   changes.push(
     { path: "/time/gameTime", before: advance.before, after: advance.after },
     { path: "/time/projects", before: state.time.projects, after: next.time.projects },
+    ...socialStateChanges(beforeSocial, ensureSocialState(next)),
   );
   return commit(next, context, clientCommandId, command, tool, "The research project completes and its progress is recorded exactly once.", { project, timeAdvance: { before: advance.before, after: advance.after, minutes: advance.after.totalMinutes - advance.before.totalMinutes, reason: "downtime-project", processedEventIds: advance.processedEventIds } }, "project_completed", [], [], changes);
 }
@@ -7394,6 +7917,7 @@ function resolveRest(
   const beforeTime = state.time;
   const beforeQuests = state.quests;
   const beforeEvents = state.time.scheduledEvents;
+  const beforeSocial = normalizeSocialState(state.social);
   const beforeEffectsForTime = state.effects;
   const requiredMinutes = command.restType === "short" ? SHORT_REST_MINUTES : LONG_REST_MINUTES;
   next.time.rest = {
@@ -7436,6 +7960,7 @@ function resolveRest(
         ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
         ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
         ...(JSON.stringify(beforeEffectsForTime) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffectsForTime, after: next.effects }] : []),
+        ...socialStateChanges(beforeSocial, ensureSocialState(next)),
       ],
     );
   }
@@ -7507,6 +8032,7 @@ function resolveRest(
       { path: "/time/rest", before: beforeTime.rest, after: next.time.rest },
       ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
       ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
+      ...socialStateChanges(beforeSocial, ensureSocialState(next)),
     ]
   );
 }
@@ -8986,6 +9512,7 @@ export function actorKnowledgeProjection(actorId: string, state: LanternCampaign
     worldContext: base ? { ...base, facts } : null,
     facts,
     knowledge,
+    social: projectSocialForActor(actorId, state),
   };
 }
 
@@ -9002,6 +9529,7 @@ export function projectStateForActor(actorId: string, state: LanternCampaignStat
   const projected = cloneCampaign(state);
   projected.worldFacts = projection.facts;
   projected.actorKnowledge = projection.knowledge;
+  delete projected.social;
   return projected;
 }
 

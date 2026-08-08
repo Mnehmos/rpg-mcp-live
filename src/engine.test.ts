@@ -123,6 +123,7 @@ describe("Lantern engine boundary", () => {
         "interact",
         "social_check",
         "merchant_trade",
+        "social_action",
         "quest_create",
         "quest_update",
         "improvise",
@@ -156,7 +157,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(52);
+    expect(names).toHaveLength(53);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");
