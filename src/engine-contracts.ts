@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { NarrationEnvelope } from "./ai-contracts.js";
+import type { ProductionRoomState } from "./engine-production-room.js";
 import type {
   CompiledCreatureAttack,
   CompiledEffectDuration,
@@ -1660,6 +1661,11 @@ export interface EngineTurnPlanCommand {
   effects: EngineTurnPlanEffect[];
 }
 
+/** Internal engine command used by the production-room API; never model-facing. */
+export interface EngineProductionRoomCommand {
+  kind: "production_room_enter";
+}
+
 export interface EngineContentRepinCommand {
   kind: "content_repin";
   fromRulesVersion: string;
@@ -1679,8 +1685,8 @@ export interface EngineTurnEffectEvidence extends EngineTurnPlanEffect {
   data: unknown;
 }
 
-export type EnginePersistedCommand = EngineCommand | EngineTurnPlanCommand | EngineContentRepinCommand;
-export type EngineResolutionTool = EngineToolName | "declare" | "listen" | "turn_plan" | "content_repin";
+export type EnginePersistedCommand = EngineCommand | EngineTurnPlanCommand | EngineContentRepinCommand | EngineProductionRoomCommand;
+export type EngineResolutionTool = EngineToolName | "declare" | "listen" | "turn_plan" | "content_repin" | "production_room";
 
 export const engineCommandRequestSchema = z
   .object({
@@ -1710,6 +1716,9 @@ export const engineOpeningRequestSchema = z
   })
   .strict();
 export type EngineOpeningRequest = z.infer<typeof engineOpeningRequestSchema>;
+
+export const engineProductionRoomEnterRequestSchema = engineOpeningRequestSchema;
+export type EngineProductionRoomEnterRequest = z.infer<typeof engineProductionRoomEnterRequestSchema>;
 
 export interface RequestContext {
   requestId: string;
@@ -2908,6 +2917,8 @@ export interface LanternCampaignState {
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
   situation: EngineSituation | null;
+  /** Private production-room traces are persisted with the campaign but never projected publicly. */
+  productionRoom?: ProductionRoomState | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
   log: EngineMessage[];
   lastRoll: number | null;

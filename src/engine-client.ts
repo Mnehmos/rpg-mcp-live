@@ -6,10 +6,12 @@ import type {
   EngineCommandRequest,
   EngineCommandResult,
   EngineOpeningRequest,
+  EngineProductionRoomEnterRequest,
   EngineSessionView,
   EngineToolCallRequest,
   EngineToolResult,
 } from "./engine-contracts.js";
+import type { ProductionRoomNarrationReleaseRequest } from "./engine-production-room.js";
 import type { Open5eCharacterOptions } from "./open5e-rules.js";
 import type { Open5eContentCatalog } from "./content/catalog.js";
 import type { ResolvedEngineEventEvidence } from "./content/registry.js";
@@ -198,6 +200,48 @@ export class LanternEngineClient {
     const result = await this.request<EngineCommandResult>(
       "/v1/campaigns/" + encodeURIComponent(campaignId) + "/opening",
       { method: "POST", body: JSON.stringify(body) },
+      { accountId, actorId }
+    );
+    return result.data;
+  }
+
+  public async enterProductionRoom(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    request: Omit<EngineProductionRoomEnterRequest, "clientCommandId"> & { clientCommandId?: string }
+  ): Promise<EngineCommandResult> {
+    const body = { ...request, clientCommandId: request.clientCommandId ?? randomUUID() };
+    const result = await this.request<EngineCommandResult>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/production-room/enter",
+      { method: "POST", body: JSON.stringify(body) },
+      { accountId, actorId }
+    );
+    return result.data;
+  }
+
+  public async getProductionRoom(
+    accountId: string,
+    actorId: string,
+    campaignId: string
+  ): Promise<{ productionRoom: unknown }> {
+    const result = await this.request<{ productionRoom: unknown }>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/production-room",
+      { method: "GET" },
+      { accountId, actorId }
+    );
+    return result.data;
+  }
+
+  public async releaseProductionRoomNarration(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    request: ProductionRoomNarrationReleaseRequest
+  ): Promise<EngineCommandResult & { productionRoom?: unknown }> {
+    const result = await this.request<EngineCommandResult & { productionRoom?: unknown }>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/production-room/narration",
+      { method: "POST", body: JSON.stringify(request) },
       { accountId, actorId }
     );
     return result.data;

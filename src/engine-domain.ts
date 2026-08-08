@@ -137,7 +137,9 @@ import type {
   EngineQuestStatus,
   EngineQuestTerminalOutcome,
   EngineQuestTransition,
+  EnginePersistedCommand,
   EngineResolution,
+  EngineResolutionTool,
   EngineSessionView,
   EngineSpellReference,
   EngineSpellcastingView,
@@ -164,6 +166,21 @@ import {
   situationChoiceAllowed,
   situationClueFactIds,
 } from "./engine-situations.js";
+import {
+  buildRuinedGatehouseBlueprint,
+  commitSceneSnapshot,
+  completeDmRun,
+  createDmRun,
+  emptyProductionRoomState,
+  initialPlayback,
+  openSceneInput,
+  parseProductionRoomState,
+  projectNarrationSequenceForActor,
+  projectSceneForActor,
+  proposeSceneBlueprint,
+  releaseNarrationSequence,
+} from "./engine-production-room.js";
+import type { DmRun, NarrationSequenceIR, ProductionRoomState } from "./engine-production-room.js";
 import type { EffectApplyInput } from "./engine-effects.js";
 import {
   activeConditionNames,
@@ -1491,6 +1508,7 @@ export function createInitialCampaign(
     improvEffects: [],
     currentBeat: null,
     situation: null,
+    productionRoom: null,
     suggestedActions: [],
     log: [
       makeMessage(
@@ -1517,6 +1535,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     worldFacts?: unknown;
     worldObjects?: unknown;
     actorKnowledge?: unknown;
+    productionRoom?: unknown;
     time?: unknown;
   };
   next.time = normalizeTimeState(next.time);
@@ -1541,6 +1560,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     : [];
   next.worldFacts = normalizeWorldFacts(next.worldFacts);
   next.actorKnowledge = normalizeKnowledgeRecords(next.actorKnowledge);
+  next.productionRoom = next.productionRoom ? parseProductionRoomState(next.productionRoom) : null;
   next.corpses = normalizeCorpses((next as LanternCampaignState & { corpses?: unknown }).corpses);
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
@@ -2363,10 +2383,11 @@ export function sanitizeNarrationForProfile(
   };
 }
 
-function redactExperienceCommand(command: EngineCommand): EngineCommand {
+function redactExperienceCommand(command: EnginePersistedCommand): EnginePersistedCommand {
   // Quest graph creation is an authored command, but its hidden predicates
   // must not survive in persisted event evidence or replay payloads.
   if (command.kind === "quest_create") return redactCommand(command);
+  if (command.kind === "turn_plan" || command.kind === "content_repin" || command.kind === "production_room_enter") return command;
   switch (command.kind) {
     case "experience_profile_update":
       return {
@@ -2506,6 +2527,178 @@ function resolveExperienceBoundary(
     [],
     [{ path: "/experienceBoundary/lastAction", before: null, after: command.action }]
   );
+}
+
+export function resolveProductionRoomEnter(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string
+): EngineResolution {
+  const existingRoom = state.productionRoom ? parseProductionRoomState(state.productionRoom) : emptyProductionRoomState();
+  if (existingRoom.activeScene) {
+    return rejection(
+      state,
+      "declare",
+      "production_room_active",
+      "The campaign already has an active production-room scene. Replay its released sequence or resolve the current scene first."
+    );
+  }
+
+  const now = new Date().toISOString();
+  const run = createDmRun({
+    kind: "scene_build",
+    accountId: context.accountId,
+    campaignId: context.campaignId,
+    actorId: context.actorId,
+    baseCampaignVersion: state.version,
+    baseSceneRevision: null,
+    usage: {
+      provider: "deterministic",
+      model: "ruined-gatehouse-fixture-v1",
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      latencyMs: 0,
+    },
+    createdAt: now,
+  });
+  const blueprint = buildRuinedGatehouseBlueprint(state.version, run.id);
+  const draft = proposeSceneBlueprint(run, blueprint, now);
+  let snapshot = commitSceneSnapshot({
+    blueprint: draft.blueprint,
+    sourceRunId: run.id,
+    currentCampaignVersion: state.version,
+    now,
+  });
+  const committedCampaignVersion = state.version + 1;
+  snapshot = openSceneInput(
+    { ...snapshot, campaignVersion: committedCampaignVersion },
+    new Date(Date.parse(now) + 1).toISOString()
+  );
+  const committedRun: DmRun = completeDmRun(run, JSON.stringify(blueprint), "committed", now);
+  const nextRoom: ProductionRoomState = {
+    ...existingRoom,
+    activeScene: snapshot,
+    runs: [...existingRoom.runs, committedRun],
+    processedOperationIds: [...new Set([...existingRoom.processedOperationIds, clientCommandId])],
+  };
+  const next = cloneCampaign(state);
+  next.productionRoom = nextRoom;
+  const resolution = commit(
+    next,
+    context,
+    clientCommandId,
+    { kind: "production_room_enter" },
+    "production_room",
+    "The ruined gatehouse is committed before player input opens.",
+    {
+      scene: projectSceneForActor(snapshot, context.actorId),
+      runId: run.id,
+      phase: "scene_snapshot_committed",
+    },
+    "scene_snapshot_committed",
+    [],
+    [],
+    [{ path: "/productionRoom/activeScene", before: null, after: snapshot }]
+  );
+  const eventId = resolution.event?.id;
+  const committedState = cloneCampaign(resolution.state);
+  const committedRoom = parseProductionRoomState(committedState.productionRoom);
+  if (committedRoom.activeScene && eventId) {
+    committedRoom.activeScene = {
+      ...committedRoom.activeScene,
+      committedEventIds: [eventId],
+    };
+    committedRoom.runs = committedRoom.runs.map((candidate) => candidate.id === run.id
+      ? { ...candidate, committedEventIds: [eventId], publicEventRefs: [eventId] }
+      : candidate);
+    committedState.productionRoom = committedRoom;
+  }
+  return {
+    ...resolution,
+    state: committedState,
+    event: resolution.event && eventId
+      ? { ...resolution.event, stateChanges: [...resolution.event.stateChanges, { path: "/productionRoom/activeScene/committedEventIds", before: [], after: [eventId] }] }
+      : resolution.event,
+    data: {
+      scene: committedRoom.activeScene ? projectSceneForActor(committedRoom.activeScene, context.actorId) : null,
+      runId: run.id,
+      phase: "scene_snapshot_committed",
+    },
+  };
+}
+
+export function resolveProductionRoomNarrationRelease(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  candidate: NarrationSequenceIR
+): EngineResolution {
+  const room = state.productionRoom ? parseProductionRoomState(state.productionRoom) : emptyProductionRoomState();
+  const scene = room.activeScene;
+  if (!scene) return rejection(state, "declare", "production_room_missing", "There is no committed production-room scene to narrate.");
+  if (room.releasedSequences.some((sequence) => sequence.id === candidate.id)) {
+    return rejection(state, "declare", "narration_already_released", "That narration sequence has already been released.");
+  }
+  if (candidate.sourceRunId !== scene.sourceRunId || candidate.sceneId !== scene.sceneId || candidate.sceneRevision !== scene.revision) {
+    return rejection(state, "declare", "narration_scene_mismatch", "The narration sequence does not belong to the committed scene revision.");
+  }
+  if (scene.campaignVersion !== state.version || candidate.campaignVersion !== scene.campaignVersion) {
+    return rejection(state, "declare", "narration_stale", "The narration candidate is based on a stale campaign revision.");
+  }
+  const projection = projectSceneForActor(scene, context.actorId);
+  let released: NarrationSequenceIR;
+  try {
+    released = releaseNarrationSequence(candidate, projection);
+  } catch (_error) {
+    return rejection(state, "declare", "narration_invalid", "The narration candidate failed the public release gate.");
+  }
+  const narratorRun = completeDmRun(
+    createDmRun({
+      id: candidate.narratorRunId,
+      kind: "narration",
+      accountId: context.accountId,
+      campaignId: context.campaignId,
+      actorId: context.actorId,
+      baseCampaignVersion: state.version,
+      baseSceneRevision: scene.revision,
+      usage: {
+        provider: "deterministic",
+        model: "narration-ir-compatibility-v1",
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        latencyMs: 0,
+      },
+      createdAt: new Date().toISOString(),
+    }),
+    JSON.stringify(candidate),
+    "released"
+  );
+  const next = cloneCampaign(state);
+  next.productionRoom = {
+    ...room,
+    runs: [...room.runs, { ...narratorRun, committedEventIds: [...scene.committedEventIds], publicEventRefs: [...scene.committedEventIds] }],
+    releasedSequences: [...room.releasedSequences, released],
+    playback: [...room.playback, initialPlayback(released)],
+    processedOperationIds: [...new Set([...room.processedOperationIds, clientCommandId])],
+  };
+  const resolution = commit(
+    next,
+    context,
+    clientCommandId,
+    { kind: "declare", goal: `production_room_narration:${candidate.id}` },
+    "declare",
+    "The validated narration sequence is released for sequential playback.",
+    { sequence: projectNarrationSequenceForActor(released), phase: "narration_released" },
+    "narration_released",
+    [],
+    [],
+    [{ path: `/productionRoom/releasedSequences/${released.id}`, before: null, after: released }]
+  );
+  return resolution;
 }
 
 export function resolveEngineCommand(
@@ -10226,8 +10419,8 @@ function commit(
   state: LanternCampaignState,
   context: RequestContext,
   clientCommandId: string,
-  command: EngineCommand,
-  tool: EngineToolName | "declare" | "listen",
+  command: EnginePersistedCommand,
+  tool: EngineResolutionTool,
   message: string,
   data: unknown,
   outcome: string,
@@ -11643,6 +11836,10 @@ export function projectStateForActor(actorId: string, state: LanternCampaignStat
     .filter((actor) => actor.ownerActorId === actorId || actor.controllerActorId === actorId)
     .map((actor) => controlledActorView(projected, actor, actorId)) as unknown as EngineControlledActor[];
   delete projected.social;
+  // Private planner/narrator runs and unreleased snapshots never cross the
+  // ordinary campaign state boundary. Use a dedicated released sequence
+  // endpoint when public playback is needed.
+  delete projected.productionRoom;
   return projected;
 }
 
@@ -11708,7 +11905,7 @@ function redactControlledActorValue(value: unknown): unknown {
 
 function redactStateChanges(changes: Array<{ path: string; before: unknown; after: unknown }>): Array<{ path: string; before: unknown; after: unknown }> {
   return changes
-    .filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge"))
+    .filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge") && !change.path.startsWith("/productionRoom"))
     .map((change) => change.path.startsWith("/controlledActors") || change.path.startsWith("/time/scheduledEvents")
       ? { ...change, before: redactControlledActorValue(change.before), after: redactControlledActorValue(change.after) }
       : change);
