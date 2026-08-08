@@ -55,6 +55,8 @@ const ALL_COMMAND_KINDS = [
   "combat_action",
   "end_turn",
   "advance_turn",
+  "advancement_confirm",
+  "npc_advance",
   "death_save",
   "loot",
   "rest",
@@ -197,6 +199,14 @@ function activeCombatState(): LanternCampaignState {
   );
 }
 
+function pendingAdvancementState(): LanternCampaignState {
+  return applyAccepted(
+    createdState(),
+    { kind: "quest_update", questId: "first-light", status: "completed" },
+    "quest_update"
+  );
+}
+
 function enemyTurnState(): LanternCampaignState {
   const state = activeCombatState();
   state.combat.activeActorId = state.combat.enemies[0]?.id ?? null;
@@ -310,6 +320,8 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "combat_action", tool: "combat_action", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "combat_action", action: "dodge" }) },
   { kind: "end_turn", tool: "end_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "end_turn" }) },
   { kind: "advance_turn", tool: "advance_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "advance_turn" }) },
+  { kind: "advancement_confirm", tool: "advancement_confirm", expectedCode: "advancement_not_pending", state: createdState, rawCommand: () => ({ kind: "advancement_confirm", pendingId: "missing-pending" }) },
+  { kind: "npc_advance", tool: "npc_advance", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "npc_advance", combatantId: "missing-combatant", templateId: "veteran" }) },
   { kind: "death_save", tool: "death_save", expectedCode: "not_unconscious", state: createdState, rawCommand: () => ({ kind: "death_save" }) },
   { kind: "loot", tool: "loot", expectedCode: "encounter_active", state: createdState, rawCommand: () => ({ kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }) },
   { kind: "rest", tool: "rest", expectedCode: "combat_active", state: activeCombatState, rawCommand: () => ({ kind: "rest", restType: "long" }) },
@@ -357,6 +369,8 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "combat_action", tool: "combat_action", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "combat_action", action: "dodge" }) }) },
   { kind: "end_turn", tool: "end_turn", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "end_turn" }) }) },
   { kind: "advance_turn", tool: "advance_turn", build: () => ({ state: enemyTurnState(), command: parseCommand({ kind: "advance_turn", actionKey: "scimitar" }) }) },
+  { kind: "advancement_confirm", tool: "advancement_confirm", build: () => { const state = pendingAdvancementState(); return { state, command: parseCommand({ kind: "advancement_confirm", pendingId: state.pendingAdvancement!.id }) }; } },
+  { kind: "npc_advance", tool: "npc_advance", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "npc_advance", combatantId: state.combat.enemies[0]!.id, templateId: "veteran" }) }; } },
   { kind: "death_save", tool: "death_save", build: () => ({ state: unconsciousState(), command: parseCommand({ kind: "death_save" }) }) },
   { kind: "loot", tool: "loot", build: () => ({ state: endedCombatState(), command: parseCommand({ kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }) }) },
   { kind: "rest", tool: "rest", build: () => ({ state: createdState(), command: parseCommand({ kind: "rest", restType: "long" }) }) },
@@ -368,7 +382,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(33);
+    expect(ALL_COMMAND_KINDS).toHaveLength(35);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

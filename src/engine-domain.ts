@@ -8,6 +8,8 @@ import type {
 } from "./content/schema.js";
 import type {
   EngineAbility,
+  EngineAdvancementPolicy,
+  EngineAdvancementPreview,
   EngineCampaignProfile,
   EngineCampaignPhase,
   EngineCharacterCreationState,
@@ -19,11 +21,13 @@ import type {
   EngineCampaignBeat,
   EngineCommand,
   EngineCombatant,
+  EngineCombatantProgression,
   EngineCombatantView,
   EngineCurrencyBreakdown,
   EngineCombat,
   EngineCombatView,
   EnginePendingReaction,
+  EnginePendingAdvancement,
   EngineTurnBudget,
   EngineTurnBudgetSlot,
   EngineMovementBudget,
@@ -135,6 +139,18 @@ export function defaultContentPolicy(): EngineContentPolicy {
   };
 }
 
+export const PROGRESSION_FORMULA_REVISION = "progression-v1" as const;
+
+export function defaultAdvancementPolicy(): EngineAdvancementPolicy {
+  return {
+    version: 1,
+    mode: "milestone",
+    maxLevel: 2,
+    hpPolicy: "fixed-average",
+    formulaRevision: PROGRESSION_FORMULA_REVISION,
+  };
+}
+
 export function normalizeContentPolicy(policy: EngineContentPolicy): EngineContentPolicy {
   const gamesystem = policy.gamesystem?.trim();
   const baseDocumentKey = policy.baseDocumentKey?.trim();
@@ -173,6 +189,8 @@ export function createInitialCampaign(
     phase: "character_creation",
     tutorialStep: 0,
     characterCreation: { abilityScoreDraft: null },
+    advancementPolicy: defaultAdvancementPolicy(),
+    pendingAdvancement: null,
     worldContext: null,
     playerNotes: [],
     character,
@@ -224,6 +242,8 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   };
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
+  next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
+  next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
   if (!next.tutorialStep && next.tutorialStep !== 0) next.tutorialStep = 0;
   if (!next.characterCreation) next.characterCreation = { abilityScoreDraft: null };
   if (!next.characterCreation.abilityScoreDraft) next.characterCreation.abilityScoreDraft = null;
@@ -237,6 +257,8 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.tutorialStep = 0;
     next.worldContext = null;
     next.playerNotes = [];
+    next.advancementPolicy = defaultAdvancementPolicy();
+    next.pendingAdvancement = null;
     next.quest = {
       id: "first-light",
       title: "The first chapter",
@@ -256,7 +278,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.worldContext.merchants = next.worldContext.merchants.map(normalizeMerchant);
     next.worldContext.npcs = next.worldContext.npcs.map(normalizeNpc);
   }
-  next.character = normalizeCharacter(next.character);
+  next.character = recalculateProgressionOnLoad(normalizeCharacter(next.character));
   next.combat = normalizeCombat(next.combat);
   next.quest = normalizeQuest(next.quest ?? ({} as EngineQuest));
   if (!Array.isArray(next.quests) || !next.quests.length) next.quests = [next.quest];
@@ -281,8 +303,176 @@ export function cloneCampaign(state: LanternCampaignState): LanternCampaignState
   return JSON.parse(JSON.stringify(state)) as LanternCampaignState;
 }
 
+function normalizeAdvancementPolicy(value: unknown): EngineAdvancementPolicy {
+  if (
+    value
+    && typeof value === "object"
+    && (value as Record<string, unknown>).version === 1
+    && (value as Record<string, unknown>).mode === "milestone"
+    && (value as Record<string, unknown>).maxLevel === 2
+    && (value as Record<string, unknown>).hpPolicy === "fixed-average"
+    && (value as Record<string, unknown>).formulaRevision === PROGRESSION_FORMULA_REVISION
+  ) {
+    return defaultAdvancementPolicy();
+  }
+  return defaultAdvancementPolicy();
+}
+
+function normalizePendingAdvancement(value: unknown): EnginePendingAdvancement | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EnginePendingAdvancement>;
+  const legalChoices = candidate.legalChoices as Partial<EnginePendingAdvancement["legalChoices"]> | undefined;
+  const preview = candidate.preview as Partial<EngineAdvancementPreview> | undefined;
+  if (
+    candidate.version !== 1
+    || typeof candidate.id !== "string"
+    || candidate.sourceKind !== "quest-milestone"
+    || typeof candidate.sourceId !== "string"
+    || typeof candidate.sourceCommandId !== "string"
+    || typeof candidate.sourceVersion !== "number"
+    || typeof candidate.ownerActorId !== "string"
+    || candidate.fromLevel !== 1
+    || candidate.toLevel !== 2
+    || typeof candidate.className !== "string"
+    || (candidate.classRef !== null && candidate.classRef !== undefined && !normalizeContentReference(candidate.classRef))
+    || typeof candidate.rulesVersion !== "string"
+    || candidate.formulaRevision !== PROGRESSION_FORMULA_REVISION
+    || !legalChoices
+    || typeof legalChoices.className !== "string"
+    || (legalChoices.classRef !== null && legalChoices.classRef !== undefined && !normalizeContentReference(legalChoices.classRef))
+    || !preview
+    || typeof preview.fromLevel !== "number"
+    || typeof preview.toLevel !== "number"
+    || typeof preview.hpGain !== "number"
+    || typeof preview.maxHpBefore !== "number"
+    || typeof preview.maxHpAfter !== "number"
+    || typeof preview.currentHpBefore !== "number"
+    || typeof preview.currentHpAfter !== "number"
+    || typeof preview.hitDieBefore !== "number"
+    || typeof preview.hitDieAfter !== "number"
+    || typeof preview.hitDiceRemainingBefore !== "number"
+    || typeof preview.hitDiceRemainingAfter !== "number"
+    || typeof preview.proficiencyBonusBefore !== "number"
+    || typeof preview.proficiencyBonusAfter !== "number"
+    || !preview.savingThrowsBefore
+    || !preview.savingThrowsAfter
+    || !preview.skillsBefore
+    || !preview.skillsAfter
+    || !Array.isArray(preview.featureRefsAdded)
+    || !Array.isArray(preview.featuresAdded)
+    || !["pending", "consumed"].includes(candidate.status ?? "")
+  ) return null;
+  const classRef = candidate.classRef === null || candidate.classRef === undefined
+    ? null
+    : normalizeContentReference(candidate.classRef);
+  if (!classRef && candidate.classRef !== null && candidate.classRef !== undefined) return null;
+  return {
+    version: 1,
+    id: candidate.id,
+    sourceKind: "quest-milestone",
+    sourceId: candidate.sourceId,
+    sourceCommandId: candidate.sourceCommandId,
+    sourceVersion: Math.max(0, Math.trunc(candidate.sourceVersion)),
+    ownerActorId: candidate.ownerActorId,
+    fromLevel: 1,
+    toLevel: 2,
+    className: candidate.className,
+    classRef,
+    rulesVersion: candidate.rulesVersion,
+    formulaRevision: PROGRESSION_FORMULA_REVISION,
+    legalChoices: {
+      className: legalChoices.className,
+      classRef: legalChoices.classRef === null || legalChoices.classRef === undefined
+        ? null
+        : normalizeContentReference(legalChoices.classRef),
+    },
+    preview: candidate.preview as EngineAdvancementPreview,
+    status: candidate.status as "pending" | "consumed",
+    ...(typeof candidate.consumedCommandId === "string" ? { consumedCommandId: candidate.consumedCommandId } : {}),
+    ...(typeof candidate.consumedAt === "string" ? { consumedAt: candidate.consumedAt } : {}),
+  };
+}
+
+function progressionFeatureAdditions(character: EngineCharacter): {
+  refs: EngineFeatureReference[];
+  names: string[];
+} {
+  const explicitClassRef = character.classRef;
+  const source = explicitClassRef
+    ? getOpen5eClass(explicitClassRef.contentKey, explicitClassRef.packHash)
+    : getOpen5eClass(open5eCharacterContentKey("class", `srd_${character.className.trim().toLocaleLowerCase("en-US")}`));
+  if (!source) return { refs: [], names: [] };
+  const classRef = explicitClassRef ?? { contentKey: source.contentKey, packHash: source.packHash };
+  const features = source?.definition.features ?? [];
+  const levelTwo = features.filter((feature) => feature.featureType === "CLASS_LEVEL_FEATURE"
+    && feature.gainedAt.some((entry) => entry.level === 2));
+  const existingRefs = new Set(character.featureRefs.map((feature) => feature.featureSourceKey));
+  const existingNames = new Set(character.features);
+  return {
+    refs: levelTwo
+      .filter((feature) => !existingRefs.has(feature.sourceKey))
+      .map((feature) => ({ ...classRef, featureSourceKey: feature.sourceKey })),
+    names: levelTwo
+      .map((feature) => feature.name)
+      .filter((name) => !existingNames.has(name)),
+  };
+}
+
+function buildAdvancementPreview(character: EngineCharacter): EngineAdvancementPreview {
+  const fromLevel = Math.max(1, Math.trunc(character.level || 1));
+  const toLevel = fromLevel + 1;
+  const hpGain = Math.max(1, Math.ceil(character.hitDie / 2) + open5eAbilityModifier(character.abilities.con));
+  const maxHpAfter = Math.max(1, character.maxHp + hpGain);
+  const additions = progressionFeatureAdditions(character);
+  const projected = hydrateCharacter({
+    ...(JSON.parse(JSON.stringify(character)) as EngineCharacter),
+    level: toLevel,
+    maxHp: maxHpAfter,
+    hp: Math.min(maxHpAfter, Math.max(0, character.hp + hpGain)),
+    hitDiceRemaining: Math.min(toLevel, character.hitDiceRemaining + 1),
+    progressionFormulaRevision: PROGRESSION_FORMULA_REVISION,
+  });
+  projected.features = [...projected.features, ...additions.names];
+  projected.featureRefs = [...projected.featureRefs, ...additions.refs];
+  if (projected.spellcasting) projected.spellcasting.slots = { ...projected.spellcasting.slotMaximums };
+  return {
+    fromLevel,
+    toLevel,
+    hpGain,
+    maxHpBefore: character.maxHp,
+    maxHpAfter: projected.maxHp,
+    currentHpBefore: character.hp,
+    currentHpAfter: projected.hp,
+    hitDieBefore: character.hitDie,
+    hitDieAfter: projected.hitDie,
+    hitDiceRemainingBefore: character.hitDiceRemaining,
+    hitDiceRemainingAfter: projected.hitDiceRemaining,
+    proficiencyBonusBefore: character.proficiencyBonus,
+    proficiencyBonusAfter: projected.proficiencyBonus,
+    savingThrowsBefore: { ...character.savingThrows },
+    savingThrowsAfter: { ...projected.savingThrows },
+    skillsBefore: JSON.parse(JSON.stringify(character.skills)),
+    skillsAfter: JSON.parse(JSON.stringify(projected.skills)),
+    spellSlotsBefore: character.spellcasting ? { ...character.spellcasting.slots } : null,
+    spellSlotsAfter: projected.spellcasting ? { ...projected.spellcasting.slots } : null,
+    featureRefsAdded: additions.refs,
+    featuresAdded: additions.names,
+  };
+}
+
+function recalculateProgressionOnLoad(character: EngineCharacter): EngineCharacter {
+  if (character.progressionFormulaRevision !== PROGRESSION_FORMULA_REVISION || character.level < 2) return character;
+  const canonicalMaxHp = typeof character.progressionMaxHp === "number"
+    ? Math.max(1, Math.trunc(character.progressionMaxHp))
+    : Math.max(1, character.hitDie * character.level + open5eAbilityModifier(character.abilities.con) * character.level);
+  character.maxHp = canonicalMaxHp;
+  character.hp = Math.max(0, Math.min(character.maxHp, character.hp));
+  return character;
+}
+
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
   const sandboxActions = ["observe", "listen", "roll"];
+  const advancementActions = state.pendingAdvancement?.status === "pending" ? ["advancement_confirm"] : [];
   const combatActions = state.combat.status === "active"
     ? state.combat.pendingReaction
       ? ["reaction_response:accept", "reaction_response:decline"]
@@ -304,6 +494,8 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     phase: state.phase,
     tutorialStep: state.tutorialStep,
     characterCreation: state.characterCreation,
+    advancementPolicy: state.advancementPolicy,
+    pendingAdvancement: state.pendingAdvancement,
     characterCreated: state.character.created,
     worldContext: projectWorldContext(state.worldContext),
     playerNotes: state.playerNotes,
@@ -320,7 +512,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
         ? ["create_character"]
         : state.phase === "tutorial"
           ? ["continue"]
-          : [...sandboxActions, ...combatActions],
+          : [...sandboxActions, ...advancementActions, ...combatActions],
     lastRoll: state.lastRoll,
     character: characterData(state.character) as EngineSessionView["character"],
     combat: combatData(state.combat),
@@ -351,6 +543,8 @@ export function readToolData(
         campaign: state.campaign,
         phase: state.phase,
         tutorialStep: state.tutorialStep,
+        advancementPolicy: state.advancementPolicy,
+        pendingAdvancement: state.pendingAdvancement,
         worldContext: projectWorldContext(state.worldContext),
         playerNotes: state.playerNotes,
         quests: state.quests,
@@ -470,6 +664,10 @@ export function resolveEngineCommand(
       return resolveReactionResponse(state, context, clientCommandId, command, tool);
     case "advance_turn":
       return resolveAdvanceTurn(state, context, clientCommandId, command, tool);
+    case "advancement_confirm":
+      return resolveAdvancementConfirm(state, context, clientCommandId, command, tool);
+    case "npc_advance":
+      return resolveNpcAdvance(state, context, clientCommandId, command, tool);
     case "death_save":
       return resolveDeathSave(state, context, clientCommandId, command, tool);
     case "loot":
@@ -1057,6 +1255,9 @@ function resolveQuestUpdate(
     syncCurrencyProjection(next.character);
     next.character.xp += updated.reward.xp;
   }
+  const pendingAdvancement = rewardClaimedNow
+    ? openPendingAdvancement(next, state, updated.id, clientCommandId)
+    : null;
   next.quest = updated;
   const rewardText = rewardClaimedNow
     ? " Reward claimed: " + formatCurrency(updated.reward.copper) + " and " + updated.reward.xp + " XP."
@@ -1070,7 +1271,180 @@ function resolveQuestUpdate(
       { path: "/character/xp", before: state.character.xp, after: next.character.xp }
     );
   }
-  return commit(next, context, clientCommandId, command, tool, "Quest updated: " + updated.title + "." + rewardText, { quest: updated, quests: next.quests, reward: rewardClaimedNow ? updated.reward : null, character: characterData(next.character) }, "quest_updated", [], [], stateChanges);
+  if (pendingAdvancement) {
+    stateChanges.push({ path: "/pendingAdvancement", before: state.pendingAdvancement, after: pendingAdvancement });
+  }
+  const advancementText = pendingAdvancement ? " A level-up preview is ready for your confirmation." : "";
+  return commit(next, context, clientCommandId, command, tool, "Quest updated: " + updated.title + "." + rewardText + advancementText, { quest: updated, quests: next.quests, reward: rewardClaimedNow ? updated.reward : null, pendingAdvancement, character: characterData(next.character) }, "quest_updated", [], [], stateChanges);
+}
+
+function openPendingAdvancement(
+  next: LanternCampaignState,
+  sourceState: LanternCampaignState,
+  sourceId: string,
+  sourceCommandId: string,
+): EnginePendingAdvancement | null {
+  const policy = next.advancementPolicy;
+  if (policy.mode !== "milestone" || !next.character.created || next.character.level >= policy.maxLevel) return null;
+  if (next.pendingAdvancement?.status === "pending") return null;
+  if (next.pendingAdvancement?.sourceId === sourceId) return null;
+  const preview = buildAdvancementPreview(next.character);
+  if (preview.fromLevel !== 1 || preview.toLevel > policy.maxLevel) return null;
+  const pending: EnginePendingAdvancement = {
+    version: 1,
+    id: randomUUID(),
+    sourceKind: "quest-milestone",
+    sourceId,
+    sourceCommandId,
+    sourceVersion: sourceState.version + 1,
+    ownerActorId: next.actorId,
+    fromLevel: 1,
+    toLevel: 2,
+    className: next.character.className,
+    classRef: next.character.classRef ? { ...next.character.classRef } : null,
+    rulesVersion: next.rulesVersion,
+    formulaRevision: policy.formulaRevision,
+    legalChoices: {
+      className: next.character.className,
+      classRef: next.character.classRef ? { ...next.character.classRef } : null,
+    },
+    preview,
+    status: "pending",
+  };
+  next.pendingAdvancement = pending;
+  return pending;
+}
+
+function resolveAdvancementConfirm(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "advancement_confirm" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const pending = state.pendingAdvancement;
+  if (!pending) return rejection(state, tool, "advancement_not_pending", "There is no pending advancement to confirm.");
+  if (pending.id !== command.pendingId) return rejection(state, tool, "advancement_stale", "That advancement preview is stale.");
+  if (pending.status !== "pending") return rejection(state, tool, "advancement_consumed", "That advancement has already been consumed.");
+  if (pending.ownerActorId !== state.actorId || state.character.level !== pending.fromLevel) {
+    return rejection(state, tool, "advancement_stale", "The pending advancement no longer matches this character.");
+  }
+  if (state.advancementPolicy.formulaRevision !== pending.formulaRevision || state.rulesVersion !== pending.rulesVersion) {
+    return rejection(state, tool, "advancement_rules_mismatch", "The pinned advancement rules no longer match this preview.");
+  }
+  const preview = buildAdvancementPreview(state.character);
+  if (preview.fromLevel !== pending.fromLevel || preview.toLevel !== pending.toLevel) {
+    return rejection(state, tool, "advancement_stale", "The character changed after this advancement was previewed.");
+  }
+  if (JSON.stringify(preview) !== JSON.stringify(pending.preview)) {
+    return rejection(state, tool, "advancement_stale", "The character changed after this advancement was previewed.");
+  }
+
+  const next = cloneCampaign(state);
+  const upgraded = hydrateCharacter({
+    ...next.character,
+    level: preview.toLevel,
+    maxHp: preview.maxHpAfter,
+    hp: preview.currentHpAfter,
+    hitDiceRemaining: preview.hitDiceRemainingAfter,
+    progressionFormulaRevision: PROGRESSION_FORMULA_REVISION,
+    progressionMaxHp: preview.maxHpAfter,
+  });
+  upgraded.features = [...upgraded.features, ...preview.featuresAdded];
+  upgraded.featureRefs = [...upgraded.featureRefs, ...preview.featureRefsAdded];
+  if (upgraded.spellcasting && preview.spellSlotsAfter) upgraded.spellcasting.slots = { ...preview.spellSlotsAfter };
+  next.character = upgraded;
+  next.pendingAdvancement = {
+    ...pending,
+    preview,
+    status: "consumed",
+    consumedCommandId: clientCommandId,
+    consumedAt: new Date().toISOString(),
+  };
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: "/character/level", before: state.character.level, after: next.character.level },
+    { path: "/character/hp", before: state.character.hp, after: next.character.hp },
+    { path: "/character/maxHp", before: state.character.maxHp, after: next.character.maxHp },
+    { path: "/character/hitDiceRemaining", before: state.character.hitDiceRemaining, after: next.character.hitDiceRemaining },
+    { path: "/character/proficiencyBonus", before: state.character.proficiencyBonus, after: next.character.proficiencyBonus },
+    { path: "/character/savingThrows", before: state.character.savingThrows, after: next.character.savingThrows },
+    { path: "/character/skills", before: state.character.skills, after: next.character.skills },
+    { path: "/character/features", before: state.character.features, after: next.character.features },
+    { path: "/character/featureRefs", before: state.character.featureRefs, after: next.character.featureRefs },
+    { path: "/character/spellcasting", before: state.character.spellcasting, after: next.character.spellcasting },
+    { path: "/pendingAdvancement", before: state.pendingAdvancement, after: next.pendingAdvancement },
+  ];
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `Advancement confirmed: ${next.character.name} reaches level ${next.character.level}.`,
+    { pendingAdvancement: next.pendingAdvancement, preview, character: characterData(next.character) },
+    "advancement_confirmed",
+    [],
+    [],
+    stateChanges,
+  );
+}
+
+function resolveNpcAdvance(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "npc_advance" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "NPC progression requires an active encounter.");
+  const target = state.combat.enemies.find((enemy) => enemy.id === command.combatantId);
+  if (!target) return rejection(state, tool, "combatant_not_found", "That combatant is not in the active encounter.");
+  if (!target.alive) return rejection(state, tool, "combatant_not_live", "A defeated combatant cannot be progressed.");
+  if (target.progression) return rejection(state, tool, "npc_progression_already_applied", "That combatant already has a progression template.");
+
+  const baseView = materializeCombatant(target);
+  const modifications = { maxHp: 5, armorClass: 1, attackBonus: 1, damageBonus: 1 };
+  const revisedExperiencePoints = baseView.experiencePoints === null
+    ? null
+    : baseView.experiencePoints * 2;
+  const progression: EngineCombatantProgression = {
+    templateId: "veteran",
+    templateVersion: "v1",
+    sourceCommandId: clientCommandId,
+    sourceVersion: state.version + 1,
+    base: {
+      maxHp: baseView.maxHp,
+      armorClass: baseView.armorClass,
+      challengeRating: baseView.challengeRating,
+      experiencePoints: baseView.experiencePoints,
+    },
+    revised: {
+      maxHp: baseView.maxHp + modifications.maxHp,
+      armorClass: baseView.armorClass + modifications.armorClass,
+      challengeRating: Number((baseView.challengeRating + 0.5).toFixed(1)),
+      experiencePoints: revisedExperiencePoints,
+    },
+    modifications,
+  };
+  const next = cloneCampaign(state);
+  const nextTarget = next.combat.enemies.find((enemy) => enemy.id === command.combatantId);
+  if (!nextTarget) return rejection(state, tool, "combatant_not_found", "That combatant is not in the active encounter.");
+  nextTarget.progression = progression;
+  nextTarget.hp = Math.min(progression.revised.maxHp, nextTarget.hp + modifications.maxHp);
+  nextTarget.alive = nextTarget.hp > 0;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `The ${baseView.name} becomes a veteran of this encounter.`,
+    { combatant: materializeCombatant(nextTarget), progression },
+    "npc_progression_applied",
+    [],
+    [],
+    [{ path: `/combat/enemies/${target.id}`, before: target, after: nextTarget }],
+  );
 }
 
 function resolveImprovise(
@@ -3774,7 +4148,8 @@ function resolveLoot(
   if (state.combat.lootClaimed) return rejection(state, tool, "loot_claimed", "The encounter area has already been searched.");
   const quest = command.questId ? state.quests.find((candidate) => candidate.id === command.questId) : null;
   if (command.questId && !quest) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
-  const questReward = quest && !quest.rewardClaimed ? quest.reward : { xp: 0, copper: 0 };
+  const questRewardAvailable = Boolean(quest && !quest.rewardClaimed);
+  const questReward = questRewardAvailable && quest ? quest.reward : { xp: 0, copper: 0 };
   const rewardItems = command.items.map((item) => normalizeInventoryItem({ ...item, equipped: false }));
   const totalCopper = command.rewardCopper + questReward.copper;
   const totalXp = command.rewardXp + questReward.xp;
@@ -3793,6 +4168,9 @@ function resolveLoot(
       if (next.quest.id === nextQuest.id) next.quest = nextQuest;
     }
   }
+  const pendingAdvancement = questRewardAvailable && quest
+    ? openPendingAdvancement(next, state, quest.id, clientCommandId)
+    : null;
   const itemText = rewardItems.length
     ? " You recover " + rewardItems.map((item) => {
         const view = materializeInventoryItem(item);
@@ -3800,13 +4178,14 @@ function resolveLoot(
       }).join(", ") + "."
     : " No item reward was authored.";
   const moneyText = totalCopper || totalXp ? " The reward is " + formatCurrency(totalCopper) + " and " + totalXp + " XP." : " No currency or XP reward was authored.";
+  const advancementText = pendingAdvancement ? " A level-up preview is ready for your confirmation." : "";
   return commit(
     next,
     context,
     clientCommandId,
     command,
     tool,
-    "You search the defeated encounter." + itemText + moneyText,
+    "You search the defeated encounter." + itemText + moneyText + advancementText,
     {
       items: materializeInventory(rewardItems),
       reward: { xp: totalXp, copper: totalCopper },
@@ -3815,6 +4194,7 @@ function resolveLoot(
       currency: next.character.currency,
       currencyBreakdown: currencyBreakdown(next.character.currency.copper),
       xp: next.character.xp,
+      pendingAdvancement,
     },
     quest ? "quest_completed" : "loot_claimed",
     [],
@@ -3825,6 +4205,7 @@ function resolveLoot(
       { path: "/character/xp", before: state.character.xp, after: next.character.xp },
       { path: "/combat/lootClaimed", before: state.combat.lootClaimed, after: next.combat.lootClaimed },
       ...(quest ? [{ path: "/quests/" + quest.id, before: quest, after: next.quests.find((candidate) => candidate.id === quest.id) }] : []),
+      ...(pendingAdvancement ? [{ path: "/pendingAdvancement", before: state.pendingAdvancement, after: pendingAdvancement }] : []),
     ]
   );
 }
@@ -5235,6 +5616,7 @@ function normalizeCombat(combat: EngineCombat | null | undefined): EngineCombat 
       distanceFeet: Math.max(0, Number(enemy.distanceFeet ?? 30)),
       conditions: Array.isArray(enemy.conditions) ? enemy.conditions : [],
       actionResources: normalizeActionResources(enemy.actionResources),
+      progression: normalizeCombatantProgression(enemy.progression),
     })),
     lootClaimed: combat.lootClaimed ?? false,
     lastAction: combat.lastAction ?? null,
@@ -5318,6 +5700,44 @@ function normalizeActionResources(
       }]];
     })
   );
+}
+
+function normalizeCombatantProgression(value: unknown): EngineCombatantProgression | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EngineCombatantProgression>;
+  if (
+    candidate.templateId !== "veteran"
+    || candidate.templateVersion !== "v1"
+    || typeof candidate.sourceCommandId !== "string"
+    || typeof candidate.sourceVersion !== "number"
+    || !candidate.base
+    || !candidate.revised
+    || !candidate.modifications
+  ) return null;
+  return {
+    templateId: "veteran",
+    templateVersion: "v1",
+    sourceCommandId: candidate.sourceCommandId,
+    sourceVersion: Math.max(0, Math.trunc(candidate.sourceVersion)),
+    base: {
+      maxHp: Math.max(1, Math.trunc(candidate.base.maxHp)),
+      armorClass: Math.trunc(candidate.base.armorClass),
+      challengeRating: Number(candidate.base.challengeRating),
+      experiencePoints: candidate.base.experiencePoints === null ? null : Math.max(0, Math.trunc(candidate.base.experiencePoints ?? 0)),
+    },
+    revised: {
+      maxHp: Math.max(1, Math.trunc(candidate.revised.maxHp)),
+      armorClass: Math.trunc(candidate.revised.armorClass),
+      challengeRating: Number(candidate.revised.challengeRating),
+      experiencePoints: candidate.revised.experiencePoints === null ? null : Math.max(0, Math.trunc(candidate.revised.experiencePoints ?? 0)),
+    },
+    modifications: {
+      maxHp: Math.trunc(candidate.modifications.maxHp),
+      armorClass: Math.trunc(candidate.modifications.armorClass),
+      attackBonus: Math.trunc(candidate.modifications.attackBonus),
+      damageBonus: Math.trunc(candidate.modifications.damageBonus),
+    },
+  };
 }
 
 function createCombatants(contentKey: string, count: number, distanceFeet = 30): EngineCombatant[] {

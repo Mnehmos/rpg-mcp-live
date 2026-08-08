@@ -143,6 +143,8 @@ describe("Lantern engine boundary", () => {
         "cast_spell",
         "combat_action",
         "end_turn",
+        "advancement_confirm",
+        "npc_advance",
         "advance_turn",
         "death_save",
         "loot",
@@ -151,7 +153,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(44);
+    expect(names).toHaveLength(46);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");

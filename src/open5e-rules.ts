@@ -883,19 +883,32 @@ export function createOpen5eCombatant(contentKey: string, id: string, distanceFe
     distanceFeet: Math.max(0, distanceFeet),
     conditions: [],
     actionResources,
+    progression: null,
   };
 }
 
 export function materializeCombatant(combatant: EngineCombatant): EngineCombatantView {
   const source = requireOpen5eCreature(combatant.contentKey, combatant.packHash);
   const creature = source.definition;
+  const progression = combatant.progression;
+  const attackBonusDelta = progression?.modifications.attackBonus ?? 0;
+  const damageBonusDelta = progression?.modifications.damageBonus ?? 0;
+  const attacks = source.attacks.map((attack) => ({
+    ...attack,
+    toHit: attack.toHit + attackBonusDelta,
+    damage: {
+      ...attack.damage,
+      average: attack.damage.average + damageBonusDelta,
+      bonus: attack.damage.bonus + damageBonusDelta,
+    },
+  }));
   return {
     ...combatant,
     name: creature.name,
-    maxHp: creature.hitPoints,
-    armorClass: creature.armorClass,
-    challengeRating: creature.challengeRating,
-    experiencePoints: creature.experiencePoints,
+    maxHp: progression?.revised.maxHp ?? creature.hitPoints,
+    armorClass: progression?.revised.armorClass ?? creature.armorClass,
+    challengeRating: progression?.revised.challengeRating ?? creature.challengeRating,
+    experiencePoints: progression?.revised.experiencePoints ?? creature.experiencePoints,
     creatureType: creature.creatureType,
     size: creature.size,
     abilities: creature.abilities,
@@ -910,7 +923,7 @@ export function materializeCombatant(combatant: EngineCombatant): EngineCombatan
     languages: creature.languages,
     defenses: creature.defenses,
     actions: creature.actions,
-    attacks: source.attacks,
+    attacks,
     effectPrograms: source.effects,
     traits: creature.traits,
     environments: creature.environments,

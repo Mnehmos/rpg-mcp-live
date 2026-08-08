@@ -1,0 +1,12 @@
+# CodeRabbit is explicitly disabled; Codex is Lantern's only automated AI reviewer.
+# Keep this tombstone so a repository-level integration cannot fall back to
+# CodeRabbit's default automatic review or commit status behavior.
+reviews:
+  review_status: false
+  commit_status: false
+  walkthrough: false
+  request_changes_workflow: false
+  auto_review:
+    enabled: false
+    auto_incremental_review: false
+    description_keyword: ""
