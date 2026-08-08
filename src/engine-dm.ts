@@ -1,6 +1,7 @@
 import { narrationEnvelopeSchema, type NarrationEnvelope } from "./ai-contracts.js";
 import type { Open5eContentResolver } from "./content/resolve.js";
 import { cloneCampaign, resolveEngineCommand } from "./engine-domain.js";
+import { hasActiveCondition } from "./engine-effects.js";
 import {
   compileAtomicTurnResolution,
   provisionalState,
@@ -604,7 +605,7 @@ function fallbackCommand(
 ): { command: EngineCommand; tool: EngineToolName | "listen" | "declare" } {
   const text = playerText.toLowerCase();
   if (state.combat.status === "active") {
-    if (state.character.conditions.includes("unconscious")) return { command: { kind: "death_save" }, tool: "death_save" };
+    if (hasActiveCondition(state.effects, state.character.id, "unconscious")) return { command: { kind: "death_save" }, tool: "death_save" };
     if (/\b(advance|end turn|wait|pass)\b/.test(text)) return { command: { kind: "advance_turn" }, tool: "advance_turn" };
     if (/\b(dodge|defend|guard)\b/.test(text)) return { command: { kind: "combat_action", action: "dodge" }, tool: "combat_action" };
     if (/\b(dash|run)\b/.test(text)) return { command: { kind: "combat_action", action: "dash" }, tool: "combat_action" };

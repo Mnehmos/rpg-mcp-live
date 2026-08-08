@@ -828,6 +828,48 @@ export interface EngineAppliedCondition {
   } | null;
 }
 
+export type EngineEffectCategory = "attack-roll" | "ability-check" | "saving-throw";
+
+export type EngineEffectOperation =
+  | { kind: "advantage" | "disadvantage"; category: EngineEffectCategory }
+  | { kind: "condition"; condition: string; action: "apply" | "remove" };
+
+export type EngineEffectDuration =
+  | { kind: "persistent" }
+  | { kind: "fixed"; amount: number; unit: "round" | "minute" | "hour" | "day" }
+  | { kind: "turn-boundary"; boundary: "start" | "end"; subject: "source" | "target"; offsetTurns: number }
+  | { kind: "source-lifetime" };
+
+export type EngineEffectClearPolicy = "short-rest" | "long-rest" | "duration" | "source-removal" | "never";
+
+export interface EngineEffectAnchor {
+  kind: "campaign-round" | "turn";
+  round: number;
+  actorId?: string;
+}
+
+export interface EngineEffectProvenance {
+  sourceContentKey: string | null;
+  sourceCommandId: string | null;
+  rulesVersion: string;
+  formulaRevision: string;
+}
+
+export interface EngineEffectInstance {
+  id: string;
+  definitionKey: string;
+  sourceRef: string;
+  targetRefs: string[];
+  operations: EngineEffectOperation[];
+  startAnchor: EngineEffectAnchor;
+  duration: EngineEffectDuration;
+  stackingKey: string;
+  stackingRule: "stack" | "replace" | "ignore";
+  clearedBy: EngineEffectClearPolicy[];
+  status: "active" | "expired" | "removed";
+  provenance: EngineEffectProvenance;
+}
+
 export interface EngineCharacterFeatureView {
   name: string;
   description: string;
@@ -978,7 +1020,6 @@ export interface EngineImprovEffect {
   targetId?: string;
   amount?: number;
   condition?: string;
-  remainingRounds?: number;
   createdAt: string;
 }
 
@@ -1015,6 +1056,7 @@ export interface LanternCampaignState {
   combat: EngineCombat;
   quest: EngineQuest;
   quests: EngineQuest[];
+  effects: EngineEffectInstance[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
@@ -1063,6 +1105,7 @@ export interface EngineSessionView {
   lastRoll: number | null;
   character: EngineCharacterView;
   quests: EngineQuest[];
+  effects: EngineEffectInstance[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
   suggestedActions: NarrationEnvelope["suggestedActions"];
