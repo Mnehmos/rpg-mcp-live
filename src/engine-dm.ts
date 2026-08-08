@@ -99,6 +99,7 @@ export function buildDmContext(
     suggestedActions: state.suggestedActions,
     character: state.character,
     combat: state.combat,
+    controlledActors: state.controlledActors,
     recentLog: state.log.slice(-12),
   };
 }
@@ -335,6 +336,7 @@ export class LanternDungeonMaster {
           "When a fight begins, choose the fiction and opposition, search the installed creatures by name, then call combat_start with exact creature content keys and counts. Never invent or copy enemy stats; the engine hydrates the pinned statblocks.",
           "For the reviewed guards-surrender-v1 encounter slice, provide the stealth-perception-v1 approach and let the engine derive surprise, initiative, morale, surrender, capture, retreat, and outcome; use encounter_decision only for a server-offered response and never force morale in prose.",
           "When authoring an encounter, include the fictionally established distance for each creature group. Range checks use that persisted distance; never invent a different distance only to make an attack or spell legal.",
+          "Controlled actors are first-class persistent companions or summons. Read controlled_actor_context before using them; create only the fixed familiar-scout-v1 or summon-scout-v1 profiles, then command them during the controller's turn with controlled_actor_command. Never author their stats, HP, senses, inventory, duration, action cost, or initiative policy. Use controlled_actor_dismiss for dismissal/source termination; an uncommanded actor deterministically guards at controller turn end.",
           "On a creature turn, read combat_state and call advance_turn with the active combatant id and a source-backed actionKey. Exact S7 multiattacks and save/damage programs are executable; fragment, legendary, reaction, or other tier rejections mean narrate no mechanical result. If a recharge roll fails without ending the turn, choose a legal fallback action in the same atomic turn plan.",
           "For spell choices, search the installed spells and use exact content keys. Use learn_spell for known cantrips, known-caster repertoires, and wizard spellbooks; use prepare_spell for prepared casters and wizard prepared spells; use cast_spell for resolution.",
           "The spell engine owns class-list eligibility, level limits, spellbook and preparation capacity, slots, action economy, concentration, range, target count, attacks, saves, damage dice, damage type, and creature defenses. If a spell or upcast returns content_tier_insufficient, do not substitute a guessed mechanical effect.",

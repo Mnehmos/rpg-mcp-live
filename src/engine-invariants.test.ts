@@ -67,6 +67,9 @@ const ALL_COMMAND_KINDS = [
   "combat_action",
   "combat_move",
   "end_turn",
+  "controlled_actor_create",
+  "controlled_actor_command",
+  "controlled_actor_dismiss",
   "advance_turn",
   "advancement_confirm",
   "npc_advance",
@@ -251,6 +254,23 @@ function activeCombatState(): LanternCampaignState {
   );
 }
 
+function controlledActorState(): LanternCampaignState {
+  return applyAccepted(createdState(), { kind: "controlled_actor_create", profileId: "familiar-scout-v1" }, "controlled_actor_create");
+}
+
+function controlledActorCombatState(): LanternCampaignState {
+  return applyAccepted(
+    controlledActorState(),
+    {
+      kind: "combat_start",
+      encounterId: "controlled-invariant-encounter",
+      encounterName: "Controlled Invariant Encounter",
+      creatures: [{ creatureKey: GOBLIN, count: 1 }],
+    },
+    "combat_start",
+  );
+}
+
 function lifecycleOfferState(): LanternCampaignState {
   const state = activeCombatState();
   state.combat.enemies[0]!.id = "fixture";
@@ -431,6 +451,9 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "combat_action", tool: "combat_action", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "combat_action", action: "dodge" }) },
   { kind: "combat_move", tool: "combat_move", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "combat_move", geometryRevision: 1, destination: { frameId: "no-combat", x: 1, y: 0, z: 0 } }) },
   { kind: "end_turn", tool: "end_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "end_turn" }) },
+  { kind: "controlled_actor_create", tool: "controlled_actor_create", expectedCode: "character_required", state: initialState, rawCommand: () => ({ kind: "controlled_actor_create", profileId: "familiar-scout-v1" }) },
+  { kind: "controlled_actor_command", tool: "controlled_actor_command", expectedCode: "controlled_actor_not_found", state: createdState, rawCommand: () => ({ kind: "controlled_actor_command", actorId: "missing-controlled", action: "guard" }) },
+  { kind: "controlled_actor_dismiss", tool: "controlled_actor_dismiss", expectedCode: "controlled_actor_not_found", state: createdState, rawCommand: () => ({ kind: "controlled_actor_dismiss", actorId: "missing-controlled" }) },
   { kind: "advance_turn", tool: "advance_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "advance_turn" }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", expectedCode: "advancement_not_pending", state: createdState, rawCommand: () => ({ kind: "advancement_confirm", pendingId: "missing-pending" }) },
   { kind: "npc_advance", tool: "npc_advance", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "npc_advance", combatantId: "missing-combatant", templateId: "veteran" }) },
@@ -537,6 +560,9 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "combat_action", tool: "combat_action", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "combat_action", action: "dodge" }) }) },
   { kind: "combat_move", tool: "combat_move", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "combat_move", geometryRevision: state.combat.tactical.geometry.revision, destination: { ...state.combat.tactical.actorPosition, y: state.combat.tactical.actorPosition.y + 1 } }) }; } },
   { kind: "end_turn", tool: "end_turn", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "end_turn" }) }) },
+  { kind: "controlled_actor_create", tool: "controlled_actor_create", build: () => ({ state: createdState(), command: parseCommand({ kind: "controlled_actor_create", profileId: "familiar-scout-v1" }) }) },
+  { kind: "controlled_actor_command", tool: "controlled_actor_command", build: () => { const state = controlledActorCombatState(); return { state, command: parseCommand({ kind: "controlled_actor_command", actorId: state.controlledActors[0]!.id, action: "guard" }) }; } },
+  { kind: "controlled_actor_dismiss", tool: "controlled_actor_dismiss", build: () => { const state = controlledActorState(); return { state, command: parseCommand({ kind: "controlled_actor_dismiss", actorId: state.controlledActors[0]!.id }) }; } },
   { kind: "advance_turn", tool: "advance_turn", build: () => ({ state: enemyTurnState(), command: parseCommand({ kind: "advance_turn", actionKey: "scimitar" }) }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", build: () => { const state = pendingAdvancementState(); return { state, command: parseCommand({ kind: "advancement_confirm", pendingId: state.pendingAdvancement!.id }) }; } },
   { kind: "npc_advance", tool: "npc_advance", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "npc_advance", combatantId: state.combat.enemies[0]!.id, templateId: "veteran" }) }; } },
@@ -552,7 +578,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(47);
+    expect(ALL_COMMAND_KINDS).toHaveLength(50);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

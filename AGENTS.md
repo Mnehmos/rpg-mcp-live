@@ -69,6 +69,7 @@ The human is the **playtester and vision-holder** — not a merge gate or deploy
 
 ## Agent operating rules
 
+0. This goal is single-instance work in `Mnehmos/rpg-mcp-live` only. Never spawn subagents, use delegated agents, or write another repository. Older orchestration comments are superseded by this rule.
 1. Never push directly to `main`.
 2. Never create `v*` production tags (the production workflow does).
 3. Never make live OpenRouter calls in CI.
@@ -76,3 +77,4 @@ The human is the **playtester and vision-holder** — not a merge gate or deploy
 5. Raw agent reasoning / scratchpads are never committed — persist decision, evidence, plan, diff, test results, critic findings.
 6. Scope discoveries become new issues, not stealth additions.
 7. Distinguish `verified` / `observed` / `designed` / `blocked` in all output.
+8. A "fresh-context critic" means the same agent rereads the written plan, issue, code, and tests after a context reset; it never means another model or agent.
