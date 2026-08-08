@@ -11,8 +11,8 @@ permissions:
 jobs:
   review:
     name: Codex review
-    # Do not expose the reviewer secret to fork-controlled code.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # The job always emits a check so required Codex review does not strand
+    # fork PRs; the guarded steps never expose the reviewer secret to forks.
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
