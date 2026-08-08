@@ -79,29 +79,38 @@ autodeploy is disabled.
 ```
 checkout exact CI-proven SHA
 → npm ci → check → build
-→ validate existing Railway project/environment/service/source scope
+→ validate project-token scope, current source/config, and disabled autodeploy
 → deploy exact SHA: engine first, then web
 → wait for health, pack/tool evidence, and web→engine reachability
 → run HTTP smoke, invariants, and deterministic gauntlet
 → write manifest with both Railway deployment IDs and commit metadata
 ```
 
-The deploy helper uses environment-scoped Railway project tokens and the
-`serviceInstanceDeployV2` exact-commit mutation. It never logs token values,
+The deploy helper uses environment-scoped Railway project tokens and first
+queries `projectToken { projectId environmentId }` so a staging token cannot
+touch production (or vice versa). It then reads the current service source,
+repo trigger, Railway config path, and native autodeploy state before calling
+the `serviceInstanceDeployV2` exact-commit mutation. It never logs token values,
 uploads a local archive, or calls `railway up`. Concurrency is
 `group: railway-staging, cancel-in-progress: true`.
 
 ## Production deployment
 
 `.github/workflows/deploy-production.yml` consumes only the successful staging
-manifest for the same SHA. The job is skipped unless the production GitHub
-environment variable `RAILWAY_PRODUCTION_PROMOTION_ENABLED` is exactly `true`.
-It is therefore disabled by default for the issue #67 cutover.
+manifest for the same SHA. The job attaches the `production` environment and
+then evaluates `RAILWAY_PRODUCTION_PROMOTION_ENABLED` at runtime. Every
+mutation step is gated by that result, so the environment variable is usable
+without allowing a disabled run to reach Railway.
 
-When explicitly enabled by the owner, it validates the staging manifest,
-deploys engine then web through the same exact-SHA helper, runs the production
-health/smoke/gauntlet checks, and publishes a release tag/manifest. It does
-not push to `main` or commit a generated `CHANGELOG.md` back to the branch.
+When explicitly enabled by the owner, it first checks full tag history, rejects
+an existing release tag, verifies GitHub tag-write capability, and generates
+the changelog before any production mutation. It then validates the staging
+manifest, deploys engine then web through the same exact-SHA helper, binds
+health responses to the expected service/environment and returned Railway
+commit SHA, runs the production health/smoke/gauntlet checks, writes the
+deployment manifest, and finally creates an annotated tag and GitHub release
+through the authenticated GitHub API. It does not push to `main` or commit a
+generated `CHANGELOG.md` back to the branch.
 
 Concurrency: `group: railway-production, cancel-in-progress: false`.
 

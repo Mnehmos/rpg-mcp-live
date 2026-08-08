@@ -15,13 +15,26 @@ const stagingScope: RailwayScope = {
   environmentName: "staging",
   serviceId: ENGINE_ID,
   expectedRepository: "Mnehmos/rpg-mcp-live",
+  expectedBranch: "main",
+  expectedRailwayConfigFile: "/railway/engine.json",
 };
 
 function graphqlResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify({ data }), { status, headers: { "content-type": "application/json" } });
 }
 
-function scopeData(overrides: { serviceInstance?: Record<string, unknown>; service?: Record<string, unknown> } = {}) {
+function tokenData(overrides: Partial<{ projectId: string; environmentId: string }> = {}) {
+  return {
+    projectToken: {
+      projectId: PROJECT_ID,
+      environmentId: STAGING_ID,
+      ...overrides,
+    },
+  };
+}
+
+function scopeData(overrides: { serviceInstance?: Record<string, unknown>; serviceInstanceAutoDeployStatus?: Record<string, unknown>; deploymentTriggers?: Record<string, unknown> } = {}) {
+  const trigger = { repository: "Mnehmos/rpg-mcp-live", branch: "main", environmentId: STAGING_ID, serviceId: ENGINE_ID };
   return {
     project: {
       id: PROJECT_ID,
@@ -32,9 +45,13 @@ function scopeData(overrides: { serviceInstance?: Record<string, unknown>; servi
       serviceId: ENGINE_ID,
       serviceName: "lantern-engine",
       environmentId: STAGING_ID,
-      latestDeployment: { meta: { repo: "Mnehmos/rpg-mcp-live", branch: "main" }, status: "SUCCESS" },
+      railwayConfigFile: "/railway/engine.json",
+      source: { repo: "Mnehmos/rpg-mcp-live", image: null },
+      service: { repoTriggers: { edges: [{ node: trigger }] } },
       ...overrides.serviceInstance,
     },
+    serviceInstanceAutoDeployStatus: { enabled: false, ...overrides.serviceInstanceAutoDeployStatus },
+    deploymentTriggers: { edges: [{ node: trigger }], ...overrides.deploymentTriggers },
   };
 }
 
@@ -46,9 +63,9 @@ function client(responses: Response[]) {
 
 describe("Railway exact-SHA deployment API", () => {
   it("uses Project-Access-Token and accepts the correctly scoped connected repo", async () => {
-    const { instance, fetchImpl } = client([graphqlResponse(scopeData())]);
+    const { instance, fetchImpl } = client([graphqlResponse(tokenData()), graphqlResponse(scopeData())]);
     const evidence = await instance.validateScope(stagingScope);
-    expect(evidence).toMatchObject({ projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, sourceRepository: "Mnehmos/rpg-mcp-live", sourceBranch: "main" });
+    expect(evidence).toMatchObject({ projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, sourceRepository: "Mnehmos/rpg-mcp-live", sourceBranch: "main", railwayConfigFile: "/railway/engine.json", nativeAutodeployEnabled: false });
     const call = fetchImpl.mock.calls[0] as unknown as [string | URL, RequestInit] | undefined;
     const headers = call?.[1].headers as Record<string, string>;
     expect(headers["Project-Access-Token"]).toBe(TOKEN);
@@ -58,18 +75,32 @@ describe("Railway exact-SHA deployment API", () => {
   it("rejects a project/environment scope mismatch before mutation", async () => {
     const wrongProject = scopeData();
     wrongProject.project.id = "other-project";
-    const { instance } = client([graphqlResponse(wrongProject)]);
+    const { instance } = client([graphqlResponse(tokenData()), graphqlResponse(wrongProject)]);
     await expect(instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "PROJECT_SCOPE_MISMATCH" });
 
     const wrongEnvironment = scopeData();
     wrongEnvironment.project.environments.edges = [{ node: { id: STAGING_ID, name: "production" } }];
-    const { instance: wrongEnvironmentClient } = client([graphqlResponse(wrongEnvironment)]);
+    const { instance: wrongEnvironmentClient } = client([graphqlResponse(tokenData()), graphqlResponse(wrongEnvironment)]);
     await expect(wrongEnvironmentClient.validateScope(stagingScope)).rejects.toMatchObject({ code: "ENVIRONMENT_SCOPE_MISMATCH" });
   });
 
+  it("rejects a project token scoped to a different environment before service lookup", async () => {
+    const { instance, fetchImpl } = client([graphqlResponse(tokenData({ environmentId: PRODUCTION_ID }))]);
+    await expect(instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "TOKEN_ENVIRONMENT_SCOPE_MISMATCH" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects an unconnected or wrong repository source", async () => {
-    const { instance } = client([graphqlResponse(scopeData({ serviceInstance: { latestDeployment: { meta: { repo: "other/repo", branch: "main" }, status: "SUCCESS" } } }))]);
+    const { instance } = client([graphqlResponse(tokenData()), graphqlResponse(scopeData({ serviceInstance: { source: { repo: "other/repo", image: null } } }))]);
     await expect(instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "SOURCE_NOT_CONNECTED" });
+  });
+
+  it("rejects current config drift and native Railway autodeploy", async () => {
+    const wrongConfig = client([graphqlResponse(tokenData()), graphqlResponse(scopeData({ serviceInstance: { railwayConfigFile: "/railway/web.json" } }))]);
+    await expect(wrongConfig.instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "CONFIG_PATH_MISMATCH" });
+
+    const autodeploy = client([graphqlResponse(tokenData()), graphqlResponse(scopeData({ serviceInstanceAutoDeployStatus: { enabled: true } }))]);
+    await expect(autodeploy.instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "NATIVE_AUTODEPLOY_ENABLED" });
   });
 
   it("rejects an unknown or malformed SHA before making an API request", async () => {
@@ -81,6 +112,7 @@ describe("Railway exact-SHA deployment API", () => {
   it("fails closed when Railway rejects a well-formed but unknown SHA", async () => {
     const unknownSha = "f".repeat(40);
     const { instance } = client([
+      graphqlResponse(tokenData()),
       graphqlResponse(scopeData()),
       new Response(JSON.stringify({ errors: [{ message: "Commit not found" }] }), { status: 200 }),
     ]);
@@ -95,6 +127,7 @@ describe("Railway exact-SHA deployment API", () => {
   it("deploys the exact SHA, polls, and returns the Railway deployment ID", async () => {
     const deploymentId = "deployment-67";
     const { instance } = client([
+      graphqlResponse(tokenData()),
       graphqlResponse(scopeData()),
       graphqlResponse({ serviceInstanceDeployV2: deploymentId }),
       graphqlResponse({ deployment: { id: deploymentId, status: "SUCCESS", projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: { commitSha: SHA } } }),
@@ -104,6 +137,7 @@ describe("Railway exact-SHA deployment API", () => {
 
   it.each(["FAILED", "CANCELED"])("fails closed on a %s deployment", async (status) => {
     const { instance } = client([
+      graphqlResponse(tokenData()),
       graphqlResponse(scopeData()),
       graphqlResponse({ serviceInstanceDeployV2: "deployment-67" }),
       graphqlResponse({ deployment: { id: "deployment-67", status, projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: null } }),
@@ -113,6 +147,7 @@ describe("Railway exact-SHA deployment API", () => {
 
   it("fails closed on an unknown deployment status and timeout", async () => {
     const unknown = client([
+      graphqlResponse(tokenData()),
       graphqlResponse(scopeData()),
       graphqlResponse({ serviceInstanceDeployV2: "deployment-67" }),
       graphqlResponse({ deployment: { id: "deployment-67", status: "MYSTERY", projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: null } }),
@@ -120,6 +155,7 @@ describe("Railway exact-SHA deployment API", () => {
     await expect(unknown.instance.deployExactCommit(stagingScope, SHA)).rejects.toMatchObject({ code: "DEPLOYMENT_STATUS_UNKNOWN" });
 
     const timeoutResponses = [
+      graphqlResponse(tokenData()),
       graphqlResponse(scopeData()),
       graphqlResponse({ serviceInstanceDeployV2: "deployment-67" }),
       graphqlResponse({ deployment: { id: "deployment-67", status: "BUILDING", projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: null } }),
@@ -150,10 +186,35 @@ describe("workflow ownership guardrails", () => {
     expect(staging).not.toContain("railway up");
   });
 
-  it("keeps production behind the disabled promotion guard", () => {
+  it("keeps production behind a runtime environment guard", () => {
     expect(production).toContain("RAILWAY_PRODUCTION_PROMOTION_ENABLED");
-    expect(production).toContain("== 'true'");
+    expect(production).toContain("Evaluate production promotion guard");
+    expect(production).toContain("steps.promotion.outputs.enabled == 'true'");
+    expect(production).not.toMatch(/if:\s*>[\s\S]*RAILWAY_PRODUCTION_PROMOTION_ENABLED/);
     expect(production.indexOf("Deploy engine to Railway production")).toBeLessThan(production.indexOf("Deploy web to Railway production"));
+  });
+
+  it("preflights release material before mutating production and uses the GitHub API for tags", () => {
+    expect(production).toContain("fetch-depth: 0");
+    expect(production).toContain("git fetch --force --tags origin");
+    expect(production).toContain("already exists; refusing to mutate production");
+    expect(production.indexOf("Preflight release tag, changelog, and write capability")).toBeLessThan(production.indexOf("Deploy engine to Railway production"));
+    expect(production.indexOf("Write production deployment manifest before publishing the tag")).toBeLessThan(production.indexOf("Create annotated GitHub tag after deployment evidence is complete"));
+    expect(production).toContain("git/tags");
+    expect(production).toContain("git/refs");
+    expect(production).not.toContain("git push");
+  });
+
+  it("binds health checks to each service and environment", () => {
+    for (const workflow of [staging, production]) {
+      expect(workflow).toContain("EXPECTED_SERVICE: lantern-engine");
+      expect(workflow).toContain("EXPECTED_ENGINE_SERVICE: lantern-engine");
+      expect(workflow).toContain(".service == $service");
+      expect(workflow).toContain(".environment == $environment");
+      expect(workflow).toContain("EXPECTED_COMMIT_SHA");
+      expect(workflow).toContain("RAILWAY_CONFIG_FILE");
+      expect(workflow).toContain("RAILWAY_EXPECTED_BRANCH: main");
+    }
   });
 
   it("does not push protected main or mutate CHANGELOG during deployment", () => {

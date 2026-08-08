@@ -47,16 +47,19 @@ GitHub Actions staging proof.
 1. A squash merge to `main` completes the required CI workflow.
 2. `deploy-staging.yml` checks out that exact CI-proven SHA, runs checks/build,
    and calls `tools/railway-deploy.ts` for the engine first and web second.
-3. The helper validates project, environment, service, and connected source
-   scope, then calls Railway's exact-commit GraphQL mutation and waits for
-   `SUCCESS`. Failed, cancelled, unknown, missing, mismatched, or timed-out
-   deployments fail closed.
+3. The helper validates the presented project token's project/environment
+   identity, the current service source and repository trigger, the
+   service-specific config path, and disabled native autodeploy. It then calls
+   Railway's exact-commit GraphQL mutation and waits for `SUCCESS`. Failed,
+   cancelled, unknown, missing, mismatched, or timed-out deployments fail
+   closed.
 4. Health, pack identity, tool count, web-to-engine reachability, smoke,
    invariants, and the deterministic gauntlet are recorded in a manifest that
    includes both Railway deployment IDs and returned commit metadata.
 5. `deploy-production.yml` consumes only the successful staging manifest. It
-   remains blocked while the environment variable
-   `RAILWAY_PRODUCTION_PROMOTION_ENABLED` is not exactly `true`.
+   attaches the production environment, evaluates the promotion variable at
+   runtime, and keeps every mutation step blocked unless the value is exactly
+   `true`.
 
 Native Railway autodeploy is kept disabled even after the source connection is
 made. Do not use `railway up` for a normal deploy, and do not push to `main`

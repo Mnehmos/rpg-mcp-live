@@ -30,6 +30,7 @@ export interface RailwayScope {
   serviceId: string;
   expectedRepository?: string;
   expectedBranch?: string;
+  expectedRailwayConfigFile?: string;
 }
 
 export interface RailwayClientOptions {
@@ -49,6 +50,8 @@ export interface RailwayScopeEvidence {
   serviceName: string;
   sourceRepository: string | null;
   sourceBranch: string | null;
+  railwayConfigFile: string;
+  nativeAutodeployEnabled: boolean;
 }
 
 export interface RailwayDeploymentEvidence {
@@ -86,8 +89,22 @@ interface ScopeResponse {
     serviceId: string;
     serviceName: string;
     environmentId: string;
-    latestDeployment: { meta: unknown; status: string } | null;
+    railwayConfigFile: string | null;
+    source: { repo: string | null; image: string | null } | null;
+    service: {
+      repoTriggers: {
+        edges: Array<{ node: { repository: string; branch: string; environmentId: string; serviceId: string | null } }>;
+      };
+    };
   } | null;
+  serviceInstanceAutoDeployStatus: { enabled: boolean } | null;
+  deploymentTriggers: {
+    edges: Array<{ node: { repository: string; branch: string; environmentId: string; serviceId: string | null } }>;
+  };
+}
+
+interface ProjectTokenScopeResponse {
+  projectToken: { projectId: string; environmentId: string } | null;
 }
 
 interface DeploymentResponse {
@@ -129,17 +146,27 @@ function findCommitSha(value: unknown): string | null {
   return null;
 }
 
-function findSource(value: unknown): { repository: string | null; branch: string | null } {
-  if (!value || typeof value !== "object") return { repository: null, branch: null };
-  const record = value as Record<string, unknown>;
-  const repository = typeof record.repo === "string" ? record.repo : typeof record.repository === "string" ? record.repository : null;
-  const branch = typeof record.branch === "string" ? record.branch : null;
-  if (repository || branch) return { repository, branch };
-  for (const nested of Object.values(record)) {
-    const found = findSource(nested);
-    if (found.repository || found.branch) return found;
-  }
-  return { repository: null, branch: null };
+interface CurrentSourceRecord {
+  repository: string;
+  branch: string;
+}
+
+function currentSource(
+  source: { repo: string | null; image: string | null } | null,
+  triggers: Array<{ repository: string; branch: string; environmentId: string; serviceId: string | null }>,
+  environmentId: string,
+  serviceId: string,
+): CurrentSourceRecord | null {
+  const scopedTriggers = triggers.filter((trigger) =>
+    trigger.environmentId === environmentId && (trigger.serviceId === null || trigger.serviceId === serviceId));
+  const uniqueTriggers = Array.from(new Map(
+    scopedTriggers.map((trigger) => [`${trigger.repository}\u0000${trigger.branch}`, { repository: trigger.repository, branch: trigger.branch }]),
+  ).values());
+  if (uniqueTriggers.length !== 1) return null;
+  const trigger = uniqueTriggers[0];
+  if (source?.image && !source.repo) return null;
+  if (source?.repo && source.repo !== trigger.repository) return null;
+  return trigger;
 }
 
 export class RailwayApiClient {
@@ -194,6 +221,24 @@ export class RailwayApiClient {
   public async validateScope(scope: RailwayScope): Promise<RailwayScopeEvidence> {
     const expectedRepository = scope.expectedRepository ?? EXPECTED_REPOSITORY;
     const expectedBranch = scope.expectedBranch ?? "main";
+    const expectedRailwayConfigFile = scope.expectedRailwayConfigFile;
+    if (!expectedRailwayConfigFile?.trim()) {
+      throw new RailwayApiError("CONFIG_PATH_MISSING", "The service-specific Railway config path is required.");
+    }
+
+    const tokenScope = await this.request<ProjectTokenScopeResponse>(
+      `query railwayProjectTokenScope {
+        projectToken { projectId environmentId }
+      }`,
+      {},
+    );
+    if (!tokenScope.projectToken || tokenScope.projectToken.projectId !== scope.projectId) {
+      throw new RailwayApiError("TOKEN_PROJECT_SCOPE_MISMATCH", "The Railway project token is not scoped to the requested project.");
+    }
+    if (tokenScope.projectToken.environmentId !== scope.environmentId) {
+      throw new RailwayApiError("TOKEN_ENVIRONMENT_SCOPE_MISMATCH", "The Railway project token is not scoped to the requested environment.");
+    }
+
     const data = await this.request<ScopeResponse>(
       `query railwayDeploymentScope($projectId: String!, $environmentId: String!, $serviceId: String!) {
         project(id: $projectId) {
@@ -202,7 +247,15 @@ export class RailwayApiClient {
         }
         serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
           id serviceId serviceName environmentId
-          latestDeployment { meta status }
+          railwayConfigFile
+          source { repo image }
+          service {
+            repoTriggers { edges { node { repository branch environmentId serviceId } } }
+          }
+        }
+        serviceInstanceAutoDeployStatus(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) { enabled }
+        deploymentTriggers(first: 100, projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) {
+          edges { node { repository branch environmentId serviceId } }
         }
       }`,
       { projectId: scope.projectId, environmentId: scope.environmentId, serviceId: scope.serviceId },
@@ -218,8 +271,22 @@ export class RailwayApiClient {
     if (!instance || instance.serviceId !== scope.serviceId || instance.environmentId !== scope.environmentId) {
       throw new RailwayApiError("SERVICE_SCOPE_MISMATCH", "The requested service is not in the requested environment.");
     }
-    const source = findSource(instance.latestDeployment?.meta);
-    if (source.repository !== expectedRepository || source.branch !== expectedBranch) {
+    if (instance.railwayConfigFile !== expectedRailwayConfigFile) {
+      throw new RailwayApiError("CONFIG_PATH_MISMATCH", `The service Railway config path must be ${expectedRailwayConfigFile}.`);
+    }
+    if (data.serviceInstanceAutoDeployStatus?.enabled !== false) {
+      throw new RailwayApiError("NATIVE_AUTODEPLOY_ENABLED", "Railway native autodeploy must be disabled before GitHub deploys.");
+    }
+    const source = currentSource(
+      instance.source,
+      [
+        ...instance.service.repoTriggers.edges.map((edge) => edge.node),
+        ...data.deploymentTriggers.edges.map((edge) => edge.node),
+      ],
+      scope.environmentId,
+      scope.serviceId,
+    );
+    if (!source || source.repository !== expectedRepository || source.branch !== expectedBranch) {
       throw new RailwayApiError("SOURCE_NOT_CONNECTED", `The service is not connected to ${expectedRepository} on ${expectedBranch}.`);
     }
     return {
@@ -230,6 +297,8 @@ export class RailwayApiClient {
       serviceName: instance.serviceName,
       sourceRepository: source.repository,
       sourceBranch: source.branch,
+      railwayConfigFile: instance.railwayConfigFile,
+      nativeAutodeployEnabled: data.serviceInstanceAutoDeployStatus.enabled,
     };
   }
 

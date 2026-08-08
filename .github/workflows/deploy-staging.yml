@@ -67,6 +67,8 @@ jobs:
           RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_ENGINE_SERVICE_ID }}
           RAILWAY_COMMIT_SHA: ${{ env.SHA }}
           RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+          RAILWAY_EXPECTED_BRANCH: main
+          RAILWAY_CONFIG_FILE: /railway/engine.json
         run: npx tsx tools/railway-deploy.ts
 
       - name: Verify engine deployment SHA
@@ -75,10 +77,16 @@ jobs:
       - name: Wait for engine health and capture pack evidence
         env:
           ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
+          EXPECTED_SERVICE: lantern-engine
+          EXPECTED_ENVIRONMENT: staging
+          EXPECTED_COMMIT_SHA: ${{ steps.engine.outputs.railway_commit_sha }}
         run: |
           for i in $(seq 1 60); do
             resp=$(curl -fsS "$ENGINE_STAGING_URL/health" || true)
-            if echo "$resp" | jq -e '.status == "ok"' >/dev/null; then
+            if echo "$resp" | jq -e --arg service "$EXPECTED_SERVICE" --arg environment "$EXPECTED_ENVIRONMENT" \
+              '.status == "ok" and .service == $service and .environment == $environment' >/dev/null; then
+              test "$EXPECTED_COMMIT_SHA" = "$SHA"
+              printf '%s\n' "$resp" > engine-health.json
               echo "$resp" | jq '{status,service,environment,rules,toolCount,openRouter:{enabled:.openRouter.enabled}}'
               echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> "$GITHUB_ENV"
               echo "ENGINE_PACK_VERSION=$(echo "$resp" | jq -r '.rules.packVersion')" >> "$GITHUB_ENV"
@@ -100,6 +108,8 @@ jobs:
           RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
           RAILWAY_COMMIT_SHA: ${{ env.SHA }}
           RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+          RAILWAY_EXPECTED_BRANCH: main
+          RAILWAY_CONFIG_FILE: /railway/web.json
         run: npx tsx tools/railway-deploy.ts
 
       - name: Verify web deployment SHA
@@ -108,10 +118,21 @@ jobs:
       - name: Wait for web health and engine reachability
         env:
           WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
+          EXPECTED_SERVICE: rpg-mcp-live-web
+          EXPECTED_ENVIRONMENT: staging
+          EXPECTED_ENGINE_SERVICE: lantern-engine
+          EXPECTED_ENGINE_ENVIRONMENT: staging
+          EXPECTED_COMMIT_SHA: ${{ steps.web.outputs.railway_commit_sha }}
         run: |
           for i in $(seq 1 60); do
             resp=$(curl -fsS "$WEB_STAGING_URL/api/health" || true)
-            if echo "$resp" | jq -e '.status == "ok" and .integrations.lanternEngine == true' >/dev/null; then
+            if echo "$resp" | jq -e --arg service "$EXPECTED_SERVICE" --arg environment "$EXPECTED_ENVIRONMENT" \
+              --arg engineService "$EXPECTED_ENGINE_SERVICE" --arg engineEnvironment "$EXPECTED_ENGINE_ENVIRONMENT" \
+              '.status == "ok" and .service == $service and .environment == $environment and
+               .integrations.lanternEngine == true and .engine.service == $engineService and
+               .engine.environment == $engineEnvironment' >/dev/null; then
+              test "$EXPECTED_COMMIT_SHA" = "$SHA"
+              printf '%s\n' "$resp" > web-health.json
               echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
               exit 0
             fi

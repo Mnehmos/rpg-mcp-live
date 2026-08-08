@@ -58,20 +58,27 @@ Deploy engine and web from the **same Git SHA**.
 
 ## Production deployment (guarded)
 
-Triggered only when staging completes successfully and
-`RAILWAY_PRODUCTION_PROMOTION_ENABLED=true` in the production environment.
+Triggered only when staging completes successfully and the production job's
+runtime guard sees `RAILWAY_PRODUCTION_PROMOTION_ENABLED=true` in the
+production environment. A false or missing value exits before any Railway or
+release mutation.
 
 1. Verify SHA is reachable from `main`.
 2. Verify SHA was deployed to staging.
 3. Deploy engine to Railway production. Verify health + backward compatibility.
 4. Run safe read + synthetic safe mutation against a dedicated acceptance campaign.
 5. Deploy web to Railway production. Verify health + engine reachability.
-6. Create annotated release tag (`vMAJOR.MINOR.PATCH`) without pushing `main`.
-7. Publish deployment manifest with both Railway deployment IDs.
+6. Write the deployment manifest with both Railway deployment IDs and returned
+   Railway commit SHAs.
+7. Create the annotated tag through the authenticated GitHub API, then publish
+   the GitHub release and manifest. Existing tags are rejected before the first
+   production deployment.
 
-## Health endpoints expose deployed SHA
+## Health evidence
 
-Both services must expose the deployed Git SHA in their health response.
+Both services expose their service and environment in health responses. The
+exact deployed Git SHA is asserted from Railway's deployment response and is
+recorded alongside the bound health evidence in the deployment manifest.
 
 ## Database and content migrations
 

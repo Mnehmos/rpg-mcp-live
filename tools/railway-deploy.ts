@@ -13,6 +13,7 @@ async function main(): Promise<void> {
   const serviceId = required("RAILWAY_SERVICE_ID");
   const commitSha = required("RAILWAY_COMMIT_SHA");
   const token = required("RAILWAY_PROJECT_TOKEN");
+  const expectedRailwayConfigFile = required("RAILWAY_CONFIG_FILE");
   const allowProduction = process.env.RAILWAY_PRODUCTION_PROMOTION_ENABLED === "true";
   const client = new RailwayApiClient({ token });
   const result = await client.deployExactCommit(
@@ -22,6 +23,8 @@ async function main(): Promise<void> {
       environmentName,
       serviceId,
       expectedRepository: process.env.RAILWAY_EXPECTED_REPOSITORY ?? undefined,
+      expectedBranch: process.env.RAILWAY_EXPECTED_BRANCH ?? "main",
+      expectedRailwayConfigFile,
     },
     commitSha,
     allowProduction,
