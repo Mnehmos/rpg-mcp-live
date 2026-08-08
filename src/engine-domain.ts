@@ -1782,6 +1782,8 @@ function resolveWorldContext(
     state.version + 1,
   );
   if (objectPatch.error) return rejection(state, tool, objectPatch.error.code, objectPatch.error.message);
+  const objectTopology = worldObjectTopologyValidation(objectPatch.entities, sceneId, state.actorId);
+  if (objectTopology) return rejection(state, tool, objectTopology.code, objectTopology.message);
   const worldContext = {
     id: sceneId,
     title: command.title,
@@ -1920,6 +1922,9 @@ function validateWorldObjectPatch(
     if (input.definition.key !== previous.definition.key || input.definition.sourceRef !== previous.definition.sourceRef) {
       return { code: "object_definition_conflict", message: "An existing world-object definition cannot be replaced in place." };
     }
+    if (!sameWorldContextValue(input.definition, previous.definition)) {
+      return { code: "object_definition_conflict", message: "An existing world-object definition cannot be changed in place." };
+    }
     if (
       input.state !== previous.state
       || (input.locationRef ?? null) !== previous.locationRef
@@ -2016,6 +2021,8 @@ function validateWorldContextPatch(
 
   const objectValidation = validateWorldObjectPatch(state.worldContext?.objects ?? [], command.objects);
   if (objectValidation) return objectValidation;
+  const existingObjectTopology = worldObjectTopologyValidation(state.worldContext?.objects ?? [], state.worldContext?.id ?? "campaign-scene", state.actorId);
+  if (existingObjectTopology) return existingObjectTopology;
 
   return validateEntityPatchOperations(
     command.merchants,
@@ -2851,11 +2858,13 @@ function resolveWorldObjectAffordance(
   const object = world?.objects.find((candidate) => candidate.id === command.targetId);
   if (!world) return rejection(state, tool, "world_context_required", "There is no authoritative world context for that object interaction.");
   if (!object) return rejection(state, tool, "object_not_found", "That world object is not established in the current context.");
-  if (command.affordance === "inspect") {
-    return readOnlyResolution(state, tool, "The engine confirms the current state of " + object.definition.name + ".", { object });
-  }
+  const topology = worldObjectTopologyValidation(world.objects, world.id, state.actorId);
+  if (topology) return rejection(state, tool, topology.code, topology.message);
   if (!object.definition.affordances.includes(command.affordance)) {
     return rejection(state, tool, "affordance_unavailable", "The established object does not declare that affordance.", { objectId: object.id, affordance: command.affordance });
+  }
+  if (command.affordance === "inspect") {
+    return readOnlyResolution(state, tool, "The engine confirms the current state of " + object.definition.name + ".", { object });
   }
   if (object.state === "destroyed") {
     return rejection(state, tool, "object_destroyed", "That object has been destroyed and cannot accept another mechanical interaction.", { objectId: object.id });
@@ -2936,6 +2945,7 @@ function resolveWorldObjectAffordance(
     case "carry":
     case "throw": {
       if (!command.destinationId) return rejection(state, tool, "destination_required", "That movement affordance needs a reviewed destination reference.");
+      if (!worldObjectDestinationAllowed(world, command.destinationId)) return rejection(state, tool, "destination_not_found", "That object destination is not established in the current scene.", { destinationId: command.destinationId });
       if ((command.affordance === "carry" || command.affordance === "throw") && object.ownerRef.kind === "actor" && object.ownerRef.id !== context.actorId) {
         return rejection(state, tool, "ownership_required", "Only the owning actor can carry or throw this object.", { objectId: object.id });
       }
@@ -2965,6 +2975,7 @@ function resolveWorldObjectAffordance(
         return rejection(state, tool, "ownership_required", "Only the owning actor can drop this object.", { objectId: object.id });
       }
       if (!command.destinationId) return rejection(state, tool, "destination_required", "Dropping an object needs a reviewed destination reference.");
+      if (!worldObjectDestinationAllowed(world, command.destinationId)) return rejection(state, tool, "destination_not_found", "That object destination is not established in the current scene.", { destinationId: command.destinationId });
       setObject(object.id, { ownerRef: { kind: "world", id: world.id }, locationRef: command.destinationId, state: "intact" });
       message = "The engine drops " + object.definition.name + " at " + command.destinationId + ".";
       outcome = "world_object_dropped";
@@ -2980,8 +2991,9 @@ function resolveWorldObjectAffordance(
     }
     case "ignite": {
       if (object.state === "lit") return rejection(state, tool, "already_lit", "That object is already lit.", { objectId: object.id });
-      const fireSource = source ?? object;
-      if (fireSource.id !== object.id && fireSource.state !== "lit") return rejection(state, tool, "fire_source_required", "Ignition requires a lit fire source.", { objectId: object.id });
+      if (object.definition.material !== "fire" && (!source || source.state !== "lit" || (source.definition.material !== "fire" && !source.definition.tags.includes("fire-source")))) {
+        return rejection(state, tool, "fire_source_required", "Ignition requires a lit fire source.", { objectId: object.id });
+      }
       if (object.definition.material !== "oil" && !object.definition.tags.includes("flammable") && object.definition.material !== "fire") return rejection(state, tool, "wrong_material", "That material is not eligible for the reviewed ignition rule.", { objectId: object.id });
       setObject(object.id, { state: "lit" });
       message = "The engine ignites " + object.definition.name + ".";
@@ -3018,6 +3030,9 @@ function resolveWorldObjectAffordance(
     }
     case "activate":
     case "use": {
+      if (command.affordance === "use" && !object.definition.effectInteractions.some((interaction) => interaction.affordance === "use")) {
+        return rejection(state, tool, "unsupported_affordance", "This object does not declare a reviewed use effect.", { objectId: object.id });
+      }
       if (command.affordance === "activate" && object.state === "active") return rejection(state, tool, "already_active", "That object is already active.", { objectId: object.id });
       if (command.affordance === "activate" && !object.definition.tags.includes("lever") && !object.definition.tags.includes("switch")) return rejection(state, tool, "wrong_material", "Only a declared lever or switch can be activated.", { objectId: object.id });
       setObject(object.id, { state: command.affordance === "activate" ? "active" : object.state });
@@ -3047,6 +3062,47 @@ function resolveWorldObjectAffordance(
     [],
     changes,
   );
+}
+
+function worldObjectTopologyValidation(
+  objects: EngineWorldObjectInstance[],
+  sceneId: string,
+  actorId: string,
+): WorldContextPatchValidation | null {
+  if (hasDuplicateEntityId(objects)) return { code: "ambiguous_object_id", message: "World-object identifiers must remain unique." };
+  const byId = new Map(objects.map((object) => [object.id, object]));
+  for (const object of objects) {
+    if (object.sceneId !== sceneId) return { code: "object_scene_mismatch", message: "A world object references a different scene frame." };
+    if (object.ownerRef.kind === "world" && object.ownerRef.id !== sceneId) {
+      return { code: "object_owner_mismatch", message: "A world-owned object must reference its current scene." };
+    }
+    if (object.ownerRef.kind === "actor" && object.ownerRef.id !== actorId) {
+      return { code: "object_owner_mismatch", message: "A world object cannot be owned by a different actor." };
+    }
+    if ((object.state === "carried" || object.state === "equipped") && object.ownerRef.kind !== "actor") {
+      return { code: "object_owner_mismatch", message: "Carried or equipped objects must be actor-owned." };
+    }
+    if (object.containerRef) {
+      const container = byId.get(object.containerRef);
+      if (!container || !container.definition.tags.includes("container")) {
+        return { code: "object_container_invalid", message: "A world object can only be contained by an established container object." };
+      }
+      if (container.id === object.id) return { code: "object_container_cycle", message: "A world object cannot contain itself." };
+      if (object.locationRef !== null && object.locationRef !== container.id) {
+        return { code: "object_location_mismatch", message: "An object's location and container references must agree." };
+      }
+    }
+    if (object.state === "destroyed" && !object.definition.criticalPolicy.canDestroy) {
+      return { code: "critical_object_protected", message: "A protected critical object cannot persist as destroyed." };
+    }
+  }
+  return null;
+}
+
+function worldObjectDestinationAllowed(world: NonNullable<LanternCampaignState["worldContext"]>, destinationId: string): boolean {
+  return destinationId === world.id
+    || world.features.includes(destinationId)
+    || world.objects.some((object) => object.id === destinationId && object.definition.tags.includes("container"));
 }
 
 function resolveCharacterCreate(
