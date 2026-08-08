@@ -9,6 +9,7 @@ import {
   engineCommandSchema,
   engineInventoryItemInputSchema,
   engineToolNameSchema,
+  engineWorldContextArgsSchema,
   type EngineCommand,
   type EngineToolName,
   type EngineToolResult,
@@ -31,55 +32,6 @@ const inventoryItemSchema = engineInventoryItemInputSchema;
 const lootItemSchema = inventoryItemSchema.refine((item) => item.quantity > 0, {
   message: "Loot quantity must be positive.",
 });
-const npcSchema = z
-  .object({
-    id: z.string().trim().min(1).max(120),
-    name: z.string().trim().min(1).max(160),
-    description: z.string().trim().max(2_000).default(""),
-    disposition: z.enum(["hostile", "unfriendly", "neutral", "friendly", "helpful"]).default("neutral"),
-    goals: z.array(z.string().trim().min(1).max(240)).max(12).default([]),
-    socialDc: z.number().int().min(1).max(30).default(12),
-    relationshipScore: z.number().int().min(-100).max(100).default(0),
-    memories: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
-  })
-  .strict();
-const merchantSchema = z
-  .object({
-    id: z.string().trim().min(1).max(120),
-    name: z.string().trim().min(1).max(160),
-    description: z.string().trim().max(2_000).default(""),
-    disposition: z.enum(["hostile", "unfriendly", "neutral", "friendly", "helpful"]).default("neutral"),
-    items: z
-      .array(
-        z
-          .object({
-            item: inventoryItemSchema,
-            stock: z.number().int().min(-1),
-            buyPriceCopper: z.number().int().nonnegative(),
-            sellPriceCopper: z.number().int().nonnegative(),
-          })
-          .strict()
-      )
-      .max(100)
-      .default([]),
-  })
-  .strict();
-const worldContextArgsSchema = z
-  .object({
-    title: z.string().trim().min(1).max(160),
-    description: z.string().trim().min(1).max(6_000),
-    features: z.array(z.string().trim().min(1).max(120)).max(20),
-    exits: z
-      .array(
-        z
-          .object({ id: z.string().trim().min(1).max(120), label: z.string().trim().min(1).max(160) })
-          .strict()
-      )
-      .max(20),
-    npcs: z.array(npcSchema).max(20).default([]),
-    merchants: z.array(merchantSchema).max(20).default([]),
-  })
-  .strict();
 const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   campaign_context: noArguments,
   content_search: z.object({
@@ -103,7 +55,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     }).strict(),
   ]),
   character_options: noArguments,
-  world_context: worldContextArgsSchema,
+  world_context: engineWorldContextArgsSchema,
   player_notes: noArguments,
   player_note_add: z
     .object({
@@ -339,7 +291,35 @@ const inventoryItemJsonSchema = {
   ],
 } as const;
 
-const merchantJsonSchema = {
+const merchantListingJsonSchema = {
+  type: "object",
+  properties: {
+    item: inventoryItemJsonSchema,
+    stock: { type: "integer", minimum: -1, description: "-1 means unlimited stock." },
+    buyPriceCopper: { type: "integer", minimum: 0 },
+    sellPriceCopper: { type: "integer", minimum: 0 },
+  },
+  required: ["item", "stock", "buyPriceCopper", "sellPriceCopper"],
+  additionalProperties: false,
+} as const;
+
+const npcPatchJsonSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    description: { type: "string" },
+    disposition: { type: "string", enum: ["hostile", "unfriendly", "neutral", "friendly", "helpful"] },
+    goals: { type: "array", maxItems: 12, items: { type: "string" } },
+    socialDc: { type: "integer", minimum: 1, maximum: 30, description: "Temporary authored social difficulty; challenge-tier ownership is tracked separately." },
+    relationshipScore: { type: "integer", minimum: -100, maximum: 100, description: "Reserved authoritative field. Do not supply it: every supplied value is rejected." },
+    memories: { type: "array", maxItems: 20, items: { type: "string" } },
+  },
+  required: ["id"],
+  additionalProperties: false,
+} as const;
+
+const merchantPatchJsonSchema = {
   type: "object",
   properties: {
     id: { type: "string" },
@@ -349,20 +329,38 @@ const merchantJsonSchema = {
     items: {
       type: "array",
       maxItems: 100,
-      items: {
-        type: "object",
-        properties: {
-          item: inventoryItemJsonSchema,
-          stock: { type: "integer", minimum: -1, description: "-1 means unlimited stock." },
-          buyPriceCopper: { type: "integer", minimum: 0 },
-          sellPriceCopper: { type: "integer", minimum: 0 },
-        },
-        required: ["item", "stock", "buyPriceCopper", "sellPriceCopper"],
-        additionalProperties: false,
-      },
+      items: merchantListingJsonSchema,
     },
   },
-  required: ["id", "name", "items"],
+  required: ["id"],
+  additionalProperties: false,
+} as const;
+
+const npcPatchOperationsJsonSchema = {
+  type: "object",
+  description: "Omit this property to preserve every existing NPC. Use nonempty upsert and/or remove arrays when changing NPCs.",
+  properties: {
+    upsert: { type: "array", maxItems: 20, items: npcPatchJsonSchema },
+    remove: { type: "array", maxItems: 20, items: { type: "string" } },
+  },
+  anyOf: [
+    { required: ["upsert"], properties: { upsert: { type: "array", minItems: 1, maxItems: 20, items: npcPatchJsonSchema } } },
+    { required: ["remove"], properties: { remove: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" } } } },
+  ],
+  additionalProperties: false,
+} as const;
+
+const merchantPatchOperationsJsonSchema = {
+  type: "object",
+  description: "Omit this property to preserve every existing merchant. Use nonempty upsert and/or remove arrays when changing merchant catalogs.",
+  properties: {
+    upsert: { type: "array", maxItems: 20, items: merchantPatchJsonSchema },
+    remove: { type: "array", maxItems: 20, items: { type: "string" } },
+  },
+  anyOf: [
+    { required: ["upsert"], properties: { upsert: { type: "array", minItems: 1, maxItems: 20, items: merchantPatchJsonSchema } } },
+    { required: ["remove"], properties: { remove: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" } } } },
+  ],
   additionalProperties: false,
 } as const;
 
@@ -438,8 +436,8 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         description: { type: "string", description: "What is true and immediately relevant in this context." },
         features: { type: "array", items: { type: "string" }, description: "Important people, objects, hazards, clues, or features currently present." },
         exits: { type: "array", items: { type: "object", properties: { id: { type: "string" }, label: { type: "string" } }, required: ["id", "label"], additionalProperties: false }, description: "Only meaningful destinations the player can currently pursue." },
-        npcs: { type: "array", description: "NPCs the DM is authoring into the current context, including social DCs and goals." },
-        merchants: { type: "array", items: merchantJsonSchema, description: "Merchant catalogs authored by the DM. Prefer exact Open5e content references; prices and stock become authoritative for trade tools." },
+        npcs: npcPatchOperationsJsonSchema,
+        merchants: merchantPatchOperationsJsonSchema,
       },
       required: ["title", "description", "features", "exits"],
       additionalProperties: false,
@@ -759,12 +757,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "world_context":
       return engineCommandSchema.parse({
         kind: "world_context",
-        title: args.title,
-        description: args.description,
-        features: args.features,
-        exits: args.exits,
-        npcs: args.npcs ?? [],
-        merchants: args.merchants ?? [],
+        ...args,
       });
     case "player_note_add":
       return engineCommandSchema.parse({ kind: "player_note_add", text: args.text, source: args.source ?? "dm" });

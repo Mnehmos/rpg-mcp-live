@@ -335,4 +335,123 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(store.getCampaign(context).version).toBe(1);
     store.close();
   });
+
+  it("does not stage a rejected world_context effect before a corrected patch", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-rejected-world-context",
+                type: "function",
+                function: {
+                  name: "world_context",
+                  arguments: JSON.stringify({
+                    title: "The Bellkeeper's Wharf",
+                    description: "Rain rattles the shutters while the bellkeeper studies a soaked ledger.",
+                    features: ["soaked ledger"],
+                    exits: [],
+                    npcs: { upsert: [{ id: "bellkeeper", name: "The Bellkeeper", relationshipScore: 0 }] },
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-corrected-world-context",
+                type: "function",
+                function: {
+                  name: "world_context",
+                  arguments: JSON.stringify({
+                    title: "The Bellkeeper's Wharf",
+                    description: "Rain rattles the shutters while the bellkeeper studies a soaked ledger.",
+                    features: ["soaked ledger"],
+                    exits: [],
+                    npcs: { upsert: [{ id: "bellkeeper", name: "The Bellkeeper" }] },
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "The bellkeeper taps the ledger and points toward the storm-dark channel." } }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-corrected-world", "actor-corrected-world");
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: "account-corrected-world",
+        actorId: "actor-corrected-world",
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: "account-corrected-world",
+      campaignId: state.id,
+      actorId: "actor-corrected-world",
+      capabilities: ["player", "dm"],
+    };
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      0,
+      "I ask the bellkeeper why the ledger is soaked."
+    );
+
+    const correctionRequest = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(correctionRequest.messages.at(-1)).toMatchObject({
+      role: "tool",
+      content: expect.stringContaining('"code":"field_not_authorable"'),
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.state.version).toBe(1);
+    expect(result.state.worldContext?.npcs).toEqual([expect.objectContaining({
+      id: "bellkeeper",
+      name: "The Bellkeeper",
+      relationshipScore: 0,
+    })]);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["world_context"]);
+    expect(result.event?.effects?.[0]?.command).toMatchObject({
+      kind: "world_context",
+      npcs: { upsert: [{ id: "bellkeeper", name: "The Bellkeeper" }] },
+    });
+    expect(result.event?.stateChanges.map((change) => change.path)).toEqual([
+      "/worldContext/id",
+      "/worldContext/title",
+      "/worldContext/description",
+      "/worldContext/features",
+      "/worldContext/exits",
+      "/worldContext/npcs/bellkeeper",
+    ]);
+    store.close();
+  });
 });

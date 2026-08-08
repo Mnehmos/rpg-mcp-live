@@ -1168,8 +1168,8 @@ describe("Lantern engine boundary", () => {
       description: "A living bazaar where every deal has a witness.",
       features: ["jade stall", "tea cart"],
       exits: [],
-      npcs: [{ id: "narin", name: "Narin", description: "A cautious trader.", disposition: "neutral" as const, goals: ["turn a profit"], socialDc: 12, relationshipScore: 0, memories: [] }],
-      merchants: [{
+      npcs: { upsert: [{ id: "narin", name: "Narin", description: "A cautious trader.", disposition: "neutral" as const, goals: ["turn a profit"], socialDc: 12, memories: [] }] },
+      merchants: { upsert: [{
         id: "narin-market",
         name: "Narin's stall",
         description: "Portable goods arranged on blue cloth.",
@@ -1180,7 +1180,7 @@ describe("Lantern engine boundary", () => {
           buyPriceCopper: 150,
           sellPriceCopper: 75,
         }],
-      }],
+      }] },
     };
     const established = resolveEngineCommand(created.state, commandContext, randomUUID(), contextCommand, "world_context");
     const purchase = resolveEngineCommand(
@@ -1236,7 +1236,7 @@ describe("Lantern engine boundary", () => {
         description: "Finished armor hangs beneath a striped awning.",
         features: ["armor racks"],
         exits: [],
-        merchants: [{
+        merchants: { upsert: [{
           id: "armorer",
           name: "The Armorer",
           description: "A practical smith.",
@@ -1251,7 +1251,7 @@ describe("Lantern engine boundary", () => {
             buyPriceCopper: 500,
             sellPriceCopper: 500,
           }],
-        }],
+        }] },
       },
       "world_context"
     );
@@ -1528,8 +1528,7 @@ describe("Lantern engine boundary", () => {
         description: "Three roads meet under a watchful hawk.",
         features: ["old milestone"],
         exits: [],
-        npcs: [{ id: "guide", name: "The Guide", description: "A patient traveler.", disposition: "friendly", goals: ["find the lost caravan"], socialDc: 10, relationshipScore: 0, memories: [] }],
-        merchants: [],
+        npcs: { upsert: [{ id: "guide", name: "The Guide", description: "A patient traveler.", disposition: "friendly", goals: ["find the lost caravan"], socialDc: 10, memories: [] }] },
       },
       "world_context"
     );
