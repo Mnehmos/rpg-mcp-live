@@ -23,6 +23,10 @@ import type {
   EngineCurrencyBreakdown,
   EngineCombat,
   EngineCombatView,
+  EnginePendingReaction,
+  EngineTurnBudget,
+  EngineTurnBudgetSlot,
+  EngineMovementBudget,
   EngineContentPolicy,
   EngineContentReference,
   EngineEvent,
@@ -32,6 +36,7 @@ import type {
   EngineEffectOperation,
   EngineImprovEffect,
   EngineInventoryItem,
+  EngineWeaponAttack,
   EngineMerchant,
   EngineMerchantPatch,
   EngineMerchantPatchOperations,
@@ -81,6 +86,7 @@ import {
   defaultOpen5eLanguages,
   materializeInventory,
   materializeInventoryItem,
+  getOpen5eEquipment,
   materializeCombatant,
   materializeCombatants,
   createOpen5eCombatant,
@@ -109,8 +115,6 @@ import {
   requireOpen5eSkill,
   requireOpen5eSpecies,
 } from "./open5e-rules.js";
-
-const proficiencyBonus = 2;
 
 export function defaultCampaignProfile(): EngineCampaignProfile {
   return {
@@ -275,6 +279,15 @@ export function cloneCampaign(state: LanternCampaignState): LanternCampaignState
 
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
   const sandboxActions = ["observe", "listen", "roll"];
+  const combatActions = state.combat.status === "active"
+    ? state.combat.activeActorId === state.actorId
+      ? [
+          ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", "combat_action:dodge"]),
+          ...(state.combat.turnBudget.bonusAction.spent || (state.character.featureUses.secondWind ?? 0) < 1 ? [] : ["combat_action:second_wind"]),
+          "end_turn",
+        ]
+      : ["advance_turn"]
+    : [];
   return {
     id: state.id,
     userId: state.accountId,
@@ -299,7 +312,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
         ? ["create_character"]
         : state.phase === "tutorial"
           ? ["continue"]
-          : sandboxActions,
+          : [...sandboxActions, ...combatActions],
     lastRoll: state.lastRoll,
     character: characterData(state.character) as EngineSessionView["character"],
     combat: combatData(state.combat),
@@ -425,6 +438,8 @@ export function resolveEngineCommand(
       return resolveCheck(state, context, clientCommandId, command, tool, command.ability, command.skill ?? null, command.goal);
     case "combat_action":
       return resolveCombatAction(state, context, clientCommandId, command, tool);
+    case "end_turn":
+      return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
     case "combat_start":
       return resolveCombatStart(state, context, clientCommandId, command, tool);
     case "spawn_creature":
@@ -1471,9 +1486,8 @@ function resolveCombatStart(
     encounterName: command.encounterName,
     round: 1,
     activeActorId: state.actorId,
-    actionUsed: false,
-    bonusActionUsed: false,
-    reactionUsed: false,
+    turnBudget: emptyTurnBudget(state.character.speed),
+    pendingReaction: null,
     enemies,
     lootClaimed: false,
     lastAction: null,
@@ -1739,13 +1753,13 @@ function resolveCastSpell(
   if (castingTime !== "reaction" && state.combat.activeActorId !== state.actorId) {
     return rejection(state, tool, "off_turn", "It is not your turn; only a reaction spell can be cast now.");
   }
-  if (castingTime === "action" && state.combat.actionUsed) {
+  if (castingTime === "action" && state.combat.turnBudget.action.spent) {
     return rejection(state, tool, "action_already_used", "Your action is already spent this turn.");
   }
-  if (castingTime === "bonus-action" && state.combat.bonusActionUsed) {
+  if (castingTime === "bonus-action" && state.combat.turnBudget.bonusAction.spent) {
     return rejection(state, tool, "bonus_action_already_used", "Your bonus action is already spent this turn.");
   }
-  if (castingTime === "reaction" && state.combat.reactionUsed) {
+  if (castingTime === "reaction" && state.combat.turnBudget.reaction.spent) {
     return rejection(state, tool, "reaction_already_used", "Your reaction is already spent this round.");
   }
 
@@ -1803,9 +1817,9 @@ function resolveCastSpell(
 
   const next = cloneCampaign(state);
   if (selectedSlotLevel !== null) next.character.spellcasting!.slots[String(selectedSlotLevel)] -= 1;
-  if (castingTime === "action") next.combat.actionUsed = true;
-  else if (castingTime === "bonus-action") next.combat.bonusActionUsed = true;
-  else next.combat.reactionUsed = true;
+  if (castingTime === "action") spendTurnSlot(next.combat.turnBudget, "action");
+  else if (castingTime === "bonus-action") spendTurnSlot(next.combat.turnBudget, "bonusAction");
+  else spendTurnSlot(next.combat.turnBudget, "reaction");
   if (spell.definition.concentration) {
     next.character.spellcasting!.concentration = {
       contentKey: spell.contentKey,
@@ -1832,7 +1846,7 @@ function resolveCastSpell(
     });
   }
   changes.push({
-    path: `/combat/${castingTime === "bonus-action" ? "bonusActionUsed" : castingTime === "reaction" ? "reactionUsed" : "actionUsed"}`,
+    path: `/combat/turnBudget/${castingTime === "bonus-action" ? "bonusAction" : castingTime === "reaction" ? "reaction" : "action"}/spent`,
     before: false,
     after: true,
   });
@@ -2040,6 +2054,76 @@ function executableSpellRangeFeet(definition: NormalizedSpell): number {
   return sourceDistance + (definition.area.size ?? 0);
 }
 
+export function deriveWeaponAttack(character: EngineCharacter, weaponId?: string): EngineWeaponAttack | null {
+  const equippedWeapons = character.inventory
+    .filter((item) => item.equipped && (item.slot === "mainhand" || item.slot === "offhand"))
+    .map((item) => {
+      try {
+        const view = materializeInventoryItem(item);
+        return view.kind === "weapon" ? { item, view } : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  const selected = weaponId
+    ? equippedWeapons.find((entry) => entry.item.id === weaponId)
+    : equippedWeapons.find((entry) => entry.item.slot === "mainhand") ?? equippedWeapons[0];
+  if (!selected) return null;
+  const source = selected.item.contentKey
+    ? getOpen5eEquipment(selected.item.contentKey, selected.item.packHash)
+    : null;
+  const properties = [...new Set((selected.view.properties ?? []).map((property) => property.trim().toLocaleLowerCase("en-US").replaceAll(" ", "-")))];
+  const weaponRecord = source?.weapon ?? null;
+  if (weaponRecord) {
+    for (const property of weaponRecord.properties) {
+      const key = (property.type ?? property.name).trim().toLocaleLowerCase("en-US").replaceAll(" ", "-");
+      if (key && !properties.includes(key)) properties.push(key);
+    }
+  }
+  const damageDice = weaponRecord?.damageDice ?? selected.view.damage?.match(/\d+d\d+/i)?.[0] ?? null;
+  if (!damageDice) return null;
+  const normalRangeFeet = weaponRecord?.range.normal ?? null;
+  const longRangeFeet = weaponRecord?.range.long ?? null;
+  const ranged = properties.includes("ranged") || (normalRangeFeet !== null && normalRangeFeet > 0);
+  const finesse = properties.includes("finesse");
+  const ability: EngineAbility = finesse
+    ? (character.abilities.dex >= character.abilities.str ? "dex" : "str")
+    : ranged ? "dex" : "str";
+  const weaponName = selected.view.name;
+  const proficiencies = character.proficiencies.weapons.map((entry) => entry.trim().toLocaleLowerCase("en-US"));
+  const normalizedWeaponName = weaponName.toLocaleLowerCase("en-US");
+  const pluralName = normalizedWeaponName.endsWith("s") ? normalizedWeaponName : normalizedWeaponName + "s";
+  const proficient = Boolean(
+    weaponRecord && (
+      (weaponRecord.isSimple && proficiencies.includes("simple weapons"))
+      || (weaponRecord.isMartial && proficiencies.includes("martial weapons"))
+    )
+  ) || proficiencies.some((entry) => entry === normalizedWeaponName || entry === pluralName);
+  const abilityModifierValue = abilityModifier(character.abilities[ability]);
+  const proficiencyBonus = character.proficiencyBonus;
+  const attackBonus = abilityModifierValue + (proficient ? proficiencyBonus : 0);
+  const explanation = `${weaponName} uses ${ability.toUpperCase()} ${abilityModifierValue >= 0 ? "+" : ""}${abilityModifierValue}; `
+    + `${proficient ? "proficiency applies" : "the character is not proficient"}; `
+    + `damage is ${damageDice}${selected.view.damage?.match(/\s+([a-zA-Z][a-zA-Z -]*)$/)?.[1] ? ` ${selected.view.damage.match(/\s+([a-zA-Z][a-zA-Z -]*)$/)?.[1]}` : ""}.`;
+  return {
+    weaponId: selected.item.id,
+    weaponName,
+    ability,
+    abilityModifier: abilityModifierValue,
+    proficient,
+    proficiencyBonus,
+    attackBonus,
+    damageDice,
+    damageType: source?.weapon?.damageTypeName ?? selected.view.damage?.replace(/^\d+d\d+\s*/i, "") ?? "unknown",
+    properties,
+    reachFeet: weaponRecord?.range.normal === 0 ? 5 : (ranged ? null : 5),
+    normalRangeFeet: normalRangeFeet && normalRangeFeet > 0 ? normalRangeFeet : null,
+    longRangeFeet: longRangeFeet && longRangeFeet > 0 ? longRangeFeet : null,
+    explanation,
+  };
+}
+
 function resolveCombatAction(
   state: LanternCampaignState,
   context: RequestContext,
@@ -2049,7 +2133,10 @@ function resolveCombatAction(
 ): EngineResolution {
   if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active encounter.");
   if (state.combat.activeActorId !== state.actorId) {
-    return rejection(state, tool, "off_turn", "It is not your turn. Advance the encounter before acting again.");
+    return rejection(state, tool, "off_turn", "It is not your turn. End the enemy turn before acting again.");
+  }
+  if (["dash", "disengage", "help", "ready"].includes(command.action)) {
+    return rejection(state, tool, "unsupported_action", `${command.action} has no mechanical implementation in this combat profile yet.`);
   }
   if (hasRuntimeCondition(state, state.character.id, "unconscious")) {
     return rejection(state, tool, "unconscious", "You are unconscious and must make a death save.");
@@ -2057,34 +2144,60 @@ function resolveCombatAction(
   const preventingCondition = ["incapacitated", "paralyzed", "petrified", "stunned"]
     .find((condition) => hasRuntimeCondition(state, state.character.id, condition));
   if (preventingCondition) {
+    return rejection(state, tool, "condition_prevents_action", `You are ${preventingCondition} and cannot take an action. End the turn to resolve the skipped turn.`);
+  }
+  const requiredSlot = command.action === "second_wind" ? "bonusAction" : "action";
+  if (state.combat.turnBudget[requiredSlot].spent) {
     return rejection(
       state,
       tool,
-      "condition_prevents_action",
-      `You are ${preventingCondition} and cannot take an action. Advance the turn to resolve the skipped turn.`
+      requiredSlot === "bonusAction" ? "bonus_action_already_used" : "action_already_used",
+      requiredSlot === "bonusAction" ? "Your bonus action is already spent this turn." : "Your action is already spent this turn."
     );
   }
-  if (state.combat.actionUsed) return rejection(state, tool, "action_already_used", "Your action is already spent this turn.");
-
   const sourceTarget = findLiveCombatant(state.combat, command.targetId);
   if (command.action === "attack" && !sourceTarget) {
     return rejection(state, tool, "target_required", "Choose a living target for the attack.");
+  }
+  const derivedAttack = command.action === "attack" ? deriveWeaponAttack(state.character, command.weaponId) : null;
+  if (command.action === "attack" && !derivedAttack) {
+    return rejection(state, tool, command.weaponId ? "weapon_not_equipped" : "weapon_required", command.weaponId ? "The selected weapon must be an equipped weapon." : "Equip a weapon before attacking.");
+  }
+  if (command.action === "second_wind" && (state.character.featureUses.secondWind ?? 0) < 1) {
+    return rejection(state, tool, "feature_unavailable", "Second Wind is unavailable until your next rest.");
+  }
+  if (command.action === "second_wind" && state.character.hp >= state.character.maxHp) {
+    return rejection(state, tool, "feature_not_needed", "Second Wind cannot be used while you are at full hit points.");
   }
 
   const next = cloneCampaign(state);
   const target = sourceTarget ? findLiveCombatant(next.combat, sourceTarget.id) : null;
   const targetView = target ? materializeCombatant(target) : null;
-  next.combat.actionUsed = true;
+  spendTurnSlot(next.combat.turnBudget, requiredSlot);
   next.combat.lastAction = command.action;
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [
-    { path: "/combat/actionUsed", before: false, after: true },
+    { path: `/combat/turnBudget/${requiredSlot}/spent`, before: false, after: true },
   ];
   let message = "You " + command.action + ".";
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
   const modifiers: Array<{ name: string; value: number }> = [];
   let outcome = "action_used";
 
-  if (command.action === "attack" && target) {
+  if (command.action === "second_wind") {
+    const die = randomInt(1, 11);
+    const beforeHp = next.character.hp;
+    const healed = die + next.character.level;
+    next.character.hp = Math.min(next.character.maxHp, next.character.hp + healed);
+    next.character.featureUses.secondWind = 0;
+    rolls.push({ kind: "second_wind_d10", value: die, sides: 10 });
+    modifiers.push({ name: "level", value: next.character.level });
+    changes.push(
+      { path: "/character/hp", before: beforeHp, after: next.character.hp },
+      { path: "/character/featureUses/secondWind", before: 1, after: 0 },
+    );
+    message = `You recover ${next.character.hp - beforeHp} hit points with Second Wind.`;
+    outcome = "second_wind";
+  } else if (command.action === "attack" && target && targetView && derivedAttack) {
     const attackRoll = randomInt(1, 21);
     const attackModifierQuery = queryModifiers(next.effects, next.character.id, "attack-roll");
     const secondRoll = attackModifierQuery.mode === "advantage" || attackModifierQuery.mode === "disadvantage"
@@ -2092,34 +2205,26 @@ function resolveCombatAction(
       : null;
     const effectiveRoll = secondRoll === null
       ? attackRoll
-      : attackModifierQuery.mode === "advantage"
-        ? Math.max(attackRoll, secondRoll)
-        : Math.min(attackRoll, secondRoll);
-    const attackModifier = abilityModifier(next.character.abilities.str) + proficiencyBonus;
-    const total = effectiveRoll + attackModifier;
+      : attackModifierQuery.mode === "advantage" ? Math.max(attackRoll, secondRoll) : Math.min(attackRoll, secondRoll);
+    const total = effectiveRoll + derivedAttack.attackBonus;
     const critical = effectiveRoll === 20;
-    const hit = critical || total >= targetView!.armorClass;
+    const hit = effectiveRoll !== 1 && (critical || total >= targetView.armorClass);
     rolls.push({ kind: "attack_d20", value: effectiveRoll, sides: 20 });
     if (secondRoll !== null) rolls.push({ kind: `attack_${attackModifierQuery.mode}_d20`, value: secondRoll, sides: 20 });
-    modifiers.push({ name: "attack_bonus", value: attackModifier }, { name: "target_ac", value: targetView!.armorClass });
+    modifiers.push({ name: "attack_bonus", value: derivedAttack.attackBonus }, { name: "target_ac", value: targetView.armorClass });
     if (hit) {
-      const damageRoll = randomInt(1, 9);
-      const damageModifier = abilityModifier(next.character.abilities.str);
-      const damage = (critical ? damageRoll * 2 : damageRoll) + damageModifier;
+      const diceMatch = derivedAttack.damageDice.match(/^(\d+)d(\d+)$/i);
+      const diceCount = diceMatch ? Number(diceMatch[1]) * (critical ? 2 : 1) : 1;
+      const dieSides = diceMatch ? Number(diceMatch[2]) : 8;
+      const damageDice = Array.from({ length: diceCount }, () => randomInt(1, dieSides + 1));
+      const damage = Math.max(1, damageDice.reduce((sum, die) => sum + die, 0) + derivedAttack.abilityModifier);
       const beforeHp = target.hp;
-      target.hp = Math.max(0, target.hp - Math.max(1, damage));
+      target.hp = Math.max(0, target.hp - damage);
       target.alive = target.hp > 0;
-      rolls.push({ kind: "damage_d8", value: damageRoll, sides: 8 });
-      modifiers.push({ name: "damage_modifier", value: damageModifier });
-      changes.push({ path: "/combat/enemies/" + target.id + "/hp", before: beforeHp, after: target.hp });
-      message =
-        "Your attack " +
-        (critical ? "critically " : "") +
-        "hits " +
-        targetView!.name +
-        " for " +
-        Math.max(1, damage) +
-        " damage.";
+      damageDice.forEach((die) => rolls.push({ kind: `damage_${derivedAttack.damageDice}`, value: die, sides: dieSides }));
+      modifiers.push({ name: "damage_modifier", value: derivedAttack.abilityModifier });
+      changes.push({ path: `/combat/enemies/${target.id}/hp`, before: beforeHp, after: target.hp });
+      message = `Your ${derivedAttack.weaponName} attack ${critical ? "critically " : ""}hits ${targetView.name} for ${damage} ${derivedAttack.damageType.toLowerCase()} damage.`;
       outcome = target.alive ? "hit" : "defeated";
       if (!next.combat.enemies.some((combatant) => combatant.alive)) {
         next.combat.status = "ended";
@@ -2127,70 +2232,58 @@ function resolveCombatAction(
         message += " The encounter ground falls silent.";
         changes.push({ path: "/combat/status", before: "active", after: "ended" });
       } else {
-        next.combat.activeActorId = firstLiveCombatantId(next.combat);
-        message += " The opposition is still standing; advance the turn to resolve its answer.";
+        message += " Your turn remains open; end it when you are ready.";
       }
     } else {
-      next.combat.activeActorId = firstLiveCombatantId(next.combat);
-      message = "Your attack misses " + targetView!.name + ". Advance the turn to see its answer.";
+      message = `Your ${derivedAttack.weaponName} attack misses ${targetView.name}. Your turn remains open; end it when you are ready.`;
       outcome = "miss";
     }
-  } else {
-    if (command.action === "dodge") {
-      const beforeConditions = [...next.character.conditions];
-      applyRuntimeEffect(
-        next,
-        effectInput(
-          next,
-          "combat:dodge",
-          next.character.id,
-          [next.character.id],
-          [
-            { kind: "condition", condition: "dodging", action: "apply" },
-            { kind: "disadvantage", category: "attack-roll" },
-          ],
-          { kind: "turn-boundary", boundary: "start", subject: "target", offsetTurns: 1 },
-          "condition:dodging",
-          "ignore",
-          ["duration"],
-          clientCommandId,
-        ),
-        changes,
-      );
-      if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
-        changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
-      }
-      message = "You take a guarded stance. The next incoming attack is made at disadvantage.";
-    } else if (command.action === "dash") {
-      message = "You gain ground across the encounter ground. The sentry watches for an opening.";
-    } else if (command.action === "disengage") {
-      message = "You withdraw without provoking a strike.";
-    } else if (command.action === "help") {
-      message = "You create an opening, though there is no ally here to take advantage of it.";
+  } else if (command.action === "dodge") {
+    const beforeConditions = [...next.character.conditions];
+    applyRuntimeEffect(
+      next,
+      effectInput(next, "combat:dodge", next.character.id, [next.character.id], [
+        { kind: "condition", condition: "dodging", action: "apply" },
+        { kind: "disadvantage", category: "attack-roll" },
+      ], { kind: "turn-boundary", boundary: "start", subject: "target", offsetTurns: 1 }, "condition:dodging", "ignore", ["duration"], clientCommandId),
+      changes,
+    );
+    if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
+      changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
     }
-    next.combat.activeActorId = firstLiveCombatantId(next.combat);
+    message = "You take a guarded stance. The next incoming attack is made at disadvantage. End the turn when ready.";
   }
 
   resolveTargetEndConditionEffects(next, rolls, modifiers, changes);
-  return commit(
-    next,
-    context,
-    clientCommandId,
-    command,
-    tool,
-    message,
-    {
-      action: command.action,
-      targetId: target?.id ?? null,
-      combat: combatData(next.combat),
-      effects: next.effects.filter((candidate) => candidate.status === "active"),
-      character: characterData(next.character),
-    },
-    outcome,
-    rolls,
-    modifiers,
-    changes
-  );
+  return commit(next, context, clientCommandId, command, tool, message, {
+    action: command.action,
+    targetId: target?.id ?? null,
+    derivedAttack,
+    combat: combatData(next.combat),
+    effects: next.effects.filter((candidate) => candidate.status === "active"),
+    character: characterData(next.character),
+  }, outcome, rolls, modifiers, changes);
+}
+
+function resolvePlayerEndTurn(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "end_turn" | "advance_turn" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active encounter to end.");
+  if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "It is not your turn.");
+  const next = cloneCampaign(state);
+  const nextEnemy = firstLiveCombatantId(next.combat);
+  if (!nextEnemy) {
+    next.combat.status = "ended";
+    next.combat.activeActorId = null;
+    return commit(next, context, clientCommandId, command, tool, "With no foe left standing, the encounter ends.", { combat: combatData(next.combat) }, "encounter_ended", [], [], [{ path: "/combat/status", before: "active", after: "ended" }]);
+  }
+  next.combat.activeActorId = nextEnemy;
+  next.combat.lastAction = "end_turn";
+  return commit(next, context, clientCommandId, command, tool, "Your turn ends. The opposition may act.", { combat: combatData(next.combat) }, "turn_ended", [], [], [{ path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextEnemy }]);
 }
 
 function resolveAdvanceTurn(
@@ -2206,7 +2299,16 @@ function resolveAdvanceTurn(
       .some((condition) => hasRuntimeCondition(state, state.character.id, condition))) {
       return resolveSkippedCharacterTurn(state, context, clientCommandId, command, tool);
     }
-    return rejection(state, tool, "not_enemy_turn", "The enemy has not been given the turn yet.");
+    // Compatibility alias for callers that used advance_turn as the old player
+    // handoff. New clients should send end_turn first; the action resolver
+    // itself never auto-advances.
+    const handoff = cloneCampaign(state);
+    handoff.combat.activeActorId = firstLiveCombatantId(handoff.combat);
+    const legacyEnemyResolution = resolveAdvanceTurn(handoff, context, clientCommandId, command, tool);
+    if (!legacyEnemyResolution.accepted) {
+      return rejection(state, tool, legacyEnemyResolution.code ?? "enemy_turn_unavailable", legacyEnemyResolution.message);
+    }
+    return legacyEnemyResolution;
   }
 
   const enemy = state.combat.activeActorId
@@ -2402,9 +2504,8 @@ function resolveAdvanceTurn(
   } else {
     next.combat.round += 1;
     next.combat.activeActorId = next.actorId;
-    next.combat.actionUsed = next.character.hp === 0;
-    next.combat.bonusActionUsed = false;
-    next.combat.reactionUsed = false;
+    resetTurnBudget(next.combat.turnBudget, next.character.speed);
+    if (next.character.hp === 0) spendTurnSlot(next.combat.turnBudget, "action");
     message += next.character.hp === 0
       ? " Your turn arrives; make a death save."
       : " The initiative returns to you.";
@@ -2440,10 +2541,10 @@ function resolveSkippedCharacterTurn(
   resolveTargetEndConditionEffects(next, rolls, modifiers, changes);
   const beforeActor = next.combat.activeActorId;
   next.combat.activeActorId = firstLiveCombatantId(next.combat);
-  next.combat.actionUsed = true;
+  spendTurnSlot(next.combat.turnBudget, "action");
   changes.push(
     { path: "/combat/activeActorId", before: beforeActor, after: next.combat.activeActorId },
-    { path: "/combat/actionUsed", before: state.combat.actionUsed, after: true }
+    { path: "/combat/turnBudget/action/spent", before: state.combat.turnBudget.action.spent, after: true }
   );
   const condition = ["incapacitated", "paralyzed", "petrified", "stunned"]
     .find((candidate) => hasRuntimeCondition(state, state.character.id, candidate)) ?? "incapacitated";
@@ -3001,9 +3102,8 @@ function finishCreatureTurn(
   }
   state.combat.round += 1;
   state.combat.activeActorId = state.actorId;
-  state.combat.actionUsed = state.character.hp === 0;
-  state.combat.bonusActionUsed = false;
-  state.combat.reactionUsed = false;
+  resetTurnBudget(state.combat.turnBudget, state.character.speed);
+  if (state.character.hp === 0) spendTurnSlot(state.combat.turnBudget, "action");
   const beforeConditions = [...state.character.conditions];
   expireAtCharacterTurnStart(state, changes);
   changes.push(
@@ -3169,7 +3269,7 @@ function resolveDeathSave(
       changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
     }
     next.combat.activeActorId = firstLiveCombatantId(next.combat);
-    next.combat.actionUsed = true;
+    spendTurnSlot(next.combat.turnBudget, "action");
     message += " You stabilize.";
     outcome = "stable";
   } else if (next.character.deathSaveFailures >= 3) {
@@ -3185,7 +3285,7 @@ function resolveDeathSave(
     outcome = "dead";
   } else {
     next.combat.activeActorId = firstLiveCombatantId(next.combat);
-    next.combat.actionUsed = true;
+    spendTurnSlot(next.combat.turnBudget, "action");
   }
 
   return commit(
@@ -3292,6 +3392,7 @@ function resolveRest(
   const beforeHitDice = next.character.hitDiceRemaining;
   const beforeSlots = next.character.spellcasting ? { ...next.character.spellcasting.slots } : null;
   const beforeConcentration = next.character.spellcasting?.concentration ?? null;
+  const beforeFeatureUses = { ...next.character.featureUses };
   const beforeEffects = next.effects;
   let message = "You complete a long rest. Your wounds close and your resources recover.";
   let outcome = "long_rest";
@@ -3327,6 +3428,7 @@ function resolveRest(
     }
   }
   next.effects = clearEffectsByPolicy(next.effects, command.restType === "short" ? "short-rest" : "long-rest");
+  if (next.character.className.trim().toLocaleLowerCase("en-US") === "fighter") next.character.featureUses.secondWind = 1;
   syncConditionProjections(next);
   return commit(
     next,
@@ -3344,6 +3446,9 @@ function resolveRest(
       { path: "/character/hitDiceRemaining", before: beforeHitDice, after: next.character.hitDiceRemaining },
       ...(beforeSlots ? [{ path: "/character/spellcasting/slots", before: beforeSlots, after: next.character.spellcasting?.slots ?? null }] : []),
       ...(beforeConcentration ? [{ path: "/character/spellcasting/concentration", before: beforeConcentration, after: next.character.spellcasting?.concentration ?? null }] : []),
+      ...(JSON.stringify(beforeFeatureUses) !== JSON.stringify(next.character.featureUses)
+        ? [{ path: "/character/featureUses", before: beforeFeatureUses, after: next.character.featureUses }]
+        : []),
       ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects)
         ? [{ path: "/effects", before: beforeEffects, after: next.effects }]
         : []),
@@ -3862,6 +3967,7 @@ function createCanonicalCharacter(
       languages: languages.map((language) => language.name),
     },
     features: features.map((feature) => feature.name),
+    featureUses: { secondWind: characterClass.sourceKey === "srd_fighter" ? 1 : 0 },
     spellcasting: buildSpellcastingState(characterClass.definition.name, level, abilities),
     hp: maxHp,
     maxHp,
@@ -4026,6 +4132,7 @@ function createCharacter(
       languages: speciesPreset.languages,
     },
     features: [...classPreset.startingFeatures, ...speciesPreset.features],
+    featureUses: { secondWind: className.toLocaleLowerCase("en-US") === "fighter" ? 1 : 0 },
     spellcasting: buildSpellcastingState(className, level, abilities),
     hp: maxHp,
     maxHp,
@@ -4064,12 +4171,25 @@ function normalizeCharacter(character: EngineCharacter): EngineCharacter {
     inventory: Array.isArray(raw.inventory) ? raw.inventory.map(normalizeInventoryItem) : [],
     conditions: Array.isArray(raw.conditions) ? raw.conditions : [],
     conditionEffects: normalizeAppliedConditions(raw.conditionEffects),
+    featureUses: normalizeFeatureUses(raw.featureUses, raw.className),
     deathSaveSuccesses: raw.deathSaveSuccesses ?? 0,
     deathSaveFailures: raw.deathSaveFailures ?? 0,
     xp: raw.xp ?? 0,
   });
   syncCurrencyProjection(hydrated);
   return hydrated;
+}
+
+function normalizeFeatureUses(value: unknown, className: unknown): Record<string, number> {
+  const raw = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const fighter = typeof className === "string" && className.trim().toLocaleLowerCase("en-US") === "fighter";
+  return {
+    secondWind: typeof raw.secondWind === "number"
+      ? Math.max(0, Math.min(1, Math.trunc(raw.secondWind)))
+      : fighter ? 1 : 0,
+  };
 }
 
 function emptyCharacterDetails(): EngineCharacterDetails {
@@ -4357,6 +4477,7 @@ function hydrateCharacter(character: EngineCharacter): EngineCharacter {
         ...(classProfile?.levelOneFeatures.map((feature) => feature.name) ?? classPreset.startingFeatures),
         ...(speciesProfile?.featureNames ?? speciesPreset.features),
       ];
+  character.featureUses = normalizeFeatureUses(character.featureUses, character.className);
   character.spellcasting = buildSpellcastingState(
     character.className,
     level,
@@ -4565,6 +4686,56 @@ function formatCurrency(copper: number): string {
   return labels.join(" ");
 }
 
+function emptyTurnBudget(movementFeet = 0): EngineTurnBudget {
+  return {
+    profile: "srd-2014-single-actor",
+    action: { available: true, spent: false },
+    bonusAction: { available: true, spent: false },
+    reaction: { available: true, spent: false },
+    movementFeet: { available: Math.max(0, Math.trunc(movementFeet)), spent: 0 },
+  };
+}
+
+function normalizeTurnBudget(value: unknown, movementFeet = 0): EngineTurnBudget {
+  const raw = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Partial<EngineTurnBudget>
+    : {};
+  const slot = (candidate: unknown, legacySpent = false): EngineTurnBudgetSlot => {
+    const source = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? candidate as Partial<EngineTurnBudgetSlot>
+      : {};
+    const spent = typeof source.spent === "boolean" ? source.spent : legacySpent;
+    return { available: !spent, spent };
+  };
+  const movement = raw.movementFeet && typeof raw.movementFeet === "object" && !Array.isArray(raw.movementFeet)
+    ? raw.movementFeet as Partial<EngineMovementBudget>
+    : {};
+  const available = typeof movement.available === "number"
+    ? Math.max(0, Math.trunc(movement.available))
+    : Math.max(0, Math.trunc(movementFeet));
+  const spent = typeof movement.spent === "number"
+    ? Math.max(0, Math.min(available, Math.trunc(movement.spent)))
+    : 0;
+  return {
+    profile: "srd-2014-single-actor",
+    action: slot(raw.action, Boolean((value as { actionUsed?: unknown } | null)?.actionUsed)),
+    bonusAction: slot(raw.bonusAction, Boolean((value as { bonusActionUsed?: unknown } | null)?.bonusActionUsed)),
+    reaction: slot(raw.reaction, Boolean((value as { reactionUsed?: unknown } | null)?.reactionUsed)),
+    movementFeet: { available, spent },
+  };
+}
+
+function spendTurnSlot(budget: EngineTurnBudget, slot: "action" | "bonusAction" | "reaction"): void {
+  budget[slot] = { available: false, spent: true };
+}
+
+function resetTurnBudget(budget: EngineTurnBudget, movementFeet: number): void {
+  budget.action = { available: true, spent: false };
+  budget.bonusAction = { available: true, spent: false };
+  budget.reaction = { available: true, spent: false };
+  budget.movementFeet = { available: Math.max(0, Math.trunc(movementFeet)), spent: 0 };
+}
+
 function emptyCombat(): EngineCombat {
   return {
     status: "none",
@@ -4572,9 +4743,8 @@ function emptyCombat(): EngineCombat {
     encounterName: null,
     round: 0,
     activeActorId: null,
-    actionUsed: false,
-    bonusActionUsed: false,
-    reactionUsed: false,
+    turnBudget: emptyTurnBudget(),
+    pendingReaction: null,
     enemies: [],
     lootClaimed: false,
     lastAction: null,
@@ -4591,6 +4761,8 @@ function normalizeCombat(combat: EngineCombat | null | undefined): EngineCombat 
       encounterId: combat.encounterId ?? null,
       encounterName: combat.encounterName ?? null,
       lastAction: "legacy_encounter_requires_explicit_repin",
+      turnBudget: normalizeTurnBudget(combat.turnBudget),
+      pendingReaction: null,
     };
   }
   return {
@@ -4599,9 +4771,8 @@ function normalizeCombat(combat: EngineCombat | null | undefined): EngineCombat 
     encounterName: combat.encounterName ?? null,
     round: Math.max(0, combat.round ?? 0),
     activeActorId: combat.activeActorId ?? null,
-    actionUsed: combat.actionUsed ?? false,
-    bonusActionUsed: combat.bonusActionUsed ?? false,
-    reactionUsed: combat.reactionUsed ?? false,
+    turnBudget: normalizeTurnBudget(combat.turnBudget, 30),
+    pendingReaction: normalizePendingReaction(combat.pendingReaction),
     enemies: legacyEnemies.map((enemy) => ({
       id: enemy.id as string,
       contentKey: enemy.contentKey as string,
@@ -4614,6 +4785,33 @@ function normalizeCombat(combat: EngineCombat | null | undefined): EngineCombat 
     })),
     lootClaimed: combat.lootClaimed ?? false,
     lastAction: combat.lastAction ?? null,
+  };
+}
+
+function normalizePendingReaction(value: unknown): EnginePendingReaction | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EnginePendingReaction>;
+  if (
+    candidate.version !== 1
+    || typeof candidate.id !== "string"
+    || typeof candidate.kind !== "string"
+    || typeof candidate.sourceCommandId !== "string"
+    || typeof candidate.sourceVersion !== "number"
+    || typeof candidate.actorId !== "string"
+    || !Array.isArray(candidate.eligibleReactionIds)
+    || !["offered", "accepted", "declined", "resolved"].includes(candidate.status ?? "")
+    || typeof candidate.resumeToken !== "string"
+  ) return null;
+  return {
+    version: 1,
+    id: candidate.id,
+    kind: candidate.kind,
+    sourceCommandId: candidate.sourceCommandId,
+    sourceVersion: Math.max(0, Math.trunc(candidate.sourceVersion)),
+    actorId: candidate.actorId,
+    eligibleReactionIds: candidate.eligibleReactionIds.filter((id): id is string => typeof id === "string"),
+    status: candidate.status!,
+    resumeToken: candidate.resumeToken,
   };
 }
 
@@ -4890,6 +5088,7 @@ function characterData(character: EngineCharacter): EngineCharacterView {
     hitDiceRemaining: character.hitDiceRemaining,
     proficiencies: character.proficiencies,
     features: character.features,
+    featureUses: character.featureUses,
     spellcasting: materializeSpellcasting(character),
     hp: character.hp,
     maxHp: character.maxHp,
@@ -4924,9 +5123,8 @@ function combatData(combat: EngineCombat): EngineCombatView {
     encounterName: combat.encounterName,
     round: combat.round,
     activeActorId: combat.activeActorId,
-    actionUsed: combat.actionUsed,
-    bonusActionUsed: combat.bonusActionUsed,
-    reactionUsed: combat.reactionUsed,
+    turnBudget: combat.turnBudget,
+    pendingReaction: combat.pendingReaction,
     enemies: materializeCombatants(combat.enemies),
     lootClaimed: combat.lootClaimed,
     lastAction: combat.lastAction,

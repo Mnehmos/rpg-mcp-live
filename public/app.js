@@ -1067,9 +1067,11 @@
     var enemyMaxHp = enemy ? Math.max(1, Number(enemy.maxHp) || 1) : 1;
     var enemyFill = $("#enemy-health-fill");
     if (enemyFill) enemyFill.style.width = Math.max(0, Math.min(100, enemyHp / enemyMaxHp * 100)) + "%";
-    var economy = combat.actionUsed ? "Action spent" : "Action ready";
-    economy += combat.bonusActionUsed ? " / bonus spent" : " / bonus ready";
-    economy += combat.reactionUsed ? " / reaction spent" : " / reaction ready";
+    var budget = combat.turnBudget || {};
+    var economy = budget.action && budget.action.spent ? "Action spent" : "Action ready";
+    economy += budget.bonusAction && budget.bonusAction.spent ? " / bonus spent" : " / bonus ready";
+    economy += budget.reaction && budget.reaction.spent ? " / reaction spent" : " / reaction ready";
+    if (budget.movementFeet) economy += " / move " + Math.max(0, budget.movementFeet.available - budget.movementFeet.spent) + " ft";
     setText("#combat-detail", economy + ".");
     var enemiesNode = $("#combat-enemies");
     if (enemiesNode) enemiesNode.innerHTML = enemies.map(function (candidate) {

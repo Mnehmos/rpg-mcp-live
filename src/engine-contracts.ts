@@ -226,6 +226,7 @@ export const engineToolNameSchema = z.enum([
   "prepare_spell",
   "cast_spell",
   "combat_action",
+  "end_turn",
   "advance_turn",
   "death_save",
   "loot",
@@ -476,11 +477,13 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("combat_action"),
-      action: z.enum(["attack", "dodge", "dash", "disengage", "help"]),
+      action: z.enum(["attack", "dodge", "dash", "disengage", "help", "ready", "second_wind"]),
       targetId: z.string().trim().min(1).max(80).optional(),
+      weaponId: z.string().trim().min(1).max(120).optional(),
       goal: z.string().trim().min(1).max(2_000).optional(),
     })
     .strict(),
+  z.object({ kind: z.literal("end_turn") }).strict(),
   z.object({
     kind: z.literal("advance_turn"),
     combatantId: z.string().trim().min(1).max(120).optional(),
@@ -797,6 +800,7 @@ export interface EngineCharacter {
   hitDiceRemaining: number;
   proficiencies: { armor: string[]; weapons: string[]; tools: string[]; languages: string[] };
   features: string[];
+  featureUses: Record<string, number>;
   spellcasting: EngineSpellcasting | null;
   hp: number;
   maxHp: number;
@@ -982,15 +986,61 @@ export interface EngineCombatantView extends EngineCombatant {
   mechanicsStatus: "typed-statblock" | "basic-attacks-compiled" | "effect-programs-compiled";
 }
 
+export interface EngineWeaponAttack {
+  weaponId: string;
+  weaponName: string;
+  ability: EngineAbility;
+  abilityModifier: number;
+  proficient: boolean;
+  proficiencyBonus: number;
+  attackBonus: number;
+  damageDice: string;
+  damageType: string;
+  properties: string[];
+  reachFeet: number | null;
+  normalRangeFeet: number | null;
+  longRangeFeet: number | null;
+  explanation: string;
+}
+
+export interface EngineTurnBudgetSlot {
+  available: boolean;
+  spent: boolean;
+}
+
+export interface EngineMovementBudget {
+  available: number;
+  spent: number;
+}
+
+export interface EngineTurnBudget {
+  profile: "srd-2014-single-actor";
+  action: EngineTurnBudgetSlot;
+  bonusAction: EngineTurnBudgetSlot;
+  reaction: EngineTurnBudgetSlot;
+  movementFeet: EngineMovementBudget;
+}
+
+export interface EnginePendingReaction {
+  version: 1;
+  id: string;
+  kind: string;
+  sourceCommandId: string;
+  sourceVersion: number;
+  actorId: string;
+  eligibleReactionIds: string[];
+  status: "offered" | "accepted" | "declined" | "resolved";
+  resumeToken: string;
+}
+
 export interface EngineCombat {
   status: "none" | "active" | "ended";
   encounterId: string | null;
   encounterName: string | null;
   round: number;
   activeActorId: string | null;
-  actionUsed: boolean;
-  bonusActionUsed: boolean;
-  reactionUsed: boolean;
+  turnBudget: EngineTurnBudget;
+  pendingReaction: EnginePendingReaction | null;
   enemies: EngineCombatant[];
   lootClaimed: boolean;
   lastAction: string | null;

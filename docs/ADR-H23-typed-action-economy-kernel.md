@@ -1,6 +1,6 @@
 # ADR-H23: Typed action-economy kernel, explicit end-turn, and persisted pending reactions
 
-Status: Accepted; implementation pending
+Status: Accepted; first vertical slice implemented in issue #3
 Date: 2026-08-07
 See also: `docs/hosted-handoff/action-economy-and-spatial-design-intent.md` (Part 1 and Part 3) for the fuller research/checklist this ADR distills.
 
@@ -37,6 +37,19 @@ The reference engine's typed combat-action fields are useful *evidence* that thi
 - `end_turn` becoming explicit means DM/LLM turn plans must call it deliberately; a turn that spends only the Action and stops will sit "open" until `end_turn` is called, which the DM prompt/tooling layer needs to account for.
 - The first real Bonus Action and Reaction should be single, mechanically meaningful features (e.g., a resource-limited Bonus Action heal, a reaction to an incoming hit) rather than synthetic test-only actions, so the budget/legality/persistence machinery is proven against a real rule, not a placeholder.
 - This ADR does not introduce movement itself (no coordinates exist yet); `movementFeet` is tracked as a budget number only. Spending it against real positions is ADR-H24's concern.
+
+### Issue #3 vertical slice boundary
+
+The first implementation keeps the existing one-player/enemy-queue combat shape
+and introduces a versioned `srd-2014-single-actor` budget with independent Action,
+Bonus Action, Reaction, and movement-foot records. `end_turn` is explicit; the
+legacy `advance_turn` handoff remains a compatibility alias for existing callers.
+Player attacks derive from an equipped weapon and no longer accept caller-supplied
+combat numbers. Fighter Second Wind is the first real Bonus Action consumer, and
+the persisted `PendingReaction` envelope is protocol-only until a reviewed
+reaction trigger is added. Dash, Disengage, Help, and Ready remain honest
+`unsupported_action` rejections; spatial movement, opportunity attacks, and full
+Ready resolution are deferred to ADR-H24/follow-on slices.
 
 ## Rejected alternatives
 
