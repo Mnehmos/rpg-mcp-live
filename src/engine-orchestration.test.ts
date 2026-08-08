@@ -229,6 +229,7 @@ describe("scene pacing and session orchestration", () => {
       expect(stale.accepted).toBe(false);
       expect(stale.code).toBe("orchestration_rejected");
       expect(store.getCampaign(context).version).toBe(result.state.version);
+      expect(store.getCampaign(context).orchestration?.activeScene?.immediateQuestion).toBe("What will you do next?");
 
       const transitionBase = store.getCampaign(context);
       const transitionScene = transitionBase.orchestration?.activeScene;
