@@ -84,7 +84,7 @@ try {
       tone: "Adventurous",
       contentPolicy: catalog.defaultPolicy,
     }),
-  });
+  }, 30_000);
   assert(
     JSON.stringify(createdCampaign.session.contentPolicy) === JSON.stringify(catalog.defaultPolicy),
     "Campaign did not persist the catalog-selected content policy."
