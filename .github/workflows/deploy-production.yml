@@ -1,15 +1,18 @@
 name: Deploy to production
 
-# Auto-promotes to production when staging completes successfully.
-# No manual dispatch — the gauntlet + staging smoke are the gate.
+# Production remains intentionally blocked until the owner enables the
+# production GitHub environment variable. The job attaches that environment
+# before evaluating the guard, so the variable is available at runtime and no
+# Railway mutation can happen while the guard is false.
 on:
   workflow_run:
     workflows: ["Deploy to staging"]
     types: [completed]
 
 permissions:
-  contents: write   # needed to create the annotated release tag
+  contents: write
   deployments: write
+  actions: read
 
 concurrency:
   group: railway-production
@@ -19,178 +22,248 @@ jobs:
   deploy-production:
     name: Production deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
+    environment: production
     if: github.event.workflow_run.conclusion == 'success'
-
     env:
       SHA: ${{ github.event.workflow_run.head_sha }}
+      EXPECTED_REPOSITORY: Mnehmos/rpg-mcp-live
 
     steps:
-      - name: Checkout exact SHA
+      - name: Evaluate production promotion guard
+        id: promotion
+        env:
+          ENABLED: ${{ vars.RAILWAY_PRODUCTION_PROMOTION_ENABLED }}
+        run: |
+          if [ "$ENABLED" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Production promotion is enabled for this run."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Production promotion disabled; no Railway or release mutation will run."
+          fi
+
+      - name: Download the successful staging manifest
+        if: steps.promotion.outputs.enabled == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: staging-manifest-${{ env.SHA }}
+          path: staging-manifest
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify staging manifest and exact SHA
+        if: steps.promotion.outputs.enabled == 'true'
+        run: |
+          jq -e --arg sha "$SHA" '
+            .environment == "staging" and
+            .gitSha == $sha and
+            (.engineDeploymentId | type == "string") and
+            (.webDeploymentId | type == "string") and
+            .engineHealth == "pass" and
+            .webHealth == "pass" and
+            .smoke == "pass" and
+            .engineRailwayCommitSha == $sha and
+            .webRailwayCommitSha == $sha
+          ' staging-manifest/deployment-manifest.json >/dev/null
+
+      - name: Checkout exact staging-proven SHA
+        if: steps.promotion.outputs.enabled == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.SHA }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify SHA is reachable from main
-        run: |
-          if git merge-base --is-ancestor "$SHA" origin/main; then
-            echo "::notice::SHA $SHA is reachable from main"
-          else
-            echo "::error::SHA $SHA is NOT reachable from main — refusing production deploy"
-            exit 1
-          fi
+      - name: Verify exact checkout
+        if: steps.promotion.outputs.enabled == 'true'
+        run: test "$(git rev-parse HEAD)" = "$SHA"
 
       - name: Set up Node
+        if: steps.promotion.outputs.enabled == 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20.18.x
           cache: npm
 
       - name: Install
+        if: steps.promotion.outputs.enabled == 'true'
         run: npm ci
 
+      - name: Typecheck and verify content pack
+        if: steps.promotion.outputs.enabled == 'true'
+        run: npm run check
+
       - name: Build
+        if: steps.promotion.outputs.enabled == 'true'
         run: npm run build
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Check tag does not already exist
-        id: version
-        run: |
-          # Derive patch version from package.json + existing tags
-          PKG_VERSION=$(jq -r '.version' package.json)
-          TAG="v${PKG_VERSION}"
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            # Tag exists — bump patch
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$PKG_VERSION"
-            PATCH=$((PATCH + 1))
-            TAG="v${MAJOR}.${MINOR}.${PATCH}"
-          fi
-          echo "release_tag=$TAG" >> $GITHUB_OUTPUT
-          echo "::notice::Production release will be tagged $TAG"
-
-      # -----------------------------------------------------------------
-      # Deploy engine FIRST.
-      # -----------------------------------------------------------------
-      - name: Deploy engine to Railway production
+      # Complete all release preflight before the first production mutation.
+      - name: Preflight release tag, changelog, and write capability
+        if: steps.promotion.outputs.enabled == 'true'
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
-          RAILWAY_ENGINE_SERVICE: ${{ vars.RAILWAY_ENGINE_SERVICE }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          railway up \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$RAILWAY_ENGINE_SERVICE" \
-            --detach
-
-      - name: Verify engine health + backward compatibility
-        env:
-          ENGINE_PRODUCTION_URL: ${{ vars.ENGINE_PRODUCTION_URL }}
-        run: |
-          for i in $(seq 1 60); do
-            resp=$(curl -sf "${ENGINE_PRODUCTION_URL}/health" || echo "")
-            if echo "$resp" | grep -q '"status":"ok"'; then
-              echo "$resp"
-              echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> $GITHUB_ENV
-              echo "ENGINE_TOOL_COUNT=$(echo "$resp" | jq -r '.toolCount')" >> $GITHUB_ENV
-              break
-            fi
-            sleep 5
-          done
-          if [ -z "$ENGINE_PACK_HASH" ]; then
-            echo "::error::Engine production did not become healthy"
+          set -eu
+          git fetch --force --tags origin
+          TAG="v$(node -p "require('./package.json').version")"
+          if git show-ref --verify --quiet "refs/tags/$TAG" || git ls-remote --exit-code --refs origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Release tag $TAG already exists; refusing to mutate production."
             exit 1
           fi
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.permissions.push // false')" != "true" ]; then
+            echo "::error::GitHub token cannot create the release tag."
+            exit 1
+          fi
+          node tools/ci/generate-changelog.mjs --version "$TAG" --fail-empty > release-body.md
+          test -s release-body.md
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Generated release material for $TAG before production deployment."
 
-      # -----------------------------------------------------------------
-      # Deploy web SECOND.
-      # -----------------------------------------------------------------
-      - name: Deploy web to Railway production
+      # Engine is intentionally first: web health depends on private engine reachability.
+      - name: Deploy engine to Railway production
+        if: steps.promotion.outputs.enabled == 'true'
+        id: engine
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
-          RAILWAY_WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE }}
-        run: |
-          railway up \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment production \
-            --service "$RAILWAY_WEB_SERVICE" \
-            --detach
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}
+          RAILWAY_ENVIRONMENT_NAME: production
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_ENGINE_SERVICE_ID }}
+          RAILWAY_COMMIT_SHA: ${{ env.SHA }}
+          RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+          RAILWAY_EXPECTED_BRANCH: main
+          RAILWAY_CONFIG_FILE: /railway/engine.json
+          RAILWAY_PRODUCTION_PROMOTION_ENABLED: ${{ vars.RAILWAY_PRODUCTION_PROMOTION_ENABLED }}
+        run: npx tsx tools/railway-deploy.ts
 
-      - name: Verify web health + engine reachability
+      - name: Verify engine deployment SHA
+        if: steps.promotion.outputs.enabled == 'true'
+        run: test "${{ steps.engine.outputs.railway_commit_sha }}" = "$SHA"
+
+      - name: Wait for engine health and capture pack evidence
+        if: steps.promotion.outputs.enabled == 'true'
         env:
-          WEB_PRODUCTION_URL: ${{ vars.WEB_PRODUCTION_URL }}
+          ENGINE_PRODUCTION_URL: ${{ vars.ENGINE_PRODUCTION_URL }}
+          EXPECTED_SERVICE: lantern-engine
+          EXPECTED_ENVIRONMENT: production
+          EXPECTED_COMMIT_SHA: ${{ steps.engine.outputs.railway_commit_sha }}
         run: |
           for i in $(seq 1 60); do
-            resp=$(curl -sf "${WEB_PRODUCTION_URL}/api/health" || echo "")
-            if echo "$resp" | grep -q '"status":"ok"' && echo "$resp" | grep -q '"lanternEngine":true'; then
-              echo "$resp"
-              echo "::notice::Production web healthy and engine reachable"
+            resp=$(curl -fsS "$ENGINE_PRODUCTION_URL/health" || true)
+            if echo "$resp" | jq -e --arg service "$EXPECTED_SERVICE" --arg environment "$EXPECTED_ENVIRONMENT" \
+              '.status == "ok" and .service == $service and .environment == $environment' >/dev/null; then
+              test "$EXPECTED_COMMIT_SHA" = "$SHA"
+              printf '%s\n' "$resp" > engine-health.json
+              echo "$resp" | jq '{status,service,environment,rules,toolCount,openRouter:{enabled:.openRouter.enabled}}'
+              echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> "$GITHUB_ENV"
+              echo "ENGINE_PACK_VERSION=$(echo "$resp" | jq -r '.rules.packVersion')" >> "$GITHUB_ENV"
+              echo "ENGINE_TOOL_COUNT=$(echo "$resp" | jq -r '.toolCount')" >> "$GITHUB_ENV"
               exit 0
             fi
             sleep 5
           done
-          echo "::error::Production web did not become healthy in 5 min"
+          echo "::error::Engine production did not become healthy in 5 minutes"
           exit 1
 
-      - name: Generate changelog (release gate — fails if empty)
-        run: |
-          node tools/ci/generate-changelog.mjs \
-            --version "${{ steps.version.outputs.release_tag }}" \
-            --update-file \
-            --fail-empty
-          # Capture for the release body
-          node tools/ci/generate-changelog.mjs \
-            --version "${{ steps.version.outputs.release_tag }}" > release-body.md
-          cat release-body.md
+      - name: Deploy web to Railway production
+        if: steps.promotion.outputs.enabled == 'true'
+        id: web
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_PRODUCTION_ENVIRONMENT_ID }}
+          RAILWAY_ENVIRONMENT_NAME: production
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
+          RAILWAY_COMMIT_SHA: ${{ env.SHA }}
+          RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+          RAILWAY_EXPECTED_BRANCH: main
+          RAILWAY_CONFIG_FILE: /railway/web.json
+          RAILWAY_PRODUCTION_PROMOTION_ENABLED: ${{ vars.RAILWAY_PRODUCTION_PROMOTION_ENABLED }}
+        run: npx tsx tools/railway-deploy.ts
 
-      - name: Commit CHANGELOG.md to main
-        run: |
-          git config user.name "Lantern CI"
-          git config user.email "ci@lantern.local"
-          git fetch origin main
-          git checkout main
-          git merge --no-edit "$SHA" 2>/dev/null || true
-          git add CHANGELOG.md
-          git diff --cached --quiet && { echo "::notice::CHANGELOG.md already up to date"; exit 0; } || true
-          git commit -m "chore(release): update CHANGELOG for ${{ steps.version.outputs.release_tag }}"
-          git push origin main
+      - name: Verify web deployment SHA
+        if: steps.promotion.outputs.enabled == 'true'
+        run: test "${{ steps.web.outputs.railway_commit_sha }}" = "$SHA"
 
-      - name: Create annotated release tag
+      - name: Wait for web health and engine reachability
+        if: steps.promotion.outputs.enabled == 'true'
+        env:
+          WEB_PRODUCTION_URL: ${{ vars.WEB_PRODUCTION_URL }}
+          EXPECTED_SERVICE: rpg-mcp-live-web
+          EXPECTED_ENVIRONMENT: production
+          EXPECTED_ENGINE_SERVICE: lantern-engine
+          EXPECTED_ENGINE_ENVIRONMENT: production
+          EXPECTED_COMMIT_SHA: ${{ steps.web.outputs.railway_commit_sha }}
         run: |
-          git config user.name "Lantern CI"
-          git config user.email "ci@lantern.local"
-          git tag -a "${{ steps.version.outputs.release_tag }}" -m "Production release ${{ steps.version.outputs.release_tag }} from $SHA"
-          git push origin "${{ steps.version.outputs.release_tag }}"
+          for i in $(seq 1 60); do
+            resp=$(curl -fsS "$WEB_PRODUCTION_URL/api/health" || true)
+            if echo "$resp" | jq -e --arg service "$EXPECTED_SERVICE" --arg environment "$EXPECTED_ENVIRONMENT" \
+              --arg engineService "$EXPECTED_ENGINE_SERVICE" --arg engineEnvironment "$EXPECTED_ENGINE_ENVIRONMENT" \
+              '.status == "ok" and .service == $service and .environment == $environment and
+               .integrations.lanternEngine == true and .engine.service == $engineService and
+               .engine.environment == $engineEnvironment' >/dev/null; then
+              test "$EXPECTED_COMMIT_SHA" = "$SHA"
+              printf '%s\n' "$resp" > web-health.json
+              echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Web production did not become healthy or reach the engine in 5 minutes"
+          exit 1
 
-      - name: Write deployment manifest
+      - name: Run two-service HTTP smoke
+        if: steps.promotion.outputs.enabled == 'true'
+        run: npm run smoke:http
+
+      - name: Run invariant suite
+        if: steps.promotion.outputs.enabled == 'true'
+        run: npm run test:invariants
+
+      - name: Run deterministic evaluation suite
+        if: steps.promotion.outputs.enabled == 'true'
+        run: npm run test:gauntlet:ci
+
+      - name: Write production deployment manifest before publishing the tag
+        if: steps.promotion.outputs.enabled == 'true'
         run: |
           node tools/ci/write-deployment-manifest.mjs \
             --env production \
             --git-sha "$SHA" \
             --git-ref main \
+            --engine-deployment-id "${{ steps.engine.outputs.deployment_id }}" \
+            --web-deployment-id "${{ steps.web.outputs.deployment_id }}" \
+            --engine-railway-commit-sha "${{ steps.engine.outputs.railway_commit_sha }}" \
+            --web-railway-commit-sha "${{ steps.web.outputs.railway_commit_sha }}" \
+            --pack-version "$ENGINE_PACK_VERSION" \
             --pack-hash "$ENGINE_PACK_HASH" \
             --tool-count "$ENGINE_TOOL_COUNT" \
+            --gauntlet-version open-ended-gauntlet-v1 \
             --engine-health pass \
             --web-health pass \
             --smoke pass \
             --output deployment-manifest.json
+          jq -e --arg sha "$SHA" '.gitSha == $sha and .engineRailwayCommitSha == $sha and .webRailwayCommitSha == $sha' deployment-manifest.json >/dev/null
 
-      - name: Upload manifest
-        uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
-        with:
-          name: production-manifest-${{ env.SHA }}
-          path: deployment-manifest.json
-          retention-days: 90
+      - name: Create annotated GitHub tag after deployment evidence is complete
+        if: steps.promotion.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag_object_sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$RELEASE_TAG" \
+            -f message="Production release $RELEASE_TAG from $SHA" \
+            -f object="$SHA" \
+            -f type=commit \
+            --jq '.sha')
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$tag_object_sha" >/dev/null
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@de2c0eb89ae2a8a8d8d0d6ea84c2ffe7749e4149 # v2
-        with:
-          tag_name: ${{ steps.version.outputs.release_tag }}
-          body_path: release-body.md
-          files: |
-            deployment-manifest.json
-            CHANGELOG.md
+      - name: Publish GitHub release
+        if: steps.promotion.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --notes-file release-body.md deployment-manifest.json
