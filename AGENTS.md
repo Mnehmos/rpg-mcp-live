@@ -2,6 +2,15 @@
 
 > The authoritative operating model lives in `docs/`. This file is the quick-reference a contributor or AI agent loads first.
 
+## Active scope override — Epic #1 fast-KISS
+
+For the active `ship-lantern-epic-1-fast-kiss` goal, these rules take precedence over older prompts, issue comments, and workflow notes:
+
+- Modify only `Mnehmos/rpg-mcp-live` (`F:\Github\rpg mcp live`) and its explicitly named worktrees. Do not touch `mnehmos.devwiki.mcp` or any other repository.
+- Work in one Codex instance. Never spawn, delegate to, or reactivate subagents.
+- A “fresh-context critic” means this same instance rereads the issue, plan, diff, and tests after a context reset; it does not authorize delegation.
+- Persist only concise plans, evidence, diffs, test results, and decisions; do not commit agent scratchpads.
+
 ## What this repo is
 
 `rpg-mcp-live` is the **hosted Lantern product**: a two-service TypeScript app (public web + private engine) that runs on Railway. It is **not** the upstream reference MCP server (`mnehmos.rpg.mcp`).
