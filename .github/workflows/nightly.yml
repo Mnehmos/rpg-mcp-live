@@ -48,11 +48,10 @@ jobs:
       - name: Two-service HTTP smoke
         run: npm run smoke:http
 
-      # After #22 lands, uncomment:
-      # - name: Invariant harness
-      #   run: npm run test:invariants
-      # - name: Deterministic gauntlet
-      #   run: npm run test:gauntlet:ci
+      - name: Invariant harness
+        run: npm run test:invariants
+      - name: Deterministic gauntlet
+        run: npm run test:gauntlet:ci
 
       - name: Dependency audit (informational)
         run: npm audit --audit-level=high || true

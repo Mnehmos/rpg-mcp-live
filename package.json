@@ -16,6 +16,8 @@
     "start:engine": "node dist/engine-server.js",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && npm run open5e:verify-pack",
     "test": "vitest run --pool=forks",
+    "test:invariants": "vitest run src/engine-invariants.test.ts --pool=forks",
+    "test:gauntlet:ci": "vitest run tools/gauntlet.test.ts --pool=forks",
     "smoke:http": "npm run build && tsx tools/s5-http-smoke.ts",
     "smoke:s5-http": "npm run smoke:http",
     "open5e:import": "tsx tools/open5e-import/cli.ts import",
