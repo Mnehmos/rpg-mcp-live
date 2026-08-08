@@ -785,6 +785,35 @@ export const engineTacticalPositionSchema = z.object({
 }).strict();
 export type EngineTacticalPosition = z.infer<typeof engineTacticalPositionSchema>;
 
+export const engineControlledActorProfileSchema = z.enum([
+  "familiar-scout-v1",
+  "summon-scout-v1",
+]);
+export type EngineControlledActorProfile = z.infer<typeof engineControlledActorProfileSchema>;
+
+export const engineControlledActorCommandActionSchema = z.enum(["attack", "guard", "follow"]);
+export type EngineControlledActorCommandAction = z.infer<typeof engineControlledActorCommandActionSchema>;
+
+export const engineControlledActorCreateCommandSchema = z.object({
+  kind: z.literal("controlled_actor_create"),
+  profileId: engineControlledActorProfileSchema,
+}).strict();
+export type EngineControlledActorCreateCommand = z.infer<typeof engineControlledActorCreateCommandSchema>;
+
+export const engineControlledActorCommandSchema = z.object({
+  kind: z.literal("controlled_actor_command"),
+  actorId: worldContextEntityIdSchema,
+  action: engineControlledActorCommandActionSchema,
+  targetId: worldContextEntityIdSchema.optional(),
+}).strict();
+export type EngineControlledActorCommand = z.infer<typeof engineControlledActorCommandSchema>;
+
+export const engineControlledActorDismissCommandSchema = z.object({
+  kind: z.literal("controlled_actor_dismiss"),
+  actorId: worldContextEntityIdSchema,
+}).strict();
+export type EngineControlledActorDismissCommand = z.infer<typeof engineControlledActorDismissCommandSchema>;
+
 export const engineTacticalBoundsSchema = z.object({
   minX: tacticalCoordinateSchema,
   maxX: tacticalCoordinateSchema,
