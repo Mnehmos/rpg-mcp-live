@@ -3,6 +3,7 @@ import type { NarrationEnvelope } from "./ai-contracts.js";
 import {
   engineExperienceProfileInputSchema,
   engineExperienceProfileSchema,
+  engineWorldObjectInputSchema,
 } from "./engine-contracts.js";
 import type {
   CompiledCreatureAttack,
@@ -45,6 +46,10 @@ import type {
   EngineSenseCapabilities,
   EngineWorldFact,
   EngineWorldFactPatchOperations,
+  EngineWorldObjectAffordance,
+  EngineWorldObjectInstance,
+  EngineWorldObjectPatchOperations,
+  EngineWorldObjectState,
   InformationTier,
   PublicProjection,
   EnginePendingReaction,
@@ -865,6 +870,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     experienceProfile?: unknown;
     adjudicationHistory?: unknown;
     worldFacts?: unknown;
+    worldObjects?: unknown;
     actorKnowledge?: unknown;
   };
   if (!next.campaign) next.campaign = defaultCampaignProfile();
@@ -911,6 +917,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   else {
     next.worldContext.npcs = Array.isArray(next.worldContext.npcs) ? next.worldContext.npcs : [];
     next.worldContext.merchants = Array.isArray(next.worldContext.merchants) ? next.worldContext.merchants : [];
+    next.worldContext.objects = normalizeWorldObjects(next.worldContext.objects, next.worldContext.id);
     next.worldContext.merchants = next.worldContext.merchants.map(normalizeMerchant);
     next.worldContext.npcs = next.worldContext.npcs.map(normalizeNpc);
   }
@@ -1034,6 +1041,37 @@ function normalizeWorldFacts(value: unknown): EngineWorldFact[] {
       active: raw.active !== false,
       createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
       updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date(0).toISOString(),
+    }];
+  });
+}
+
+function normalizeWorldObjects(value: unknown, sceneId: string): EngineWorldObjectInstance[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Partial<EngineWorldObjectInstance>;
+    const parsed = engineWorldObjectInputSchema.safeParse({
+      id: raw.id,
+      definition: raw.definition,
+      state: raw.state,
+      locationRef: raw.locationRef ?? null,
+      ownerRef: raw.ownerRef,
+      containerRef: raw.containerRef ?? null,
+    });
+    if (!parsed.success) return [];
+    const now = new Date(0).toISOString();
+    return [{
+      ...parsed.data,
+      sceneId,
+      locationRef: parsed.data.locationRef ?? null,
+      ownerRef: parsed.data.ownerRef ?? { kind: "world" as const, id: sceneId },
+      containerRef: parsed.data.containerRef ?? null,
+      revision: typeof raw.revision === "number" ? Math.max(1, Math.trunc(raw.revision)) : 1,
+      provenance: {
+        sourceCommandId: typeof raw.provenance?.sourceCommandId === "string" ? raw.provenance.sourceCommandId : "legacy",
+        sourceVersion: typeof raw.provenance?.sourceVersion === "number" ? Math.max(0, Math.trunc(raw.provenance.sourceVersion)) : 0,
+        occurredAt: typeof raw.provenance?.occurredAt === "string" ? raw.provenance.occurredAt : now,
+      },
     }];
   });
 }
@@ -1736,6 +1774,14 @@ function resolveWorldContext(
   const merchantPatch = applyMerchantPatch(currentWorldContext?.merchants ?? [], command.merchants);
   const sceneId = currentWorldContext?.id ?? randomUUID();
   const factPatch = applyWorldFactPatch(state.worldFacts, command.facts, sceneId);
+  const objectPatch = applyWorldObjectPatch(
+    currentWorldContext?.objects ?? [],
+    command.objects,
+    sceneId,
+    clientCommandId,
+    state.version + 1,
+  );
+  if (objectPatch.error) return rejection(state, tool, objectPatch.error.code, objectPatch.error.message);
   const worldContext = {
     id: sceneId,
     title: command.title,
@@ -1744,6 +1790,7 @@ function resolveWorldContext(
     exits: command.exits,
     npcs: npcPatch.entities,
     merchants: merchantPatch.entities,
+    objects: objectPatch.entities,
   };
   const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
   if (!currentWorldContext) {
@@ -1754,6 +1801,7 @@ function resolveWorldContext(
   appendWorldContextChange(stateChanges, "/worldContext/features", currentWorldContext?.features ?? null, worldContext.features);
   appendWorldContextChange(stateChanges, "/worldContext/exits", currentWorldContext?.exits ?? null, worldContext.exits);
   stateChanges.push(...npcPatch.stateChanges, ...merchantPatch.stateChanges);
+  stateChanges.push(...objectPatch.stateChanges);
   stateChanges.push(...factPatch.stateChanges);
 
   const next = cloneCampaign(state);
@@ -1842,6 +1890,100 @@ function applyWorldFactPatch(
   return { entities: [...byId.values()], changedFactIds: [...new Set(changedFactIds)], stateChanges };
 }
 
+function validateWorldObjectPatch(
+  existing: EngineWorldObjectInstance[],
+  operations: EngineWorldObjectPatchOperations | undefined
+): WorldContextPatchValidation | null {
+  if (!operations) return null;
+  if (hasDuplicateEntityId(existing)) {
+    return { code: "ambiguous_object_id", message: "Existing world-object identifiers are ambiguous and cannot be patched safely." };
+  }
+  const upserts = operations.upsert ?? [];
+  const removals = operations.remove ?? [];
+  if (hasDuplicateEntityId(upserts) || hasDuplicateEntityId(removals)) {
+    return { code: "duplicate_object_id", message: "World-object identifiers must be unique within a patch." };
+  }
+  const upsertIds = new Set(upserts.map((object) => object.id));
+  if (removals.some((id) => upsertIds.has(id))) {
+    return { code: "conflicting_object_operation", message: "A world object cannot be upserted and removed in the same world_context command." };
+  }
+  const existingById = new Map(existing.map((object) => [object.id, object]));
+  if (removals.some((id) => !existingById.has(id))) {
+    return { code: "object_not_found", message: "The requested world-object removal does not exist in the current context." };
+  }
+  for (const input of upserts) {
+    if (input.ownerRef) {
+      return { code: "field_not_authorable", message: "World-object ownership is engine-owned and cannot be authored through world_context." };
+    }
+    const previous = existingById.get(input.id);
+    if (!previous) continue;
+    if (input.definition.key !== previous.definition.key || input.definition.sourceRef !== previous.definition.sourceRef) {
+      return { code: "object_definition_conflict", message: "An existing world-object definition cannot be replaced in place." };
+    }
+    if (
+      input.state !== previous.state
+      || (input.locationRef ?? null) !== previous.locationRef
+      || (input.containerRef ?? null) !== previous.containerRef
+    ) {
+      return { code: "object_state_not_authorable", message: "Existing world-object state and location are engine-owned; use a typed affordance." };
+    }
+  }
+  const additions = upserts.filter((input) => !existingById.has(input.id)).length;
+  if (existing.length - removals.length + additions > 40) {
+    return { code: "object_limit_exceeded", message: "A world context can contain at most 40 world objects." };
+  }
+  for (const id of removals) {
+    const object = existingById.get(id);
+    if (object && !object.definition.criticalPolicy.canLose) {
+      return { code: "critical_object_protected", message: "This critical object cannot be removed; resolve its declared loss policy through a typed interaction." };
+    }
+  }
+  return null;
+}
+
+function applyWorldObjectPatch(
+  existing: EngineWorldObjectInstance[],
+  operations: EngineWorldObjectPatchOperations | undefined,
+  sceneId: string,
+  sourceCommandId: string,
+  sourceVersion: number,
+): { entities: EngineWorldObjectInstance[]; stateChanges: WorldContextStateChange[]; error: WorldContextPatchValidation | null } {
+  const validation = validateWorldObjectPatch(existing, operations);
+  if (validation) return { entities: existing, stateChanges: [], error: validation };
+  if (!operations) return { entities: existing, stateChanges: [], error: null };
+  const now = new Date().toISOString();
+  const byId = new Map(existing.map((object) => [object.id, object]));
+  const stateChanges: WorldContextStateChange[] = [];
+  for (const input of operations.upsert ?? []) {
+    const previous = byId.get(input.id);
+    const object: EngineWorldObjectInstance = previous
+      ? {
+          ...previous,
+          definition: input.definition,
+        }
+      : {
+          ...input,
+          sceneId,
+          locationRef: input.locationRef ?? null,
+          ownerRef: { kind: "world", id: sceneId },
+          containerRef: input.containerRef ?? null,
+          revision: 1,
+          provenance: { sourceCommandId, sourceVersion, occurredAt: now },
+        };
+    byId.set(input.id, object);
+    if (!sameWorldContextValue(previous ?? null, object)) {
+      stateChanges.push({ path: "/worldContext/objects/" + escapeJsonPointerSegment(input.id), before: previous ?? null, after: object });
+    }
+  }
+  for (const id of operations.remove ?? []) {
+    const previous = byId.get(id);
+    if (!previous) continue;
+    byId.delete(id);
+    stateChanges.push({ path: "/worldContext/objects/" + escapeJsonPointerSegment(id), before: previous, after: null });
+  }
+  return { entities: [...byId.values()], stateChanges, error: null };
+}
+
 function validateWorldContextPatch(
   state: LanternCampaignState,
   command: Extract<EngineCommand, { kind: "world_context" }>
@@ -1871,6 +2013,9 @@ function validateWorldContextPatch(
 
   const factValidation = validateWorldFactPatch(state.worldFacts, command.facts);
   if (factValidation) return factValidation;
+
+  const objectValidation = validateWorldObjectPatch(state.worldContext?.objects ?? [], command.objects);
+  if (objectValidation) return objectValidation;
 
   return validateEntityPatchOperations(
     command.merchants,
@@ -2671,6 +2816,15 @@ function resolveInteract(
   command: Extract<EngineCommand, { kind: "interact" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
+  if (command.affordance) {
+    return resolveWorldObjectAffordance(
+      state,
+      context,
+      clientCommandId,
+      command as Extract<EngineCommand, { kind: "interact" }> & { affordance: EngineWorldObjectAffordance },
+      tool,
+    );
+  }
   return commit(
     state,
     context,
@@ -2683,6 +2837,215 @@ function resolveInteract(
     [],
     [],
     []
+  );
+}
+
+function resolveWorldObjectAffordance(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "interact" }> & { affordance: EngineWorldObjectAffordance },
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const world = state.worldContext;
+  const object = world?.objects.find((candidate) => candidate.id === command.targetId);
+  if (!world) return rejection(state, tool, "world_context_required", "There is no authoritative world context for that object interaction.");
+  if (!object) return rejection(state, tool, "object_not_found", "That world object is not established in the current context.");
+  if (command.affordance === "inspect") {
+    return readOnlyResolution(state, tool, "The engine confirms the current state of " + object.definition.name + ".", { object });
+  }
+  if (!object.definition.affordances.includes(command.affordance)) {
+    return rejection(state, tool, "affordance_unavailable", "The established object does not declare that affordance.", { objectId: object.id, affordance: command.affordance });
+  }
+  if (object.state === "destroyed") {
+    return rejection(state, tool, "object_destroyed", "That object has been destroyed and cannot accept another mechanical interaction.", { objectId: object.id });
+  }
+  const prerequisite = object.definition.prerequisites.find((candidate) => candidate.affordance === command.affordance);
+  const source = command.sourceId ? world.objects.find((candidate) => candidate.id === command.sourceId) : undefined;
+  if (prerequisite) {
+    if (!source || !prerequisite.requiredTags.every((tag) => source.definition.tags.includes(tag))) {
+      return rejection(state, tool, "prerequisite_missing", "The referenced prerequisite does not provide the required material or tag.", { objectId: object.id, affordance: command.affordance });
+    }
+    if (prerequisite.requiredState && source.state !== prerequisite.requiredState) {
+      return rejection(state, tool, "prerequisite_state_invalid", "The referenced prerequisite is not in the required state.", { objectId: source.id, requiredState: prerequisite.requiredState });
+    }
+  }
+
+  const next = cloneCampaign(state);
+  const nextWorld = next.worldContext;
+  if (!nextWorld) return rejection(state, tool, "world_context_required", "There is no authoritative world context for that object interaction.");
+  const changes: WorldContextStateChange[] = [];
+  const now = new Date().toISOString();
+  const setObject = (objectId: string, patch: Partial<EngineWorldObjectInstance>): EngineWorldObjectInstance | null => {
+    const index = nextWorld.objects.findIndex((candidate) => candidate.id === objectId);
+    if (index < 0) return null;
+    const before = nextWorld.objects[index]!;
+    const after: EngineWorldObjectInstance = {
+      ...before,
+      ...patch,
+      revision: before.revision + 1,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version + 1, occurredAt: now },
+    };
+    nextWorld.objects[index] = after;
+    if (!sameWorldContextValue(before, after)) {
+      changes.push({ path: "/worldContext/objects/" + escapeJsonPointerSegment(objectId), before, after });
+    }
+    return after;
+  };
+  const requireState = (states: EngineWorldObjectState[], code: string, message: string): EngineResolution | null => {
+    if (states.includes(object.state)) return null;
+    return rejection(state, tool, code, message, { objectId: object.id, state: object.state });
+  };
+  let message = "";
+  let outcome = "world_object_interacted";
+  switch (command.affordance) {
+    case "open": {
+      if (object.state === "locked") return rejection(state, tool, "object_locked", "The object is locked; unlock it before opening.", { objectId: object.id });
+      const invalid = requireState(["closed", "unlocked"], "object_not_closed", "Only a closed or unlocked object can be opened.");
+      if (invalid) return invalid;
+      setObject(object.id, { state: "open" });
+      message = "The engine opens " + object.definition.name + ".";
+      outcome = "world_object_opened";
+      break;
+    }
+    case "close": {
+      const invalid = requireState(["open"], "object_not_open", "Only an open object can be closed.");
+      if (invalid) return invalid;
+      setObject(object.id, { state: "closed" });
+      message = "The engine closes " + object.definition.name + ".";
+      outcome = "world_object_closed";
+      break;
+    }
+    case "lock": {
+      const invalid = requireState(["closed", "unlocked"], "object_not_closed", "Only a closed or unlocked object can be locked.");
+      if (invalid) return invalid;
+      setObject(object.id, { state: "locked" });
+      message = "The engine locks " + object.definition.name + ".";
+      outcome = "world_object_locked";
+      break;
+    }
+    case "unlock": {
+      const invalid = requireState(["locked"], "object_not_locked", "Only a locked object can be unlocked.");
+      if (invalid) return invalid;
+      setObject(object.id, { state: "unlocked" });
+      message = "The engine unlocks " + object.definition.name + ".";
+      outcome = "world_object_unlocked";
+      break;
+    }
+    case "move":
+    case "carry":
+    case "throw": {
+      if (!command.destinationId) return rejection(state, tool, "destination_required", "That movement affordance needs a reviewed destination reference.");
+      if ((command.affordance === "carry" || command.affordance === "throw") && object.ownerRef.kind === "actor" && object.ownerRef.id !== context.actorId) {
+        return rejection(state, tool, "ownership_required", "Only the owning actor can carry or throw this object.", { objectId: object.id });
+      }
+      setObject(object.id, {
+        locationRef: command.destinationId,
+        ...(command.affordance === "carry" ? { ownerRef: { kind: "actor", id: context.actorId }, state: "carried" as const } : {}),
+      });
+      message = "The engine moves " + object.definition.name + " to " + command.destinationId + ".";
+      outcome = "world_object_moved";
+      break;
+    }
+    case "take":
+    case "steal": {
+      if (object.ownerRef.kind === "actor" && object.ownerRef.id === context.actorId) {
+        return rejection(state, tool, "already_owned", "The acting character already owns that object.", { objectId: object.id });
+      }
+      if (!object.definition.criticalPolicy.canLose && command.affordance === "steal") {
+        return rejection(state, tool, "critical_object_protected", "This critical object cannot be lost through that interaction.", { objectId: object.id });
+      }
+      setObject(object.id, { ownerRef: { kind: "actor", id: context.actorId }, locationRef: null, state: "carried" });
+      message = "The engine records " + object.definition.name + " as carried by the acting character.";
+      outcome = command.affordance === "take" ? "world_object_taken" : "world_object_stolen";
+      break;
+    }
+    case "drop": {
+      if (object.ownerRef.kind !== "actor" || object.ownerRef.id !== context.actorId) {
+        return rejection(state, tool, "ownership_required", "Only the owning actor can drop this object.", { objectId: object.id });
+      }
+      if (!command.destinationId) return rejection(state, tool, "destination_required", "Dropping an object needs a reviewed destination reference.");
+      setObject(object.id, { ownerRef: { kind: "world", id: world.id }, locationRef: command.destinationId, state: "intact" });
+      message = "The engine drops " + object.definition.name + " at " + command.destinationId + ".";
+      outcome = "world_object_dropped";
+      break;
+    }
+    case "equip": {
+      if (object.ownerRef.kind !== "actor" || object.ownerRef.id !== context.actorId) return rejection(state, tool, "ownership_required", "Only the owning actor can equip this object.", { objectId: object.id });
+      if (!object.definition.tags.includes("weapon") && !object.definition.tags.includes("armor")) return rejection(state, tool, "wrong_material", "Only an established weapon or armor object can be equipped.", { objectId: object.id });
+      setObject(object.id, { state: "equipped" });
+      message = "The engine equips " + object.definition.name + ".";
+      outcome = "world_object_equipped";
+      break;
+    }
+    case "ignite": {
+      if (object.state === "lit") return rejection(state, tool, "already_lit", "That object is already lit.", { objectId: object.id });
+      const fireSource = source ?? object;
+      if (fireSource.id !== object.id && fireSource.state !== "lit") return rejection(state, tool, "fire_source_required", "Ignition requires a lit fire source.", { objectId: object.id });
+      if (object.definition.material !== "oil" && !object.definition.tags.includes("flammable") && object.definition.material !== "fire") return rejection(state, tool, "wrong_material", "That material is not eligible for the reviewed ignition rule.", { objectId: object.id });
+      setObject(object.id, { state: "lit" });
+      message = "The engine ignites " + object.definition.name + ".";
+      outcome = "world_object_ignited";
+      break;
+    }
+    case "extinguish": {
+      const invalid = requireState(["lit"], "object_not_lit", "Only a lit object can be extinguished.");
+      if (invalid) return invalid;
+      setObject(object.id, { state: "unlit" });
+      message = "The engine extinguishes " + object.definition.name + ".";
+      outcome = "world_object_extinguished";
+      break;
+    }
+    case "damage":
+    case "break": {
+      if (!object.definition.criticalPolicy.canDestroy) return rejection(state, tool, "critical_object_protected", "This critical object cannot be destroyed under its declared policy.", { objectId: object.id });
+      if (command.affordance === "break" && !object.definition.tags.includes("breakable")) return rejection(state, tool, "wrong_material", "That object is not declared breakable.", { objectId: object.id });
+      const nextState = command.affordance === "break" || object.state === "damaged" ? "destroyed" : "damaged";
+      setObject(object.id, { state: nextState });
+      message = "The engine records " + object.definition.name + " as " + nextState + ".";
+      outcome = nextState === "destroyed" ? "world_object_destroyed" : "world_object_damaged";
+      break;
+    }
+    case "attach": {
+      if (!source || source.id === object.id) return rejection(state, tool, "attachment_source_required", "Attaching requires a distinct referenced rope or tether object.");
+      if (source.definition.material !== "rope" && !source.definition.tags.includes("rope")) return rejection(state, tool, "wrong_material", "Only a rope-tagged object can satisfy the attachment rule.", { objectId: source.id });
+      if (source.state === "destroyed") return rejection(state, tool, "object_destroyed", "The referenced rope is destroyed.", { objectId: source.id });
+      setObject(source.id, { state: "attached", ownerRef: object.ownerRef, locationRef: object.locationRef });
+      setObject(object.id, { state: "attached" });
+      message = "The engine attaches " + source.definition.name + " to " + object.definition.name + ".";
+      outcome = "world_object_attached";
+      break;
+    }
+    case "activate":
+    case "use": {
+      if (command.affordance === "activate" && object.state === "active") return rejection(state, tool, "already_active", "That object is already active.", { objectId: object.id });
+      if (command.affordance === "activate" && !object.definition.tags.includes("lever") && !object.definition.tags.includes("switch")) return rejection(state, tool, "wrong_material", "Only a declared lever or switch can be activated.", { objectId: object.id });
+      setObject(object.id, { state: command.affordance === "activate" ? "active" : object.state });
+      for (const interaction of object.definition.effectInteractions.filter((candidate) => candidate.affordance === command.affordance)) {
+        const target = nextWorld.objects.find((candidate) => candidate.id === interaction.targetId);
+        if (!target) return rejection(state, tool, "effect_target_not_found", "The declared object effect target is not established in the current scene.", { targetId: interaction.targetId });
+        if (target.state === "destroyed") return rejection(state, tool, "effect_target_destroyed", "The declared object effect target is destroyed.", { targetId: target.id });
+        setObject(target.id, { state: interaction.targetState });
+      }
+      message = "The engine resolves " + command.affordance + " on " + object.definition.name + ".";
+      outcome = "world_object_" + command.affordance;
+      break;
+    }
+    case "give":
+      return rejection(state, tool, "unsupported_affordance", "Giving a world object requires an actor or merchant inventory transfer; this first slice does not invent a second transfer path.");
+  }
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    message,
+    { object: nextWorld.objects.find((candidate) => candidate.id === object.id), affordance: command.affordance, sourceId: command.sourceId ?? null, destinationId: command.destinationId ?? null },
+    outcome,
+    [],
+    [],
+    changes,
   );
 }
 

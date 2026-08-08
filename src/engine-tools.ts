@@ -16,6 +16,7 @@ import {
   engineTacticalGeometryInputSchema,
   engineTacticalPositionSchema,
   engineToolNameSchema,
+  engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   type EngineCommand,
   type EngineToolName,
@@ -94,6 +95,9 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     .object({
       targetId: z.string().trim().min(1).max(80),
       goal: z.string().trim().min(1).max(2_000),
+      affordance: engineWorldObjectAffordanceSchema.optional(),
+      sourceId: z.string().trim().min(1).max(120).optional(),
+      destinationId: z.string().trim().min(1).max(120).optional(),
     })
     .strict(),
   social_check: z
@@ -575,6 +579,9 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       properties: {
         targetId: { type: "string", description: "A feature or object identifier from the current context." },
         goal: { type: "string", description: "What the player is trying to do." },
+        affordance: { type: "string", enum: ["inspect", "open", "close", "lock", "unlock", "move", "carry", "throw", "take", "give", "drop", "steal", "equip", "use", "ignite", "extinguish", "break", "damage", "attach", "activate"], description: "A reviewed world-object affordance. Omit only for legacy narration-only interaction." },
+        sourceId: { type: "string", description: "A referenced source object for attach/ignite/prerequisite interactions." },
+        destinationId: { type: "string", description: "A reviewed destination reference for move/carry/throw/drop interactions." },
       },
       required: ["targetId", "goal"],
       additionalProperties: false,
@@ -1034,7 +1041,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "character_update":
       return engineCommandSchema.parse({ kind: "character_update", ...args });
     case "interact":
-      return engineCommandSchema.parse({ kind: "interact", targetId: args.targetId, goal: args.goal });
+      return engineCommandSchema.parse({ kind: "interact", targetId: args.targetId, goal: args.goal, affordance: args.affordance, sourceId: args.sourceId, destinationId: args.destinationId });
     case "social_check":
       return engineCommandSchema.parse({ kind: "social_check", npcId: args.npcId, ability: args.ability, skill: args.skill, goal: args.goal });
     case "merchant_trade":

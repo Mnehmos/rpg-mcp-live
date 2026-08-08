@@ -190,6 +190,7 @@ function worldState(): LanternCampaignState {
         sellPriceCopper: 1,
       }],
     }],
+    objects: [],
   };
   return normalizeCampaignState(state);
 }
