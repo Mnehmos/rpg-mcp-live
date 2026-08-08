@@ -3,6 +3,9 @@ import type {
   EngineCombatant,
   EngineCombatantView,
   EngineEquipmentSlot,
+  EngineItemChargeState,
+  EngineItemOwnerRef,
+  EngineItemProvenance,
   EngineInventoryItem,
   EngineInventoryItemInput,
   EngineInventoryItemView,
@@ -419,19 +422,41 @@ export function normalizeInventoryItem(
     equipped: raw.equipped === true,
     attuned: raw.attuned === true,
   };
+  const ownerRef = normalizeOwnerRef(raw.ownerRef);
+  const containerRef = typeof raw.containerRef === "string" && raw.containerRef.trim()
+    ? raw.containerRef.trim()
+    : undefined;
+  const charges = normalizeChargeState(raw.charges);
+  const suppliedProvenance = normalizeItemProvenance(raw.provenance);
   if (typeof raw.contentKey === "string" && raw.contentKey.trim()) {
     const contentKey = raw.contentKey.trim();
     const packHash = typeof raw.packHash === "string" && raw.packHash.trim()
       ? raw.packHash.trim()
       : rulesKernel.packHash;
     requireOpen5eEquipment(contentKey, packHash);
-    return compactItem({ ...instance, contentKey, packHash });
+    return compactItem({
+      ...instance,
+      contentKey,
+      packHash,
+      ownerRef,
+      containerRef,
+      charges,
+      provenance: suppliedProvenance ?? { kind: "open5e" },
+    });
   }
 
   const authored = isRecord(raw.authoredDefinition)
     ? normalizeAuthoredDefinition(raw.authoredDefinition)
     : normalizeLegacyDefinition(raw);
-  return compactItem({ ...instance, authoredDefinition: authored });
+  const authoredCharges = charges ?? defaultChargesForDefinition(authored);
+  return compactItem({
+    ...instance,
+    authoredDefinition: authored,
+    ownerRef,
+    containerRef,
+    charges: authoredCharges,
+    provenance: suppliedProvenance ?? { kind: "authored" },
+  });
 }
 
 export function materializeInventoryItem(item: EngineInventoryItem): EngineInventoryItemView {
@@ -1041,7 +1066,15 @@ function normalizeAuthoredDefinition(raw: Record<string, unknown>): EngineItemDe
       : [],
     damage: typeof raw.damage === "string" ? raw.damage : undefined,
     armorClass: finiteNonnegativeInteger(raw.armorClass),
-    mechanicsTier: 2,
+    containerCapacity: typeof raw.containerCapacity === "number" && Number.isFinite(raw.containerCapacity)
+      ? Math.max(0, raw.containerCapacity)
+      : undefined,
+    ammunitionId: typeof raw.ammunitionId === "string" && raw.ammunitionId.trim() ? raw.ammunitionId.trim() : undefined,
+    effectKey: raw.effectKey === "lantern-ward-v1" ? "lantern-ward-v1" : undefined,
+    isMagic: raw.isMagic === true,
+    mechanicsTier: raw.mechanicsTier === 0 || raw.mechanicsTier === 1 || raw.mechanicsTier === 2
+      ? raw.mechanicsTier
+      : 2,
   };
 }
 
@@ -1056,6 +1089,34 @@ function compactItem(item: EngineInventoryItem): EngineInventoryItem {
   return Object.fromEntries(
     Object.entries(item).filter(([, value]) => value !== undefined && value !== false)
   ) as unknown as EngineInventoryItem;
+}
+
+function normalizeOwnerRef(value: unknown): EngineItemOwnerRef | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind;
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  if ((kind !== "actor" && kind !== "merchant" && kind !== "world") || !id) return undefined;
+  return { kind, id };
+}
+
+function normalizeItemProvenance(value: unknown): EngineItemProvenance | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind;
+  if (kind !== "starter" && kind !== "loot" && kind !== "merchant" && kind !== "authored" && kind !== "open5e") return undefined;
+  const sourceId = typeof value.sourceId === "string" && value.sourceId.trim() ? value.sourceId.trim() : undefined;
+  return { kind, ...(sourceId ? { sourceId } : {}) };
+}
+
+function normalizeChargeState(value: unknown): EngineItemChargeState | undefined {
+  if (!isRecord(value)) return undefined;
+  const current = finiteNonnegativeInteger(value.current);
+  const max = finiteNonnegativeInteger(value.max);
+  if (current === undefined || max === undefined || max < 1 || current > max) return undefined;
+  return { current, max };
+}
+
+function defaultChargesForDefinition(definition: EngineItemDefinition): EngineItemChargeState | undefined {
+  return definition.effectKey === "lantern-ward-v1" ? { current: 1, max: 1 } : undefined;
 }
 
 function finiteNonnegativeInteger(value: unknown): number | undefined {

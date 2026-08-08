@@ -60,8 +60,11 @@ import type {
   EngineEffectInstance,
   EngineEffectDuration,
   EngineEffectOperation,
+  EngineEquipmentSlot,
   EngineImprovEffect,
   EngineInventoryItem,
+  EngineInventoryItemView,
+  EngineItemProvenance,
   EngineWeaponAttack,
   EngineMerchant,
   EngineMerchantPatch,
@@ -1504,6 +1507,8 @@ export function resolveEngineCommand(
       return resolveCharacterCreate(state, context, clientCommandId, command, tool);
     case "equip_item":
       return resolveEquipItem(state, context, clientCommandId, command, tool);
+    case "inventory_transfer":
+      return resolveInventoryTransfer(state, context, clientCommandId, command, tool);
     case "unequip_item":
       return resolveUnequipItem(state, context, clientCommandId, command, tool);
     case "drop_item":
@@ -2123,13 +2128,28 @@ function resolveMerchantTrade(
   const beforeCharacter = cloneCampaign(state).character;
   if (isBuying) {
     if (state.character.currency.copper < total) return rejection(state, tool, "insufficient_funds", "You cannot afford that purchase.");
+    if (state.character.inventory.some((candidate) => candidate.id === nextListing.item.id)) {
+      return rejection(state, tool, "item_instance_conflict", "That merchant instance already exists in your inventory.");
+    }
     next.character.currency.copper -= total;
     syncCurrencyProjection(next.character);
-    addInventory(next.character.inventory, { ...normalizeInventoryItem(nextListing.item), quantity: command.quantity, equipped: false });
+    addInventory(next.character.inventory, withActorOwnership(
+      { ...normalizeInventoryItem(nextListing.item), quantity: command.quantity, equipped: false },
+      next.character.id,
+      { kind: "merchant", sourceId: merchant.id },
+    ));
+    const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+    if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
     if (nextListing.stock >= 0) nextListing.stock -= command.quantity;
   } else {
     const held = next.character.inventory.find((candidate) => candidate.id === command.itemId);
     if (!held || held.quantity < command.quantity) return rejection(state, tool, "item_not_owned", "You do not have that quantity to sell.");
+    if (!isActorOwnedItem(held, next.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
+    if (held.equipped) return rejection(state, tool, "item_equipped", "Unequip the item before selling it.");
+    const heldView = materializeInventoryItem(held);
+    if (isContainerItem(heldView) && inventoryHasChildren(next.character.inventory, held.id)) {
+      return rejection(state, tool, "container_not_empty", "Empty a container before selling it.");
+    }
     held.quantity -= command.quantity;
     if (held.quantity <= 0) next.character.inventory = next.character.inventory.filter((candidate) => candidate.id !== held.id);
     next.character.currency.copper += total;
@@ -2633,6 +2653,84 @@ function resolveCharacterCreate(
   );
 }
 
+function resolveInventoryTransfer(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "inventory_transfer" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const quantity = Number.isInteger(command.quantity) ? command.quantity : 1;
+  const item = state.character.inventory.find((candidate) => candidate.id === command.itemId);
+  if (!item) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
+  if (!isActorOwnedItem(item, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
+  if (item.equipped) return rejection(state, tool, "item_equipped", "Unequip the item before moving it.");
+  if (item.quantity < quantity) return rejection(state, tool, "quantity_unavailable", "You do not have that quantity.");
+
+  const target = command.targetContainerId
+    ? state.character.inventory.find((candidate) => candidate.id === command.targetContainerId)
+    : null;
+  if (command.targetContainerId && !target) return rejection(state, tool, "container_not_found", "That container is not in your inventory.");
+  if (target && !isActorOwnedItem(target, state.character.id)) return rejection(state, tool, "container_not_owned", "You do not own that container.");
+  if (target && target.id === item.id) return rejection(state, tool, "container_cycle", "An item cannot contain itself.");
+  if (target) {
+    const targetView = materializeInventoryItem(target);
+    if (!isContainerItem(targetView)) return rejection(state, tool, "not_a_container", "That item is not a bounded container.");
+    if (target.equipped) return rejection(state, tool, "container_equipped", "Unequip the container before moving items into it.");
+    if (isDescendantOf(state.character.inventory, target.id, item.id)) {
+      return rejection(state, tool, "container_cycle", "A container cannot be moved inside its own contents.");
+    }
+  }
+  if (item.containerRef === (target?.id ?? undefined)) {
+    return rejection(state, tool, "already_at_location", "That item is already at the requested location.");
+  }
+  if (quantity < item.quantity && isContainerItem(materializeInventoryItem(item)) && inventoryHasChildren(state.character.inventory, item.id)) {
+    return rejection(state, tool, "container_stack_split", "A non-empty container stack cannot be split.");
+  }
+
+  const next = cloneCampaign(state);
+  next.character.inventory = next.character.inventory.map((candidate) => ({
+    ...candidate,
+    ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+  }));
+  const source = next.character.inventory.find((candidate) => candidate.id === command.itemId);
+  if (!source) return rejection(state, tool, "item_not_found", "That item is no longer in your inventory.");
+  const movedQuantity = quantity;
+  let moved: EngineInventoryItem;
+  if (movedQuantity === source.quantity) {
+    source.containerRef = target?.id;
+    moved = source;
+  } else {
+    source.quantity -= movedQuantity;
+    moved = {
+      ...source,
+      id: randomUUID(),
+      quantity: movedQuantity,
+      containerRef: target?.id,
+      equipped: false,
+      slot: undefined,
+    };
+    next.character.inventory.push(moved);
+  }
+  const topologyIssue = inventoryTopologyIssue(next.character.inventory, next.character.id);
+  if (topologyIssue) return rejection(state, tool, topologyIssue.code, topologyIssue.message);
+  const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+  if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    target ? `You place ${movedQuantity} × ${materializeInventoryItem(item).name} in the ${materializeInventoryItem(target).name}.` : `You move ${movedQuantity} × ${materializeInventoryItem(item).name} to your carried inventory.`,
+    { item: materializeInventoryItem(moved), inventory: materializeInventory(next.character.inventory), character: characterData(next.character) },
+    "inventory_transferred",
+    [],
+    [],
+    [{ path: "/character/inventory", before: state.character.inventory, after: next.character.inventory }],
+  );
+}
+
 function resolveEquipItem(
   state: LanternCampaignState,
   context: RequestContext,
@@ -2642,17 +2740,38 @@ function resolveEquipItem(
 ): EngineResolution {
   const item = state.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (!item) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
+  if (!isActorOwnedItem(item, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
+  if (item.containerRef) return rejection(state, tool, "item_in_container", "Remove the item from its container before equipping it.");
   const itemView = materializeInventoryItem(item);
-  if (itemView.kind !== "weapon" && itemView.kind !== "armor") return rejection(state, tool, "not_equipment", "Only weapons and armor can be equipped.");
-  if (itemView.isMagic && itemView.mechanicsTier !== 2) {
+  if (itemView.kind !== "weapon" && itemView.kind !== "armor" && itemView.effectKey !== "lantern-ward-v1") {
+    return rejection(state, tool, "not_equipment", "Only weapons, armor, and reviewed magic items can be equipped.");
+  }
+  if (!itemExecutionAllowed(itemView, "equip")) {
     return rejection(
       state,
       tool,
       "content_tier_insufficient",
-      "That magic item's effect is available as Open5e prose but has not been compiled for mechanical use."
+      "That item's supplied or catalog mechanics are not reviewed for equipment execution."
     );
   }
+  if (itemView.attunementRequired && !item.attuned) return rejection(state, tool, "attunement_required", "Attune to that item before equipping it.");
+  if (itemView.effectKey === "lantern-ward-v1" && (itemView.charges?.current ?? item.charges?.current ?? 0) <= 0) {
+    return rejection(state, tool, "charges_depleted", "That magic item's charges are depleted.");
+  }
+  const slotIssue = equipmentSlotIssue(itemView, command.slot);
+  if (slotIssue) return rejection(state, tool, slotIssue.code, slotIssue.message);
+  const conflict = equipmentConflict(state.character.inventory, itemView, command.slot, item.id);
+  if (conflict) return rejection(state, tool, conflict.code, conflict.message);
   const next = cloneCampaign(state);
+  next.character.inventory = next.character.inventory.map((candidate) => ({
+    ...candidate,
+    ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+  }));
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  for (const displaced of state.character.inventory.filter((candidate) => candidate.equipped && candidate.slot === command.slot && candidate.id !== item.id)) {
+    const displacedView = materializeInventoryItem(displaced);
+    if (displacedView.effectKey) removeRuntimeSource(next, `item:${displaced.id}`, changes);
+  }
   next.character.inventory = next.character.inventory.map((candidate) => {
     if (candidate.slot !== command.slot) return candidate;
     return { ...candidate, equipped: false };
@@ -2661,10 +2780,29 @@ function resolveEquipItem(
   if (!equipped) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
   equipped.slot = command.slot;
   equipped.equipped = true;
+  if (itemView.effectKey === "lantern-ward-v1") {
+    applyRuntimeEffect(
+      next,
+      effectInput(
+        next,
+        itemView.effectKey,
+        `item:${item.id}`,
+        [next.character.id],
+        [{ kind: "stat-modifier", stat: "armor-class", value: 1, stackingKey: "magic:lantern-ward-v1" }],
+        { kind: "persistent" },
+        "magic:lantern-ward-v1",
+        "ignore",
+        ["source-removal"],
+        clientCommandId,
+      ),
+      changes,
+    );
+  }
   next.character.ac = deriveArmorClass(next.character, next.effects);
   return commit(next, context, clientCommandId, command, tool, "You equip the " + itemView.name + ".", { item: materializeInventoryItem(equipped), character: characterData(next.character) }, "item_equipped", [], [], [
     { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
     { path: "/character/ac", before: state.character.ac, after: next.character.ac },
+    ...changes,
   ]);
 }
 
@@ -2677,14 +2815,23 @@ function resolveUnequipItem(
 ): EngineResolution {
   const item = state.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (!item) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
+  if (!isActorOwnedItem(item, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
   if (!item.equipped) return rejection(state, tool, "item_not_equipped", "That item is not equipped.");
   const next = cloneCampaign(state);
+  next.character.inventory = next.character.inventory.map((candidate) => ({
+    ...candidate,
+    ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+  }));
   const target = next.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (target) target.equipped = false;
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const itemView = materializeInventoryItem(item);
+  if (itemView.effectKey) removeRuntimeSource(next, `item:${item.id}`, changes);
   next.character.ac = deriveArmorClass(next.character, next.effects);
   return commit(next, context, clientCommandId, command, tool, "You unequip the " + materializeInventoryItem(item).name + ".", { item: target ? materializeInventoryItem(target) : null, character: characterData(next.character) }, "item_unequipped", [], [], [
     { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
     { path: "/character/ac", before: state.character.ac, after: next.character.ac },
+    ...changes,
   ]);
 }
 
@@ -2697,8 +2844,12 @@ function resolveDropItem(
 ): EngineResolution {
   const item = state.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (!item) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
+  if (!isActorOwnedItem(item, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
   if (item.quantity < command.quantity) return rejection(state, tool, "quantity_unavailable", "You do not have that quantity.");
   if (item.equipped && command.quantity >= item.quantity) return rejection(state, tool, "item_equipped", "Unequip the item before dropping it.");
+  if (isContainerItem(materializeInventoryItem(item)) && inventoryHasChildren(state.character.inventory, item.id)) {
+    return rejection(state, tool, "container_not_empty", "Empty a container before dropping it.");
+  }
   const next = cloneCampaign(state);
   const target = next.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (target) target.quantity -= command.quantity;
@@ -3885,6 +4036,8 @@ export function deriveWeaponAttack(character: EngineCharacter, weaponId?: string
   const abilityModifierValue = abilityModifier(character.abilities[ability]);
   const proficiencyBonus = character.proficiencyBonus;
   const attackBonus = abilityModifierValue + (proficient ? proficiencyBonus : 0);
+  const ammunitionId = selected.view.ammunitionId
+    ?? (properties.includes("ammunition") ? defaultAmmunitionId(weaponName) : undefined);
   const explanation = `${weaponName} uses ${ability.toUpperCase()} ${abilityModifierValue >= 0 ? "+" : ""}${abilityModifierValue}; `
     + `${proficient ? "proficiency applies" : "the character is not proficient"}; `
     + `damage is ${damageDice}${selected.view.damage?.match(/\s+([a-zA-Z][a-zA-Z -]*)$/)?.[1] ? ` ${selected.view.damage.match(/\s+([a-zA-Z][a-zA-Z -]*)$/)?.[1]}` : ""}.`;
@@ -3902,6 +4055,7 @@ export function deriveWeaponAttack(character: EngineCharacter, weaponId?: string
     reachFeet: weaponRecord?.range.normal === 0 ? 5 : (ranged ? null : 5),
     normalRangeFeet: normalRangeFeet && normalRangeFeet > 0 ? normalRangeFeet : null,
     longRangeFeet: longRangeFeet && longRangeFeet > 0 ? longRangeFeet : null,
+    ammunitionId,
     explanation,
   };
 }
@@ -3945,6 +4099,15 @@ function resolveCombatAction(
   if (command.action === "attack" && !derivedAttack) {
     return rejection(state, tool, command.weaponId ? "weapon_not_equipped" : "weapon_required", command.weaponId ? "The selected weapon must be an equipped weapon." : "Equip a weapon before attacking.");
   }
+  const ammunition = command.action === "attack" && derivedAttack?.ammunitionId
+    ? findAmmunition(state.character.inventory, derivedAttack.ammunitionId)
+    : null;
+  if (ammunition && !isActorOwnedItem(ammunition, state.character.id)) {
+    return rejection(state, tool, "ammunition_unavailable", "That ammunition is not owned by the character.");
+  }
+  if (command.action === "attack" && derivedAttack?.ammunitionId && !ammunition) {
+    return rejection(state, tool, "ammunition_unavailable", "That ranged weapon has no available ammunition.");
+  }
   if (command.action === "second_wind" && (state.character.featureUses.secondWind ?? 0) < 1) {
     return rejection(state, tool, "feature_unavailable", "Second Wind is unavailable until your next rest.");
   }
@@ -3953,6 +4116,10 @@ function resolveCombatAction(
   }
 
   const next = cloneCampaign(state);
+  next.character.inventory = next.character.inventory.map((candidate) => ({
+    ...candidate,
+    ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+  }));
   const target = sourceTarget ? findLiveCombatant(next.combat, sourceTarget.id) : null;
   const targetView = target ? materializeCombatant(target) : null;
   spendTurnSlot(next.combat.turnBudget, requiredSlot);
@@ -4018,6 +4185,14 @@ function resolveCombatAction(
     } else {
       message = `Your ${derivedAttack.weaponName} attack misses ${targetView.name}. Your turn remains open; end it when you are ready.`;
       outcome = "miss";
+    }
+    if (ammunition) {
+      const consumed = next.character.inventory.find((candidate) => candidate.id === ammunition.id);
+      if (!consumed || consumed.quantity < 1) return rejection(state, tool, "ammunition_unavailable", "That ranged weapon has no available ammunition.");
+      const beforeQuantity = consumed.quantity;
+      consumed.quantity -= 1;
+      if (consumed.quantity <= 0) next.character.inventory = next.character.inventory.filter((candidate) => candidate.id !== consumed.id);
+      changes.push({ path: `/character/inventory/${consumed.id}/quantity`, before: beforeQuantity, after: Math.max(0, beforeQuantity - 1) });
     }
   } else if (command.action === "dodge") {
     const beforeConditions = [...next.character.conditions];
@@ -5193,11 +5368,25 @@ function resolveLoot(
   if (command.questId && !quest) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
   const questRewardAvailable = Boolean(quest && !quest.rewardClaimed);
   const questReward = questRewardAvailable && quest ? quest.reward : { xp: 0, copper: 0 };
-  const rewardItems = command.items.map((item) => normalizeInventoryItem({ ...item, equipped: false }));
+  const normalizedRewards = command.items.map((item) => normalizeInventoryItem({ ...item, equipped: false }));
+  const rewardIds = new Set<string>();
+  for (const item of normalizedRewards) {
+    if (rewardIds.has(item.id) || state.character.inventory.some((candidate) => candidate.id === item.id)) {
+      return rejection(state, tool, "duplicate_item_instance", "Loot cannot create a second item instance with an existing id.");
+    }
+    rewardIds.add(item.id);
+  }
+  const rewardItems = normalizedRewards.map((item) => withActorOwnership(item, state.character.id, { kind: "loot", sourceId: clientCommandId }));
   const totalCopper = command.rewardCopper + questReward.copper;
   const totalXp = command.rewardXp + questReward.xp;
   const next = cloneCampaign(state);
+  next.character.inventory = next.character.inventory.map((candidate) => ({
+    ...candidate,
+    ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+  }));
   for (const item of rewardItems) addInventory(next.character.inventory, item);
+  const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+  if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
   next.character.currency.copper += totalCopper;
   syncCurrencyProjection(next.character);
   next.character.xp += totalXp;
@@ -5341,14 +5530,53 @@ function resolveUseItem(
 ): EngineResolution {
   const item = state.character.inventory.find((candidate) => candidate.id === command.itemId);
   if (!item) return rejection(state, tool, "item_not_found", "That item is not in your inventory.");
+  if (!isActorOwnedItem(item, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
   const itemView = materializeInventoryItem(item);
-  if (itemView.definitionSource === "open5e" && itemView.mechanicsTier !== 2) {
-    return rejection(state, tool, "content_tier_insufficient", "That Open5e item's prose has not been compiled into a usable mechanical effect.");
+  if (!itemExecutionAllowed(itemView, "use")) {
+    return rejection(state, tool, "content_tier_insufficient", "That item's supplied or catalog mechanics are not reviewed for use execution.");
+  }
+  if (itemView.effectKey === "lantern-ward-v1") {
+    if (!item.equipped) return rejection(state, tool, "item_not_equipped", "Equip the Lantern Ward before spending its charge.");
+    const currentCharges = item.charges?.current ?? 1;
+    const maximumCharges = item.charges?.max ?? 1;
+    if (currentCharges <= 0) return rejection(state, tool, "charges_depleted", "That magic item's charges are depleted.");
+    const next = cloneCampaign(state);
+    next.character.inventory = next.character.inventory.map((candidate) => ({
+      ...candidate,
+      ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+    }));
+    const target = next.character.inventory.find((candidate) => candidate.id === item.id);
+    if (!target) return rejection(state, tool, "item_not_found", "That item is no longer in your inventory.");
+    const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+    target.charges = { current: currentCharges - 1, max: maximumCharges };
+    if (target.charges.current === 0) removeRuntimeSource(next, `item:${item.id}`, changes);
+    next.character.ac = deriveArmorClass(next.character, next.effects);
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `You spend a Lantern Ward charge; ${target.charges.current} charge${target.charges.current === 1 ? "" : "s"} remains.`,
+      { item: materializeInventoryItem(target), character: characterData(next.character) },
+      "item_charge_spent",
+      [],
+      [],
+      [
+        { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
+        { path: "/character/ac", before: state.character.ac, after: next.character.ac },
+        ...changes,
+      ],
+    );
   }
   if (itemView.kind !== "consumable" || !itemView.healing) return rejection(state, tool, "not_consumable", "That item cannot be used as a consumable.");
   if (state.character.hp >= state.character.maxHp) return rejection(state, tool, "already_full_health", "You are already at full health.");
 
   const next = cloneCampaign(state);
+  next.character.inventory = next.character.inventory.map((candidate) => ({
+    ...candidate,
+    ownerRef: candidate.ownerRef ?? { kind: "actor", id: next.character.id },
+  }));
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   const healing = applyHealing(next, itemView.healing, "consumable", changes);
   const consumed = next.character.inventory.find((candidate) => candidate.id === item.id);
@@ -6389,7 +6617,9 @@ function hydrateCharacter(character: EngineCharacter): EngineCharacter {
   );
   character.maxHp = character.maxHp ?? maxHp;
   character.hp = Math.max(0, Math.min(character.maxHp, character.hp ?? character.maxHp));
-  character.inventory = Array.isArray(character.inventory) ? character.inventory.map(normalizeInventoryItem) : [];
+  character.inventory = Array.isArray(character.inventory)
+    ? character.inventory.map(normalizeInventoryItem)
+    : [];
   character.currency = character.currency ?? { copper: 0 };
   character.ac = deriveArmorClass(character);
   return character;
@@ -6800,9 +7030,208 @@ function syncCurrencyProjection(character: EngineCharacter): void {
   character.gold = Math.floor(character.currency.copper / 100);
 }
 
+const MAX_CONTAINER_DEPTH = 4;
+
+interface InventoryIssue {
+  code: string;
+  message: string;
+}
+
+function isActorOwnedItem(item: EngineInventoryItem, actorId: string): boolean {
+  return !item.ownerRef || (item.ownerRef.kind === "actor" && item.ownerRef.id === actorId);
+}
+
+function withActorOwnership(
+  item: EngineInventoryItem,
+  actorId: string,
+  provenance: EngineItemProvenance,
+): EngineInventoryItem {
+  return {
+    ...item,
+    ownerRef: { kind: "actor", id: actorId },
+    containerRef: undefined,
+    equipped: false,
+    slot: undefined,
+    provenance,
+  };
+}
+
+function isContainerItem(item: EngineInventoryItemView): boolean {
+  return typeof item.containerCapacity === "number";
+}
+
+function inventoryHasChildren(inventory: EngineInventoryItem[], containerId: string): boolean {
+  return inventory.some((item) => item.containerRef === containerId);
+}
+
+function isDescendantOf(inventory: EngineInventoryItem[], candidateId: string, ancestorId: string): boolean {
+  const seen = new Set<string>();
+  let current = inventory.find((item) => item.id === candidateId);
+  while (current?.containerRef) {
+    if (seen.has(current.id)) return true;
+    seen.add(current.id);
+    if (current.containerRef === ancestorId) return true;
+    current = inventory.find((item) => item.id === current!.containerRef);
+  }
+  return false;
+}
+
+function inventoryTopologyIssue(inventory: EngineInventoryItem[], actorId?: string): InventoryIssue | null {
+  const ids = new Set<string>();
+  for (const item of inventory) {
+    if (ids.has(item.id)) return { code: "duplicate_item_instance", message: "Inventory contains duplicate item instance ids." };
+    ids.add(item.id);
+    if (item.quantity < 0 || !Number.isInteger(item.quantity)) return { code: "invalid_quantity", message: "Inventory quantities must be nonnegative integers." };
+    if (actorId && !isActorOwnedItem(item, actorId)) return { code: "item_not_owned", message: "An inventory item is owned by another actor." };
+    if (item.equipped && item.containerRef) return { code: "equipped_item_in_container", message: "An equipped item cannot be inside a container." };
+    if (!item.containerRef) continue;
+    if (item.containerRef === item.id) return { code: "container_cycle", message: "A container cannot contain itself." };
+    const parent = inventory.find((candidate) => candidate.id === item.containerRef);
+    if (!parent) return { code: "container_not_found", message: "An item refers to a missing container." };
+    let depth = 1;
+    let current = parent;
+    const seen = new Set<string>([item.id]);
+    while (current.containerRef) {
+      if (seen.has(current.id)) return { code: "container_cycle", message: "Container locations must be acyclic." };
+      seen.add(current.id);
+      depth += 1;
+      if (depth > MAX_CONTAINER_DEPTH) return { code: "container_depth_exceeded", message: `Containers may be nested only ${MAX_CONTAINER_DEPTH} levels deep.` };
+      const ancestor = inventory.find((candidate) => candidate.id === current.containerRef);
+      if (!ancestor) return { code: "container_not_found", message: "An item refers to a missing ancestor container." };
+      current = ancestor;
+    }
+    try {
+      if (!isContainerItem(materializeInventoryItem(parent))) return { code: "not_a_container", message: "An item refers to a non-container location." };
+    } catch {
+      return { code: "invalid_item", message: "An inventory item could not be materialized." };
+    }
+  }
+  return null;
+}
+
+function inventoryCapacityIssue(inventory: EngineInventoryItem[], character: EngineCharacter): InventoryIssue | null {
+  const topologyIssue = inventoryTopologyIssue(inventory, character.id);
+  if (topologyIssue) return topologyIssue;
+  const carryLimit = carryCapacity(character.abilities.str);
+  const carryWeight = inventoryWeight(inventory);
+  if (carryWeight > carryLimit) return { code: "carry_capacity_exceeded", message: "That change would exceed your carrying capacity." };
+  for (const item of inventory) {
+    let view: EngineInventoryItemView;
+    try {
+      view = materializeInventoryItem(item);
+    } catch {
+      return { code: "invalid_item", message: "An inventory item could not be materialized." };
+    }
+    if (!isContainerItem(view)) continue;
+    const used = containerContentsWeight(inventory, item.id);
+    if (used > view.containerCapacity!) {
+      return { code: "container_capacity_exceeded", message: `${view.name} cannot hold that weight.` };
+    }
+  }
+  return null;
+}
+
 function inventoryWeight(inventory: EngineInventoryItem[]): number {
-  return materializeInventory(inventory)
-    .reduce((total, item) => total + item.weight * item.quantity, 0);
+  const views = new Map(inventory.map((item) => [item.id, materializeInventoryItem(item)]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const weightFor = (id: string, depth: number): number => {
+    const view = views.get(id);
+    if (!view || visiting.has(id) || depth > MAX_CONTAINER_DEPTH + 1) return 0;
+    visiting.add(id);
+    let total = view.weight * view.quantity;
+    for (const child of inventory) {
+      if (child.containerRef === id) total += weightFor(child.id, depth + 1);
+    }
+    visiting.delete(id);
+    visited.add(id);
+    return total;
+  };
+  let total = 0;
+  for (const item of inventory) {
+    if (!item.containerRef || !views.has(item.containerRef)) total += weightFor(item.id, 0);
+  }
+  for (const item of inventory) {
+    if (!visited.has(item.id)) total += weightFor(item.id, 0);
+  }
+  return total;
+}
+
+function containerContentsWeight(inventory: EngineInventoryItem[], containerId: string): number {
+  const views = new Map(inventory.map((item) => [item.id, materializeInventoryItem(item)]));
+  const visiting = new Set<string>();
+  const weightFor = (id: string, depth: number): number => {
+    const view = views.get(id);
+    if (!view || visiting.has(id) || depth > MAX_CONTAINER_DEPTH + 1) return 0;
+    visiting.add(id);
+    let total = view.weight * view.quantity;
+    for (const child of inventory) {
+      if (child.containerRef === id) total += weightFor(child.id, depth + 1);
+    }
+    visiting.delete(id);
+    return total;
+  };
+  return inventory.filter((item) => item.containerRef === containerId)
+    .reduce((total, item) => total + weightFor(item.id, 1), 0);
+}
+
+function defaultAmmunitionId(weaponName: string): string {
+  const name = weaponName.toLocaleLowerCase("en-US");
+  if (name.includes("crossbow")) return "bolt";
+  if (name.includes("bow")) return "arrow";
+  if (name.includes("sling")) return "sling-bullet";
+  return "ammunition";
+}
+
+function findAmmunition(inventory: EngineInventoryItem[], ammunitionId: string): EngineInventoryItem | null {
+  const exact = inventory.find((item) => item.id === ammunitionId && item.quantity > 0 && materializeInventoryItem(item).kind === "ammunition");
+  if (exact) return exact;
+  const hint = ammunitionId.toLocaleLowerCase("en-US");
+  return inventory.find((item) => {
+    if (item.quantity <= 0) return false;
+    const view = materializeInventoryItem(item);
+    return view.kind === "ammunition"
+      && (view.name.toLocaleLowerCase("en-US").includes(hint) || item.contentKey?.toLocaleLowerCase("en-US").includes(hint) === true);
+  }) ?? null;
+}
+
+function itemExecutionAllowed(item: EngineInventoryItemView, operation: "equip" | "use"): boolean {
+  const tier = item.mechanicsTier ?? 0;
+  if (operation === "equip") {
+    if (item.effectKey || item.isMagic) return tier === 2;
+    if (item.definitionSource === "authored") return tier === 2;
+    return tier === 2 || (item.definitionSource === "open5e" && (item.kind === "weapon" || item.kind === "armor"));
+  }
+  return tier === 2 && (item.effectKey === "lantern-ward-v1" || (item.kind === "consumable" && Boolean(item.healing)));
+}
+
+function normalizedProperties(item: EngineItemDefinitionLike): string[] {
+  return [...new Set((item.properties ?? []).map((property) => property.trim().toLocaleLowerCase("en-US").replaceAll(" ", "-")))];
+}
+
+type EngineItemDefinitionLike = Pick<EngineInventoryItemView, "kind" | "properties" | "effectKey">;
+
+function equipmentSlotIssue(item: EngineInventoryItemView, slot: EngineEquipmentSlot): InventoryIssue | null {
+  const properties = normalizedProperties(item);
+  if (item.effectKey === "lantern-ward-v1") return slot === "accessory" ? null : { code: "invalid_equipment_slot", message: "The Lantern Ward occupies an accessory slot." };
+  if (item.kind === "weapon" && slot !== "mainhand" && slot !== "offhand") return { code: "invalid_equipment_slot", message: "Weapons occupy a mainhand or offhand slot." };
+  if (item.kind === "armor" && properties.includes("shield") && slot !== "offhand") return { code: "invalid_equipment_slot", message: "A shield occupies the offhand slot." };
+  if (item.kind === "armor" && !properties.includes("shield") && !["armor", "head", "feet", "accessory"].includes(slot)) return { code: "invalid_equipment_slot", message: "That armor cannot occupy the requested slot." };
+  if (properties.includes("two-handed") && slot !== "mainhand") return { code: "two_handed_conflict", message: "A two-handed weapon must occupy the mainhand slot." };
+  return null;
+}
+
+function equipmentConflict(inventory: EngineInventoryItem[], item: EngineInventoryItemView, slot: EngineEquipmentSlot, itemId: string): InventoryIssue | null {
+  const properties = normalizedProperties(item);
+  const equipped = inventory.filter((candidate) => candidate.equipped && candidate.id !== itemId);
+  const offhand = equipped.find((candidate) => candidate.slot === "offhand");
+  const mainhand = equipped.find((candidate) => candidate.slot === "mainhand");
+  if (slot === "mainhand" && properties.includes("two-handed") && offhand) return { code: "two_handed_conflict", message: "Unequip the offhand before wielding a two-handed weapon." };
+  if (slot === "offhand" && mainhand) {
+    const mainView = materializeInventoryItem(mainhand);
+    if (normalizedProperties(mainView).includes("two-handed")) return { code: "two_handed_conflict", message: "A two-handed weapon occupies both hands." };
+  }
+  return null;
 }
 
 function addInventory(inventory: EngineInventoryItem[], item: EngineInventoryItem): void {
