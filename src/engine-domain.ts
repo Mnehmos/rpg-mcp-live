@@ -37,6 +37,7 @@ import type {
   EngineCurrencyBreakdown,
   EngineCombat,
   EngineCombatView,
+  EngineCheckEvidence,
   EnginePendingReaction,
   EnginePendingAdvancement,
   EngineTurnBudget,
@@ -304,6 +305,8 @@ type ChallengeDefinition = {
   allowedOutcomes: EngineAdjudicationOutcome[];
   retryPolicy: EngineAdjudicationDecision["retryPolicy"];
   costs: EngineAdjudicationCosts;
+  actorCheck?: { ability: EngineAbility; skill: string };
+  opposed?: { ability: EngineAbility; skill: string };
   reason?: string;
   alternatives?: string[];
 };
@@ -347,6 +350,20 @@ const REVIEWED_CHALLENGE_DEFINITIONS: ChallengeDefinition[] = [
     allowedOutcomes: ["success", "failure-with-complication"],
     retryPolicy: "new_approach_or_state_change",
     costs: { timeMinutes: 5, noise: 2, exposure: 1 },
+  },
+  {
+    id: "stealth-perception-v1",
+    aliases: ["stealth-v-perception", "opposed-stealth-perception"],
+    feasibility: "uncertain",
+    selectedRuleFamily: "stealth-vs-perception",
+    dcSource: "opposed_actor",
+    dcProvenance: "reviewed-challenge:stealth-perception-v1:opposed-v1",
+    stakes: [],
+    allowedOutcomes: ["success", "failure-with-complication"],
+    retryPolicy: "new_approach_or_state_change",
+    costs: { timeMinutes: 0, noise: 0, exposure: 0 },
+    actorCheck: { ability: "dex", skill: "stealth" },
+    opposed: { ability: "wis", skill: "perception" },
   },
 ];
 
@@ -408,7 +425,10 @@ function buildAdjudicationDecision(
     allowedOutcomes: [...definition.allowedOutcomes],
     retryPolicy: definition.retryPolicy,
     costs: { ...definition.costs },
-    informationPolicy: "public",
+    informationPolicy: command.informationPolicy ?? "public",
+    ...(command.helperId ? { helperId: command.helperId } : {}),
+    ...(command.opponentId ? { opponentId: command.opponentId } : {}),
+    ...(command.tool ? { tool: command.tool } : {}),
     policyRevision: ADJUDICATION_POLICY_REVISION,
     rulesVersion: state.rulesVersion,
   };
@@ -462,6 +482,114 @@ function adjudicationRejection(
   return rejection(state, tool, code, message, { adjudication: decision, ...extraData });
 }
 
+function validateChallengeHelper(
+  state: LanternCampaignState,
+  context: RequestContext,
+  helperId: string | undefined,
+  tool: EngineToolName | "declare" | "listen",
+  decision: EngineAdjudicationDecision
+): EngineResolution | null {
+  if (!helperId) return null;
+  if (helperId === context.actorId || helperId === state.character.id) {
+    return adjudicationRejection(state, tool, "helper_not_eligible", "The acting character cannot help itself.", decision);
+  }
+  const helper = state.worldContext?.npcs.find((candidate) => candidate.id === helperId);
+  if (!helper) return adjudicationRejection(state, tool, "helper_not_found", "That helper is not established in the current context.", decision);
+  if (helper.disposition !== "friendly" && helper.disposition !== "helpful") {
+    return adjudicationRejection(state, tool, "helper_unavailable", "That NPC is not willing to help with this check.", decision);
+  }
+  return null;
+}
+
+function resolveOpposedCheck(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineChallengeAttemptCommand,
+  tool: EngineToolName | "declare" | "listen",
+  decision: EngineAdjudicationDecision,
+  definition: ChallengeDefinition
+): EngineResolution {
+  const opponentId = decision.opponentId;
+  if (!opponentId) return adjudicationRejection(state, tool, "opponent_required", "This opposed challenge needs an established opponent.", decision);
+  if (state.combat.status !== "active") return adjudicationRejection(state, tool, "opponent_not_supported", "An opposed challenge requires an active established opponent.", decision);
+  const opponent = state.combat.enemies.find((candidate) => candidate.id === opponentId && candidate.alive);
+  if (!opponent) return adjudicationRejection(state, tool, "opponent_not_found", "That opponent is not a living combatant in the current encounter.", decision);
+  const actorCheck = definition.actorCheck ?? { ability: "dex" as const, skill: "stealth" };
+  const derived = deriveCheck(state, actorCheck.ability, actorCheck.skill, decision.tool ?? null, tool);
+  if ("accepted" in derived) return derived;
+  const opponentView = materializeCombatant(opponent);
+  const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
+  const advantageSources = [...modifierQuery.effectIds];
+  if (decision.helperId) advantageSources.push("helper:" + decision.helperId);
+  const disadvantageSources = modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [];
+  const advantageCount = modifierQuery.advantage + (decision.helperId ? 1 : 0);
+  const disadvantageCount = modifierQuery.disadvantage;
+  const mode: EngineCheckEvidence["mode"] = advantageCount > 0 && disadvantageCount > 0 ? "cancelled" : advantageCount > 0 ? "advantage" : disadvantageCount > 0 ? "disadvantage" : "normal";
+  const firstRoll = randomInt(1, 21);
+  const secondRoll = mode !== "normal" && mode !== "cancelled" ? randomInt(1, 21) : null;
+  const roll = secondRoll === null ? firstRoll : mode === "advantage" ? Math.max(firstRoll, secondRoll) : Math.min(firstRoll, secondRoll);
+  const opponentRoll = randomInt(1, 21);
+  const opponentModifier = opponentView.skillBonusesAll[definition.opposed?.skill ?? "perception"] ?? opponentView.abilityModifiers[definition.opposed?.ability ?? "wis"];
+  const opponentTotal = opponentRoll + opponentModifier;
+  const total = roll + derived.modifier;
+  const success = total > opponentTotal;
+  const outcome: EngineAdjudicationOutcome = success ? "success" : "failure-with-complication";
+  const withheld = decision.informationPolicy === "withheld";
+  const publicText = `You make a ${actorCheck.ability.toUpperCase()} (${actorCheck.skill}) check against ${opponentView.name}: ${total} versus ${opponentTotal}. ${success ? "Success." : "Failure."}`;
+  const text = withheld ? "The opposed check resolves, but its details are withheld." : publicText;
+  const check: EngineCheckEvidence = {
+    kind: "opposed-check",
+    actorId: context.actorId,
+    ability: actorCheck.ability,
+    skill: actorCheck.skill,
+    tool: derived.tool,
+    proficiency: derived.proficiency,
+    expertise: derived.expertise,
+    modifier: derived.modifier,
+    modifierSources: [...derived.modifierSources],
+    advantageSources,
+    disadvantageSources,
+    mode,
+    ...(decision.helperId ? { helperId: decision.helperId } : {}),
+    opponentId,
+    opponentAbility: definition.opposed?.ability,
+    opponentSkill: definition.opposed?.skill,
+    opponentModifier,
+    opponentTotal,
+    informationPolicy: decision.informationPolicy,
+    formulaRevision: "checks-v1",
+  };
+  const next = cloneCampaign(state);
+  next.lastRoll = roll;
+  const attemptChange = appendAdjudicationAttempt(next, state, decision, outcome, roll, total).change;
+  const fullData = { ability: actorCheck.ability, skill: actorCheck.skill, goal: command.goal, roll, modifier: derived.modifier, total, opponentId, opponentRoll, opponentModifier, opponentTotal, success, adjudication: decision, costs: decision.costs, outcome };
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    text,
+    withheld ? { informationPolicy: "withheld", outcome } : fullData,
+    outcome,
+    [
+      { kind: "d20", value: roll, sides: 20 },
+      ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
+      { kind: "opposed_d20", value: opponentRoll, sides: 20 },
+    ],
+    [
+      { name: actorCheck.ability + "_modifier", value: derived.modifier },
+      { name: "opponent_modifier", value: opponentModifier },
+      { name: "opponent_total", value: opponentTotal },
+    ],
+    [{ path: "/lastRoll", before: state.lastRoll, after: roll }, attemptChange],
+    [],
+    decision,
+    check
+  );
+}
+
 function resolveChallengeAttempt(
   state: LanternCampaignState,
   context: RequestContext,
@@ -491,6 +619,8 @@ function resolveChallengeAttempt(
       decision
     );
   }
+  const helperRejection = validateChallengeHelper(state, context, decision.helperId, tool, decision);
+  if (helperRejection) return helperRejection;
   if (definition.feasibility === "automatic") {
     const next = cloneCampaign(state);
     const { change } = appendAdjudicationAttempt(next, state, decision, "automatic-success");
@@ -509,6 +639,10 @@ function resolveChallengeAttempt(
       [],
       decision
     );
+  }
+
+  if (definition.opposed) {
+    return resolveOpposedCheck(state, context, clientCommandId, command, tool, decision, definition);
   }
 
   const checkCommand = {
@@ -1707,6 +1841,8 @@ function resolveSocialCheck(
 ): EngineResolution {
   const npc = state.worldContext?.npcs.find((candidate) => candidate.id === command.npcId);
   if (!npc) return rejection(state, tool, "npc_not_found", "That NPC is not established in the current context.");
+  const derived = deriveCheck(state, command.ability, command.skill ?? null, null, tool);
+  if ("accepted" in derived) return derived;
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
   const firstRoll = randomInt(1, 21);
   const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
@@ -1717,9 +1853,7 @@ function resolveSocialCheck(
     : modifierQuery.mode === "advantage"
       ? Math.max(firstRoll, secondRoll)
       : Math.min(firstRoll, secondRoll);
-  const baseModifier = open5eAbilityModifier(state.character.abilities[command.ability]);
-  const skillBonus = command.skill ? state.character.skills[command.skill]?.bonus : undefined;
-  const modifier = skillBonus ?? baseModifier;
+  const modifier = derived.modifier;
   const total = roll + modifier;
   const success = total >= npc.socialDc;
   const next = cloneCampaign(state);
@@ -1744,7 +1878,25 @@ function resolveSocialCheck(
       ...(secondRoll === null ? [] : [{ kind: `social_${modifierQuery.mode}_d20`, value: secondRoll, sides: 20 }]),
     ],
     [{ name: command.ability + "_modifier", value: modifier }, { name: "social_dc", value: npc.socialDc }],
-    nextNpc ? [{ path: "/worldContext/npcs/" + npc.id + "/relationshipScore", before: npc.relationshipScore, after: nextNpc.relationshipScore }] : []
+    nextNpc ? [{ path: "/worldContext/npcs/" + npc.id + "/relationshipScore", before: npc.relationshipScore, after: nextNpc.relationshipScore }] : [],
+    [],
+    undefined,
+    {
+      kind: "ability-check",
+      actorId: context.actorId,
+      ability: command.ability,
+      skill: derived.skill,
+      tool: null,
+      proficiency: derived.proficiency,
+      expertise: derived.expertise,
+      modifier,
+      modifierSources: [...derived.modifierSources],
+      advantageSources: [...modifierQuery.effectIds],
+      disadvantageSources: modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [],
+      mode: modifierQuery.mode,
+      informationPolicy: "public",
+      formulaRevision: "checks-v1",
+    }
   );
 }
 
@@ -2085,6 +2237,9 @@ function resolveImprovise(
   if (command.effectType === "condition" && !command.condition) {
     return rejection(state, tool, "condition_required", "A condition effect must name its reviewed condition marker.");
   }
+  if (command.effectType === "damage" && !(command.amount && command.amount > 0)) {
+    return rejection(state, tool, "damage_amount_required", "Damage must provide a positive amount.");
+  }
   if ((command.effectType === "damage" || command.effectType === "healing") && !targetIsPlayer) {
     return rejection(state, tool, "unsupported_effect_target", `${command.effectType} currently has no creature resolver.`);
   }
@@ -2097,11 +2252,12 @@ function resolveImprovise(
     targetId: command.targetId,
     amount: command.amount,
     condition: command.condition,
+    checkCategory: command.checkCategory,
     createdAt: new Date().toISOString(),
   };
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   if (command.effectType === "advantage" || command.effectType === "disadvantage") {
-    const operation: EngineEffectOperation = { kind: command.effectType, category: "attack-roll" };
+    const operation: EngineEffectOperation = { kind: command.effectType, category: command.checkCategory ?? "attack-roll" };
     applyRuntimeEffect(
       next,
       effectInput(
@@ -2151,7 +2307,10 @@ function resolveImprovise(
     }
   }
   next.improvEffects = [...state.improvEffects, effect].slice(-100);
-  return commit(next, context, clientCommandId, command, tool, "Improv effect applied: " + command.title + ".", { effect, effects: next.effects.filter((candidate) => candidate.status === "active"), character: characterData(next.character) }, "improv_effect_applied", [], [], [
+  const fictional = command.effectType === "fictional";
+  return commit(next, context, clientCommandId, command, tool, fictional
+    ? "The fiction advances; no mechanical effect was applied: " + command.title + "."
+    : "Improv effect applied: " + command.title + ".", { effect, mechanical: !fictional, effects: next.effects.filter((candidate) => candidate.status === "active"), character: characterData(next.character) }, fictional ? "improvise_fictional" : "improv_effect_applied", [], [], [
     { path: "/improvEffects", before: state.improvEffects, after: next.improvEffects },
     { path: "/character", before: state.character, after: next.character },
     ...changes,
@@ -2411,6 +2570,50 @@ function resolveTutorialAdvance(
   );
 }
 
+type DerivedCheck = {
+  modifier: number;
+  skill: string | null;
+  tool: string | null;
+  proficiency: boolean;
+  expertise: boolean;
+  modifierSources: string[];
+};
+
+function deriveCheck(
+  state: LanternCampaignState,
+  ability: EngineAbility,
+  skill: string | null,
+  tool: string | null,
+  rejectionTool: EngineToolName | "declare" | "listen"
+): DerivedCheck | EngineResolution {
+  const skillEntry = skill ? state.character.skills[skill] : undefined;
+  if (skill && !skillEntry) return rejection(state, rejectionTool, "unknown_skill", `No reviewed skill is established for ${skill}.`);
+  if (skillEntry && skillEntry.ability !== ability) {
+    return rejection(state, rejectionTool, "skill_ability_mismatch", `${skill} is resolved from ${skillEntry.ability}, not ${ability}.`);
+  }
+  const normalizedTool = tool?.trim().toLocaleLowerCase("en-US") || null;
+  const hasToolProficiency = normalizedTool !== null && state.character.proficiencies.tools.some((candidate) => candidate.trim().toLocaleLowerCase("en-US") === normalizedTool);
+  if (normalizedTool && !hasToolProficiency) return rejection(state, rejectionTool, "tool_proficiency_required", `The character is not proficient with ${tool}.`);
+  const base = abilityModifier(state.character.abilities[ability]);
+  const modifierSources = [ability + "_modifier"];
+  let modifier = base;
+  const proficiency = Boolean(skillEntry?.proficient);
+  const expertise = Boolean(skillEntry?.expertise);
+  if (proficiency) {
+    modifier += state.character.proficiencyBonus;
+    modifierSources.push("proficiency");
+  }
+  if (expertise) {
+    modifier += state.character.proficiencyBonus;
+    modifierSources.push("expertise");
+  }
+  if (hasToolProficiency) {
+    modifier += state.character.proficiencyBonus;
+    modifierSources.push("tool_proficiency");
+  }
+  return { modifier, skill, tool, proficiency, expertise, modifierSources };
+}
+
 function resolveCheck(
   state: LanternCampaignState,
   context: RequestContext,
@@ -2423,45 +2626,60 @@ function resolveCheck(
   adjudication?: EngineAdjudicationDecision,
   persistedCommand?: EngineCommand
 ): EngineResolution {
+  const derived = deriveCheck(state, ability, skill, adjudication?.tool ?? null, tool);
+  if ("accepted" in derived) return derived;
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
-  const firstRoll = randomInt(1, 21);
-  const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
-    ? randomInt(1, 21)
-    : null;
+  const advantageSources = [...modifierQuery.effectIds];
+  if (adjudication?.helperId) advantageSources.push("helper:" + adjudication.helperId);
+  const disadvantageSources = modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [];
+  const advantageCount = modifierQuery.advantage + (adjudication?.helperId ? 1 : 0);
+  const disadvantageCount = modifierQuery.disadvantage;
+  const mode: EngineCheckEvidence["mode"] = advantageCount > 0 && disadvantageCount > 0
+    ? "cancelled"
+    : advantageCount > 0 ? "advantage" : disadvantageCount > 0 ? "disadvantage" : "normal";
+  const passive = command.kind === "roll_check" && command.passive === true;
+  const firstRoll = passive ? 10 : randomInt(1, 21);
+  const secondRoll = !passive && mode !== "normal" && mode !== "cancelled" ? randomInt(1, 21) : null;
   const roll = secondRoll === null
     ? firstRoll
-    : modifierQuery.mode === "advantage"
-      ? Math.max(firstRoll, secondRoll)
-      : Math.min(firstRoll, secondRoll);
-  const modifier = skill && state.character.skills[skill]
-    ? state.character.skills[skill].bonus
-    : abilityModifier(state.character.abilities[ability]);
+    : mode === "advantage" ? Math.max(firstRoll, secondRoll) : Math.min(firstRoll, secondRoll);
   const dc = adjudication?.dc ?? (state.combat.status === "active" ? 14 : 12);
-  const total = roll + modifier;
+  const total = roll + derived.modifier;
   const success = total >= dc;
   const adjudicationOutcome: EngineAdjudicationOutcome | null = adjudication
     ? success ? "success" : "failure-with-complication"
     : null;
   const outcome = adjudicationOutcome ?? (success ? "success" : "failure");
   const label = ability.toUpperCase() + (skill ? " (" + skill + ")" : "");
-  const text =
-    "You make a " +
-    label +
-    " check: d20 " +
-    roll +
-    " " +
-    signed(modifier) +
-    " = " +
-    total +
-    " against DC " +
-    dc +
-    ". " +
-    (success ? "Success." : "Failure.");
+  const publicText = passive
+    ? "You make a passive " + label + " check: " + total + " against DC " + dc + ". " + (success ? "Success." : "Failure.")
+    : "You make a " + label + " check: d20 " + roll + " " + signed(derived.modifier) + " = " + total + " against DC " + dc + ". " + (success ? "Success." : "Failure.");
+  const withheld = adjudication?.informationPolicy === "withheld";
+  const text = withheld ? "The check resolves, but its details are withheld." : publicText;
+  const check: EngineCheckEvidence = {
+    kind: "ability-check",
+    actorId: context.actorId,
+    ability,
+    skill: derived.skill,
+    tool: derived.tool,
+    proficiency: derived.proficiency,
+    expertise: derived.expertise,
+    modifier: derived.modifier,
+    modifierSources: [...derived.modifierSources],
+    advantageSources,
+    disadvantageSources,
+    mode,
+    ...(adjudication?.helperId ? { helperId: adjudication.helperId } : {}),
+    informationPolicy: adjudication?.informationPolicy ?? "public",
+    formulaRevision: "checks-v1",
+  };
   const next = cloneCampaign(state);
   next.lastRoll = roll;
   const attemptChange = adjudication && adjudicationOutcome
     ? appendAdjudicationAttempt(next, state, adjudication, adjudicationOutcome, roll, total).change
     : null;
+  const fullData = { ability, skill, goal, dc, roll, modifier: derived.modifier, total, success, ...(adjudication ? { adjudication, costs: adjudication.costs, outcome } : {}) };
+  const data = withheld ? { informationPolicy: "withheld", outcome } : fullData;
   return commit(
     next,
     context,
@@ -2469,19 +2687,20 @@ function resolveCheck(
     persistedCommand ?? command,
     tool,
     text,
-    { ability, skill, goal, dc, roll, modifier, total, success, ...(adjudication ? { adjudication, costs: adjudication.costs, outcome } : {}) },
+    data,
     outcome,
     [
-      { kind: "d20", value: roll, sides: 20 },
-      ...(secondRoll === null ? [] : [{ kind: `d20_${modifierQuery.mode}`, value: secondRoll, sides: 20 }]),
+      { kind: passive ? "passive_score" : "d20", value: roll, sides: passive ? undefined : 20 },
+      ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
     ],
-    [{ name: ability + "_modifier", value: modifier }, { name: "dc", value: dc }],
+    [{ name: ability + "_modifier", value: derived.modifier }, { name: "dc", value: dc }],
     [
       { path: "/lastRoll", before: state.lastRoll, after: roll },
       ...(attemptChange ? [attemptChange] : []),
     ],
     [],
-    adjudication
+    adjudication,
+    check
   );
 }
 
@@ -4971,7 +5190,8 @@ function commit(
   modifiers: Array<{ name: string; value: number }>,
   stateChanges: Array<{ path: string; before: unknown; after: unknown }>,
   evidenceContentKeys: string[] = [],
-  adjudication?: EngineAdjudicationDecision
+  adjudication?: EngineAdjudicationDecision,
+  check?: EngineCheckEvidence
 ): EngineResolution {
   const next = cloneCampaign(state);
   const createdAt = new Date().toISOString();
@@ -4985,6 +5205,7 @@ function commit(
     tool,
     command: persistedCommand,
     ...(adjudication ? { adjudication } : {}),
+    ...(check ? { check } : {}),
     accountId: context.accountId,
     campaignId: context.campaignId,
     actorId: context.actorId,

@@ -381,6 +381,9 @@ export interface EngineAdjudicationDecision {
   retryPolicy: "not_applicable" | "new_approach_or_state_change";
   costs: EngineAdjudicationCosts;
   informationPolicy: "public" | "withheld";
+  helperId?: string;
+  opponentId?: string;
+  tool?: string;
   policyRevision: string;
   rulesVersion: string;
 }
@@ -392,6 +395,29 @@ export interface EngineAdjudicationAttempt extends EngineAdjudicationDecision {
   total?: number;
 }
 
+export interface EngineCheckEvidence {
+  kind: "ability-check" | "opposed-check";
+  actorId: string;
+  ability: EngineAbility;
+  skill: string | null;
+  tool: string | null;
+  proficiency: boolean;
+  expertise: boolean;
+  modifier: number;
+  modifierSources: string[];
+  advantageSources: string[];
+  disadvantageSources: string[];
+  mode: "normal" | "advantage" | "disadvantage" | "cancelled";
+  helperId?: string;
+  opponentId?: string;
+  opponentAbility?: EngineAbility;
+  opponentSkill?: string;
+  opponentModifier?: number;
+  opponentTotal?: number;
+  informationPolicy: "public" | "withheld";
+  formulaRevision: string;
+}
+
 export const engineChallengeAttemptCommandSchema = z.object({
   kind: z.literal("challenge_attempt"),
   challengeId: z.string().trim().min(1).max(120),
@@ -400,6 +426,10 @@ export const engineChallengeAttemptCommandSchema = z.object({
   sceneId: z.string().trim().min(1).max(120).optional(),
   difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
   requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
+  helperId: z.string().trim().min(1).max(120).optional(),
+  opponentId: z.string().trim().min(1).max(120).optional(),
+  informationPolicy: z.enum(["public", "withheld"]).optional(),
+  tool: z.string().trim().min(1).max(120).optional(),
 }).strict();
 export type EngineChallengeAttemptCommand = z.infer<typeof engineChallengeAttemptCommandSchema>;
 
@@ -530,6 +560,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       amount: z.number().int().min(0).max(1_000).optional(),
       durationRounds: z.number().int().min(1).max(1_000).optional(),
       condition: z.string().trim().min(1).max(80).optional(),
+      checkCategory: z.enum(["attack-roll", "ability-check", "saving-throw"]).optional(),
     })
     .strict(),
   z
@@ -583,6 +614,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       ability: engineAbilitySchema,
       skill: z.string().trim().min(1).max(80).optional(),
       goal: z.string().trim().min(1).max(2_000),
+      passive: z.boolean().optional(),
     })
     .strict(),
   z
@@ -732,6 +764,7 @@ export interface EngineTurnEffectEvidence extends EngineTurnPlanEffect {
   rolls: Array<{ kind: string; value: number; sides?: number }>;
   modifiers: Array<{ name: string; value: number }>;
   adjudication?: EngineAdjudicationDecision;
+  check?: EngineCheckEvidence;
   outcome: string;
   stateChanges: Array<{ path: string; before: unknown; after: unknown }>;
   data: unknown;
@@ -1350,6 +1383,7 @@ export interface EngineImprovEffect {
   targetId?: string;
   amount?: number;
   condition?: string;
+  checkCategory?: EngineEffectCategory;
   createdAt: string;
 }
 
@@ -1406,6 +1440,7 @@ export interface EngineEvent {
   command: EnginePersistedCommand;
   effects?: EngineTurnEffectEvidence[];
   adjudication?: EngineAdjudicationDecision;
+  check?: EngineCheckEvidence;
   accountId: string;
   campaignId: string;
   actorId: string;
