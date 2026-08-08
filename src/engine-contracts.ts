@@ -753,6 +753,13 @@ export const engineToolNameSchema = z.enum([
   "quest_progress",
   "combat_state",
   "controlled_actor_context",
+  "party_context",
+  "party_create",
+  "party_set_viewpoint",
+  "party_split",
+  "party_rejoin",
+  "party_shared_transfer",
+  "party_group_check",
   "combat_start",
   "encounter_decision",
   "spawn_creature",
@@ -817,6 +824,48 @@ export const engineControlledActorDismissCommandSchema = z.object({
   actorId: worldContextEntityIdSchema,
 }).strict();
 export type EngineControlledActorDismissCommand = z.infer<typeof engineControlledActorDismissCommandSchema>;
+
+export const enginePartyCreateCommandSchema = z.object({
+  kind: z.literal("party_create"),
+}).strict();
+export type EnginePartyCreateCommand = z.infer<typeof enginePartyCreateCommandSchema>;
+
+export const enginePartySetViewpointCommandSchema = z.object({
+  kind: z.literal("party_set_viewpoint"),
+  actorId: worldContextEntityIdSchema,
+}).strict();
+export type EnginePartySetViewpointCommand = z.infer<typeof enginePartySetViewpointCommandSchema>;
+
+export const enginePartySplitCommandSchema = z.object({
+  kind: z.literal("party_split"),
+  actorId: worldContextEntityIdSchema,
+  sceneId: worldContextEntityIdSchema,
+  locationRef: worldContextEntityIdSchema.optional(),
+}).strict();
+export type EnginePartySplitCommand = z.infer<typeof enginePartySplitCommandSchema>;
+
+export const enginePartyRejoinCommandSchema = z.object({
+  kind: z.literal("party_rejoin"),
+}).strict();
+export type EnginePartyRejoinCommand = z.infer<typeof enginePartyRejoinCommandSchema>;
+
+export const enginePartySharedTransferCommandSchema = z.object({
+  kind: z.literal("party_shared_transfer"),
+  actorId: worldContextEntityIdSchema,
+  itemId: worldContextEntityIdSchema,
+  quantity: z.number().int().min(1).max(100).default(1),
+  direction: z.enum(["to_shared", "from_shared"]),
+}).strict();
+export type EnginePartySharedTransferCommand = z.infer<typeof enginePartySharedTransferCommandSchema>;
+
+export const enginePartyGroupCheckCommandSchema = z.object({
+  kind: z.literal("party_group_check"),
+  ability: engineAbilitySchema,
+  skill: z.string().trim().min(1).max(80).optional(),
+  goal: z.string().trim().min(1).max(2_000),
+  actorIds: z.array(worldContextEntityIdSchema).min(1).max(3),
+}).strict();
+export type EnginePartyGroupCheckCommand = z.infer<typeof enginePartyGroupCheckCommandSchema>;
 
 export const engineTacticalBoundsSchema = z.object({
   minX: tacticalCoordinateSchema,
@@ -1492,6 +1541,12 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   engineControlledActorCreateCommandSchema,
   engineControlledActorCommandSchema,
   engineControlledActorDismissCommandSchema,
+  enginePartyCreateCommandSchema,
+  enginePartySetViewpointCommandSchema,
+  enginePartySplitCommandSchema,
+  enginePartyRejoinCommandSchema,
+  enginePartySharedTransferCommandSchema,
+  enginePartyGroupCheckCommandSchema,
   z.object({
     kind: z.literal("advance_turn"),
     combatantId: z.string().trim().min(1).max(120).optional(),
@@ -2252,6 +2307,7 @@ export interface EngineControlledActor {
   lastBehavior: EngineControlledActorBehavior;
   guardedUntilRound: number | null;
   attack: EngineControlledActorAttack;
+  effects: EngineEffectInstance[];
   inventory: EngineInventoryItem[];
   createdAtMinutes: number;
   expiresAtMinutes: number | null;
@@ -2288,6 +2344,45 @@ export interface EngineControlledActorView extends Omit<
   inventory: EngineInventoryItemView[];
   knowledge: EngineKnowledgeRecord[];
   legalCommands: EngineControlledActorCommandOffer[];
+}
+
+export type EnginePartyMemberRole = "leader" | "companion";
+export type EnginePartyMode = "together" | "split";
+
+export interface EnginePartyMember {
+  actorId: string;
+  role: EnginePartyMemberRole;
+  controllerActorId: string;
+  sceneId: string;
+  locationRef: string;
+  joinedAtVersion: number;
+}
+
+export interface EnginePartySharedState {
+  questIds: string[];
+  currency: EngineCurrency;
+  container: {
+    id: string;
+    name: string;
+    inventory: EngineInventoryItem[];
+  };
+}
+
+export interface EnginePartyConsentPolicy {
+  mode: "single-controller-future-member-seam";
+  permanentChoiceRequires: "leader-confirmation";
+}
+
+export interface EnginePartyState {
+  id: string;
+  leaderActorId: string;
+  activeViewpointActorId: string;
+  mode: EnginePartyMode;
+  members: EnginePartyMember[];
+  shared: EnginePartySharedState;
+  rewardAllocation: "leader-only";
+  consent: EnginePartyConsentPolicy;
+  revision: number;
 }
 
 export interface EngineWeaponAttack {
@@ -2624,6 +2719,7 @@ export interface LanternCampaignState {
   /** Shared exactly-once reward-key space used by encounters and quests. */
   claimedRewards: string[];
   controlledActors: EngineControlledActor[];
+  party: EnginePartyState | null;
   time: EngineTimeState;
   social?: EngineSocialState;
   worldContext: EngineWorldContext | null;
@@ -2698,6 +2794,7 @@ export interface EngineSessionView {
   suggestedActions: NarrationEnvelope["suggestedActions"];
   combat: EngineCombatView;
   controlledActors: EngineControlledActorView[];
+  party: EnginePartyState | null;
   updatedAt: string;
 }
 

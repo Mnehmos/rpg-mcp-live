@@ -70,6 +70,12 @@ const ALL_COMMAND_KINDS = [
   "controlled_actor_create",
   "controlled_actor_command",
   "controlled_actor_dismiss",
+  "party_create",
+  "party_set_viewpoint",
+  "party_split",
+  "party_rejoin",
+  "party_shared_transfer",
+  "party_group_check",
   "advance_turn",
   "advancement_confirm",
   "npc_advance",
@@ -256,6 +262,26 @@ function activeCombatState(): LanternCampaignState {
 
 function controlledActorState(): LanternCampaignState {
   return applyAccepted(createdState(), { kind: "controlled_actor_create", profileId: "familiar-scout-v1" }, "controlled_actor_create");
+}
+
+function partyState(): LanternCampaignState {
+  return applyAccepted(controlledActorState(), { kind: "party_create" }, "party_create");
+}
+
+function partySharedItemState(): LanternCampaignState {
+  const state = partyState();
+  state.character.inventory.push({
+    id: "party-census-item",
+    quantity: 1,
+    ownerRef: { kind: "actor", id: state.character.id },
+    authoredDefinition: { name: "Party census item", kind: "tool", weight: 1 },
+  });
+  return normalizeCampaignState(state);
+}
+
+function partySplitState(): LanternCampaignState {
+  const state = partyState();
+  return applyAccepted(state, { kind: "party_split", actorId: state.controlledActors[0]!.id, sceneId: "party-side-room" }, "party_split");
 }
 
 function controlledActorCombatState(): LanternCampaignState {
@@ -454,6 +480,12 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "controlled_actor_create", tool: "controlled_actor_create", expectedCode: "character_required", state: initialState, rawCommand: () => ({ kind: "controlled_actor_create", profileId: "familiar-scout-v1" }) },
   { kind: "controlled_actor_command", tool: "controlled_actor_command", expectedCode: "controlled_actor_not_found", state: createdState, rawCommand: () => ({ kind: "controlled_actor_command", actorId: "missing-controlled", action: "guard" }) },
   { kind: "controlled_actor_dismiss", tool: "controlled_actor_dismiss", expectedCode: "controlled_actor_not_found", state: createdState, rawCommand: () => ({ kind: "controlled_actor_dismiss", actorId: "missing-controlled" }) },
+  { kind: "party_create", tool: "party_create", expectedCode: "controlled_actor_required", state: createdState, rawCommand: () => ({ kind: "party_create" }) },
+  { kind: "party_set_viewpoint", tool: "party_set_viewpoint", expectedCode: "party_member_not_found", state: partyState, rawCommand: () => ({ kind: "party_set_viewpoint", actorId: "missing-party-member" }) },
+  { kind: "party_split", tool: "party_split", expectedCode: "party_member_not_found", state: partyState, rawCommand: () => ({ kind: "party_split", actorId: "missing-party-member", sceneId: "party-side-room" }) },
+  { kind: "party_rejoin", tool: "party_rejoin", expectedCode: "party_already_together", state: partyState, rawCommand: () => ({ kind: "party_rejoin" }) },
+  { kind: "party_shared_transfer", tool: "party_shared_transfer", expectedCode: "item_not_found", state: partyState, rawCommand: () => ({ kind: "party_shared_transfer", actorId: "actor-invariants", itemId: "missing-party-item", direction: "to_shared" }) },
+  { kind: "party_group_check", tool: "party_group_check", expectedCode: "party_member_not_found", state: partyState, rawCommand: () => ({ kind: "party_group_check", ability: "wis", goal: "Check together", actorIds: ["actor-invariants", "missing-party-member"] }) },
   { kind: "advance_turn", tool: "advance_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "advance_turn" }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", expectedCode: "advancement_not_pending", state: createdState, rawCommand: () => ({ kind: "advancement_confirm", pendingId: "missing-pending" }) },
   { kind: "npc_advance", tool: "npc_advance", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "npc_advance", combatantId: "missing-combatant", templateId: "veteran" }) },
@@ -563,6 +595,12 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "controlled_actor_create", tool: "controlled_actor_create", build: () => ({ state: createdState(), command: parseCommand({ kind: "controlled_actor_create", profileId: "familiar-scout-v1" }) }) },
   { kind: "controlled_actor_command", tool: "controlled_actor_command", build: () => { const state = controlledActorCombatState(); return { state, command: parseCommand({ kind: "controlled_actor_command", actorId: state.controlledActors[0]!.id, action: "guard" }) }; } },
   { kind: "controlled_actor_dismiss", tool: "controlled_actor_dismiss", build: () => { const state = controlledActorState(); return { state, command: parseCommand({ kind: "controlled_actor_dismiss", actorId: state.controlledActors[0]!.id }) }; } },
+  { kind: "party_create", tool: "party_create", build: () => ({ state: controlledActorState(), command: parseCommand({ kind: "party_create" }) }) },
+  { kind: "party_set_viewpoint", tool: "party_set_viewpoint", build: () => { const state = partyState(); return { state, command: parseCommand({ kind: "party_set_viewpoint", actorId: state.controlledActors[0]!.id }) }; } },
+  { kind: "party_split", tool: "party_split", build: () => { const state = partyState(); return { state, command: parseCommand({ kind: "party_split", actorId: state.controlledActors[0]!.id, sceneId: "party-side-room" }) }; } },
+  { kind: "party_rejoin", tool: "party_rejoin", build: () => ({ state: partySplitState(), command: parseCommand({ kind: "party_rejoin" }) }) },
+  { kind: "party_shared_transfer", tool: "party_shared_transfer", build: () => ({ state: partySharedItemState(), command: parseCommand({ kind: "party_shared_transfer", actorId: "actor-invariants", itemId: "party-census-item", direction: "to_shared" }) }) },
+  { kind: "party_group_check", tool: "party_group_check", build: () => { const state = partyState(); return { state, command: parseCommand({ kind: "party_group_check", ability: "wis", goal: "Check together", actorIds: [state.actorId, state.controlledActors[0]!.id] }) }; } },
   { kind: "advance_turn", tool: "advance_turn", build: () => ({ state: enemyTurnState(), command: parseCommand({ kind: "advance_turn", actionKey: "scimitar" }) }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", build: () => { const state = pendingAdvancementState(); return { state, command: parseCommand({ kind: "advancement_confirm", pendingId: state.pendingAdvancement!.id }) }; } },
   { kind: "npc_advance", tool: "npc_advance", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "npc_advance", combatantId: state.combat.enemies[0]!.id, templateId: "veteran" }) }; } },
@@ -578,7 +616,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(50);
+    expect(ALL_COMMAND_KINDS).toHaveLength(56);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {
