@@ -217,6 +217,7 @@ describe("authoritative inventory ownership and economy", () => {
         disposition: "neutral",
         items: [{ item: authored("market-lantern", "Market lantern", "tool", 1), stock: 1, buyPriceCopper: 40, sellPriceCopper: 20 }],
       }],
+      objects: [],
     };
     const ready = normalizeCampaignState(state);
     const bought = apply(ready, { kind: "merchant_trade", merchantId: "fixture-merchant", itemId: "market-lantern", side: "buy", quantity: 1 });

@@ -125,6 +125,7 @@ function seededCampaign(): LanternCampaignState {
         }],
       },
     ],
+    objects: [],
   };
   return normalizeCampaignState(campaign);
 }

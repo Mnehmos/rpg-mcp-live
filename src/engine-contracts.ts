@@ -206,6 +206,143 @@ export const engineWorldFactPatchOperationsSchema = z.object({
 );
 export type EngineWorldFactPatchOperations = z.infer<typeof engineWorldFactPatchOperationsSchema>;
 
+export const engineWorldObjectStateSchema = z.enum([
+  "intact",
+  "damaged",
+  "destroyed",
+  "open",
+  "closed",
+  "locked",
+  "unlocked",
+  "lit",
+  "unlit",
+  "wet",
+  "attached",
+  "active",
+  "inactive",
+  "carried",
+  "equipped",
+  "hidden",
+]);
+export type EngineWorldObjectState = z.infer<typeof engineWorldObjectStateSchema>;
+
+export const engineWorldObjectMaterialSchema = z.enum([
+  "wood",
+  "metal",
+  "stone",
+  "rope",
+  "oil",
+  "fire",
+  "cloth",
+  "paper",
+  "glass",
+  "mixed",
+]);
+export type EngineWorldObjectMaterial = z.infer<typeof engineWorldObjectMaterialSchema>;
+
+export const engineWorldObjectAffordanceSchema = z.enum([
+  "inspect",
+  "open",
+  "close",
+  "lock",
+  "unlock",
+  "move",
+  "carry",
+  "throw",
+  "take",
+  "give",
+  "drop",
+  "steal",
+  "equip",
+  "use",
+  "ignite",
+  "extinguish",
+  "break",
+  "damage",
+  "attach",
+  "activate",
+]);
+export type EngineWorldObjectAffordance = z.infer<typeof engineWorldObjectAffordanceSchema>;
+
+export const engineCriticalObjectPolicySchema = z.object({
+  kind: z.enum(["ordinary_consequence", "recoverable_route", "alternate_path", "quest_failure", "world_transformation"]),
+  canDestroy: z.boolean(),
+  canLose: z.boolean(),
+  canSell: z.boolean(),
+  canConsume: z.boolean(),
+  canHide: z.boolean(),
+  recoveryRef: worldContextEntityIdSchema.optional(),
+}).strict();
+export type EngineCriticalObjectPolicy = z.infer<typeof engineCriticalObjectPolicySchema>;
+
+export const engineWorldObjectPrerequisiteSchema = z.object({
+  affordance: engineWorldObjectAffordanceSchema,
+  requiredTags: z.array(z.string().trim().min(1).max(80)).max(8),
+  requiredState: engineWorldObjectStateSchema.optional(),
+}).strict();
+export type EngineWorldObjectPrerequisite = z.infer<typeof engineWorldObjectPrerequisiteSchema>;
+
+export const engineWorldObjectEffectInteractionSchema = z.object({
+  affordance: engineWorldObjectAffordanceSchema,
+  targetId: worldContextEntityIdSchema,
+  targetState: engineWorldObjectStateSchema,
+}).strict();
+export type EngineWorldObjectEffectInteraction = z.infer<typeof engineWorldObjectEffectInteractionSchema>;
+
+export const engineWorldObjectDefinitionSchema = z.object({
+  key: worldContextEntityIdSchema,
+  sourceRef: z.string().trim().min(1).max(240),
+  name: z.string().trim().min(1).max(160),
+  description: z.string().trim().min(1).max(2_000),
+  material: engineWorldObjectMaterialSchema,
+  tags: z.array(z.string().trim().min(1).max(80)).max(20),
+  affordances: z.array(engineWorldObjectAffordanceSchema).max(20),
+  prerequisites: z.array(engineWorldObjectPrerequisiteSchema).max(20),
+  effectInteractions: z.array(engineWorldObjectEffectInteractionSchema).max(20),
+  weight: z.number().nonnegative().max(10_000),
+  criticalPolicy: engineCriticalObjectPolicySchema,
+}).strict().superRefine((definition, context) => {
+  if (new Set(definition.tags).size !== definition.tags.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["tags"], message: "World-object tags must be unique." });
+  }
+  if (new Set(definition.affordances).size !== definition.affordances.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["affordances"], message: "World-object affordances must be unique." });
+  }
+});
+export type EngineWorldObjectDefinition = z.infer<typeof engineWorldObjectDefinitionSchema>;
+
+export const engineWorldObjectInputSchema = z.object({
+  id: worldContextEntityIdSchema,
+  definition: engineWorldObjectDefinitionSchema,
+  state: engineWorldObjectStateSchema,
+  locationRef: worldContextEntityIdSchema.nullable().optional(),
+  ownerRef: engineItemOwnerRefSchema.optional(),
+  containerRef: worldContextEntityIdSchema.nullable().optional(),
+}).strict();
+export type EngineWorldObjectInput = z.infer<typeof engineWorldObjectInputSchema>;
+
+export const engineWorldObjectPatchOperationsSchema = z.object({
+  upsert: z.array(engineWorldObjectInputSchema).max(40).optional(),
+  remove: z.array(worldContextEntityIdSchema).max(40).optional(),
+}).strict().refine(
+  (operations) => (operations.upsert?.length ?? 0) + (operations.remove?.length ?? 0) > 0,
+  "A provided object patch needs at least one operation."
+);
+export type EngineWorldObjectPatchOperations = z.infer<typeof engineWorldObjectPatchOperationsSchema>;
+
+export interface EngineWorldObjectInstance extends EngineWorldObjectInput {
+  sceneId: string;
+  locationRef: string | null;
+  ownerRef: EngineItemOwnerRef;
+  containerRef: string | null;
+  revision: number;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+    occurredAt: string;
+  };
+}
+
 export interface EngineWorldFact extends EngineWorldFactInput {
   sceneId: string;
   revision: number;
@@ -288,6 +425,7 @@ export const engineWorldContextArgsSchema = z.object({
   npcs: engineNpcPatchOperationsSchema.optional(),
   merchants: engineMerchantPatchOperationsSchema.optional(),
   facts: engineWorldFactPatchOperationsSchema.optional(),
+  objects: engineWorldObjectPatchOperationsSchema.optional(),
 }).strict();
 export type EngineWorldContextArgs = z.infer<typeof engineWorldContextArgsSchema>;
 
@@ -797,6 +935,9 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       kind: z.literal("interact"),
       targetId: z.string().trim().min(1).max(80),
       goal: z.string().trim().min(1).max(2_000),
+      affordance: engineWorldObjectAffordanceSchema.optional(),
+      sourceId: z.string().trim().min(1).max(120).optional(),
+      destinationId: z.string().trim().min(1).max(120).optional(),
     })
     .strict(),
   z
@@ -1143,6 +1284,7 @@ export interface EngineWorldContext {
   features: string[];
   npcs: EngineNpc[];
   merchants: EngineMerchant[];
+  objects: EngineWorldObjectInstance[];
 }
 
 export interface EngineNpc {

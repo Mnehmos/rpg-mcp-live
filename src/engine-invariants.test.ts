@@ -23,6 +23,7 @@ import {
 } from "./engine-contracts.js";
 import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "./engine-domain.js";
 import { EngineVersionConflictError, LanternEngineStore } from "./engine-store.js";
+import { ruinedGatehouseWorldContextCommand } from "./world-object-fixture.js";
 
 type CommandKind = EngineCommand["kind"];
 type FixtureTool = EngineToolName | "declare" | "listen";
@@ -190,8 +191,14 @@ function worldState(): LanternCampaignState {
         sellPriceCopper: 1,
       }],
     }],
+    objects: [],
   };
   return normalizeCampaignState(state);
+}
+
+function worldObjectState(): LanternCampaignState {
+  const state = createdState();
+  return applyAccepted(state, ruinedGatehouseWorldContextCommand(), "world_context");
 }
 
 function activeCombatState(): LanternCampaignState {
@@ -363,6 +370,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   },
   { kind: "character_update", tool: "character_update", expectedCode: "character_required", state: initialState, rawCommand: () => ({ kind: "character_update", name: "Too early" }) },
   { kind: "move", tool: "move", expectedCode: "invalid_move", state: initialState, rawCommand: () => ({ kind: "move", destinationId: "missing-exit" }) },
+  { kind: "interact", tool: "interact", expectedCode: "object_locked", state: worldObjectState, rawCommand: () => ({ kind: "interact", targetId: "gatehouse-door", affordance: "open", goal: "Open the locked gatehouse door." }) },
   { kind: "social_check", tool: "social_check", expectedCode: "npc_not_found", state: createdState, rawCommand: () => ({ kind: "social_check", npcId: "missing-npc", ability: "cha", goal: "Ask for help." }) },
   { kind: "merchant_trade", tool: "merchant_trade", expectedCode: "merchant_not_found", state: createdState, rawCommand: () => ({ kind: "merchant_trade", merchantId: "missing-merchant", itemId: "lamp-oil", side: "buy", quantity: 1 }) },
   { kind: "quest_update", tool: "quest_update", expectedCode: "quest_not_found", state: initialState, rawCommand: () => ({ kind: "quest_update", questId: "missing-quest", progress: 10 }) },
@@ -419,6 +427,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "character_update", tool: "character_update", build: () => ({ state: createdState(), command: parseCommand({ kind: "character_update", name: "Replay Hero" }) }) },
   { kind: "move", tool: "move", build: () => ({ state: worldState(), command: parseCommand({ kind: "move", destinationId: "west-pier" }) }) },
   { kind: "interact", tool: "interact", build: () => ({ state: initialState(), command: parseCommand({ kind: "interact", targetId: "fixture-object", goal: "Touch the fixture." }) }) },
+  { kind: "interact", tool: "interact", build: () => ({ state: worldObjectState(), command: parseCommand({ kind: "interact", targetId: "gatehouse-door", affordance: "unlock", goal: "Replay the typed door interaction." }) }) },
   { kind: "social_check", tool: "social_check", build: () => ({ state: worldState(), command: parseCommand({ kind: "social_check", npcId: "guide", ability: "cha", goal: "Ask for directions." }) }) },
   { kind: "merchant_trade", tool: "merchant_trade", build: () => ({ state: worldState(), command: parseCommand({ kind: "merchant_trade", merchantId: "trader", itemId: "lamp-oil", side: "buy", quantity: 1 }) }) },
   { kind: "quest_create", tool: "quest_create", build: () => ({ state: initialState(), command: parseCommand({ kind: "quest_create", title: "Replay quest", objective: "Record it once.", rewardXp: 1, rewardCopper: 1 }) }) },
