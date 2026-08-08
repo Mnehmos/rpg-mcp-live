@@ -83,7 +83,7 @@ export const engineItemOwnerRefSchema = z.object({
 export type EngineItemOwnerRef = z.infer<typeof engineItemOwnerRefSchema>;
 
 export const engineItemProvenanceSchema = z.object({
-  kind: z.enum(["starter", "loot", "merchant", "authored", "open5e"]),
+  kind: z.enum(["starter", "loot", "merchant", "quest", "authored", "open5e"]),
   sourceId: z.string().trim().min(1).max(160).optional(),
 }).strict();
 export type EngineItemProvenance = z.infer<typeof engineItemProvenanceSchema>;
@@ -569,6 +569,129 @@ export const engineSocialActionCommandSchema = z.object({
 }).strict();
 export type EngineSocialActionCommand = z.infer<typeof engineSocialActionCommandSchema>;
 
+const questIdentifierSchema = z.string().trim().min(1).max(120);
+
+export const engineQuestPredicateSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("inventory_owned"),
+    itemId: questIdentifierSchema,
+    quantity: z.number().int().positive().max(100),
+  }).strict(),
+  z.object({
+    kind: z.literal("encounter_outcome"),
+    outcomeId: questIdentifierSchema,
+    outcome: z.enum(["killed", "surrendered", "captured", "escaped", "rescue_succeeded", "rescue_failed"]),
+  }).strict(),
+  z.object({
+    kind: z.literal("social_reputation"),
+    actorId: questIdentifierSchema.optional(),
+    communityId: questIdentifierSchema,
+    minScore: z.number().int().min(-100).max(100),
+  }).strict(),
+  z.object({
+    kind: z.literal("actor_at_location"),
+    actorId: questIdentifierSchema,
+    locationRef: questIdentifierSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("fact_discovered"),
+    factId: questIdentifierSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("game_time_before"),
+    deadlineAtMinutes: z.number().int().nonnegative().max(100_000_000),
+  }).strict(),
+  z.object({
+    kind: z.literal("player_choice"),
+    choiceId: questIdentifierSchema,
+  }).strict(),
+]);
+export type EngineQuestPredicate = z.infer<typeof engineQuestPredicateSchema>;
+
+export const engineQuestObjectiveInputSchema = z.object({
+  id: questIdentifierSchema,
+  title: z.string().trim().min(1).max(240),
+  mode: z.enum(["ordered", "unordered"]),
+  optional: z.boolean().default(false),
+  hidden: z.boolean().default(false),
+  predicate: engineQuestPredicateSchema,
+}).strict();
+export type EngineQuestObjectiveInput = z.infer<typeof engineQuestObjectiveInputSchema>;
+
+export const engineQuestConsequenceSchema = z.object({
+  xp: z.number().int().nonnegative().max(1_000_000).default(0),
+  copper: z.number().int().nonnegative().max(100_000_000).default(0),
+  items: z.array(
+    engineInventoryItemInputSchema.refine((item) => item.quantity > 0, {
+      message: "Quest reward quantity must be positive.",
+    })
+  ).max(8).optional(),
+  reputation: z.object({
+    actorId: questIdentifierSchema.optional(),
+    communityId: questIdentifierSchema,
+    delta: z.number().int().min(-100).max(100),
+  }).strict().optional(),
+  worldFact: z.object({
+    factId: questIdentifierSchema,
+    active: z.boolean(),
+  }).strict().optional(),
+  followUpQuestId: questIdentifierSchema.optional(),
+}).strict();
+export type EngineQuestConsequence = z.infer<typeof engineQuestConsequenceSchema>;
+
+export const engineQuestTransitionInputSchema = z.object({
+  id: questIdentifierSchema,
+  label: z.string().trim().min(1).max(240),
+  outcome: z.enum(["success", "failure", "abandonment", "expiration"]),
+  predicates: z.array(engineQuestPredicateSchema).max(8).default([]),
+  requiresObjectiveIds: z.array(questIdentifierSchema).max(20).default([]),
+  choiceId: questIdentifierSchema.optional(),
+  consequence: engineQuestConsequenceSchema.default({ xp: 0, copper: 0 }),
+}).strict();
+export type EngineQuestTransitionInput = z.infer<typeof engineQuestTransitionInputSchema>;
+
+export const engineQuestClockInputSchema = z.object({
+  id: questIdentifierSchema,
+  title: z.string().trim().min(1).max(160),
+  max: z.number().int().positive().max(1_000_000),
+  source: z.enum(["time", "objective", "choice"]),
+}).strict();
+export type EngineQuestClockInput = z.infer<typeof engineQuestClockInputSchema>;
+
+export const engineQuestGraphInputSchema = z.object({
+  objectives: z.array(engineQuestObjectiveInputSchema).min(1).max(20),
+  transitions: z.array(engineQuestTransitionInputSchema).min(1).max(20),
+  deadlineAtMinutes: z.number().int().nonnegative().max(100_000_000).optional(),
+  deadlineTransitionId: questIdentifierSchema.optional(),
+  followUpQuestId: questIdentifierSchema.optional(),
+  clock: engineQuestClockInputSchema.optional(),
+}).strict().superRefine((graph, context) => {
+  const objectiveIds = new Set<string>();
+  for (const objective of graph.objectives) {
+    if (objectiveIds.has(objective.id)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["objectives"], message: "Quest objective identifiers must be unique." });
+    objectiveIds.add(objective.id);
+  }
+  const transitionIds = new Set<string>();
+  for (const transition of graph.transitions) {
+    if (transitionIds.has(transition.id)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["transitions"], message: "Quest transition identifiers must be unique." });
+    transitionIds.add(transition.id);
+    if (transition.requiresObjectiveIds.some((id) => !objectiveIds.has(id))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["transitions"], message: "Quest transitions may require only declared objectives." });
+    }
+  }
+  if (graph.deadlineTransitionId && !transitionIds.has(graph.deadlineTransitionId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["deadlineTransitionId"], message: "The deadline transition must be declared in the graph." });
+  }
+  const deadlineTransition = graph.deadlineTransitionId ? graph.transitions.find((transition) => transition.id === graph.deadlineTransitionId) : undefined;
+  if (deadlineTransition && deadlineTransition.outcome !== "expiration") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["deadlineTransitionId"], message: "A quest deadline must resolve through an expiration transition." });
+  }
+  if (graph.deadlineAtMinutes !== undefined && !graph.deadlineTransitionId && !graph.transitions.some((transition) => transition.outcome === "expiration")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["deadlineAtMinutes"], message: "A graph deadline requires an expiration transition." });
+  }
+});
+export type EngineQuestGraphInput = z.infer<typeof engineQuestGraphInputSchema>;
+
 export const engineWorldContextArgsSchema = z.object({
   title: z.string().trim().min(1).max(160),
   description: z.string().trim().min(1).max(6_000),
@@ -613,6 +736,7 @@ export const engineToolNameSchema = z.enum([
   "merchant_trade",
   "social_action",
   "quest_create",
+  "quest_transition",
   "quest_update",
   "improvise",
   "campaign_beat",
@@ -1147,13 +1271,23 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       rewardCopper: z.number().int().nonnegative().max(100_000_000),
       giverNpcId: z.string().trim().min(1).max(120).optional(),
       deadline: z.string().trim().max(160).optional(),
+      deadlineAtMinutes: z.number().int().nonnegative().max(100_000_000).optional(),
+      graph: engineQuestGraphInputSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("quest_transition"),
+      questId: questIdentifierSchema,
+      transitionId: questIdentifierSchema,
+      choiceId: questIdentifierSchema.optional(),
     })
     .strict(),
   z
     .object({
       kind: z.literal("quest_update"),
       questId: z.string().trim().min(1).max(120),
-      status: z.enum(["active", "completed", "failed", "abandoned"]).optional(),
+      status: z.enum(["active", "completed", "failed", "abandoned", "expired"]).optional(),
       objective: z.string().trim().min(1).max(2_000).optional(),
       progress: z.number().int().min(0).max(100).optional(),
     })
@@ -2114,11 +2248,70 @@ export interface EngineCombatView extends Omit<EngineCombat, "enemies"> {
   enemies: EngineCombatantView[];
 }
 
+export type EngineQuestStatus = "active" | "completed" | "failed" | "abandoned" | "expired";
+export type EngineQuestTerminalOutcome = "success" | "failure" | "abandonment" | "expiration";
+
+export interface EngineQuestObjective {
+  id: string;
+  title: string;
+  mode: "ordered" | "unordered";
+  optional: boolean;
+  hidden: boolean;
+  discovered: boolean;
+  status: "pending" | "completed";
+  predicate: EngineQuestPredicate;
+  completedAtMinutes: number | null;
+  evidence: string | null;
+}
+
+export interface EngineQuestTransition {
+  id: string;
+  label: string;
+  outcome: EngineQuestTerminalOutcome;
+  predicates: EngineQuestPredicate[];
+  requiresObjectiveIds: string[];
+  choiceId?: string;
+  consequence: EngineQuestConsequence;
+}
+
+export interface EngineQuestProgressClock {
+  id: string;
+  title: string;
+  current: number;
+  max: number;
+  source: "time" | "objective" | "choice";
+  resolvedAtMinutes: number | null;
+  resolvedByTransitionId: string | null;
+}
+
+export interface EngineQuestConsequenceRecord {
+  transitionId: string;
+  outcomeId: string;
+  rewardKeys: string[];
+  reputationApplied: boolean;
+  worldChangeApplied: boolean;
+  followUpEligible: boolean;
+  appliedAtMinutes: number;
+  sourceCommandId: string;
+}
+
+export interface EngineQuestGraph {
+  objectives: EngineQuestObjective[];
+  transitions: EngineQuestTransition[];
+  deadlineAtMinutes: number | null;
+  deadlineTransitionId: string | null;
+  followUpQuestId: string | null;
+  followUpEligible: boolean;
+  clock: EngineQuestProgressClock | null;
+  terminalTransitionId: string | null;
+  consequenceRecords: EngineQuestConsequenceRecord[];
+}
+
 export interface EngineQuest {
   id: string;
   title: string;
   objective: string;
-  status: "active" | "completed" | "failed" | "abandoned";
+  status: EngineQuestStatus;
   reward: { xp: number; copper: number };
   rewardClaimed: boolean;
   progress: number;
@@ -2126,6 +2319,7 @@ export interface EngineQuest {
   deadline?: string;
   /** Engine-owned in-fiction deadline. `deadline` remains legacy display text. */
   deadlineAtMinutes?: number;
+  graph?: EngineQuestGraph;
 }
 
 export type EngineTravelPace = "normal" | "fast";
@@ -2304,6 +2498,8 @@ export interface LanternCampaignState {
   characterCreation: EngineCharacterCreationState;
   advancementPolicy: EngineAdvancementPolicy;
   pendingAdvancement: EnginePendingAdvancement | null;
+  /** Shared exactly-once reward-key space used by encounters and quests. */
+  claimedRewards: string[];
   time: EngineTimeState;
   social?: EngineSocialState;
   worldContext: EngineWorldContext | null;

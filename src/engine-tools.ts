@@ -18,6 +18,7 @@ import {
   engineToolNameSchema,
   engineSocialActionCommandSchema,
   engineNpcTickCommandSchema,
+  engineQuestGraphInputSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   type EngineCommand,
@@ -136,8 +137,15 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       rewardCopper: z.number().int().nonnegative().max(100_000_000),
       giverNpcId: z.string().trim().min(1).max(120).optional(),
       deadline: z.string().trim().max(160).optional(),
+      deadlineAtMinutes: z.number().int().nonnegative().max(100_000_000).optional(),
+      graph: engineQuestGraphInputSchema.optional(),
     })
     .strict(),
+  quest_transition: z.object({
+    questId: z.string().trim().min(1).max(120),
+    transitionId: z.string().trim().min(1).max(120),
+    choiceId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
   quest_update: z
     .object({
       questId: z.string().trim().min(1).max(120),
@@ -676,8 +684,18 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     "Create a DM-authored quest with a concrete objective and reward. The engine persists it and later applies its reward atomically.",
     {
       type: "object",
-      properties: { title: { type: "string" }, objective: { type: "string" }, rewardXp: { type: "integer", minimum: 0 }, rewardCopper: { type: "integer", minimum: 0 }, giverNpcId: { type: "string" }, deadline: { type: "string" } },
+      properties: { title: { type: "string" }, objective: { type: "string" }, rewardXp: { type: "integer", minimum: 0 }, rewardCopper: { type: "integer", minimum: 0 }, giverNpcId: { type: "string" }, deadline: { type: "string" }, deadlineAtMinutes: { type: "integer", minimum: 0 }, graph: { type: "object", description: "Closed typed objectives, predicates, branches, and optional bounded clock for an authoritative quest graph." } },
       required: ["title", "objective", "rewardXp", "rewardCopper"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "quest_transition",
+    "Resolve one authored quest-graph branch. Predicates are evaluated from committed state; narration cannot complete objectives or grant rewards.",
+    {
+      type: "object",
+      properties: { questId: { type: "string" }, transitionId: { type: "string" }, choiceId: { type: "string" } },
+      required: ["questId", "transitionId"],
       additionalProperties: false,
     }
   ),
@@ -686,7 +704,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     "Update progress or status for a DM-authored quest. The engine persists the journal entry and completion state.",
     {
       type: "object",
-      properties: { questId: { type: "string" }, status: { type: "string", enum: ["active", "completed", "failed", "abandoned"] }, objective: { type: "string" }, progress: { type: "integer", minimum: 0, maximum: 100 } },
+      properties: { questId: { type: "string" }, status: { type: "string", enum: ["active", "completed", "failed", "abandoned", "expired"] }, objective: { type: "string" }, progress: { type: "integer", minimum: 0, maximum: 100 } },
       required: ["questId"],
       additionalProperties: false,
     }
@@ -1138,7 +1156,9 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         truthRelation: args.truthRelation,
       });
     case "quest_create":
-      return engineCommandSchema.parse({ kind: "quest_create", title: args.title, objective: args.objective, rewardXp: args.rewardXp, rewardCopper: args.rewardCopper, giverNpcId: args.giverNpcId, deadline: args.deadline });
+      return engineCommandSchema.parse({ kind: "quest_create", title: args.title, objective: args.objective, rewardXp: args.rewardXp, rewardCopper: args.rewardCopper, giverNpcId: args.giverNpcId, deadline: args.deadline, deadlineAtMinutes: args.deadlineAtMinutes, graph: args.graph });
+    case "quest_transition":
+      return engineCommandSchema.parse({ kind: "quest_transition", questId: args.questId, transitionId: args.transitionId, choiceId: args.choiceId });
     case "quest_update":
       return engineCommandSchema.parse({ kind: "quest_update", questId: args.questId, status: args.status, objective: args.objective, progress: args.progress });
     case "improvise":

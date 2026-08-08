@@ -3,6 +3,7 @@ import type { NarrationEnvelope } from "./ai-contracts.js";
 import {
   engineExperienceProfileInputSchema,
   engineExperienceProfileSchema,
+  engineQuestGraphInputSchema,
   engineWorldObjectInputSchema,
 } from "./engine-contracts.js";
 import type {
@@ -118,6 +119,14 @@ import type {
   EngineNpcPatchOperations,
   EngineMessage,
   EngineQuest,
+  EngineQuestConsequenceRecord,
+  EngineQuestGraph,
+  EngineQuestObjective,
+  EngineQuestPredicate,
+  EngineQuestProgressClock,
+  EngineQuestStatus,
+  EngineQuestTerminalOutcome,
+  EngineQuestTransition,
   EngineResolution,
   EngineSessionView,
   EngineSpellReference,
@@ -1427,6 +1436,7 @@ export function createInitialCampaign(
     characterCreation: { abilityScoreDraft: null },
     advancementPolicy: defaultAdvancementPolicy(),
     pendingAdvancement: null,
+    claimedRewards: [],
     time: defaultTimeState(),
     social: defaultSocialState(),
     worldContext: null,
@@ -1489,6 +1499,9 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   };
   next.time = normalizeTimeState(next.time);
   next.social = normalizeSocialState(next.social);
+  next.claimedRewards = Array.isArray((next as LanternCampaignState & { claimedRewards?: unknown }).claimedRewards)
+    ? [...new Set((next as LanternCampaignState & { claimedRewards?: unknown }).claimedRewards!.filter((key): key is string => typeof key === "string"))]
+    : [];
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
   next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
@@ -1517,6 +1530,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.playerNotes = [];
     next.advancementPolicy = defaultAdvancementPolicy();
     next.pendingAdvancement = null;
+    next.claimedRewards = [];
     next.quest = {
       id: "first-light",
       title: "The first chapter",
@@ -1920,7 +1934,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     characterCreated: state.character.created,
     worldContext: projection.worldContext,
     playerNotes: state.playerNotes,
-    quests: state.quests,
+    quests: projectQuestsForActor(state, state.actorId),
     corpses: state.corpses,
     effects: state.effects.filter((effect) => effect.status === "active"),
     improvEffects: state.improvEffects,
@@ -1974,14 +1988,14 @@ export function readToolData(
         worldContext: projection.worldContext,
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
-        quests: state.quests,
+        quests: projectQuestsForActor(state, state.actorId),
         corpses: state.corpses,
         effects: state.effects.filter((effect) => effect.status === "active"),
         improvEffects: state.improvEffects,
         currentBeat: state.currentBeat,
         character: characterData(state.character),
         combat: combatData(state.combat),
-        quest: state.quest,
+        quest: projectQuestForActor(state.quest, state, state.actorId),
         recentLog: state.log.slice(-8),
       };
     case "observe":
@@ -2013,7 +2027,7 @@ export function readToolData(
         encumbered: inventoryWeight(state.character.inventory) > carryCapacity(state.character.abilities.str),
       };
     case "quest_progress":
-      return state.quest;
+      return projectQuestForActor(state.quest, state, state.actorId);
     case "combat_state":
       return combatData(state.combat);
   }
@@ -2057,6 +2071,9 @@ export function sanitizeNarrationForProfile(
 }
 
 function redactExperienceCommand(command: EngineCommand): EngineCommand {
+  // Quest graph creation is an authored command, but its hidden predicates
+  // must not survive in persisted event evidence or replay payloads.
+  if (command.kind === "quest_create") return redactCommand(command);
   switch (command.kind) {
     case "experience_profile_update":
       return {
@@ -2216,6 +2233,7 @@ export function resolveEngineCommand(
     && command.kind !== "experience_boundary"
     && command.kind !== "campaign_beat"
     && command.kind !== "quest_create"
+    && command.kind !== "quest_transition"
     && command.kind !== "quest_update"
   ) {
     return rejection(state, tool, "actor_dead", "A dead character cannot act, rest, cast, or receive ordinary healing.");
@@ -2276,6 +2294,8 @@ export function resolveEngineCommand(
       return resolveMerchantTrade(state, context, clientCommandId, command, tool);
     case "quest_create":
       return resolveQuestCreate(state, context, clientCommandId, command, tool);
+    case "quest_transition":
+      return resolveQuestTransition(state, context, clientCommandId, command, tool);
     case "quest_update":
       return resolveQuestUpdate(state, context, clientCommandId, command, tool);
     case "improvise":
@@ -3592,6 +3612,9 @@ function resolveQuestCreate(
   command: Extract<EngineCommand, { kind: "quest_create" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
+  const graph = command.graph ? normalizeQuestGraph(command.graph) : undefined;
+  if (command.graph && !graph) return rejection(state, tool, "invalid_quest_graph", "That quest graph does not match the reviewed typed predicate contract.");
+  const deadlineAtMinutes = graph?.deadlineAtMinutes ?? command.deadlineAtMinutes;
   const quest: EngineQuest = {
     id: randomUUID(),
     title: command.title,
@@ -3602,14 +3625,316 @@ function resolveQuestCreate(
     progress: 0,
     giverNpcId: command.giverNpcId,
     deadline: command.deadline,
+    ...(deadlineAtMinutes === undefined ? {} : { deadlineAtMinutes }),
+    ...(graph ? { graph: { ...graph, deadlineAtMinutes: deadlineAtMinutes ?? null } } : {}),
   };
   const next = cloneCampaign(state);
   next.quests = [...state.quests, quest].slice(-50);
   next.quest = quest;
-  return commit(next, context, clientCommandId, command, tool, "Quest added: " + quest.title + ".", { quest, quests: next.quests }, "quest_created", [], [], [
-    { path: "/quests", before: state.quests, after: next.quests },
-    { path: "/quest", before: state.quest, after: next.quest },
-  ]);
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: "/quests", before: projectQuestsForActor(state, context.actorId), after: projectQuestsForActor(next, context.actorId) },
+    { path: "/quest", before: projectQuestForActor(state.quest, state, context.actorId), after: projectQuestForActor(next.quest, next, context.actorId) },
+  ];
+  if (deadlineAtMinutes !== undefined) {
+    const scheduledEvent: EngineScheduledEvent = {
+      id: `quest-deadline:${quest.id}`,
+      kind: "quest-deadline",
+      dueAtMinutes: deadlineAtMinutes,
+      status: "pending",
+      targetRef: quest.id,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version },
+    };
+    next.time.scheduledEvents = [...state.time.scheduledEvents, scheduledEvent];
+    stateChanges.push({ path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents });
+  }
+  return commit(next, context, clientCommandId, command, tool, "Quest added: " + quest.title + ".", { quest: projectQuestForActor(quest, state, context.actorId), quests: projectQuestsForActor(next, context.actorId) }, "quest_created", [], [], stateChanges);
+}
+
+function projectQuestsForActor(state: LanternCampaignState, actorId: string): EngineQuest[] {
+  return state.quests.map((quest) => projectQuestForActor(quest, state, actorId));
+}
+
+function projectQuestForActor(quest: EngineQuest, state: LanternCampaignState, actorId: string): EngineQuest {
+  if (!quest.graph) return quest;
+  const projected = JSON.parse(JSON.stringify(quest)) as EngineQuest;
+  const knownFactIds = new Set(
+    state.actorKnowledge
+      .filter((record) => record.actorId === actorId && !record.stale && (record.tier === "known" || record.tier === "perceived"))
+      .map((record) => record.factId)
+  );
+  const visibleObjectiveIds = new Set<string>();
+  projected.graph!.objectives = projected.graph!.objectives.flatMap((objective) => {
+    const discoveredForActor = objective.discovered
+      || (objective.hidden && objective.predicate.kind === "fact_discovered" && knownFactIds.has(objective.predicate.factId));
+    if (objective.hidden && !discoveredForActor) {
+      return [{
+        id: objective.id,
+        title: "Hidden objective",
+        mode: objective.mode,
+        optional: objective.optional,
+        hidden: true,
+        discovered: false,
+        status: "pending" as const,
+        predicate: { kind: "player_choice", choiceId: "__hidden__" } as EngineQuestPredicate,
+        completedAtMinutes: null,
+        evidence: null,
+      }];
+    }
+    visibleObjectiveIds.add(objective.id);
+    return [{ ...objective, discovered: discoveredForActor }];
+  });
+  projected.graph!.transitions = projected.graph!.transitions.filter((transition) => {
+    if (transition.requiresObjectiveIds.some((objectiveId) => !visibleObjectiveIds.has(objectiveId))) return false;
+    return !transition.predicates.some((predicate) => predicate.kind === "fact_discovered" && !knownFactIds.has(predicate.factId));
+  }).map((transition) => ({ ...transition, predicates: [] }));
+  return projected;
+}
+
+function resolveQuestTransition(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "quest_transition" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  const existing = state.quests.find((candidate) => candidate.id === command.questId);
+  if (!existing) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
+  if (!existing.graph) return rejection(state, tool, "quest_graph_unavailable", "That legacy quest has no typed transition graph.");
+  if (existing.status !== "active") return rejection(state, tool, "quest_terminal", "A terminal quest cannot transition again.");
+  const transition = existing.graph.transitions.find((candidate) => candidate.id === command.transitionId);
+  if (!transition) return rejection(state, tool, "quest_transition_not_found", "That transition is not declared by the quest graph.");
+  if (transition.choiceId && transition.choiceId !== command.choiceId) return rejection(state, tool, "quest_choice_required", "That branch requires its declared player choice.");
+  if (transition.outcome === "expiration" && existing.graph.deadlineAtMinutes !== null && state.time.gameTime.totalMinutes < existing.graph.deadlineAtMinutes) {
+    return rejection(state, tool, "quest_deadline_not_reached", "The expiration branch is not available before the committed deadline.");
+  }
+  const predicateError = validateQuestTransitionPredicates(state, existing, transition, command.choiceId);
+  if (predicateError) return rejection(state, tool, predicateError.code, predicateError.message);
+  const next = cloneCampaign(state);
+  const target = next.quests.find((candidate) => candidate.id === command.questId);
+  if (!target?.graph) return rejection(state, tool, "quest_graph_unavailable", "That quest graph is no longer available.");
+  const applied = applyQuestTransitionState(next, state, target, transition, context, clientCommandId, command.choiceId);
+  if (applied.error) return rejection(state, tool, applied.error.code, applied.error.message);
+  next.quest = target;
+  const stateChanges = applied.stateChanges;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `Quest branch resolved: ${transition.label}.`,
+    {
+      quest: projectQuestForActor(target, next, context.actorId),
+      transitionId: transition.id,
+      outcome: transition.outcome,
+      rewardKeys: applied.rewardKeys,
+      followUpEligible: target.graph.followUpEligible,
+      clock: target.graph.clock,
+    },
+    `quest_${transition.outcome}`,
+    [],
+    [],
+    stateChanges,
+  );
+}
+
+type QuestTransitionValidation = { code: string; message: string };
+
+function validateQuestTransitionPredicates(
+  state: LanternCampaignState,
+  quest: EngineQuest,
+  transition: EngineQuestTransition,
+  choiceId?: string,
+): QuestTransitionValidation | null {
+  for (const predicate of transition.predicates) {
+    if (!evaluateQuestPredicate(state, predicate, choiceId)) {
+      return { code: "quest_predicate_unsatisfied", message: `The committed state does not satisfy branch ${transition.id}.` };
+    }
+  }
+  for (const objectiveId of transition.requiresObjectiveIds) {
+    const objective = quest.graph?.objectives.find((candidate) => candidate.id === objectiveId);
+    if (!objective || !evaluateQuestObjective(state, quest.graph, objective, choiceId)) {
+      return { code: "quest_objective_unsatisfied", message: `Objective ${objectiveId} is not complete from committed state.` };
+    }
+  }
+  return null;
+}
+
+function evaluateQuestPredicate(state: LanternCampaignState, predicate: EngineQuestPredicate, choiceId?: string): boolean {
+  switch (predicate.kind) {
+    case "inventory_owned":
+      return state.character.inventory.some((item) => item.id === predicate.itemId && item.quantity >= predicate.quantity);
+    case "encounter_outcome":
+      return state.combat.lifecycle?.outcomeId === predicate.outcomeId && state.combat.lifecycle.outcome === predicate.outcome;
+    case "social_reputation": {
+      const actorId = predicate.actorId ?? state.actorId;
+      return (state.social?.reputations ?? []).some((reputation) => reputation.actorId === actorId && reputation.communityId === predicate.communityId && reputation.score >= predicate.minScore);
+    }
+    case "actor_at_location": {
+      if (predicate.actorId === state.actorId) return state.worldContext?.id === predicate.locationRef;
+      return state.worldContext?.npcs.some((npc) => npc.id === predicate.actorId && npc.agency?.locationRef === predicate.locationRef) ?? false;
+    }
+    case "fact_discovered":
+      return state.actorKnowledge.some((record) => record.actorId === state.actorId && record.factId === predicate.factId && !record.stale && (record.tier === "known" || record.tier === "perceived"));
+    case "game_time_before":
+      return state.time.gameTime.totalMinutes <= predicate.deadlineAtMinutes;
+    case "player_choice":
+      return predicate.choiceId === choiceId;
+  }
+}
+
+function evaluateQuestObjective(
+  state: LanternCampaignState,
+  graph: EngineQuestGraph | undefined,
+  objective: EngineQuestObjective,
+  choiceId?: string,
+): boolean {
+  if (objective.status === "completed") return true;
+  if (objective.hidden && !objective.discovered && objective.predicate.kind !== "fact_discovered") return false;
+  if (objective.hidden && !objective.discovered && !evaluateQuestPredicate(state, objective.predicate, choiceId)) return false;
+  if (objective.mode === "ordered" && graph) {
+    const index = graph.objectives.findIndex((candidate) => candidate.id === objective.id);
+    const blocked = graph.objectives.slice(0, index).some((candidate) => candidate.mode === "ordered" && !candidate.optional && candidate.status !== "completed");
+    if (blocked) return false;
+  }
+  return evaluateQuestPredicate(state, objective.predicate, choiceId);
+}
+
+function applyQuestTransitionState(
+  next: LanternCampaignState,
+  sourceState: LanternCampaignState,
+  quest: EngineQuest,
+  transition: EngineQuestTransition,
+  context: RequestContext,
+  sourceCommandId: string,
+  choiceId?: string,
+): { error: QuestTransitionValidation | null; rewardKeys: string[]; stateChanges: Array<{ path: string; before: unknown; after: unknown }> } {
+  const graph = quest.graph;
+  if (!graph) return { error: { code: "quest_graph_unavailable", message: "That quest has no typed transition graph." }, rewardKeys: [], stateChanges: [] };
+  const consequence = transition.consequence;
+  if (consequence.worldFact && !next.worldFacts.some((fact) => fact.id === consequence.worldFact!.factId)) {
+    return { error: { code: "quest_world_fact_missing", message: "A quest consequence may change only an established world fact." }, rewardKeys: [], stateChanges: [] };
+  }
+  const beforeCharacter = sourceState.character;
+  const beforeInventory = sourceState.character.inventory;
+  const beforeSocial = sourceState.social;
+  const beforeFacts = sourceState.worldFacts;
+  const beforeClaimedRewards = sourceState.claimedRewards;
+  const outcomeId = `${quest.id}:${transition.id}`;
+  const rewardKeys: string[] = [];
+  const rewardItems = (consequence.items ?? []).map((item) => normalizeInventoryItem({ ...item, equipped: false }));
+  const rewardItemIds = new Set<string>();
+  for (const item of rewardItems) {
+    if (rewardItemIds.has(item.id) || next.character.inventory.some((candidate) => candidate.id === item.id)) {
+      return { error: { code: "duplicate_item_instance", message: "A quest consequence cannot create a duplicate item instance." }, rewardKeys: [], stateChanges: [] };
+    }
+    rewardItemIds.add(item.id);
+  }
+  const claim = (rewardType: string): boolean => {
+    const key = `${outcomeId}:${rewardType}`;
+    if (next.claimedRewards.includes(key)) return false;
+    next.claimedRewards.push(key);
+    rewardKeys.push(key);
+    return true;
+  };
+  if (consequence.xp > 0 && claim("xp")) next.character.xp += consequence.xp;
+  if (consequence.copper > 0 && claim("copper")) {
+    next.character.currency.copper += consequence.copper;
+    syncCurrencyProjection(next.character);
+  }
+  for (const item of rewardItems) {
+    if (claim(`item:${item.id}`)) addInventory(next.character.inventory, withActorOwnership(item, next.character.id, { kind: "quest", sourceId: sourceCommandId }));
+  }
+  const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+  if (capacityIssue) return { error: { code: capacityIssue.code, message: capacityIssue.message }, rewardKeys: [], stateChanges: [] };
+  let reputationApplied = false;
+  if (consequence.reputation && claim("reputation")) {
+    const actorId = consequence.reputation.actorId ?? next.actorId;
+    const social = ensureSocialState(next);
+    const existing = social.reputations.find((candidate) => candidate.actorId === actorId && candidate.communityId === consequence.reputation!.communityId);
+    if (existing) {
+      existing.score = Math.max(SOCIAL_MIN, Math.min(SOCIAL_MAX, existing.score + consequence.reputation.delta));
+      existing.provenance = { sourceCommandId, sourceVersion: sourceState.version, occurredAt: new Date().toISOString() };
+    } else {
+      social.reputations.push({
+        id: `${outcomeId}:reputation:${consequence.reputation.communityId}`,
+        actorId,
+        communityId: consequence.reputation.communityId,
+        score: Math.max(SOCIAL_MIN, Math.min(SOCIAL_MAX, consequence.reputation.delta)),
+        provenance: { sourceCommandId, sourceVersion: sourceState.version, occurredAt: new Date().toISOString() },
+      });
+    }
+    reputationApplied = true;
+  }
+  let worldChangeApplied = false;
+  if (consequence.worldFact && claim("world")) {
+    const fact = next.worldFacts.find((candidate) => candidate.id === consequence.worldFact!.factId);
+    if (fact) {
+      fact.active = consequence.worldFact.active;
+      fact.revision += 1;
+      fact.updatedAt = new Date().toISOString();
+      markKnowledgeStale(next, [fact.id]);
+      worldChangeApplied = true;
+    }
+  }
+  const followUpQuestId = consequence.followUpQuestId ?? graph.followUpQuestId;
+  const followUpEligible = Boolean(followUpQuestId);
+  if (followUpEligible) graph.followUpEligible = true;
+  const nowMinutes = next.time.gameTime.totalMinutes;
+  const completedObjectiveIds: string[] = [];
+  graph.objectives = graph.objectives.map((objective) => {
+    if (objective.status === "completed") return objective;
+    const discovered = objective.hidden
+      ? objective.discovered || (objective.predicate.kind === "fact_discovered" && evaluateQuestPredicate(next, objective.predicate, choiceId))
+      : true;
+    const completed = discovered && evaluateQuestObjective(next, graph, { ...objective, discovered }, choiceId);
+    if (!completed) return { ...objective, discovered };
+    completedObjectiveIds.push(objective.id);
+    return { ...objective, discovered, status: "completed" as const, completedAtMinutes: nowMinutes, evidence: `state:${sourceCommandId}` };
+  });
+  const statusByOutcome: Record<EngineQuestTerminalOutcome, EngineQuestStatus> = {
+    success: "completed",
+    failure: "failed",
+    abandonment: "abandoned",
+    expiration: "expired",
+  };
+  quest.status = statusByOutcome[transition.outcome];
+  quest.progress = Math.round((graph.objectives.filter((objective) => objective.status === "completed").length / Math.max(1, graph.objectives.length)) * 100);
+  quest.rewardClaimed = rewardKeys.length > 0 || quest.rewardClaimed;
+  graph.terminalTransitionId = transition.id;
+  if (graph.clock) {
+    if (graph.clock.source === "objective") graph.clock.current = Math.min(graph.clock.max, graph.objectives.filter((objective) => objective.status === "completed").length);
+    if (graph.clock.source === "choice") graph.clock.current = Math.min(graph.clock.max, graph.clock.current + (choiceId ? 1 : 0));
+    if (graph.clock.current >= graph.clock.max || transition.outcome !== "success") {
+      graph.clock.resolvedAtMinutes = nowMinutes;
+      graph.clock.resolvedByTransitionId = transition.id;
+    }
+  }
+  graph.consequenceRecords.push({
+    transitionId: transition.id,
+    outcomeId,
+    rewardKeys,
+    reputationApplied,
+    worldChangeApplied,
+    followUpEligible,
+    appliedAtMinutes: nowMinutes,
+    sourceCommandId,
+  });
+  const targetIndex = next.quests.findIndex((candidate) => candidate.id === quest.id);
+  if (targetIndex >= 0) next.quests[targetIndex] = quest;
+  if (next.quest.id === quest.id) next.quest = quest;
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: `/quests/${quest.id}`, before: projectQuestForActor(sourceState.quests.find((candidate) => candidate.id === quest.id) ?? quest, sourceState, context.actorId), after: projectQuestForActor(quest, next, context.actorId) },
+    ...(JSON.stringify(beforeClaimedRewards) === JSON.stringify(next.claimedRewards) ? [] : [{ path: "/claimedRewards", before: beforeClaimedRewards, after: next.claimedRewards }]),
+    ...(beforeCharacter.xp === next.character.xp ? [] : [{ path: "/character/xp", before: beforeCharacter.xp, after: next.character.xp }]),
+    ...(JSON.stringify(beforeCharacter.currency) === JSON.stringify(next.character.currency) ? [] : [{ path: "/character/currency", before: beforeCharacter.currency, after: next.character.currency }]),
+    ...(JSON.stringify(beforeInventory) === JSON.stringify(next.character.inventory) ? [] : [{ path: "/character/inventory", before: beforeInventory, after: next.character.inventory }]),
+    ...(JSON.stringify(beforeSocial) === JSON.stringify(next.social) ? [] : [{ path: "/social", before: beforeSocial, after: next.social }]),
+    ...(JSON.stringify(beforeFacts) === JSON.stringify(next.worldFacts) ? [] : [{ path: "/worldFacts", before: beforeFacts, after: next.worldFacts }]),
+  ];
+  void context;
+  void completedObjectiveIds;
+  return { error: null, rewardKeys, stateChanges };
 }
 
 function resolveQuestUpdate(
@@ -3621,6 +3946,9 @@ function resolveQuestUpdate(
 ): EngineResolution {
   const existing = state.quests.find((candidate) => candidate.id === command.questId);
   if (!existing) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
+  if (existing.graph) {
+    return rejection(state, tool, "quest_transition_required", "Graph quest objectives and terminal state can change only through a declared quest_transition.");
+  }
   const next = cloneCampaign(state);
   const updated = next.quests.find((candidate) => candidate.id === command.questId);
   if (!updated) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
@@ -3631,6 +3959,8 @@ function resolveQuestUpdate(
   const rewardClaimedNow = updated.status === "completed" && !updated.rewardClaimed;
   if (rewardClaimedNow) {
     updated.rewardClaimed = true;
+    const rewardKey = `${updated.id}:legacy:reward`;
+    if (!next.claimedRewards.includes(rewardKey)) next.claimedRewards.push(rewardKey);
     next.character.currency.copper += updated.reward.copper;
     syncCurrencyProjection(next.character);
     next.character.xp += updated.reward.xp;
@@ -3648,7 +3978,8 @@ function resolveQuestUpdate(
   if (rewardClaimedNow) {
     stateChanges.push(
       { path: "/character/currency", before: state.character.currency, after: next.character.currency },
-      { path: "/character/xp", before: state.character.xp, after: next.character.xp }
+      { path: "/character/xp", before: state.character.xp, after: next.character.xp },
+      { path: "/claimedRewards", before: state.claimedRewards, after: next.claimedRewards },
     );
   }
   if (pendingAdvancement) {
@@ -7884,13 +8215,15 @@ function resolveLoot(
   if (command.corpseId) return resolveCorpseLoot(state, context, clientCommandId, command, tool);
   if (state.combat.status !== "ended") return rejection(state, tool, "encounter_active", "There is no defeated encounter to loot.");
   const lifecycleRewardKey = state.combat.lifecycle?.outcomeId ? `${state.combat.lifecycle.outcomeId}:loot` : null;
-  if (lifecycleRewardKey && state.combat.lifecycle?.claimedRewards.includes(lifecycleRewardKey)) {
+  if (lifecycleRewardKey && (state.claimedRewards.includes(lifecycleRewardKey) || state.combat.lifecycle?.claimedRewards.includes(lifecycleRewardKey))) {
     return rejection(state, tool, "reward_claimed", "This encounter outcome's reward has already been claimed.");
   }
   if (state.combat.lootClaimed) return rejection(state, tool, "loot_claimed", "The encounter area has already been searched.");
   const quest = command.questId ? state.quests.find((candidate) => candidate.id === command.questId) : null;
   if (command.questId && !quest) return rejection(state, tool, "quest_not_found", "That quest is not in the campaign journal.");
-  const questRewardAvailable = Boolean(quest && !quest.rewardClaimed);
+  if (quest?.graph) return rejection(state, tool, "quest_transition_required", "Graph quest rewards resolve only through a declared quest_transition.");
+  const questRewardKey = quest ? `${quest.id}:legacy:reward` : null;
+  const questRewardAvailable = Boolean(quest && !quest.rewardClaimed && !(questRewardKey && state.claimedRewards.includes(questRewardKey)));
   const questReward = questRewardAvailable && quest ? quest.reward : { xp: 0, copper: 0 };
   const normalizedRewards = command.items.map((item) => normalizeInventoryItem({ ...item, equipped: false }));
   const rewardIds = new Set<string>();
@@ -7915,7 +8248,10 @@ function resolveLoot(
   syncCurrencyProjection(next.character);
   next.character.xp += totalXp;
   next.combat.lootClaimed = true;
-  if (lifecycleRewardKey && next.combat.lifecycle) next.combat.lifecycle.claimedRewards.push(lifecycleRewardKey);
+  if (lifecycleRewardKey) {
+    next.claimedRewards = [...new Set([...next.claimedRewards, lifecycleRewardKey])];
+    if (next.combat.lifecycle && !next.combat.lifecycle.claimedRewards.includes(lifecycleRewardKey)) next.combat.lifecycle.claimedRewards.push(lifecycleRewardKey);
+  }
   if (quest) {
     const nextQuest = next.quests.find((candidate) => candidate.id === quest.id);
     if (nextQuest) {
@@ -7924,6 +8260,7 @@ function resolveLoot(
       nextQuest.rewardClaimed = true;
       if (next.quest.id === nextQuest.id) next.quest = nextQuest;
     }
+    if (questRewardKey) next.claimedRewards = [...new Set([...next.claimedRewards, questRewardKey])];
   }
   const pendingAdvancement = questRewardAvailable && quest
     ? openPendingAdvancement(next, state, quest.id, clientCommandId)
@@ -7960,6 +8297,7 @@ function resolveLoot(
       { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
       { path: "/character/currency", before: state.character.currency, after: next.character.currency },
       { path: "/character/xp", before: state.character.xp, after: next.character.xp },
+      { path: "/claimedRewards", before: state.claimedRewards, after: next.claimedRewards },
       { path: "/combat/lootClaimed", before: state.combat.lootClaimed, after: next.combat.lootClaimed },
       ...(lifecycleRewardKey ? [{ path: "/combat/lifecycle/claimedRewards", before: state.combat.lifecycle?.claimedRewards ?? [], after: next.combat.lifecycle?.claimedRewards ?? [] }] : []),
       ...(quest ? [{ path: "/quests/" + quest.id, before: quest, after: next.quests.find((candidate) => candidate.id === quest.id) }] : []),
@@ -8064,9 +8402,10 @@ function advanceGameTime(
   minutes: number,
   reason: string,
   sourceCommandId: string,
-): { before: EngineGameTime; after: EngineGameTime; processedEventIds: string[]; expiredEffectIds: string[]; interrupted: boolean } {
+): { before: EngineGameTime; after: EngineGameTime; processedEventIds: string[]; expiredEffectIds: string[]; interrupted: boolean; questStateChanges: Array<{ path: string; before: unknown; after: unknown }> } {
   void reason;
   const social = ensureSocialState(next);
+  const sourceState = cloneCampaign(next);
   const before = next.time.gameTime;
   const after = gameTimeAt(before.totalMinutes + Math.max(0, Math.trunc(minutes)));
   const processedEventIds: string[] = [];
@@ -8092,10 +8431,8 @@ function advanceGameTime(
       }
     }
     if (event.kind === "quest-deadline" && event.targetRef) {
-      next.quests = next.quests.map((quest) => quest.id === event.targetRef && quest.status === "active"
-        ? { ...quest, status: "failed" as const }
-        : quest);
-      if (next.quest.id === event.targetRef && next.quest.status === "active") next.quest = { ...next.quest, status: "failed" };
+      // Graph deadlines are applied below against the complete after-time snapshot;
+      // legacy flat quests retain their compatibility failure path there as well.
     }
     if (event.kind === "social-propagation" && event.sourceRef) {
       const rumor = social.rumors.find((candidate) => candidate.id === event.sourceRef && candidate.status === "pending");
@@ -8114,25 +8451,78 @@ function advanceGameTime(
       expiredEffectIds.push(effect.id);
     }
   }
-  next.quests = next.quests.map((quest) => quest.status === "active"
-    && quest.deadlineAtMinutes !== undefined
-    && quest.deadlineAtMinutes > before.totalMinutes
-    && quest.deadlineAtMinutes <= after.totalMinutes
-    ? { ...quest, status: "failed" as const }
-    : quest);
-  if (next.quest.status === "active"
-    && next.quest.deadlineAtMinutes !== undefined
-    && next.quest.deadlineAtMinutes > before.totalMinutes
-    && next.quest.deadlineAtMinutes <= after.totalMinutes) {
-    next.quest = { ...next.quest, status: "failed" };
-  }
+  next.time.gameTime = after;
+  const questStateChanges = applyQuestDeadlineTransitions(next, sourceState, after, sourceCommandId);
+  questStateChanges.push(...advanceQuestTimeClocks(next, sourceState, before, after));
   next.time.worldClocks = next.time.worldClocks.map((clock) => ({
     ...clock,
     elapsedMinutes: clock.elapsedMinutes + after.totalMinutes - before.totalMinutes,
     provenance: { sourceCommandId, sourceVersion: next.version + 1 },
   }));
-  next.time.gameTime = after;
-  return { before, after, processedEventIds, expiredEffectIds: [...new Set(expiredEffectIds)], interrupted };
+  return { before, after, processedEventIds, expiredEffectIds: [...new Set(expiredEffectIds)], interrupted, questStateChanges };
+}
+
+function advanceQuestTimeClocks(
+  next: LanternCampaignState,
+  sourceState: LanternCampaignState,
+  before: EngineGameTime,
+  after: EngineGameTime,
+): Array<{ path: string; before: unknown; after: unknown }> {
+  const elapsed = Math.max(0, after.totalMinutes - before.totalMinutes);
+  if (elapsed === 0) return [];
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+  for (const sourceQuest of sourceState.quests) {
+    const target = next.quests.find((candidate) => candidate.id === sourceQuest.id);
+    const sourceClock = sourceQuest.graph?.clock;
+    const targetClock = target?.graph?.clock;
+    if (!target || target.status !== "active" || !sourceClock || !targetClock || sourceClock.source !== "time") continue;
+    const beforeClock = { ...targetClock };
+    targetClock.current = Math.min(targetClock.max, Math.max(0, targetClock.current + elapsed));
+    if (targetClock.current !== beforeClock.current) {
+      stateChanges.push({ path: `/quests/${target.id}/graph/clock`, before: beforeClock, after: { ...targetClock } });
+    }
+  }
+  return stateChanges;
+}
+
+function applyQuestDeadlineTransitions(
+  next: LanternCampaignState,
+  sourceState: LanternCampaignState,
+  after: EngineGameTime,
+  sourceCommandId: string,
+): Array<{ path: string; before: unknown; after: unknown }> {
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const context: RequestContext = {
+    requestId: sourceCommandId,
+    accountId: next.accountId,
+    campaignId: next.id,
+    actorId: next.actorId,
+    capabilities: ["dm"],
+  };
+  for (const sourceQuest of sourceState.quests) {
+    if (sourceQuest.status !== "active" || sourceQuest.deadlineAtMinutes === undefined) continue;
+    if (sourceQuest.deadlineAtMinutes > after.totalMinutes) continue;
+    const target = next.quests.find((candidate) => candidate.id === sourceQuest.id);
+    if (!target || target.status !== "active") continue;
+    if (target.graph) {
+      const transitionId = target.graph.deadlineTransitionId
+        ?? target.graph.transitions.find((candidate) => candidate.outcome === "expiration")?.id;
+      const transition = transitionId ? target.graph.transitions.find((candidate) => candidate.id === transitionId) : undefined;
+      if (transition) {
+        const applied = applyQuestTransitionState(next, sourceState, target, transition, context, sourceCommandId);
+        if (!applied.error) stateChanges.push(...applied.stateChanges);
+      } else {
+        target.status = "expired";
+        target.graph.terminalTransitionId = null;
+        stateChanges.push({ path: `/quests/${target.id}`, before: projectQuestForActor(sourceQuest, sourceState, context.actorId), after: projectQuestForActor(target, next, context.actorId) });
+      }
+    } else {
+      target.status = "failed";
+      stateChanges.push({ path: `/quests/${target.id}/status`, before: sourceQuest.status, after: target.status });
+      if (next.quest.id === target.id) next.quest = target;
+    }
+  }
+  return stateChanges;
 }
 
 function resolveTravel(
@@ -8235,10 +8625,11 @@ function resolveTravel(
   next.time.travel = travel;
   changes.push(
     { path: "/time/gameTime", before: advance.before, after: advance.after },
+    ...advance.questStateChanges,
     { path: "/time/travel", before: state.time.travel, after: travel },
     { path: "/time/randomEvents", before: state.time.randomEvents, after: next.time.randomEvents },
     { path: "/time/survival", before: beforeSurvival, after: next.time.survival },
-    ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
+    ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: projectQuestsForActor(state, context.actorId), after: projectQuestsForActor(next, context.actorId) }] : []),
     ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffects, after: next.effects }] : []),
     ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
     ...(JSON.stringify(beforeWorldClocks) !== JSON.stringify(next.time.worldClocks) ? [{ path: "/time/worldClocks", before: beforeWorldClocks, after: next.time.worldClocks }] : []),
@@ -8336,6 +8727,7 @@ function resolveProject(
   project.provenance = { sourceCommandId: clientCommandId, sourceVersion: state.version };
   changes.push(
     { path: "/time/gameTime", before: advance.before, after: advance.after },
+    ...advance.questStateChanges,
     { path: "/time/projects", before: state.time.projects, after: next.time.projects },
     ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
     ...(npcAgency?.stateChanges ?? []),
@@ -8410,8 +8802,9 @@ function resolveRest(
       [],
       [
         { path: "/time/gameTime", before: beforeTime.gameTime, after: next.time.gameTime },
+        ...advance.questStateChanges,
         { path: "/time/rest", before: beforeTime.rest, after: next.time.rest },
-        ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
+        ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: projectQuestsForActor(state, context.actorId), after: projectQuestsForActor(next, context.actorId) }] : []),
         ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
         ...(JSON.stringify(beforeEffectsForTime) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffectsForTime, after: next.effects }] : []),
         ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
@@ -8484,8 +8877,9 @@ function resolveRest(
         ? [{ path: "/effects", before: beforeEffectsForTime, after: next.effects }]
         : []),
       { path: "/time/gameTime", before: beforeTime.gameTime, after: next.time.gameTime },
+      ...advance.questStateChanges,
       { path: "/time/rest", before: beforeTime.rest, after: next.time.rest },
-      ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
+      ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: projectQuestsForActor(state, context.actorId), after: projectQuestsForActor(next, context.actorId) }] : []),
       ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
       ...socialStateChanges(beforeSocial, ensureSocialState(next)).filter((change) => !(npcAgency?.stateChanges ?? []).some((agencyChange) => agencyChange.path === change.path)),
       ...(npcAgency?.stateChanges ?? []),
@@ -10076,6 +10470,32 @@ function redactCommand<T extends object>(command: T): T {
   const projected = JSON.parse(JSON.stringify(command)) as Record<string, unknown>;
   if (projected.kind === "world_context") delete projected.facts;
   if (projected.kind === "challenge_attempt") delete projected.factId;
+  if (projected.kind === "quest_create" && projected.graph && typeof projected.graph === "object" && !Array.isArray(projected.graph)) {
+    const graph = projected.graph as Record<string, unknown>;
+    if (Array.isArray(graph.objectives)) {
+      graph.objectives = graph.objectives.map((objective) => {
+        if (!objective || typeof objective !== "object" || Array.isArray(objective)) return objective;
+        const candidate = objective as Record<string, unknown>;
+        return candidate.hidden === true
+          ? { id: candidate.id, title: "[hidden objective]", mode: candidate.mode, optional: candidate.optional, hidden: true }
+          : candidate;
+      });
+    }
+    if (Array.isArray(graph.transitions)) {
+      graph.transitions = graph.transitions.map((transition) => {
+        if (!transition || typeof transition !== "object" || Array.isArray(transition)) return transition;
+        const candidate = transition as Record<string, unknown>;
+        return {
+          id: candidate.id,
+          label: "[quest branch]",
+          outcome: "[redacted]",
+          predicates: [],
+          requiresObjectiveIds: [],
+          consequence: { xp: 0, copper: 0 },
+        };
+      });
+    }
+  }
   if (projected.kind === "turn_plan" && Array.isArray(projected.effects)) {
     projected.effects = projected.effects.map((effect) => {
       if (!effect || typeof effect !== "object" || Array.isArray(effect)) return effect;
@@ -10120,20 +10540,131 @@ function redactWithheldCheck<T>(check: T): T {
 
 function normalizeQuest(quest: EngineQuest): EngineQuest {
   const legacy = quest as EngineQuest & { reward?: { xp?: number; copper?: number; gold?: number } };
+  const graph = normalizeQuestGraph(legacy.graph);
+  const status: EngineQuestStatus = ["active", "completed", "failed", "abandoned", "expired"].includes(legacy.status)
+    ? legacy.status as EngineQuestStatus
+    : "active";
+  const deadlineAtMinutes = typeof legacy.deadlineAtMinutes === "number"
+    ? Math.max(0, Math.trunc(legacy.deadlineAtMinutes))
+    : graph?.deadlineAtMinutes ?? undefined;
   return {
     id: legacy.id ?? randomUUID(),
     title: legacy.title ?? "Untitled quest",
     objective: legacy.objective ?? "Follow the thread.",
-    status: legacy.status ?? "active",
+    status,
     reward: {
-      xp: legacy.reward?.xp ?? 0,
-      copper: legacy.reward?.copper ?? (legacy.reward?.gold ?? 0) * 100,
+      xp: Math.max(0, Math.trunc(legacy.reward?.xp ?? 0)),
+      copper: Math.max(0, Math.trunc(legacy.reward?.copper ?? (legacy.reward?.gold ?? 0) * 100)),
     },
-    rewardClaimed: legacy.rewardClaimed ?? false,
-    progress: Math.max(0, Math.min(100, legacy.progress ?? 0)),
+    rewardClaimed: Boolean(legacy.rewardClaimed),
+    progress: Math.max(0, Math.min(100, Math.trunc(legacy.progress ?? 0))),
     giverNpcId: legacy.giverNpcId,
     deadline: legacy.deadline,
-    ...(typeof legacy.deadlineAtMinutes === "number" ? { deadlineAtMinutes: Math.max(0, Math.trunc(legacy.deadlineAtMinutes)) } : {}),
+    ...(deadlineAtMinutes === undefined ? {} : { deadlineAtMinutes }),
+    ...(graph ? { graph: { ...graph, deadlineAtMinutes: graph.deadlineAtMinutes ?? deadlineAtMinutes ?? null } } : {}),
+  };
+}
+
+function normalizeQuestGraph(value: unknown): EngineQuestGraph | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Partial<EngineQuestGraph> & { objectives?: unknown; transitions?: unknown; clock?: unknown };
+  if (!Array.isArray(raw.objectives) || !Array.isArray(raw.transitions)) return undefined;
+  const objectiveInputs = raw.objectives.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const item = candidate as Partial<EngineQuestObjective>;
+    return [
+      {
+        id: item.id,
+        title: item.title,
+        mode: item.mode,
+        optional: item.optional,
+        hidden: item.hidden,
+        predicate: item.predicate,
+      },
+    ];
+  });
+  const transitionInputs = raw.transitions.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const transition = candidate as Partial<EngineQuestTransition>;
+    return [{
+      id: transition.id,
+      label: transition.label,
+      outcome: transition.outcome,
+      predicates: transition.predicates,
+      requiresObjectiveIds: transition.requiresObjectiveIds,
+      ...(transition.choiceId ? { choiceId: transition.choiceId } : {}),
+      consequence: transition.consequence,
+    }];
+  });
+  const parsed = engineQuestGraphInputSchema.safeParse({
+    objectives: objectiveInputs,
+    transitions: transitionInputs,
+    ...(typeof raw.deadlineAtMinutes === "number" ? { deadlineAtMinutes: raw.deadlineAtMinutes } : {}),
+    ...(typeof raw.deadlineTransitionId === "string" ? { deadlineTransitionId: raw.deadlineTransitionId } : {}),
+    ...(typeof raw.followUpQuestId === "string" ? { followUpQuestId: raw.followUpQuestId } : {}),
+    ...(raw.clock && typeof raw.clock === "object" && !Array.isArray(raw.clock)
+      ? {
+          clock: {
+            id: (raw.clock as Partial<EngineQuestProgressClock>).id,
+            title: (raw.clock as Partial<EngineQuestProgressClock>).title,
+            max: (raw.clock as Partial<EngineQuestProgressClock>).max,
+            source: (raw.clock as Partial<EngineQuestProgressClock>).source,
+          },
+        }
+      : {}),
+  });
+  if (!parsed.success) return undefined;
+  const previousObjectives = new Map(
+    raw.objectives.flatMap((candidate) => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+      const objective = candidate as Partial<EngineQuestObjective>;
+      return typeof objective.id === "string" ? [[objective.id, objective]] as const : [];
+    })
+  );
+  const objectives: EngineQuestObjective[] = parsed.data.objectives.map((objective) => {
+    const previous = previousObjectives.get(objective.id);
+    return {
+      ...objective,
+      discovered: objective.hidden ? Boolean(previous?.discovered) : true,
+      status: previous?.status === "completed" ? "completed" : "pending",
+      completedAtMinutes: typeof previous?.completedAtMinutes === "number" ? Math.max(0, Math.trunc(previous.completedAtMinutes)) : null,
+      evidence: typeof previous?.evidence === "string" ? previous.evidence : null,
+    };
+  });
+  const previousRecords = Array.isArray(raw.consequenceRecords) ? raw.consequenceRecords : [];
+  const consequenceRecords: EngineQuestConsequenceRecord[] = previousRecords.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const record = candidate as Partial<EngineQuestConsequenceRecord>;
+    if (typeof record.transitionId !== "string" || typeof record.outcomeId !== "string") return [];
+    return [{
+      transitionId: record.transitionId,
+      outcomeId: record.outcomeId,
+      rewardKeys: Array.isArray(record.rewardKeys) ? record.rewardKeys.filter((key): key is string => typeof key === "string") : [],
+      reputationApplied: Boolean(record.reputationApplied),
+      worldChangeApplied: Boolean(record.worldChangeApplied),
+      followUpEligible: Boolean(record.followUpEligible),
+      appliedAtMinutes: typeof record.appliedAtMinutes === "number" ? Math.max(0, Math.trunc(record.appliedAtMinutes)) : 0,
+      sourceCommandId: typeof record.sourceCommandId === "string" ? record.sourceCommandId : "legacy-quest",
+    }];
+  });
+  const clock = parsed.data.clock
+    ? {
+        ...parsed.data.clock,
+        current: Math.max(0, Math.min(parsed.data.clock.max, Math.trunc((raw.clock as Partial<EngineQuestProgressClock> | undefined)?.current ?? 0))),
+        resolvedAtMinutes: typeof (raw.clock as Partial<EngineQuestProgressClock> | undefined)?.resolvedAtMinutes === "number" ? Math.max(0, Math.trunc((raw.clock as Partial<EngineQuestProgressClock>).resolvedAtMinutes!)) : null,
+        resolvedByTransitionId: typeof (raw.clock as Partial<EngineQuestProgressClock> | undefined)?.resolvedByTransitionId === "string" ? (raw.clock as Partial<EngineQuestProgressClock>).resolvedByTransitionId! : null,
+      } satisfies EngineQuestProgressClock
+    : null;
+  return {
+    objectives,
+    transitions: parsed.data.transitions as EngineQuestTransition[],
+    deadlineAtMinutes: typeof parsed.data.deadlineAtMinutes === "number" ? parsed.data.deadlineAtMinutes : null,
+    deadlineTransitionId: parsed.data.deadlineTransitionId ?? null,
+    followUpQuestId: parsed.data.followUpQuestId ?? null,
+    followUpEligible: Boolean(raw.followUpEligible),
+    clock,
+    terminalTransitionId: typeof raw.terminalTransitionId === "string" ? raw.terminalTransitionId : null,
+    consequenceRecords,
   };
 }
 
