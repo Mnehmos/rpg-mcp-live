@@ -156,7 +156,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(50);
+    expect(names).toHaveLength(52);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");

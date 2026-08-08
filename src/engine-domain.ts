@@ -50,6 +50,16 @@ import type {
   EngineWorldObjectInstance,
   EngineWorldObjectPatchOperations,
   EngineWorldObjectState,
+  EngineGameTime,
+  EngineTimeState,
+  EngineTravelPace,
+  EngineTravelPlan,
+  EngineScheduledEvent,
+  EngineRandomEventResolution,
+  EngineProjectClock,
+  EngineWorldClock,
+  EngineRestState,
+  EngineSurvivalState,
   InformationTier,
   PublicProjection,
   EnginePendingReaction,
@@ -771,6 +781,147 @@ export function defaultAdvancementPolicy(): EngineAdvancementPolicy {
   };
 }
 
+const GAME_CALENDAR_ID = "lantern-standard-v1";
+const ONE_DAY_MINUTES = 24 * 60;
+const SHORT_REST_MINUTES = 60;
+const LONG_REST_MINUTES = 8 * 60;
+
+function gameTimeAt(totalMinutes: number): EngineGameTime {
+  const total = Math.max(0, Math.trunc(totalMinutes));
+  const dayIndex = Math.floor(total / ONE_DAY_MINUTES);
+  const minuteOfDay = total % ONE_DAY_MINUTES;
+  return {
+    calendarId: GAME_CALENDAR_ID,
+    year: 1 + Math.floor(dayIndex / 365),
+    day: 1 + (dayIndex % 365),
+    hour: Math.floor(minuteOfDay / 60),
+    minute: minuteOfDay % 60,
+    totalMinutes: total,
+  };
+}
+
+function defaultTimeState(): EngineTimeState {
+  return {
+    gameTime: gameTimeAt(0),
+    scheduledEvents: [],
+    travel: null,
+    rest: {
+      status: "idle",
+      restType: null,
+      startedAtMinutes: null,
+      completedAtMinutes: null,
+      requiredMinutes: 0,
+      interruptionEventId: null,
+      lastCompletedAtMinutes: null,
+    },
+    survival: {
+      exhaustionLevel: 0,
+      exposure: 0,
+      forcedMarches: 0,
+      weather: "clear",
+    },
+    worldClocks: [],
+    randomEvents: [],
+    projects: [],
+  };
+}
+
+function normalizeTimeState(value: unknown): EngineTimeState {
+  const defaults = defaultTimeState();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return defaults;
+  const raw = value as Partial<EngineTimeState> & { gameTime?: Partial<EngineGameTime> };
+  const totalMinutes = Math.max(0, Math.trunc(raw.gameTime?.totalMinutes ?? 0));
+  const gameTime = gameTimeAt(totalMinutes);
+  const scheduledEvents = Array.isArray(raw.scheduledEvents)
+    ? raw.scheduledEvents.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const event = candidate as Partial<EngineScheduledEvent>;
+        if (typeof event.id !== "string" || typeof event.kind !== "string" || typeof event.dueAtMinutes !== "number") return [];
+        if (!["rest-interruption", "effect-expiry", "world-clock", "quest-deadline"].includes(event.kind)) return [];
+        return [{
+          id: event.id,
+          kind: event.kind as EngineScheduledEvent["kind"],
+          dueAtMinutes: Math.max(0, Math.trunc(event.dueAtMinutes)),
+          status: event.status === "processed" ? "processed" as const : "pending" as const,
+          ...(typeof event.sourceRef === "string" ? { sourceRef: event.sourceRef } : {}),
+          ...(typeof event.targetRef === "string" ? { targetRef: event.targetRef } : {}),
+          ...(typeof event.processedAtMinutes === "number" ? { processedAtMinutes: Math.max(0, Math.trunc(event.processedAtMinutes)) } : {}),
+          provenance: {
+            sourceCommandId: event.provenance?.sourceCommandId ?? "legacy-time",
+            sourceVersion: Math.max(0, Math.trunc(event.provenance?.sourceVersion ?? 0)),
+          },
+        }];
+      })
+    : [];
+  const rawRest = raw.rest && typeof raw.rest === "object" ? raw.rest as Partial<EngineRestState> : {};
+  const rest: EngineRestState = {
+    status: rawRest.status === "interrupted" || rawRest.status === "completed" || rawRest.status === "in_progress" ? rawRest.status : "idle",
+    restType: rawRest.restType === "short" || rawRest.restType === "long" ? rawRest.restType : null,
+    startedAtMinutes: typeof rawRest.startedAtMinutes === "number" ? Math.max(0, Math.trunc(rawRest.startedAtMinutes)) : null,
+    completedAtMinutes: typeof rawRest.completedAtMinutes === "number" ? Math.max(0, Math.trunc(rawRest.completedAtMinutes)) : null,
+    requiredMinutes: Math.max(0, Math.trunc(rawRest.requiredMinutes ?? 0)),
+    interruptionEventId: typeof rawRest.interruptionEventId === "string" ? rawRest.interruptionEventId : null,
+    lastCompletedAtMinutes: typeof rawRest.lastCompletedAtMinutes === "number" ? Math.max(0, Math.trunc(rawRest.lastCompletedAtMinutes)) : null,
+  };
+  const rawSurvival = raw.survival && typeof raw.survival === "object" ? raw.survival as Partial<EngineSurvivalState> : {};
+  const survival: EngineSurvivalState = {
+    exhaustionLevel: Math.max(0, Math.trunc(rawSurvival.exhaustionLevel ?? 0)),
+    exposure: Math.max(0, Math.trunc(rawSurvival.exposure ?? 0)),
+    forcedMarches: Math.max(0, Math.trunc(rawSurvival.forcedMarches ?? 0)),
+    weather: rawSurvival.weather === "rain" || rawSurvival.weather === "storm" ? rawSurvival.weather : "clear",
+  };
+  const worldClocks = Array.isArray(raw.worldClocks)
+    ? raw.worldClocks.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const clock = candidate as Partial<EngineWorldClock>;
+        if (typeof clock.id !== "string" || typeof clock.name !== "string") return [];
+        return [{
+          id: clock.id,
+          name: clock.name,
+          elapsedMinutes: Math.max(0, Math.trunc(clock.elapsedMinutes ?? 0)),
+          provenance: {
+            sourceCommandId: clock.provenance?.sourceCommandId ?? "legacy-time",
+            sourceVersion: Math.max(0, Math.trunc(clock.provenance?.sourceVersion ?? 0)),
+          },
+        }];
+      })
+    : [];
+  const projects = Array.isArray(raw.projects)
+    ? raw.projects.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const project = candidate as Partial<EngineProjectClock>;
+        if (typeof project.id !== "string" || project.definitionId !== "research-v1") return [];
+        return [{
+          id: project.id,
+          definitionId: "research-v1" as const,
+          title: project.title ?? "Research project",
+          workRequiredMinutes: Math.max(1, Math.trunc(project.workRequiredMinutes ?? 480)),
+          workCompletedMinutes: Math.max(0, Math.trunc(project.workCompletedMinutes ?? 0)),
+          materialProperty: "project-material" as const,
+          materialQuantity: Math.max(0, Math.trunc(project.materialQuantity ?? 1)),
+          status: project.status === "completed" ? "completed" as const : "active" as const,
+          startedAtMinutes: Math.max(0, Math.trunc(project.startedAtMinutes ?? totalMinutes)),
+          completedAtMinutes: typeof project.completedAtMinutes === "number" ? Math.max(0, Math.trunc(project.completedAtMinutes)) : null,
+          provenance: {
+            sourceCommandId: project.provenance?.sourceCommandId ?? "legacy-time",
+            sourceVersion: Math.max(0, Math.trunc(project.provenance?.sourceVersion ?? 0)),
+          },
+        }];
+      })
+    : [];
+  return {
+    ...defaults,
+    gameTime,
+    scheduledEvents,
+    travel: raw.travel ?? null,
+    rest,
+    survival,
+    worldClocks,
+    randomEvents: Array.isArray(raw.randomEvents) ? raw.randomEvents as EngineRandomEventResolution[] : [],
+    projects,
+  };
+}
+
 export function normalizeContentPolicy(policy: EngineContentPolicy): EngineContentPolicy {
   const gamesystem = policy.gamesystem?.trim();
   const baseDocumentKey = policy.baseDocumentKey?.trim();
@@ -816,6 +967,7 @@ export function createInitialCampaign(
     characterCreation: { abilityScoreDraft: null },
     advancementPolicy: defaultAdvancementPolicy(),
     pendingAdvancement: null,
+    time: defaultTimeState(),
     worldContext: null,
     worldFacts: [],
     actorKnowledge: [],
@@ -872,7 +1024,9 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     worldFacts?: unknown;
     worldObjects?: unknown;
     actorKnowledge?: unknown;
+    time?: unknown;
   };
+  next.time = normalizeTimeState(next.time);
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
   next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
@@ -1299,6 +1453,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     characterCreation: state.characterCreation,
     advancementPolicy: state.advancementPolicy,
     pendingAdvancement: state.pendingAdvancement,
+    time: state.time,
     characterCreated: state.character.created,
     worldContext: projection.worldContext,
     playerNotes: state.playerNotes,
@@ -1351,6 +1506,7 @@ export function readToolData(
         tutorialStep: state.tutorialStep,
         advancementPolicy: state.advancementPolicy,
         pendingAdvancement: state.pendingAdvancement,
+        time: state.time,
         worldContext: projection.worldContext,
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
@@ -1368,6 +1524,7 @@ export function readToolData(
       return {
         worldContext: projection.worldContext,
         campaignVersion: state.version,
+        time: state.time,
         combat: combatData(state.combat),
       };
     case "world_context":
@@ -1600,7 +1757,7 @@ export function resolveEngineCommand(
   }
   if (
     state.character.lifecycleState === "stable"
-    && ["combat_action", "combat_move", "cast_spell", "move", "interact", "social_check", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot"].includes(command.kind)
+    && ["combat_action", "combat_move", "cast_spell", "move", "travel", "interact", "social_check", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
   ) {
     return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
   }
@@ -1640,6 +1797,8 @@ export function resolveEngineCommand(
       return resolveCharacterUpdate(state, context, clientCommandId, command, tool);
     case "move":
       return resolveMove(state, context, clientCommandId, command, tool);
+    case "travel":
+      return resolveTravel(state, context, clientCommandId, command, tool);
     case "interact":
       return resolveInteract(state, context, clientCommandId, command, tool);
     case "social_check":
@@ -1702,6 +1861,8 @@ export function resolveEngineCommand(
       return resolveLoot(state, context, clientCommandId, command, tool);
     case "rest":
       return resolveRest(state, context, clientCommandId, command, tool);
+    case "project":
+      return resolveProject(state, context, clientCommandId, command, tool);
     case "use_item":
       return resolveUseItem(state, context, clientCommandId, command, tool);
     case "declare":
@@ -6893,6 +7054,320 @@ function resolveCorpseLoot(
   );
 }
 
+type ReviewedTravelProfile = {
+  distanceMiles: number;
+  elapsedMinutes: number;
+  navigationDc: number;
+  forcedMarch: boolean;
+};
+
+function reviewedTravelProfile(routeId: string, pace: EngineTravelPace): ReviewedTravelProfile | null {
+  if (routeId !== "one-day-road-v1") return null;
+  return pace === "fast"
+    ? { distanceMiles: 30, elapsedMinutes: 6 * 60, navigationDc: 12, forcedMarch: true }
+    : { distanceMiles: 24, elapsedMinutes: 8 * 60, navigationDc: 10, forcedMarch: false };
+}
+
+function normalizedItemProperties(item: EngineInventoryItem): string[] {
+  try {
+    return (materializeInventoryItem(item).properties ?? [])
+      .map((property) => property.trim().toLocaleLowerCase("en-US").replaceAll(" ", "-"));
+  } catch {
+    return [];
+  }
+}
+
+function supplyItem(state: LanternCampaignState, property: string): EngineInventoryItem | null {
+  return state.character.inventory.find((item) => item.quantity > 0 && isActorOwnedItem(item, state.character.id) && normalizedItemProperties(item).includes(property)) ?? null;
+}
+
+function consumeInventoryProperty(
+  state: LanternCampaignState,
+  property: string,
+  quantity: number,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): boolean {
+  const item = supplyItem(state, property);
+  if (!item || item.quantity < quantity) return false;
+  const before = item.quantity;
+  item.quantity -= quantity;
+  changes.push({ path: `/character/inventory/${item.id}/quantity`, before, after: item.quantity });
+  return true;
+}
+
+function minutesForDuration(duration: EngineEffectDuration): number | null {
+  if (duration.kind !== "fixed") return null;
+  const multiplier = duration.unit === "minute" ? 1 : duration.unit === "hour" ? 60 : duration.unit === "day" ? ONE_DAY_MINUTES : null;
+  return multiplier === null ? null : duration.amount * multiplier;
+}
+
+function advanceGameTime(
+  next: LanternCampaignState,
+  minutes: number,
+  reason: string,
+  sourceCommandId: string,
+): { before: EngineGameTime; after: EngineGameTime; processedEventIds: string[]; expiredEffectIds: string[]; interrupted: boolean } {
+  void reason;
+  const before = next.time.gameTime;
+  const after = gameTimeAt(before.totalMinutes + Math.max(0, Math.trunc(minutes)));
+  const processedEventIds: string[] = [];
+  const expiredEffectIds: string[] = [];
+  let interrupted = false;
+  const dueEvents = next.time.scheduledEvents
+    .filter((event) => event.status === "pending" && event.dueAtMinutes > before.totalMinutes && event.dueAtMinutes <= after.totalMinutes)
+    .sort((left, right) => left.dueAtMinutes - right.dueAtMinutes || left.id.localeCompare(right.id));
+  for (const event of dueEvents) {
+    event.status = "processed";
+    event.processedAtMinutes = event.dueAtMinutes;
+    processedEventIds.push(event.id);
+    if (event.kind === "rest-interruption" && next.time.rest.status === "in_progress") {
+      next.time.rest.status = "interrupted";
+      next.time.rest.interruptionEventId = event.id;
+      interrupted = true;
+    }
+    if (event.kind === "effect-expiry" && event.targetRef) {
+      const effect = next.effects.find((candidate) => candidate.id === event.targetRef && candidate.status === "active");
+      if (effect) {
+        effect.status = "expired";
+        expiredEffectIds.push(effect.id);
+      }
+    }
+    if (event.kind === "quest-deadline" && event.targetRef) {
+      next.quests = next.quests.map((quest) => quest.id === event.targetRef && quest.status === "active"
+        ? { ...quest, status: "failed" as const }
+        : quest);
+      if (next.quest.id === event.targetRef && next.quest.status === "active") next.quest = { ...next.quest, status: "failed" };
+    }
+  }
+  for (const effect of next.effects) {
+    const durationMinutes = minutesForDuration(effect.duration);
+    if (effect.status !== "active" || durationMinutes === null || effect.startTimeMinutes === undefined) continue;
+    const dueAt = effect.startTimeMinutes + durationMinutes;
+    if (dueAt > before.totalMinutes && dueAt <= after.totalMinutes) {
+      effect.status = "expired";
+      expiredEffectIds.push(effect.id);
+    }
+  }
+  next.quests = next.quests.map((quest) => quest.status === "active"
+    && quest.deadlineAtMinutes !== undefined
+    && quest.deadlineAtMinutes > before.totalMinutes
+    && quest.deadlineAtMinutes <= after.totalMinutes
+    ? { ...quest, status: "failed" as const }
+    : quest);
+  if (next.quest.status === "active"
+    && next.quest.deadlineAtMinutes !== undefined
+    && next.quest.deadlineAtMinutes > before.totalMinutes
+    && next.quest.deadlineAtMinutes <= after.totalMinutes) {
+    next.quest = { ...next.quest, status: "failed" };
+  }
+  next.time.worldClocks = next.time.worldClocks.map((clock) => ({
+    ...clock,
+    elapsedMinutes: clock.elapsedMinutes + after.totalMinutes - before.totalMinutes,
+    provenance: { sourceCommandId, sourceVersion: next.version + 1 },
+  }));
+  next.time.gameTime = after;
+  return { before, after, processedEventIds, expiredEffectIds: [...new Set(expiredEffectIds)], interrupted };
+}
+
+function resolveTravel(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "travel" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  if (state.combat.status === "active") return rejection(state, tool, "combat_active", "You cannot travel during an active encounter.");
+  if (state.time.rest.status === "in_progress") return rejection(state, tool, "rest_in_progress", "Finish or interrupt the current rest before travelling.");
+  const profile = reviewedTravelProfile(command.routeId, command.pace);
+  if (!profile) return rejection(state, tool, "route_unreviewed", "That route is not a reviewed travel profile.");
+  const exit = state.worldContext?.exits.find((candidate) => candidate.id === command.destinationId);
+  if (!exit) return rejection(state, tool, "invalid_destination", "Travel must target an exit established in the current world context.");
+  const navigatorId = command.navigatorId ?? state.actorId;
+  const watcherId = command.watcherId ?? state.actorId;
+  if (navigatorId !== state.actorId || watcherId !== state.actorId) {
+    return rejection(state, tool, "actor_not_available", "This single-PC slice can only assign the current actor as navigator and watch.");
+  }
+  const ration = supplyItem(state, "ration");
+  const water = supplyItem(state, "water");
+  if (!ration || !water) return rejection(state, tool, "supplies_shortage", "A one-day journey requires one ration and one water supply.");
+  const derived = deriveCheck(state, "wis", state.character.skills.survival ? "survival" : null, null, tool);
+  if ("accepted" in derived) return derived;
+  const navigationRoll = randomInt(1, 21);
+  const navigationTotal = navigationRoll + derived.modifier;
+  const navigationSuccess = navigationTotal >= profile.navigationDc;
+  const randomEventRoll = randomInt(1, 101);
+  const randomThreshold = command.pace === "fast" ? 35 : 25;
+  const triggered = randomEventRoll <= randomThreshold;
+  const selectionRoll = triggered ? randomInt(1, 4) : undefined;
+  const selectedEntryId = triggered
+    ? (["roadside-rain", "roadside-cache", "roadside-patrol", "roadside-sign"][Math.max(0, (selectionRoll ?? 1) - 1)] ?? "roadside-rain")
+    : undefined;
+  const contextHash = createHash("sha256")
+    .update(JSON.stringify({ routeId: command.routeId, destinationId: command.destinationId, pace: command.pace, weather: state.time.survival.weather, totalMinutes: state.time.gameTime.totalMinutes }))
+    .digest("hex");
+  const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const beforeQuests = state.quests;
+  const beforeEffects = state.effects;
+  const beforeEvents = state.time.scheduledEvents;
+  const beforeWorldClocks = state.time.worldClocks;
+  consumeInventoryProperty(next, "ration", 1, changes);
+  consumeInventoryProperty(next, "water", 1, changes);
+  const beforeSurvival = state.time.survival;
+  if (profile.forcedMarch || !navigationSuccess) {
+    next.time.survival.exhaustionLevel += 1;
+    next.time.survival.forcedMarches += profile.forcedMarch ? 1 : 0;
+    next.time.survival.exposure += navigationSuccess ? 0 : 1;
+  }
+  if (selectedEntryId === "roadside-rain") next.time.survival.weather = "rain";
+  if (selectedEntryId === "roadside-cache") next.time.survival.exposure = Math.max(0, next.time.survival.exposure - 1);
+  const advance = advanceGameTime(next, profile.elapsedMinutes, navigationSuccess ? "travel-arrival" : "travel-navigation-failure", clientCommandId);
+  const randomEvent: EngineRandomEventResolution = {
+    id: randomUUID(),
+    trigger: "travel-watch",
+    triggerId: clientCommandId,
+    tableId: "travel-watch-v1",
+    tableVersion: "1",
+    contextHash,
+    occurrenceRoll: randomEventRoll,
+    occurrenceThreshold: randomThreshold,
+    triggered,
+    ...(selectionRoll === undefined ? {} : { selectionRoll }),
+    ...(selectedEntryId === undefined ? {} : { selectedEntryId }),
+    reusedEntityIds: [],
+    instantiatedEntityIds: [],
+    createdFactIds: [],
+    createdClockIds: [],
+    createdSituationIds: [],
+    createdEncounterIds: [],
+    sourceEventId: randomUUID(),
+    campaignVersion: state.version + 1,
+  };
+  next.time.randomEvents = [...next.time.randomEvents, randomEvent].slice(-100);
+  const travel: EngineTravelPlan = {
+    id: randomUUID(),
+    routeId: command.routeId,
+    originRef: state.worldContext?.id ?? "world",
+    destinationRef: command.destinationId,
+    pace: command.pace,
+    navigatorId,
+    watcherId,
+    distanceMiles: profile.distanceMiles,
+    elapsedMinutes: profile.elapsedMinutes,
+    startedAtMinutes: state.time.gameTime.totalMinutes,
+    arrivalAtMinutes: advance.after.totalMinutes,
+    status: navigationSuccess ? "arrived" : "failed",
+    navigation: { roll: navigationRoll, modifier: derived.modifier, total: navigationTotal, dc: profile.navigationDc, success: navigationSuccess },
+    supplies: { rations: 1, water: 1 },
+    weather: next.time.survival.weather,
+    randomEventId: randomEvent.id,
+    forcedMarch: profile.forcedMarch || !navigationSuccess,
+    provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version },
+  };
+  next.time.travel = travel;
+  changes.push(
+    { path: "/time/gameTime", before: advance.before, after: advance.after },
+    { path: "/time/travel", before: state.time.travel, after: travel },
+    { path: "/time/randomEvents", before: state.time.randomEvents, after: next.time.randomEvents },
+    { path: "/time/survival", before: beforeSurvival, after: next.time.survival },
+    ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
+    ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffects, after: next.effects }] : []),
+    ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
+    ...(JSON.stringify(beforeWorldClocks) !== JSON.stringify(next.time.worldClocks) ? [{ path: "/time/worldClocks", before: beforeWorldClocks, after: next.time.worldClocks }] : []),
+  );
+  const message = navigationSuccess
+    ? `You travel ${profile.distanceMiles} miles toward ${exit.label} and arrive after ${profile.elapsedMinutes} minutes.`
+    : `Navigation fails on the road toward ${exit.label}; the party loses time and gains a bounded exhaustion consequence.`;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    message,
+    {
+      travel,
+      randomEvent,
+      timeAdvance: { before: advance.before, after: advance.after, minutes: profile.elapsedMinutes, reason: navigationSuccess ? "travel-arrival" : "travel-navigation-failure", processedEventIds: advance.processedEventIds },
+    },
+    navigationSuccess ? "travel_arrived" : "travel_navigation_failed",
+    [
+      { kind: "navigation_d20", value: navigationRoll, sides: 20 },
+      { kind: "travel_event_d100", value: randomEventRoll, sides: 100 },
+      ...(selectionRoll === undefined ? [] : [{ kind: "travel_event_selection", value: selectionRoll, sides: 4 }]),
+    ],
+    [{ name: "navigation_modifier", value: derived.modifier }, { name: "navigation_dc", value: profile.navigationDc }, { name: "event_threshold", value: randomThreshold }],
+    changes,
+    [],
+    undefined,
+    {
+      kind: "ability-check",
+      actorId: context.actorId,
+      ability: "wis",
+      skill: derived.skill,
+      tool: null,
+      proficiency: derived.proficiency,
+      expertise: derived.expertise,
+      modifier: derived.modifier,
+      modifierSources: derived.modifierSources,
+      advantageSources: [],
+      disadvantageSources: [],
+      mode: "normal",
+      informationPolicy: "public",
+      formulaRevision: "checks-v1",
+    },
+  );
+}
+
+function resolveProject(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "project" }>,
+  tool: EngineToolName | "declare" | "listen"
+): EngineResolution {
+  if (state.combat.status === "active") return rejection(state, tool, "combat_active", "You cannot work on a project during an active encounter.");
+  if (command.projectId !== "research-v1") return rejection(state, tool, "project_unreviewed", "That downtime project is not reviewed in this slice.");
+  const existing = state.time.projects.find((project) => project.id === command.projectId);
+  if (command.action === "start") {
+    if (existing) return rejection(state, tool, "project_exists", "That project has already been started.");
+    const next = cloneCampaign(state);
+    const project: EngineProjectClock = {
+      id: command.projectId,
+      definitionId: "research-v1",
+      title: "Research the road ahead",
+      workRequiredMinutes: 8 * 60,
+      workCompletedMinutes: 0,
+      materialProperty: "project-material",
+      materialQuantity: 1,
+      status: "active",
+      startedAtMinutes: state.time.gameTime.totalMinutes,
+      completedAtMinutes: null,
+      provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version },
+    };
+    next.time.projects = [...next.time.projects, project];
+    return commit(next, context, clientCommandId, command, tool, "The research project is now tracked by the campaign clock.", { project }, "project_started", [], [], [{ path: "/time/projects", before: state.time.projects, after: next.time.projects }]);
+  }
+  if (!existing || existing.status !== "active") return rejection(state, tool, "project_not_active", "That project is not active.");
+  const material = supplyItem(state, existing.materialProperty);
+  if (!material || material.quantity < existing.materialQuantity) return rejection(state, tool, "project_material_shortage", "The project lacks its reviewed material cost.");
+  const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  if (existing.workCompletedMinutes === 0) consumeInventoryProperty(next, existing.materialProperty, existing.materialQuantity, changes);
+  const advance = advanceGameTime(next, existing.workRequiredMinutes - existing.workCompletedMinutes, "downtime-project", clientCommandId);
+  const project = next.time.projects.find((candidate) => candidate.id === existing.id);
+  if (!project) return rejection(state, tool, "project_not_active", "That project is not active.");
+  project.workCompletedMinutes = project.workRequiredMinutes;
+  project.status = "completed";
+  project.completedAtMinutes = advance.after.totalMinutes;
+  project.provenance = { sourceCommandId: clientCommandId, sourceVersion: state.version };
+  changes.push(
+    { path: "/time/gameTime", before: advance.before, after: advance.after },
+    { path: "/time/projects", before: state.time.projects, after: next.time.projects },
+  );
+  return commit(next, context, clientCommandId, command, tool, "The research project completes and its progress is recorded exactly once.", { project, timeAdvance: { before: advance.before, after: advance.after, minutes: advance.after.totalMinutes - advance.before.totalMinutes, reason: "downtime-project", processedEventIds: advance.processedEventIds } }, "project_completed", [], [], changes);
+}
+
 function resolveRest(
   state: LanternCampaignState,
   context: RequestContext,
@@ -6902,7 +7377,35 @@ function resolveRest(
 ): EngineResolution {
   if (state.combat.status === "active") return rejection(state, tool, "combat_active", "You cannot rest during an active encounter.");
   if (hasRuntimeCondition(state, state.character.id, "dead")) return rejection(state, tool, "dead", "A dead character cannot rest.");
+  const nowMinutes = state.time.gameTime.totalMinutes;
+  const lastRest = state.time.rest.lastCompletedAtMinutes;
+  if (
+    lastRest !== null
+    && state.time.rest.restType === "long"
+    && command.restType === "long"
+    && nowMinutes - lastRest < ONE_DAY_MINUTES
+  ) {
+    return rejection(state, tool, "rest_too_soon", "A long rest requires a full in-fiction day between completed long rests.");
+  }
+  if (lastRest !== null && command.restType === "short" && nowMinutes - lastRest < SHORT_REST_MINUTES) {
+    return rejection(state, tool, "rest_too_soon", "A short rest requires elapsed in-fiction time before it can recover resources again.");
+  }
   const next = cloneCampaign(state);
+  const beforeTime = state.time;
+  const beforeQuests = state.quests;
+  const beforeEvents = state.time.scheduledEvents;
+  const beforeEffectsForTime = state.effects;
+  const requiredMinutes = command.restType === "short" ? SHORT_REST_MINUTES : LONG_REST_MINUTES;
+  next.time.rest = {
+    status: "in_progress",
+    restType: command.restType,
+    startedAtMinutes: nowMinutes,
+    completedAtMinutes: null,
+    requiredMinutes,
+    interruptionEventId: null,
+    lastCompletedAtMinutes: state.time.rest.lastCompletedAtMinutes,
+  };
+  const advance = advanceGameTime(next, requiredMinutes, command.restType === "short" ? "short-rest" : "long-rest", clientCommandId);
   const beforeHp = next.character.hp;
   const beforeHitDice = next.character.hitDiceRemaining;
   const beforeSlots = next.character.spellcasting ? { ...next.character.spellcasting.slots } : null;
@@ -6910,6 +7413,32 @@ function resolveRest(
   const beforeFeatureUses = { ...next.character.featureUses };
   const beforeEffects = next.effects;
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  if (advance.interrupted) {
+    next.time.rest.completedAtMinutes = advance.after.totalMinutes;
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      "The rest is interrupted before recovery completes; elapsed time is still recorded.",
+      {
+        restType: command.restType,
+        interrupted: true,
+        timeAdvance: { before: advance.before, after: advance.after, minutes: requiredMinutes, reason: command.restType === "short" ? "short-rest" : "long-rest", processedEventIds: advance.processedEventIds },
+      },
+      "rest_interrupted",
+      [],
+      [],
+      [
+        { path: "/time/gameTime", before: beforeTime.gameTime, after: next.time.gameTime },
+        { path: "/time/rest", before: beforeTime.rest, after: next.time.rest },
+        ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
+        ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
+        ...(JSON.stringify(beforeEffectsForTime) !== JSON.stringify(next.effects) ? [{ path: "/effects", before: beforeEffectsForTime, after: next.effects }] : []),
+      ],
+    );
+  }
   let message = "You complete a long rest. Your wounds close and your resources recover.";
   let outcome = "long_rest";
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
@@ -6945,6 +7474,9 @@ function resolveRest(
   }
   next.effects = clearEffectsByPolicy(next.effects, command.restType === "short" ? "short-rest" : "long-rest");
   if (next.character.className.trim().toLocaleLowerCase("en-US") === "fighter") next.character.featureUses.secondWind = 1;
+  next.time.rest.status = "completed";
+  next.time.rest.completedAtMinutes = advance.after.totalMinutes;
+  next.time.rest.lastCompletedAtMinutes = advance.after.totalMinutes;
   syncConditionProjections(next);
   return commit(
     next,
@@ -6953,7 +7485,7 @@ function resolveRest(
     command,
     tool,
     message,
-    { restType: command.restType, hpRestored: next.character.hp - beforeHp, hitDiceRemaining: next.character.hitDiceRemaining, character: characterData(next.character) },
+    { restType: command.restType, hpRestored: next.character.hp - beforeHp, hitDiceRemaining: next.character.hitDiceRemaining, character: characterData(next.character), timeAdvance: { before: advance.before, after: advance.after, minutes: requiredMinutes, reason: command.restType === "short" ? "short-rest" : "long-rest", processedEventIds: advance.processedEventIds } },
     outcome,
     rolls,
     [],
@@ -6968,6 +7500,13 @@ function resolveRest(
       ...(JSON.stringify(beforeEffects) !== JSON.stringify(next.effects)
         ? [{ path: "/effects", before: beforeEffects, after: next.effects }]
         : []),
+      ...(JSON.stringify(beforeEffectsForTime) !== JSON.stringify(next.effects) && JSON.stringify(beforeEffects) === JSON.stringify(next.effects)
+        ? [{ path: "/effects", before: beforeEffectsForTime, after: next.effects }]
+        : []),
+      { path: "/time/gameTime", before: beforeTime.gameTime, after: next.time.gameTime },
+      { path: "/time/rest", before: beforeTime.rest, after: next.time.rest },
+      ...(JSON.stringify(beforeQuests) !== JSON.stringify(next.quests) ? [{ path: "/quests", before: beforeQuests, after: next.quests }] : []),
+      ...(JSON.stringify(beforeEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: beforeEvents, after: next.time.scheduledEvents }] : []),
     ]
   );
 }
@@ -8021,6 +8560,7 @@ function normalizeEffects(value: unknown, state: LanternCampaignState): EngineEf
             ["short-rest", "long-rest", "duration", "source-removal", "never"].includes(policy as string)
           ),
           status: candidate.status!,
+          ...(typeof candidate.startTimeMinutes === "number" ? { startTimeMinutes: Math.max(0, Math.trunc(candidate.startTimeMinutes)) } : {}),
           provenance: candidate.provenance,
         }];
       })
@@ -8598,6 +9138,7 @@ function normalizeQuest(quest: EngineQuest): EngineQuest {
     progress: Math.max(0, Math.min(100, legacy.progress ?? 0)),
     giverNpcId: legacy.giverNpcId,
     deadline: legacy.deadline,
+    ...(typeof legacy.deadlineAtMinutes === "number" ? { deadlineAtMinutes: Math.max(0, Math.trunc(legacy.deadlineAtMinutes)) } : {}),
   };
 }
 
@@ -9657,7 +10198,9 @@ function applyRuntimeEffect(
 ): { effect: EngineEffectInstance; decision: "applied" | "ignored" | "replaced" } {
   const before = state.effects;
   const result = applyEffect(before, input);
-  state.effects = result.effects;
+  state.effects = result.effects.map((effect) => effect.id === result.effect.id && effect.duration.kind === "fixed"
+    ? { ...effect, startTimeMinutes: state.time.gameTime.totalMinutes }
+    : effect);
   syncConditionProjections(state);
   if (changes && JSON.stringify(before) !== JSON.stringify(state.effects)) {
     changes.push({ path: "/effects", before, after: state.effects });

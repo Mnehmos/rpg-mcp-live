@@ -91,6 +91,13 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   merchant_catalog: noArguments,
   observe: noArguments,
   move: z.object({ destinationId: z.string().trim().min(1).max(80) }).strict(),
+  travel: z.object({
+    routeId: z.string().trim().min(1).max(120),
+    destinationId: z.string().trim().min(1).max(120),
+    pace: z.enum(["normal", "fast"]),
+    navigatorId: z.string().trim().min(1).max(120).optional(),
+    watcherId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
   interact: z
     .object({
       targetId: z.string().trim().min(1).max(80),
@@ -290,6 +297,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     })
     .strict(),
   rest: z.object({ restType: z.enum(["short", "long"]).default("long") }).strict(),
+  project: z.object({ action: z.enum(["start", "work"]), projectId: z.string().trim().min(1).max(120) }).strict(),
   tutorial_advance: noArguments,
   roll_check: z
     .object({
@@ -568,6 +576,22 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       type: "object",
       properties: { destinationId: { type: "string", description: "The exit id from the current world context." } },
       required: ["destinationId"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "travel",
+    "Resolve one reviewed overland journey. The engine derives distance, elapsed time, navigation, supplies, watches, weather, and random-event evidence.",
+    {
+      type: "object",
+      properties: {
+        routeId: { type: "string", description: "A reviewed route profile id; the engine rejects unreviewed routes." },
+        destinationId: { type: "string", description: "An exit id from the current world context." },
+        pace: { type: "string", enum: ["normal", "fast"] },
+        navigatorId: { type: "string", description: "Optional established actor reference; current actor only in this slice." },
+        watcherId: { type: "string", description: "Optional established actor reference; current actor only in this slice." },
+      },
+      required: ["routeId", "destinationId", "pace"],
       additionalProperties: false,
     }
   ),
@@ -979,6 +1003,16 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     }
   ),
   tool("rest", "Take a rest outside active combat. Recovery is server-owned and transactional.", {}),
+  tool(
+    "project",
+    "Start or work one reviewed downtime project. The engine derives work duration, material cost, progress, and completion.",
+    {
+      type: "object",
+      properties: { action: { type: "string", enum: ["start", "work"] }, projectId: { type: "string" } },
+      required: ["action", "projectId"],
+      additionalProperties: false,
+    }
+  ),
   tool("tutorial_advance", "Advance the guided tutorial one step or enter the open campaign sandbox.", {}),
   tool(
     "roll_check",
@@ -1010,6 +1044,8 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
   switch (toolName) {
     case "move":
       return engineCommandSchema.parse({ kind: "move", destinationId: args.destinationId });
+    case "travel":
+      return engineCommandSchema.parse({ kind: "travel", routeId: args.routeId, destinationId: args.destinationId, pace: args.pace, navigatorId: args.navigatorId, watcherId: args.watcherId });
     case "world_context":
       return engineCommandSchema.parse({
         kind: "world_context",
@@ -1175,6 +1211,8 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       });
     case "rest":
       return engineCommandSchema.parse({ kind: "rest", restType: args.restType ?? "long" });
+    case "project":
+      return engineCommandSchema.parse({ kind: "project", action: args.action, projectId: args.projectId });
     case "tutorial_advance":
       return { kind: "tutorial_advance" };
     case "roll_check":

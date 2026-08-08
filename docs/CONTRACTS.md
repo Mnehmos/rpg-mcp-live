@@ -116,7 +116,7 @@ The action is either a supported quick action or natural language that the priva
 
 ## Tool facade
 
-The engine publishes 41 tool definitions in OpenRouter-compatible function format:
+The engine publishes 52 tool definitions in OpenRouter-compatible function format:
 
 ~~~text
 campaign_context
@@ -131,6 +131,7 @@ npc_context
 merchant_catalog
 observe
 move
+travel
 interact
 social_check
 merchant_trade
@@ -158,6 +159,7 @@ advance_turn
 death_save
 loot
 rest
+project
 roll_check
 tutorial_advance
 ~~~
@@ -167,6 +169,8 @@ tutorial_advance
 `worldContext` is nullable. A new campaign has no preset room, location, map node, or scene. The DM writes the current place or situation through `world_context` when the fiction needs durable context. `playerNotes` is an ordered list of `{ id, text, source, createdAt }` records. The DM may write a `dm` note only for an explicit or clearly confirmed player fact; the player writes `player` notes through the web notes endpoint. The character sheet and campaign log remain engine-owned projections and are returned with every session view.
 
 World-object instances are persisted inside the current world context as separate mutable records with stable `id`, `definition.sourceRef`, scene/location/container/owner references, material/tags, declared affordances, state, revision, provenance, and `criticalPolicy`. The `interact` tool accepts an optional typed `affordance`, `sourceId`, and `destinationId`; legacy goal-only interactions remain narration-only compatibility behavior. Typed affordances are resolved by the engine and reject unsupported materials, ownership, prerequisites, or critical-object violations without changing state. The bounded first fixture is the eight-object ruined gatehouse; physics, chemistry, arbitrary scripting, and #24 scene-detail promotion remain deferred.
+
+Campaign time is an explicit `time.gameTime` calendar aggregate and is separate from wall-clock `updatedAt`. `travel` uses the reviewed `one-day-road-v1` route profile; the engine derives distance, elapsed minutes, navigation, ration/water consumption, watches, weather, random-event evidence, exhaustion, and world-clock/deadline consequences. `rest` advances authoritative time, processes scheduled events exactly once, honors interruption, and applies existing effect clear policies; repeated long rests are gated by one in-fiction day. `project` is the bounded `research-v1` downtime clock. Legacy saves normalize with a zero-time aggregate, and every accepted time-advancing event records before/after game time plus its reason. Background workers, full route/weather catalogs, and multiplayer scheduling remain out of scope.
 
 Read tools return authoritative projections without changing the campaign version. A DM turn may use multiple reads and propose multiple ordered, typed effects. The engine validates the complete turn plan against one working snapshot and either commits every effect in one transaction or commits none. The turn receives one idempotency result and increments the campaign version once. See ADR-H15.
 
