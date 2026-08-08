@@ -75,7 +75,9 @@ describe("controlled actors", () => {
     expect(publicView).not.toHaveProperty("ownerActorId");
     expect(publicView).not.toHaveProperty("summonerActorId");
     expect(readToolData(summonResult.state, "controlled_actor_context")).toMatchObject({ campaignVersion: summonResult.state.version });
-    expect(JSON.stringify(projectResolutionForActor(summonResult, created.actorId).event)).not.toContain("sourceRef");
+    const projectedResolution = projectResolutionForActor(summonResult, created.actorId);
+    expect(JSON.stringify(projectedResolution.event)).not.toContain("sourceRef");
+    expect((projectedResolution.state.controlledActors[0] as unknown as Record<string, unknown>)).not.toHaveProperty("sourceRef");
   });
 
   it("rejects duplicate creation and unauthorized commands without mutation", () => {

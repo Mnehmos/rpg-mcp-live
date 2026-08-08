@@ -2089,7 +2089,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
   };
 }
 
-function controlledActorLegalCommands(state: LanternCampaignState, actor: EngineControlledActor): EngineControlledActorCommandOffer[] {
+function controlledActorLegalCommands(state: LanternCampaignState, actor: EngineControlledActor, viewerActorId = state.actorId): EngineControlledActorCommandOffer[] {
   const actions: Array<{ action: EngineControlledActorCommandAction; cost: "action" | "bonus-action"; targetRequired: boolean }> = [
     { action: "attack", cost: "action", targetRequired: true },
     { action: "guard", cost: "action", targetRequired: false },
@@ -2098,10 +2098,10 @@ function controlledActorLegalCommands(state: LanternCampaignState, actor: Engine
   return actions.map(({ action, cost, targetRequired }) => {
     let reason: string | null = null;
     if (actor.status !== "active") reason = `Actor is ${actor.status}.`;
-    else if (actor.controllerActorId !== state.actorId) reason = "This actor has a different controller.";
+    else if (actor.controllerActorId !== viewerActorId) reason = "This actor has a different controller.";
     else if (state.combat.status !== "active") reason = "A controller-turn command requires an active encounter.";
     else if (state.combat.pendingReaction) reason = "Resolve the pending reaction first.";
-    else if (state.combat.activeActorId !== state.actorId) reason = "The controller's turn is not active.";
+    else if (state.combat.activeActorId !== viewerActorId) reason = "The controller's turn is not active.";
     else if (state.combat.turnBudget[cost === "action" ? "action" : "bonusAction"].spent) reason = `The controller's ${cost} is already spent.`;
     else if (actor.turnBudget[cost === "action" ? "action" : "bonusAction"].spent) reason = `The actor's ${cost} is already spent.`;
     else if (action === "attack" && !state.combat.enemies.some((enemy) => enemy.alive && fiveESimpleDistanceFeet(actor.position, enemy.position) <= controlledActorRangeFeet(actor))) reason = "No living target is within the actor's fixed attack range.";
@@ -2109,7 +2109,7 @@ function controlledActorLegalCommands(state: LanternCampaignState, actor: Engine
   });
 }
 
-function controlledActorView(state: LanternCampaignState, actor: EngineControlledActor): EngineControlledActorView {
+function controlledActorView(state: LanternCampaignState, actor: EngineControlledActor, viewerActorId = state.actorId): EngineControlledActorView {
   return {
     id: actor.id,
     profileId: actor.profileId,
@@ -2136,7 +2136,7 @@ function controlledActorView(state: LanternCampaignState, actor: EngineControlle
     terminalAtMinutes: actor.terminalAtMinutes,
     inventory: materializeInventory(actor.inventory),
     knowledge: state.actorKnowledge.filter((record) => record.actorId === actor.id),
-    legalCommands: controlledActorLegalCommands(state, actor),
+    legalCommands: controlledActorLegalCommands(state, actor, viewerActorId),
   };
 }
 
@@ -10898,6 +10898,9 @@ export function projectStateForActor(actorId: string, state: LanternCampaignStat
   const projected = cloneCampaign(state);
   projected.worldFacts = projection.facts;
   projected.actorKnowledge = projection.knowledge;
+  projected.controlledActors = projected.controlledActors
+    .filter((actor) => actor.ownerActorId === actorId || actor.controllerActorId === actorId)
+    .map((actor) => controlledActorView(projected, actor, actorId)) as unknown as EngineControlledActor[];
   delete projected.social;
   return projected;
 }
