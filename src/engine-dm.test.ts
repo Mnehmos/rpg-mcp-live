@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInitialCampaign } from "./engine-domain.js";
-import { LanternDungeonMaster } from "./engine-dm.js";
+import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -26,6 +26,28 @@ function createStore(): LanternEngineStore {
 describe("Lantern OpenRouter tool loop", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("passes the authoritative structured action offers to the DM context", () => {
+    const state = createInitialCampaign("account-offers", "actor-offers");
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const dmContext = buildDmContext(state, context, "I look around.", "player_turn");
+    expect(dmContext.actionOffers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        actionId: "create_character",
+        timing: "free",
+        cost: {},
+        validTargets: [],
+        reasonUnavailable: null,
+        stateVersion: state.version,
+      }),
+    ]));
   });
 
   it("reads context, commits one authoritative tool, and narrates the committed result", async () => {

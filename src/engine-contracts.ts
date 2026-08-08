@@ -2512,6 +2512,29 @@ export interface EnginePendingReaction {
   resumeToken: string;
 }
 
+export type EngineActionOfferTiming = "action" | "bonus_action" | "reaction" | "movement" | "free";
+
+export interface EngineActionOfferCost {
+  action?: number;
+  bonusAction?: number;
+  reaction?: number;
+  movementFeet?: number;
+}
+
+/**
+ * A server-derived action choice.  The caller may select an offer, but never
+ * supplies its timing, cost, target set, or legality.
+ */
+export interface EngineActionOffer {
+  actionId: string;
+  label: string;
+  timing: EngineActionOfferTiming;
+  validTargets: string[];
+  cost: EngineActionOfferCost;
+  stateVersion: number;
+  reasonUnavailable: string | null;
+}
+
 export interface EngineCombat {
   status: "none" | "active" | "ended";
   encounterId: string | null;
@@ -2982,6 +3005,7 @@ export interface EngineSessionView {
   playerNotes: EngineNote[];
   log: EngineMessage[];
   availableActions: string[];
+  actionOffers: EngineActionOffer[];
   lastRoll: number | null;
   character: EngineCharacterView;
   quests: EngineQuest[];

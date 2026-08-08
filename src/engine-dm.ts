@@ -3,6 +3,7 @@ import type { Open5eContentResolver } from "./content/resolve.js";
 import {
   cloneCampaign,
   actorKnowledgeProjection,
+  deriveActionOffers,
   projectExperienceProfile,
   projectStateForActor,
   projectResolutionForActor,
@@ -103,6 +104,7 @@ export function buildDmContext(
     currentBeat: state.currentBeat,
     situation: state.situation ? projectSituationForActor(state.situation, state, activeViewpointActorId) : null,
     suggestedActions: state.suggestedActions,
+    actionOffers: deriveActionOffers(state),
     character: state.character,
     combat: state.combat,
     controlledActors: projectedState.controlledActors.map((actor) => ({
