@@ -12,6 +12,8 @@ import type {
   EngineItemDefinition,
   EngineItemKind,
   EngineSkill,
+  EngineTacticalFootprint,
+  EngineTacticalPosition,
 } from "./engine-contracts.js";
 import {
   loadActiveRulesKernel,
@@ -875,8 +877,22 @@ export function open5eClassSourceKey(className: string): string {
   return normalized.startsWith("srd_") ? normalized : `srd_${normalized}`;
 }
 
-export function createOpen5eCombatant(contentKey: string, id: string, distanceFeet = 30): EngineCombatant {
+export function createOpen5eCombatant(
+  contentKey: string,
+  id: string,
+  distanceFeet = 30,
+  position: EngineTacticalPosition = {
+    frameId: "legacy",
+    x: Math.max(1, Math.ceil(Math.max(0, distanceFeet) / 5)),
+    y: 0,
+    z: 0,
+  }
+): EngineCombatant {
   const source = requireOpen5eCreature(contentKey);
+  const sizeName = source.definition.size.name.trim().toLocaleLowerCase("en-US");
+  const footprint: EngineTacticalFootprint = sizeName === "large"
+    ? { width: 2, height: 2 }
+    : { width: 1, height: 1 };
   const actionResources = Object.fromEntries(
     source.effects
       .filter((program) => program.sourceActionKey && program.usage)
@@ -905,6 +921,8 @@ export function createOpen5eCombatant(contentKey: string, id: string, distanceFe
     packHash: rulesKernel.packHash,
     hp: source.definition.hitPoints,
     alive: source.definition.hitPoints > 0,
+    position,
+    footprint,
     distanceFeet: Math.max(0, distanceFeet),
     conditions: [],
     actionResources,

@@ -52,6 +52,16 @@ import type {
   EngineTurnBudget,
   EngineTurnBudgetSlot,
   EngineMovementBudget,
+  EngineTacticalBounds,
+  EngineTacticalFootprint,
+  EngineTacticalGeometry,
+  EngineTacticalGeometryInput,
+  EngineTacticalObstacle,
+  EngineTacticalPosition,
+  EngineTacticalTerrain,
+  EngineCombatTacticalState,
+  EngineMovementPlan,
+  EnginePathTrigger,
   EngineContentPolicy,
   EngineExperienceFeedback,
   EngineExperienceProfile,
@@ -899,7 +909,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.worldContext.npcs = next.worldContext.npcs.map(normalizeNpc);
   }
   next.character = recalculateProgressionOnLoad(normalizeCharacter(next.character));
-  next.combat = normalizeCombat(next.combat);
+  next.combat = normalizeCombat(next.combat, next.actorId, next.character.speed);
   next.quest = normalizeQuest(next.quest ?? ({} as EngineQuest));
   if (!Array.isArray(next.quests) || !next.quests.length) next.quests = [next.quest];
   next.quests = next.quests.map(normalizeQuest);
@@ -1223,6 +1233,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
       ? ["reaction_response:accept", "reaction_response:decline"]
       : state.combat.activeActorId === state.actorId
       ? [
+          ...(state.combat.turnBudget.movementFeet.spent < state.combat.turnBudget.movementFeet.available ? ["combat_move"] : []),
           ...(state.combat.turnBudget.action.spent ? [] : ["combat_action:attack", "combat_action:dodge"]),
           ...(state.combat.turnBudget.bonusAction.spent || (state.character.featureUses.secondWind ?? 0) < 1 ? [] : ["combat_action:second_wind"]),
           "end_turn",
@@ -1543,7 +1554,7 @@ export function resolveEngineCommand(
   }
   if (
     state.character.lifecycleState === "stable"
-    && ["combat_action", "cast_spell", "move", "interact", "social_check", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot"].includes(command.kind)
+    && ["combat_action", "combat_move", "cast_spell", "move", "interact", "social_check", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot"].includes(command.kind)
   ) {
     return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
   }
@@ -1615,6 +1626,8 @@ export function resolveEngineCommand(
       return resolveCheck(state, context, clientCommandId, command, tool, command.ability, command.skill ?? null, command.goal);
     case "combat_action":
       return resolveCombatAction(state, context, clientCommandId, command, tool);
+    case "combat_move":
+      return resolveCombatMove(state, context, clientCommandId, command, tool);
     case "end_turn":
       return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
     case "combat_start":
@@ -3144,6 +3157,411 @@ function resolveCheck(
   );
 }
 
+const TACTICAL_CELL_FEET = 5;
+const TACTICAL_REACH_FEET = 5;
+const MAX_TACTICAL_CELLS = 40_000;
+
+type TacticalCell = { x: number; y: number };
+type TacticalIssue = { code: string; message: string };
+
+export function fiveESimpleDistanceFeet(
+  from: EngineTacticalPosition,
+  to: EngineTacticalPosition,
+): number {
+  if (from.frameId !== to.frameId || from.z !== 0 || to.z !== 0) return Number.POSITIVE_INFINITY;
+  return Math.max(Math.abs(from.x - to.x), Math.abs(from.y - to.y)) * TACTICAL_CELL_FEET;
+}
+
+function defaultTacticalBounds(maxDistanceCells: number): EngineTacticalBounds {
+  return {
+    minX: -20,
+    maxX: Math.max(20, maxDistanceCells + 4),
+    minY: -20,
+    maxY: 20,
+  };
+}
+
+function buildCombatTacticalState(
+  input: EngineTacticalGeometryInput | undefined,
+  encounterId: string,
+  _actorId: string,
+  maxDistanceCells: number,
+): { tactical: EngineCombatTacticalState } | TacticalIssue {
+  const frameId = input?.frameId ?? encounterId;
+  const actorPosition = input?.playerPosition ?? { frameId, x: 0, y: 0, z: 0 };
+  const geometry: EngineTacticalGeometry = {
+    frameId,
+    revision: 1,
+    metric: "five_e_simple",
+    bounds: input?.bounds ?? defaultTacticalBounds(maxDistanceCells),
+    obstacles: (input?.obstacles ?? []).map((obstacle) => ({
+      ...obstacle,
+      width: obstacle.width ?? 1,
+      height: obstacle.height ?? 1,
+    })),
+    difficultTerrain: (input?.difficultTerrain ?? []).map((terrain) => ({
+      ...terrain,
+      width: terrain.width ?? 1,
+      height: terrain.height ?? 1,
+      costFeet: terrain.costFeet ?? 10,
+    })),
+  };
+  const geometryIssue = validateTacticalGeometry(geometry);
+  if (geometryIssue) return geometryIssue;
+  const positionIssue = validatePositionFrame(actorPosition, frameId);
+  if (positionIssue) return positionIssue;
+  const footprint: EngineTacticalFootprint = { width: 1, height: 1 };
+  const fitIssue = positionFitsGeometry(actorPosition, footprint, geometry, []);
+  if (fitIssue) return fitIssue;
+  return {
+    tactical: {
+      geometry,
+      movementMode: "walking",
+      actorPosition: { ...actorPosition },
+      actorFootprint: footprint,
+      lastPlan: null,
+    },
+  };
+}
+
+function validateTacticalGeometry(geometry: EngineTacticalGeometry): TacticalIssue | null {
+  const { minX, maxX, minY, maxY } = geometry.bounds;
+  if (![minX, maxX, minY, maxY].every(Number.isInteger) || minX > maxX || minY > maxY) {
+    return { code: "invalid_tactical_bounds", message: "Tactical bounds must be ordered integer cell coordinates." };
+  }
+  const area = (maxX - minX + 1) * (maxY - minY + 1);
+  if (!Number.isSafeInteger(area) || area > MAX_TACTICAL_CELLS) {
+    return { code: "tactical_geometry_too_large", message: "The first tactical slice supports at most 40,000 bounded cells." };
+  }
+  const ids = new Set<string>();
+  for (const obstacle of geometry.obstacles) {
+    const issue = validateRectangle(obstacle, geometry.bounds, ids, "obstacle");
+    if (issue) return issue;
+  }
+  const terrainIds = new Set<string>();
+  for (const terrain of geometry.difficultTerrain) {
+    const issue = validateRectangle(terrain, geometry.bounds, terrainIds, "terrain");
+    if (issue) return issue;
+    if (!Number.isInteger(terrain.costFeet) || terrain.costFeet < TACTICAL_CELL_FEET || terrain.costFeet % TACTICAL_CELL_FEET !== 0) {
+      return { code: "invalid_difficult_terrain", message: "Difficult-terrain cost must be a positive multiple of 5 feet." };
+    }
+  }
+  return null;
+}
+
+function validateRectangle(
+  rectangle: { id: string; x: number; y: number; width: number; height: number },
+  bounds: EngineTacticalBounds,
+  ids: Set<string>,
+  kind: "obstacle" | "terrain",
+): TacticalIssue | null {
+  if (ids.has(rectangle.id)) return { code: "duplicate_tactical_geometry_id", message: `${kind} ids must be unique.` };
+  ids.add(rectangle.id);
+  if (![rectangle.x, rectangle.y, rectangle.width, rectangle.height].every(Number.isInteger) || rectangle.width < 1 || rectangle.height < 1) {
+    return { code: "invalid_tactical_geometry", message: `${kind} dimensions must be positive integer cells.` };
+  }
+  if (
+    rectangle.x < bounds.minX
+    || rectangle.y < bounds.minY
+    || rectangle.x + rectangle.width - 1 > bounds.maxX
+    || rectangle.y + rectangle.height - 1 > bounds.maxY
+  ) {
+    return { code: "tactical_geometry_out_of_bounds", message: `${kind} must be contained by tactical bounds.` };
+  }
+  return null;
+}
+
+function validatePositionFrame(position: EngineTacticalPosition, frameId: string): TacticalIssue | null {
+  if (position.frameId !== frameId) return { code: "tactical_frame_mismatch", message: "The position belongs to a different tactical frame." };
+  if (![position.x, position.y, position.z].every(Number.isInteger)) {
+    return { code: "invalid_tactical_position", message: "Tactical positions must use integer cell coordinates." };
+  }
+  if (position.z !== 0) return { code: "tactical_z_unsupported", message: "Walking movement is limited to z=0 in this tactical slice." };
+  return null;
+}
+
+function positionCells(position: EngineTacticalPosition, footprint: EngineTacticalFootprint): TacticalCell[] {
+  const cells: TacticalCell[] = [];
+  for (let dx = 0; dx < footprint.width; dx += 1) {
+    for (let dy = 0; dy < footprint.height; dy += 1) cells.push({ x: position.x + dx, y: position.y + dy });
+  }
+  return cells;
+}
+
+function cellKey(cell: TacticalCell): string {
+  return `${cell.x},${cell.y}`;
+}
+
+function rectangleCells(rectangle: { x: number; y: number; width: number; height: number }): Set<string> {
+  const cells = new Set<string>();
+  for (let dx = 0; dx < rectangle.width; dx += 1) {
+    for (let dy = 0; dy < rectangle.height; dy += 1) cells.add(cellKey({ x: rectangle.x + dx, y: rectangle.y + dy }));
+  }
+  return cells;
+}
+
+function positionFitsGeometry(
+  position: EngineTacticalPosition,
+  footprint: EngineTacticalFootprint,
+  geometry: EngineTacticalGeometry,
+  enemies: EngineCombatant[],
+  ignoredEnemyIds: Set<string> = new Set(),
+): TacticalIssue | null {
+  const frameIssue = validatePositionFrame(position, geometry.frameId);
+  if (frameIssue) return frameIssue;
+  if (!Number.isInteger(footprint.width) || !Number.isInteger(footprint.height) || footprint.width < 1 || footprint.height < 1 || footprint.width > 2 || footprint.height > 2) {
+    return { code: "unsupported_tactical_footprint", message: "The first slice supports Tiny through Large footprints only." };
+  }
+  const cells = positionCells(position, footprint);
+  for (const cell of cells) {
+    if (cell.x < geometry.bounds.minX || cell.x > geometry.bounds.maxX || cell.y < geometry.bounds.minY || cell.y > geometry.bounds.maxY) {
+      return { code: "tactical_destination_out_of_bounds", message: "The complete combatant footprint must remain within tactical bounds." };
+    }
+  }
+  const blocked = new Set<string>();
+  for (const obstacle of geometry.obstacles) {
+    for (const cell of rectangleCells(obstacle)) blocked.add(cell);
+  }
+  if (cells.some((cell) => blocked.has(cellKey(cell)))) {
+    return { code: "tactical_obstacle_collision", message: "The path intersects a blocking tactical obstacle." };
+  }
+  for (const enemy of enemies) {
+    if (ignoredEnemyIds.has(enemy.id)) continue;
+    const enemyCells = new Set(positionCells(enemy.position, enemy.footprint).map(cellKey));
+    if (cells.some((cell) => enemyCells.has(cellKey(cell)))) {
+      return { code: "tactical_creature_collision", message: "The path intersects another combatant's footprint." };
+    }
+  }
+  return null;
+}
+
+function validateCombatantSetup(tactical: EngineCombatTacticalState, enemies: EngineCombatant[]): TacticalIssue | null {
+  const actorIssue = positionFitsGeometry(tactical.actorPosition, tactical.actorFootprint, tactical.geometry, []);
+  if (actorIssue) return actorIssue;
+  const placed: EngineCombatant[] = [];
+  for (const enemy of enemies) {
+    const issue = positionFitsGeometry(enemy.position, enemy.footprint, tactical.geometry, placed);
+    if (issue) return issue;
+    placed.push(enemy);
+  }
+  return null;
+}
+
+function diagonalCornerIssue(
+  from: EngineTacticalPosition,
+  to: EngineTacticalPosition,
+  footprint: EngineTacticalFootprint,
+  geometry: EngineTacticalGeometry,
+  enemies: EngineCombatant[],
+): TacticalIssue | null {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (Math.abs(dx) !== 1 || Math.abs(dy) !== 1) return null;
+  const horizontal = { ...from, x: from.x + dx };
+  const vertical = { ...from, y: from.y + dy };
+  return positionFitsGeometry(horizontal, footprint, geometry, enemies)
+    ?? positionFitsGeometry(vertical, footprint, geometry, enemies);
+}
+
+const tacticalNeighbors: readonly [number, number][] = [
+  [1, 0], [0, 1], [-1, 0], [0, -1],
+  [1, 1], [1, -1], [-1, 1], [-1, -1],
+];
+
+function terrainCostFeet(position: EngineTacticalPosition, footprint: EngineTacticalFootprint, geometry: EngineTacticalGeometry): number {
+  const cells = new Set(positionCells(position, footprint).map(cellKey));
+  return geometry.difficultTerrain
+    .filter((terrain) => [...rectangleCells(terrain)].some((cell) => cells.has(cell)))
+    .reduce((cost, terrain) => Math.max(cost, terrain.costFeet), TACTICAL_CELL_FEET);
+}
+
+function findTacticalPath(
+  from: EngineTacticalPosition,
+  destination: EngineTacticalPosition,
+  footprint: EngineTacticalFootprint,
+  geometry: EngineTacticalGeometry,
+  enemies: EngineCombatant[],
+): { path: EngineTacticalPosition[]; costFeet: number } | TacticalIssue {
+  interface Candidate {
+    position: EngineTacticalPosition;
+    path: EngineTacticalPosition[];
+    costFeet: number;
+    sequence: number;
+  }
+  const frontier: Candidate[] = [{ position: from, path: [], costFeet: 0, sequence: 0 }];
+  const best = new Map<string, number>([[`${from.x},${from.y}`, 0]]);
+  let sequence = 1;
+  while (frontier.length > 0) {
+    frontier.sort((left, right) => left.costFeet - right.costFeet || left.sequence - right.sequence);
+    const current = frontier.shift()!;
+    if (current.position.x === destination.x && current.position.y === destination.y) {
+      return { path: current.path, costFeet: current.costFeet };
+    }
+    for (const [dx, dy] of tacticalNeighbors) {
+      const next = { ...current.position, x: current.position.x + dx, y: current.position.y + dy };
+      const fitIssue = positionFitsGeometry(next, footprint, geometry, enemies);
+      if (fitIssue) continue;
+      const cornerIssue = diagonalCornerIssue(current.position, next, footprint, geometry, enemies);
+      if (cornerIssue) continue;
+      const nextCost = current.costFeet + terrainCostFeet(next, footprint, geometry);
+      const key = `${next.x},${next.y}`;
+      if (nextCost >= (best.get(key) ?? Number.POSITIVE_INFINITY)) continue;
+      best.set(key, nextCost);
+      frontier.push({ position: next, path: [...current.path, next], costFeet: nextCost, sequence: sequence++ });
+    }
+  }
+  return { code: "tactical_path_unavailable", message: "No valid bounded path reaches that tactical destination." };
+}
+
+function validateProvidedTacticalPath(
+  from: EngineTacticalPosition,
+  destination: EngineTacticalPosition,
+  providedPath: EngineTacticalPosition[],
+  footprint: EngineTacticalFootprint,
+  geometry: EngineTacticalGeometry,
+  enemies: EngineCombatant[],
+): { path: EngineTacticalPosition[]; costFeet: number } | TacticalIssue {
+  if (providedPath.length === 0) return { code: "tactical_path_invalid", message: "A supplied movement path must contain at least one destination cell." };
+  const path = positionEquals(providedPath[0]!, from) ? providedPath.slice(1) : [...providedPath];
+  if (path.length === 0 || !positionEquals(path[path.length - 1]!, destination)) {
+    return { code: "tactical_path_invalid", message: "The supplied path must end at the requested destination." };
+  }
+  let previous = from;
+  let costFeet = 0;
+  for (const next of path) {
+    const frameIssue = validatePositionFrame(next, geometry.frameId);
+    if (frameIssue) return frameIssue;
+    const dx = next.x - previous.x;
+    const dy = next.y - previous.y;
+    if (Math.abs(dx) > 1 || Math.abs(dy) > 1 || (dx === 0 && dy === 0)) {
+      return { code: "tactical_path_invalid", message: "Movement paths must use adjacent horizontal or diagonal cells." };
+    }
+    const fitIssue = positionFitsGeometry(next, footprint, geometry, enemies);
+    if (fitIssue) return fitIssue;
+    const cornerIssue = diagonalCornerIssue(previous, next, footprint, geometry, enemies);
+    if (cornerIssue) return { code: "tactical_corner_blocked", message: "Diagonal movement cannot cut through a blocked corner." };
+    costFeet += terrainCostFeet(next, footprint, geometry);
+    previous = next;
+  }
+  return { path, costFeet };
+}
+
+function positionEquals(left: EngineTacticalPosition, right: EngineTacticalPosition): boolean {
+  return left.frameId === right.frameId && left.x === right.x && left.y === right.y && left.z === right.z;
+}
+
+function tacticalDistanceFeet(combat: EngineCombat, enemy: EngineCombatant): number {
+  const derived = fiveESimpleDistanceFeet(combat.tactical.actorPosition, enemy.position);
+  return Number.isFinite(derived) ? derived : Math.max(0, enemy.distanceFeet);
+}
+
+function movementTriggers(
+  from: EngineTacticalPosition,
+  path: EngineTacticalPosition[],
+  enemies: EngineCombatant[],
+): EnginePathTrigger[] {
+  const triggers: EnginePathTrigger[] = [];
+  let previous = from;
+  path.forEach((next, index) => {
+    for (const enemy of enemies) {
+      if (!enemy.alive) continue;
+      const distanceBeforeFeet = fiveESimpleDistanceFeet(previous, enemy.position);
+      const distanceAfterFeet = fiveESimpleDistanceFeet(next, enemy.position);
+      const enters = distanceBeforeFeet > TACTICAL_REACH_FEET && distanceAfterFeet <= TACTICAL_REACH_FEET;
+      const leaves = distanceBeforeFeet <= TACTICAL_REACH_FEET && distanceAfterFeet > TACTICAL_REACH_FEET;
+      if (enters || leaves) {
+        triggers.push({
+          kind: "reach-boundary",
+          enemyId: enemy.id,
+          segmentIndex: index + 1,
+          boundary: enters ? "entering-reach" : "leaving-reach",
+          reachFeet: TACTICAL_REACH_FEET,
+          distanceBeforeFeet,
+          distanceAfterFeet,
+        });
+      }
+    }
+    previous = next;
+  });
+  return triggers;
+}
+
+function syncDerivedCombatDistances(tactical: EngineCombatTacticalState, enemies: EngineCombatant[]): void {
+  for (const enemy of enemies) {
+    const distance = fiveESimpleDistanceFeet(tactical.actorPosition, enemy.position);
+    enemy.distanceFeet = Number.isFinite(distance) ? distance : Math.max(0, enemy.distanceFeet);
+  }
+}
+
+function resolveCombatMove(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "combat_move" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active encounter.");
+  if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "It is not your turn.");
+  if (hasRuntimeCondition(state, state.character.id, "unconscious")) return rejection(state, tool, "unconscious", "You are unconscious and cannot move.");
+  const preventingCondition = ["incapacitated", "paralyzed", "petrified", "stunned"]
+    .find((condition) => hasRuntimeCondition(state, state.character.id, condition));
+  if (preventingCondition) return rejection(state, tool, "condition_prevents_movement", `You are ${preventingCondition} and cannot move.`);
+  const tactical = state.combat.tactical;
+  if (command.geometryRevision !== tactical.geometry.revision) {
+    return rejection(state, tool, "stale_tactical_geometry", "The tactical geometry changed; replan movement from the current revision.");
+  }
+  const destinationFrameIssue = validatePositionFrame(command.destination, tactical.geometry.frameId);
+  if (destinationFrameIssue) return rejection(state, tool, destinationFrameIssue.code, destinationFrameIssue.message);
+  if (positionEquals(tactical.actorPosition, command.destination)) {
+    return rejection(state, tool, "tactical_no_movement", "The requested destination is your current tactical cell.");
+  }
+  const pathResult = command.path
+    ? validateProvidedTacticalPath(tactical.actorPosition, command.destination, command.path, tactical.actorFootprint, tactical.geometry, state.combat.enemies)
+    : findTacticalPath(tactical.actorPosition, command.destination, tactical.actorFootprint, tactical.geometry, state.combat.enemies);
+  if ("code" in pathResult) return rejection(state, tool, pathResult.code, pathResult.message);
+  const remainingFeet = Math.max(0, tacticalMovementRemaining(state.combat.turnBudget));
+  if (pathResult.costFeet > remainingFeet) {
+    return rejection(state, tool, "insufficient_movement", `That path costs ${pathResult.costFeet} feet, but only ${remainingFeet} feet remain.`);
+  }
+  const plan: EngineMovementPlan = {
+    actorId: state.actorId,
+    geometryRevision: tactical.geometry.revision,
+    metric: tactical.geometry.metric,
+    from: { ...tactical.actorPosition },
+    to: { ...command.destination },
+    path: pathResult.path.map((position) => ({ ...position })),
+    costFeet: pathResult.costFeet,
+    triggers: movementTriggers(tactical.actorPosition, pathResult.path, state.combat.enemies),
+  };
+  const next = cloneCampaign(state);
+  next.combat.tactical.actorPosition = { ...plan.to };
+  next.combat.tactical.lastPlan = plan;
+  next.combat.turnBudget.movementFeet.spent += plan.costFeet;
+  next.combat.lastAction = "combat_move";
+  syncDerivedCombatDistances(next.combat.tactical, next.combat.enemies);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `You move ${plan.costFeet} feet through ${plan.path.length} tactical cell${plan.path.length === 1 ? "" : "s"}.`,
+    { movement: plan, combat: combatData(next.combat) },
+    "combat_moved",
+    [],
+    [],
+    [
+      { path: "/combat/tactical/actorPosition", before: state.combat.tactical.actorPosition, after: next.combat.tactical.actorPosition },
+      { path: "/combat/turnBudget/movementFeet/spent", before: state.combat.turnBudget.movementFeet.spent, after: next.combat.turnBudget.movementFeet.spent },
+      { path: "/combat/tactical/lastPlan", before: state.combat.tactical.lastPlan, after: next.combat.tactical.lastPlan },
+    ],
+  );
+}
+
+function tacticalMovementRemaining(budget: EngineTurnBudget): number {
+  return Math.max(0, budget.movementFeet.available - budget.movementFeet.spent);
+}
+
 function resolveCombatStart(
   state: LanternCampaignState,
   context: RequestContext,
@@ -3161,7 +3579,34 @@ function resolveCombatStart(
       return rejection(state, tool, "content_not_installed", `Creature content is not installed: ${group.creatureKey}.`);
     }
   }
-  const enemies = command.creatures.flatMap((group) => createCombatants(group.creatureKey, group.count, group.distanceFeet ?? 30));
+  const maxDistanceCells = Math.max(
+    1,
+    ...command.creatures.map((group) => Math.max(1, Math.ceil((group.distanceFeet ?? 5) / TACTICAL_CELL_FEET)))
+  );
+  const tacticalResult = buildCombatTacticalState(command.tactical, command.encounterId, state.actorId, maxDistanceCells);
+  if ("code" in tacticalResult) return rejection(state, tool, tacticalResult.code, tacticalResult.message);
+  const tactical = tacticalResult.tactical;
+  for (const group of command.creatures) {
+    if (group.position && group.position.frameId !== tactical.geometry.frameId) {
+      return rejection(state, tool, "tactical_frame_mismatch", "Every combatant position must use the encounter's tactical frame.");
+    }
+    if (group.position?.z !== undefined && group.position.z !== 0) {
+      return rejection(state, tool, "tactical_z_unsupported", "Walking combatants must remain on z=0 in this tactical slice.");
+    }
+  }
+  const enemies = command.creatures.flatMap((group, groupIndex) => createCombatants(
+    group.creatureKey,
+    group.count,
+    group.distanceFeet ?? 5,
+    tactical.geometry.frameId,
+    group.position ?? {
+      ...tactical.actorPosition,
+      x: tactical.actorPosition.x + Math.max(1, Math.ceil((group.distanceFeet ?? 5) / TACTICAL_CELL_FEET)) + groupIndex,
+    },
+  ));
+  const setupIssue = validateCombatantSetup(tactical, enemies);
+  if (setupIssue) return rejection(state, tool, setupIssue.code, setupIssue.message);
+  syncDerivedCombatDistances(tactical, enemies);
   const next = cloneCampaign(state);
   next.combat = {
     status: "active",
@@ -3170,6 +3615,7 @@ function resolveCombatStart(
     round: 1,
     activeActorId: state.actorId,
     turnBudget: emptyTurnBudget(state.character.speed),
+    tactical,
     pendingReaction: null,
     enemies,
     lootClaimed: false,
@@ -3206,9 +3652,28 @@ function resolveSpawnCreature(
   if (!getOpen5eCreature(command.creatureKey)) {
     return rejection(state, tool, "content_not_installed", `Creature content is not installed: ${command.creatureKey}.`);
   }
-  const spawned = createCombatants(command.creatureKey, command.count, command.distanceFeet ?? 30);
+  if (command.position?.frameId !== undefined && command.position.frameId !== state.combat.tactical.geometry.frameId) {
+    return rejection(state, tool, "tactical_frame_mismatch", "Every combatant position must use the encounter's tactical frame.");
+  }
+  if (command.position?.z !== undefined && command.position.z !== 0) {
+    return rejection(state, tool, "tactical_z_unsupported", "Walking combatants must remain on z=0 in this tactical slice.");
+  }
+  const distanceFeet = command.distanceFeet ?? 5;
+  const spawned = createCombatants(
+    command.creatureKey,
+    command.count,
+    distanceFeet,
+    state.combat.tactical.geometry.frameId,
+    command.position ?? {
+      ...state.combat.tactical.actorPosition,
+      x: state.combat.tactical.actorPosition.x + Math.max(1, Math.ceil(distanceFeet / TACTICAL_CELL_FEET)) + state.combat.enemies.length,
+    },
+  );
+  const setupIssue = validateCombatantSetup(state.combat.tactical, [...state.combat.enemies, ...spawned]);
+  if (setupIssue) return rejection(state, tool, setupIssue.code, setupIssue.message);
   const next = cloneCampaign(state);
   next.combat.enemies.push(...spawned);
+  syncDerivedCombatDistances(next.combat.tactical, next.combat.enemies);
   return commit(
     next,
     context,
@@ -3495,13 +3960,14 @@ function resolveCastSpell(
     return rejection(state, tool, "invalid_spell_target", "Every spell target must be a living combatant in the active encounter.");
   }
   const rangeFeet = executableSpellRangeFeet(spell.definition);
-  const outOfRange = targets.find((target) => target !== null && target.distanceFeet > rangeFeet);
+  const outOfRange = targets.find((target) => target !== null && tacticalDistanceFeet(state.combat, target) > rangeFeet);
   if (outOfRange) {
+    const distanceFeet = tacticalDistanceFeet(state.combat, outOfRange);
     return rejection(
       state,
       tool,
       "spell_target_out_of_range",
-      `${spell.definition.name} can currently resolve through ${rangeFeet} feet; target ${outOfRange.id} is ${outOfRange.distanceFeet} feet away.`
+      `${spell.definition.name} can currently resolve through ${rangeFeet} feet; target ${outOfRange.id} is ${distanceFeet} feet away.`
     );
   }
 
@@ -4185,6 +4651,18 @@ function resolveCombatAction(
   const derivedAttack = command.action === "attack" ? deriveWeaponAttack(state.character, command.weaponId) : null;
   if (command.action === "attack" && !derivedAttack) {
     return rejection(state, tool, command.weaponId ? "weapon_not_equipped" : "weapon_required", command.weaponId ? "The selected weapon must be an equipped weapon." : "Equip a weapon before attacking.");
+  }
+  if (command.action === "attack" && sourceTarget && derivedAttack) {
+    const maximumRange = derivedAttack.longRangeFeet ?? derivedAttack.normalRangeFeet ?? derivedAttack.reachFeet;
+    const distanceFeet = tacticalDistanceFeet(state.combat, sourceTarget);
+    if (maximumRange !== null && distanceFeet > maximumRange) {
+      return rejection(
+        state,
+        tool,
+        "target_out_of_range",
+        `${derivedAttack.weaponName} can currently reach ${maximumRange} feet; target ${sourceTarget.id} is ${distanceFeet} feet away.`
+      );
+    }
   }
   const ammunition = command.action === "attack" && derivedAttack?.ammunitionId
     ? findAmmunition(state.character.inventory, derivedAttack.ammunitionId)
@@ -7644,6 +8122,23 @@ function resetTurnBudget(budget: EngineTurnBudget, movementFeet: number): void {
   budget.movementFeet = { available: Math.max(0, Math.trunc(movementFeet)), spent: 0 };
 }
 
+function emptyTacticalState(frameId = "none"): EngineCombatTacticalState {
+  return {
+    geometry: {
+      frameId,
+      revision: 1,
+      metric: "five_e_simple",
+      bounds: defaultTacticalBounds(1),
+      obstacles: [],
+      difficultTerrain: [],
+    },
+    movementMode: "walking",
+    actorPosition: { frameId, x: 0, y: 0, z: 0 },
+    actorFootprint: { width: 1, height: 1 },
+    lastPlan: null,
+  };
+}
+
 function emptyCombat(): EngineCombat {
   return {
     status: "none",
@@ -7652,6 +8147,7 @@ function emptyCombat(): EngineCombat {
     round: 0,
     activeActorId: null,
     turnBudget: emptyTurnBudget(),
+    tactical: emptyTacticalState(),
     pendingReaction: null,
     enemies: [],
     lootClaimed: false,
@@ -7659,7 +8155,7 @@ function emptyCombat(): EngineCombat {
   };
 }
 
-function normalizeCombat(combat: EngineCombat | null | undefined): EngineCombat {
+function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "actor", movementFeet = 30): EngineCombat {
   if (!combat || !Array.isArray(combat.enemies)) return emptyCombat();
   const legacyEnemies = combat.enemies as Array<Partial<EngineCombatant>>;
   if (legacyEnemies.some((enemy) => !enemy.id || !enemy.contentKey || !enemy.packHash)) {
@@ -7669,31 +8165,180 @@ function normalizeCombat(combat: EngineCombat | null | undefined): EngineCombat 
       encounterId: combat.encounterId ?? null,
       encounterName: combat.encounterName ?? null,
       lastAction: "legacy_encounter_requires_explicit_repin",
-      turnBudget: normalizeTurnBudget(combat.turnBudget),
+      turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
       pendingReaction: null,
     };
   }
+  const maxDistanceCells = Math.max(1, ...legacyEnemies.map((enemy) => Math.max(1, Math.ceil(Number(enemy.distanceFeet ?? 5) / TACTICAL_CELL_FEET))));
+  const tactical = normalizeCombatTactical(combat.tactical, combat.encounterId ?? "legacy", actorId, maxDistanceCells);
+  const enemies = legacyEnemies.map((enemy, index) => {
+    const position = isTacticalPosition(enemy.position) && enemy.position.frameId === tactical.geometry.frameId
+      ? { ...enemy.position }
+      : {
+          frameId: tactical.geometry.frameId,
+          x: tactical.actorPosition.x + Math.max(1, Math.ceil(Number(enemy.distanceFeet ?? 5) / TACTICAL_CELL_FEET)) + index,
+          y: tactical.actorPosition.y,
+          z: 0,
+        };
+    const footprint = normalizeFootprint(enemy.footprint);
+    return {
+      id: enemy.id as string,
+      contentKey: enemy.contentKey as string,
+      packHash: enemy.packHash as string,
+      hp: Math.max(0, Math.trunc(enemy.hp ?? 0)),
+      alive: Boolean(enemy.alive) && (enemy.hp ?? 0) > 0,
+      position,
+      footprint,
+      distanceFeet: 0,
+      conditions: Array.isArray(enemy.conditions) ? enemy.conditions : [],
+      actionResources: normalizeActionResources(enemy.actionResources),
+      progression: normalizeCombatantProgression(enemy.progression),
+    } satisfies EngineCombatant;
+  });
+  syncDerivedCombatDistances(tactical, enemies);
   return {
     status: combat.status ?? "none",
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
     round: Math.max(0, combat.round ?? 0),
     activeActorId: combat.activeActorId ?? null,
-    turnBudget: normalizeTurnBudget(combat.turnBudget, 30),
+    turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
+    tactical,
     pendingReaction: normalizePendingReaction(combat.pendingReaction),
-    enemies: legacyEnemies.map((enemy) => ({
-      id: enemy.id as string,
-      contentKey: enemy.contentKey as string,
-      packHash: enemy.packHash as string,
-      hp: Math.max(0, Math.trunc(enemy.hp ?? 0)),
-      alive: Boolean(enemy.alive) && (enemy.hp ?? 0) > 0,
-      distanceFeet: Math.max(0, Number(enemy.distanceFeet ?? 30)),
-      conditions: Array.isArray(enemy.conditions) ? enemy.conditions : [],
-      actionResources: normalizeActionResources(enemy.actionResources),
-      progression: normalizeCombatantProgression(enemy.progression),
-    })),
+    enemies,
     lootClaimed: combat.lootClaimed ?? false,
     lastAction: combat.lastAction ?? null,
+  };
+}
+
+function isTacticalPosition(value: unknown): value is EngineTacticalPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const position = value as Partial<EngineTacticalPosition>;
+  return typeof position.frameId === "string"
+    && Number.isInteger(position.x)
+    && Number.isInteger(position.y)
+    && Number.isInteger(position.z);
+}
+
+function normalizeFootprint(value: unknown): EngineTacticalFootprint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { width: 1, height: 1 };
+  const footprint = value as Partial<EngineTacticalFootprint>;
+  return {
+    width: Number.isInteger(footprint.width) && footprint.width! >= 1 && footprint.width! <= 2 ? footprint.width! : 1,
+    height: Number.isInteger(footprint.height) && footprint.height! >= 1 && footprint.height! <= 2 ? footprint.height! : 1,
+  };
+}
+
+function normalizeCombatTactical(
+  value: unknown,
+  encounterId: string,
+  actorId: string,
+  maxDistanceCells: number,
+): EngineCombatTacticalState {
+  const fallback = emptyTacticalState(encounterId);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const candidate = value as Partial<EngineCombatTacticalState>;
+  const rawGeometry = candidate.geometry && typeof candidate.geometry === "object" && !Array.isArray(candidate.geometry)
+    ? candidate.geometry as Partial<EngineTacticalGeometry>
+    : {};
+  const frameId = typeof rawGeometry.frameId === "string" && rawGeometry.frameId.trim() ? rawGeometry.frameId : encounterId;
+  const rawBounds = rawGeometry.bounds && typeof rawGeometry.bounds === "object" && !Array.isArray(rawGeometry.bounds)
+    ? rawGeometry.bounds as Partial<EngineTacticalBounds>
+    : {};
+  const geometry: EngineTacticalGeometry = {
+    frameId,
+    revision: Number.isInteger(rawGeometry.revision) && rawGeometry.revision! >= 1 ? rawGeometry.revision! : 1,
+    metric: "five_e_simple",
+    bounds: {
+      minX: Number.isInteger(rawBounds.minX) ? rawBounds.minX! : defaultTacticalBounds(maxDistanceCells).minX,
+      maxX: Number.isInteger(rawBounds.maxX) ? rawBounds.maxX! : defaultTacticalBounds(maxDistanceCells).maxX,
+      minY: Number.isInteger(rawBounds.minY) ? rawBounds.minY! : defaultTacticalBounds(maxDistanceCells).minY,
+      maxY: Number.isInteger(rawBounds.maxY) ? rawBounds.maxY! : defaultTacticalBounds(maxDistanceCells).maxY,
+    },
+    obstacles: Array.isArray(rawGeometry.obstacles) ? rawGeometry.obstacles.flatMap((entry) => normalizeTacticalRectangle(entry)) : [],
+    difficultTerrain: Array.isArray(rawGeometry.difficultTerrain)
+      ? rawGeometry.difficultTerrain.flatMap((entry) => normalizeTacticalTerrain(entry))
+      : [],
+  };
+  if (validateTacticalGeometry(geometry)) return fallback;
+  const actorPosition = isTacticalPosition(candidate.actorPosition) && candidate.actorPosition.frameId === frameId && candidate.actorPosition.z === 0
+    ? { ...candidate.actorPosition }
+    : { frameId, x: 0, y: 0, z: 0 };
+  if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallback;
+  return {
+    geometry,
+    movementMode: "walking",
+    actorPosition,
+    actorFootprint: normalizeFootprint(candidate.actorFootprint),
+    lastPlan: normalizeMovementPlan(candidate.lastPlan, actorId, geometry.revision, frameId),
+  };
+}
+
+function normalizeTacticalRectangle(value: unknown): EngineTacticalObstacle[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const candidate = value as Partial<EngineTacticalObstacle>;
+  if (typeof candidate.id !== "string" || !Number.isInteger(candidate.x) || !Number.isInteger(candidate.y)) return [];
+  const x = Number(candidate.x);
+  const y = Number(candidate.y);
+  const width = Number.isInteger(candidate.width) && candidate.width! >= 1 ? Number(candidate.width) : 1;
+  const height = Number.isInteger(candidate.height) && candidate.height! >= 1 ? Number(candidate.height) : 1;
+  return [{
+    id: candidate.id,
+    x,
+    y,
+    width,
+    height,
+  }];
+}
+
+function normalizeTacticalTerrain(value: unknown): EngineTacticalTerrain[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const candidate = value as Partial<EngineTacticalTerrain>;
+  if (typeof candidate.id !== "string" || !Number.isInteger(candidate.x) || !Number.isInteger(candidate.y)) return [];
+  const x = Number(candidate.x);
+  const y = Number(candidate.y);
+  const width = Number.isInteger(candidate.width) && candidate.width! >= 1 ? Number(candidate.width) : 1;
+  const height = Number.isInteger(candidate.height) && candidate.height! >= 1 ? Number(candidate.height) : 1;
+  const costFeet = Number.isInteger(candidate.costFeet) && candidate.costFeet! >= 5 ? Number(candidate.costFeet) : 10;
+  return [{
+    id: candidate.id,
+    x,
+    y,
+    width,
+    height,
+    costFeet,
+  }];
+}
+
+function normalizeMovementPlan(
+  value: unknown,
+  actorId: string,
+  geometryRevision: number,
+  frameId: string,
+): EngineMovementPlan | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EngineMovementPlan>;
+  if (
+    candidate.actorId !== actorId
+    || candidate.geometryRevision !== geometryRevision
+    || candidate.metric !== "five_e_simple"
+    || !isTacticalPosition(candidate.from)
+    || !isTacticalPosition(candidate.to)
+    || candidate.from.frameId !== frameId
+    || candidate.to.frameId !== frameId
+    || !Array.isArray(candidate.path)
+    || !Array.isArray(candidate.triggers)
+    || typeof candidate.costFeet !== "number"
+  ) return null;
+  return {
+    actorId,
+    geometryRevision,
+    metric: "five_e_simple",
+    from: { ...candidate.from },
+    to: { ...candidate.to },
+    path: candidate.path.filter(isTacticalPosition).map((position) => ({ ...position })),
+    costFeet: Math.max(0, Math.trunc(candidate.costFeet)),
+    triggers: candidate.triggers.filter((trigger): trigger is EnginePathTrigger => Boolean(trigger && typeof trigger === "object" && (trigger as EnginePathTrigger).kind === "reach-boundary")).map((trigger) => ({ ...trigger })),
   };
 }
 
@@ -7814,8 +8459,24 @@ function normalizeCombatantProgression(value: unknown): EngineCombatantProgressi
   };
 }
 
-function createCombatants(contentKey: string, count: number, distanceFeet = 30): EngineCombatant[] {
-  return Array.from({ length: count }, () => createOpen5eCombatant(contentKey, randomUUID(), distanceFeet));
+function createCombatants(
+  contentKey: string,
+  count: number,
+  distanceFeet = 5,
+  frameId = "legacy",
+  positionBase?: EngineTacticalPosition,
+): EngineCombatant[] {
+  return Array.from({ length: count }, (_, index) => {
+    const position = positionBase
+      ? { ...positionBase, y: positionBase.y + index }
+      : {
+          frameId,
+          x: Math.max(1, Math.ceil(Math.max(0, distanceFeet) / TACTICAL_CELL_FEET)) + index,
+          y: 0,
+          z: 0,
+        };
+    return createOpen5eCombatant(contentKey, randomUUID(), distanceFeet, position);
+  });
 }
 
 function describeCombatants(combatants: EngineCombatant[]): string {
@@ -8096,6 +8757,10 @@ function characterData(character: EngineCharacter): EngineCharacterView {
 }
 
 function combatData(combat: EngineCombat): EngineCombatView {
+  const enemies = materializeCombatants(combat.enemies).map((enemy) => ({
+    ...enemy,
+    distanceFeet: tacticalDistanceFeet(combat, enemy),
+  }));
   return {
     status: combat.status,
     encounterId: combat.encounterId,
@@ -8103,8 +8768,9 @@ function combatData(combat: EngineCombat): EngineCombatView {
     round: combat.round,
     activeActorId: combat.activeActorId,
     turnBudget: combat.turnBudget,
+    tactical: combat.tactical,
     pendingReaction: combat.pendingReaction,
-    enemies: materializeCombatants(combat.enemies),
+    enemies,
     lootClaimed: combat.lootClaimed,
     lastAction: combat.lastAction,
   };

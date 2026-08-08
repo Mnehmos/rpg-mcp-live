@@ -339,6 +339,7 @@ export const engineToolNameSchema = z.enum([
   "cast_spell",
   "reaction_response",
   "combat_action",
+  "combat_move",
   "end_turn",
   "advance_turn",
   "advancement_confirm",
@@ -350,6 +351,96 @@ export const engineToolNameSchema = z.enum([
   "tutorial_advance",
 ]);
 export type EngineToolName = z.infer<typeof engineToolNameSchema>;
+
+const tacticalCoordinateSchema = z.number().int().min(-100_000).max(100_000);
+const tacticalDimensionSchema = z.number().int().min(1).max(20);
+
+export const engineTacticalPositionSchema = z.object({
+  frameId: z.string().trim().min(1).max(120),
+  x: tacticalCoordinateSchema,
+  y: tacticalCoordinateSchema,
+  z: tacticalCoordinateSchema,
+}).strict();
+export type EngineTacticalPosition = z.infer<typeof engineTacticalPositionSchema>;
+
+export const engineTacticalBoundsSchema = z.object({
+  minX: tacticalCoordinateSchema,
+  maxX: tacticalCoordinateSchema,
+  minY: tacticalCoordinateSchema,
+  maxY: tacticalCoordinateSchema,
+}).strict();
+export type EngineTacticalBounds = z.infer<typeof engineTacticalBoundsSchema>;
+
+export const engineTacticalObstacleSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  x: tacticalCoordinateSchema,
+  y: tacticalCoordinateSchema,
+  width: tacticalDimensionSchema.default(1),
+  height: tacticalDimensionSchema.default(1),
+}).strict();
+export type EngineTacticalObstacle = z.infer<typeof engineTacticalObstacleSchema>;
+
+export const engineTacticalTerrainSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  x: tacticalCoordinateSchema,
+  y: tacticalCoordinateSchema,
+  width: tacticalDimensionSchema.default(1),
+  height: tacticalDimensionSchema.default(1),
+  costFeet: z.number().int().min(5).max(100).multipleOf(5).default(10),
+}).strict();
+export type EngineTacticalTerrain = z.infer<typeof engineTacticalTerrainSchema>;
+
+export const engineTacticalGeometryInputSchema = z.object({
+  frameId: z.string().trim().min(1).max(120),
+  bounds: engineTacticalBoundsSchema,
+  obstacles: z.array(engineTacticalObstacleSchema).max(500).default([]),
+  difficultTerrain: z.array(engineTacticalTerrainSchema).max(500).default([]),
+  playerPosition: engineTacticalPositionSchema.optional(),
+}).strict();
+export type EngineTacticalGeometryInput = z.infer<typeof engineTacticalGeometryInputSchema>;
+
+export interface EngineTacticalGeometry {
+  frameId: string;
+  revision: number;
+  metric: "five_e_simple";
+  bounds: EngineTacticalBounds;
+  obstacles: EngineTacticalObstacle[];
+  difficultTerrain: EngineTacticalTerrain[];
+}
+
+export interface EngineTacticalFootprint {
+  width: number;
+  height: number;
+}
+
+export interface EnginePathTrigger {
+  kind: "reach-boundary";
+  enemyId: string;
+  segmentIndex: number;
+  boundary: "entering-reach" | "leaving-reach";
+  reachFeet: 5;
+  distanceBeforeFeet: number;
+  distanceAfterFeet: number;
+}
+
+export interface EngineMovementPlan {
+  actorId: string;
+  geometryRevision: number;
+  metric: "five_e_simple";
+  from: EngineTacticalPosition;
+  to: EngineTacticalPosition;
+  path: EngineTacticalPosition[];
+  costFeet: number;
+  triggers: EnginePathTrigger[];
+}
+
+export interface EngineCombatTacticalState {
+  geometry: EngineTacticalGeometry;
+  movementMode: "walking";
+  actorPosition: EngineTacticalPosition;
+  actorFootprint: EngineTacticalFootprint;
+  lastPlan: EngineMovementPlan | null;
+}
 
 export const engineCampaignPhaseSchema = z.enum(["character_creation", "tutorial", "sandbox"]);
 export type EngineCampaignPhase = z.infer<typeof engineCampaignPhaseSchema>;
@@ -744,11 +835,13 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
               creatureKey: z.string().trim().startsWith("open5e:creature:").max(300),
               count: z.number().int().min(1).max(20),
               distanceFeet: z.number().nonnegative().max(100_000).optional(),
+              position: engineTacticalPositionSchema.optional(),
             })
             .strict()
         )
         .min(1)
         .max(20),
+      tactical: engineTacticalGeometryInputSchema.optional(),
     })
     .strict(),
   z
@@ -757,6 +850,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       creatureKey: z.string().trim().startsWith("open5e:creature:").max(300),
       count: z.number().int().min(1).max(20),
       distanceFeet: z.number().nonnegative().max(100_000).optional(),
+      position: engineTacticalPositionSchema.optional(),
     })
     .strict(),
   z
@@ -797,6 +891,14 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       targetId: z.string().trim().min(1).max(80).optional(),
       weaponId: z.string().trim().min(1).max(120).optional(),
       goal: z.string().trim().min(1).max(2_000).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("combat_move"),
+      geometryRevision: z.number().int().nonnegative(),
+      destination: engineTacticalPositionSchema,
+      path: z.array(engineTacticalPositionSchema).max(400).optional(),
     })
     .strict(),
   z.object({ kind: z.literal("end_turn") }).strict(),
@@ -1355,6 +1457,9 @@ export interface EngineCombatant {
   packHash: string;
   hp: number;
   alive: boolean;
+  position: EngineTacticalPosition;
+  footprint: EngineTacticalFootprint;
+  /** Derived compatibility projection; tactical positions are authoritative. */
   distanceFeet: number;
   conditions: string[];
   actionResources: Record<string, EngineActionResource>;
@@ -1490,6 +1595,7 @@ export interface EngineCombat {
   round: number;
   activeActorId: string | null;
   turnBudget: EngineTurnBudget;
+  tactical: EngineCombatTacticalState;
   pendingReaction: EnginePendingReaction | null;
   enemies: EngineCombatant[];
   lootClaimed: boolean;

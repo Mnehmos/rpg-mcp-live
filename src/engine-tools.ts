@@ -11,6 +11,8 @@ import {
   engineCommandSchema,
   engineExperienceProfileInputSchema,
   engineInventoryItemInputSchema,
+  engineTacticalGeometryInputSchema,
+  engineTacticalPositionSchema,
   engineToolNameSchema,
   engineWorldContextArgsSchema,
   type EngineCommand,
@@ -201,18 +203,21 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
             .object({
               creatureKey: z.string().trim().startsWith("open5e:creature:").max(300),
               count: z.number().int().min(1).max(20),
-              distanceFeet: z.number().nonnegative().max(100_000).default(30),
+              distanceFeet: z.number().nonnegative().max(100_000).optional(),
+              position: engineTacticalPositionSchema.optional(),
             })
             .strict()
         )
         .min(1)
         .max(20),
+      tactical: engineTacticalGeometryInputSchema.optional(),
     })
     .strict(),
   spawn_creature: z.object({
     creatureKey: z.string().trim().startsWith("open5e:creature:").max(300),
     count: z.number().int().min(1).max(20),
-    distanceFeet: z.number().nonnegative().max(100_000).default(30),
+    distanceFeet: z.number().nonnegative().max(100_000).optional(),
+    position: engineTacticalPositionSchema.optional(),
   }).strict(),
   learn_spell: z.object({
     spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
@@ -241,6 +246,11 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       goal: z.string().trim().min(1).max(2_000).optional(),
     })
     .strict(),
+  combat_move: z.object({
+    geometryRevision: z.number().int().nonnegative(),
+    destination: engineTacticalPositionSchema,
+    path: z.array(engineTacticalPositionSchema).max(400).optional(),
+  }).strict(),
   end_turn: noArguments,
   advancement_confirm: z.object({ pendingId: z.string().trim().min(1).max(120) }).strict(),
   npc_advance: z.object({
@@ -705,13 +715,46 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
             properties: {
               creatureKey: { type: "string", description: "Exact open5e:creature contentKey from content_search." },
               count: { type: "integer", minimum: 1, maximum: 20 },
-              distanceFeet: { type: "number", minimum: 0, maximum: 100000, description: "Authoritative starting distance from the player; defaults to 30 feet." },
+              distanceFeet: { type: "number", minimum: 0, maximum: 100000, description: "Legacy setup hint used to derive an initial tactical cell; omit for an adjacent 5-foot default." },
+              position: {
+                type: "object",
+                properties: {
+                  frameId: { type: "string" },
+                  x: { type: "integer" },
+                  y: { type: "integer" },
+                  z: { type: "integer", description: "Walking is limited to z=0 in this slice." },
+                },
+                required: ["frameId", "x", "y", "z"],
+                additionalProperties: false,
+              },
             },
             required: ["creatureKey", "count"],
             additionalProperties: false,
           },
           minItems: 1,
           maxItems: 20,
+        },
+        tactical: {
+          type: "object",
+          properties: {
+            frameId: { type: "string" },
+            bounds: {
+              type: "object",
+              properties: {
+                minX: { type: "integer" },
+                maxX: { type: "integer" },
+                minY: { type: "integer" },
+                maxY: { type: "integer" },
+              },
+              required: ["minX", "maxX", "minY", "maxY"],
+              additionalProperties: false,
+            },
+            obstacles: { type: "array", items: { type: "object" } },
+            difficultTerrain: { type: "array", items: { type: "object" } },
+            playerPosition: { type: "object" },
+          },
+          required: ["frameId", "bounds"],
+          additionalProperties: false,
         },
       },
       required: ["encounterId", "encounterName", "creatures"],
@@ -726,7 +769,18 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       properties: {
         creatureKey: { type: "string", description: "Exact open5e:creature contentKey from content_search." },
         count: { type: "integer", minimum: 1, maximum: 20 },
-        distanceFeet: { type: "number", minimum: 0, maximum: 100000, description: "Authoritative distance from the player; defaults to 30 feet." },
+        distanceFeet: { type: "number", minimum: 0, maximum: 100000, description: "Legacy setup hint used to derive an initial tactical cell." },
+        position: {
+          type: "object",
+          properties: {
+            frameId: { type: "string" },
+            x: { type: "integer" },
+            y: { type: "integer" },
+            z: { type: "integer", description: "Walking is limited to z=0 in this slice." },
+          },
+          required: ["frameId", "x", "y", "z"],
+          additionalProperties: false,
+        },
       },
       required: ["creatureKey", "count"],
       additionalProperties: false,
@@ -799,6 +853,30 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         goal: { type: "string" },
       },
       required: ["action"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "combat_move",
+    "Move the player along a bounded deterministic tactical path. The engine validates geometry revision, z=0 walking, footprint collision, corner clearance, and movement budget before committing.",
+    {
+      type: "object",
+      properties: {
+        geometryRevision: { type: "integer", minimum: 0 },
+        destination: {
+          type: "object",
+          properties: {
+            frameId: { type: "string" },
+            x: { type: "integer" },
+            y: { type: "integer" },
+            z: { type: "integer", description: "Walking is limited to z=0 in this slice." },
+          },
+          required: ["frameId", "x", "y", "z"],
+          additionalProperties: false,
+        },
+        path: { type: "array", items: { type: "object" }, maxItems: 400 },
+      },
+      required: ["geometryRevision", "destination"],
       additionalProperties: false,
     }
   ),
@@ -971,6 +1049,13 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         weaponId: args.weaponId,
         goal: args.goal,
       });
+    case "combat_move":
+      return engineCommandSchema.parse({
+        kind: "combat_move",
+        geometryRevision: args.geometryRevision,
+        destination: args.destination,
+        path: args.path,
+      });
     case "end_turn":
       return engineCommandSchema.parse({ kind: "end_turn" });
     case "advancement_confirm":
@@ -983,13 +1068,15 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         encounterId: args.encounterId,
         encounterName: args.encounterName,
         creatures: args.creatures,
+        tactical: args.tactical,
       });
     case "spawn_creature":
       return engineCommandSchema.parse({
         kind: "spawn_creature",
         creatureKey: args.creatureKey,
         count: args.count,
-        distanceFeet: args.distanceFeet ?? 30,
+        distanceFeet: args.distanceFeet,
+        position: args.position,
       });
     case "learn_spell":
       return engineCommandSchema.parse({ kind: "learn_spell", spellKey: args.spellKey });

@@ -143,6 +143,7 @@ describe("Lantern engine boundary", () => {
         "prepare_spell",
         "cast_spell",
         "combat_action",
+        "combat_move",
         "end_turn",
         "advancement_confirm",
         "npc_advance",
@@ -154,7 +155,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(48);
+    expect(names).toHaveLength(49);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");
@@ -1432,7 +1433,7 @@ describe("Lantern engine boundary", () => {
     expect(started.state.combat.enemies.every((enemy) => enemy.distanceFeet === 10)).toBe(true);
 
     const distant = JSON.parse(JSON.stringify(started.state)) as typeof started.state;
-    for (const enemy of distant.combat.enemies) enemy.distanceFeet = 20;
+    for (const enemy of distant.combat.enemies) enemy.position = { ...enemy.position, x: distant.combat.tactical.actorPosition.x + 4 };
     const distantBefore = JSON.stringify(distant);
     const rejected = resolveEngineCommand(
       distant,

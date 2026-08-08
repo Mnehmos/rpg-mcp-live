@@ -66,6 +66,8 @@ describe("Open5e S9 pack review and campaign re-pin", () => {
       packHash: s7.descriptor.packHash,
       hp: 7,
       alive: true,
+      position: { frameId: state.combat.tactical.geometry.frameId, x: 6, y: 0, z: 0 },
+      footprint: { width: 1, height: 1 },
       distanceFeet: 30,
       conditions: [],
       actionResources: {},
