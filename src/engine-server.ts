@@ -16,6 +16,7 @@ import {
   engineCampaignCreateSchema,
   engineCampaignDeleteSchema,
   engineOpeningRequestSchema,
+  engineProductionRoomEnterRequestSchema,
   engineToolCallRequestSchema,
   type CreateCampaignContext,
   type EngineCommand,
@@ -23,7 +24,8 @@ import {
   type LanternCampaignState,
   type RequestContext,
 } from "./engine-contracts.js";
-import { createInitialCampaign, projectEventForActor, projectResolutionForActor, projectStateForActor, resolveEngineCommand, toSessionView } from "./engine-domain.js";
+import { createInitialCampaign, projectEventForActor, projectResolutionForActor, projectStateForActor, resolveEngineCommand, resolveProductionRoomEnter, resolveProductionRoomNarrationRelease, toSessionView } from "./engine-domain.js";
+import { parseProductionRoomState, productionRoomNarrationReleaseRequestSchema, projectNarrationSequenceForActor, projectSceneForActor } from "./engine-production-room.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
 import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js";
 import {
@@ -328,6 +330,90 @@ app.post("/v1/campaigns/:campaignId/opening", async (request, response) => {
       parsed.data.expectedCampaignVersion
     );
     response.json(projectResolutionForActor(result, context.actorId));
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+app.post("/v1/campaigns/:campaignId/production-room/enter", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const parsed = engineProductionRoomEnterRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({
+        code: "invalid_production_room_enter",
+        error: "Entering the production room requires a UUID clientCommandId and the current campaign version.",
+        details: parsed.error.flatten(),
+      });
+      return;
+    }
+    const state = store.getCampaign(context);
+    assertCampaignUsesActivePack(state);
+    const result = store.executeCommand({
+      context,
+      clientCommandId: parsed.data.clientCommandId,
+      expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+      command: { kind: "production_room_enter" },
+      tool: "production_room",
+      resolve: (current) => resolveProductionRoomEnter(current, context, parsed.data.clientCommandId),
+    });
+    response.json(projectResolutionForActor(result, context.actorId));
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+app.get("/v1/campaigns/:campaignId/production-room", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const state = store.getCampaign(context);
+    const room = state.productionRoom ? parseProductionRoomState(state.productionRoom) : null;
+    response.json({
+      productionRoom: room?.activeScene
+        ? {
+            scene: projectSceneForActor(room.activeScene, context.actorId),
+            releasedSequences: room.releasedSequences.map(projectNarrationSequenceForActor),
+            playback: room.playback,
+          }
+        : null,
+    });
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+app.post("/v1/campaigns/:campaignId/production-room/narration", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const parsed = productionRoomNarrationReleaseRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({
+        code: "invalid_production_room_narration",
+        error: "Narration release requires a UUID clientCommandId, current campaign version, and a valid sequence IR.",
+        details: parsed.error.flatten(),
+      });
+      return;
+    }
+    const result = store.executeCommand({
+      context,
+      clientCommandId: parsed.data.clientCommandId,
+      expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+      command: { kind: "declare", goal: `production_room_narration:${parsed.data.sequence.id}` },
+      tool: "declare",
+      resolve: (current) => resolveProductionRoomNarrationRelease(current, context, parsed.data.clientCommandId, parsed.data.sequence),
+    });
+    const publicResult = projectResolutionForActor(result, context.actorId);
+    const room = result.state.productionRoom ? parseProductionRoomState(result.state.productionRoom) : null;
+    response.json({
+      ...publicResult,
+      productionRoom: room?.activeScene
+        ? {
+            scene: projectSceneForActor(room.activeScene, context.actorId),
+            releasedSequences: room.releasedSequences.map(projectNarrationSequenceForActor),
+            playback: room.playback,
+          }
+        : null,
+    });
   } catch (error) {
     sendError(response, error);
   }

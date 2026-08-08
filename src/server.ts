@@ -6,7 +6,8 @@ import { z } from "zod";
 import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent } from "./billing.js";
 import { config } from "./config.js";
 import { EngineHttpError, LanternEngineClient } from "./engine-client.js";
-import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema } from "./engine-contracts.js";
+import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema, engineProductionRoomEnterRequestSchema } from "./engine-contracts.js";
+import { productionRoomNarrationReleaseRequestSchema } from "./engine-production-room.js";
 import { gameActionSchema } from "./game.js";
 import { GameStore } from "./store.js";
 
@@ -457,6 +458,57 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
   }
   try {
     const result = await engineClient.startOpening(userId, userId, request.params.campaignId, parsed.data);
+    response.json({ ...result, subscription: store.getSubscription(userId) });
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
+app.post("/api/campaigns/:campaignId/production-room/enter", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const parsed = engineProductionRoomEnterRequestSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({
+      code: "invalid_production_room_enter",
+      error: "Entering the production room requires the current campaign version and a command id.",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+  try {
+    const result = await engineClient.enterProductionRoom(userId, userId, request.params.campaignId, parsed.data);
+    response.json({ ...result, subscription: store.getSubscription(userId) });
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
+app.get("/api/campaigns/:campaignId/production-room", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  try {
+    const result = await engineClient.getProductionRoom(userId, userId, request.params.campaignId);
+    response.json({ ...result, subscription: store.getSubscription(userId) });
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
+app.post("/api/campaigns/:campaignId/production-room/narration", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const parsed = productionRoomNarrationReleaseRequestSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({
+      code: "invalid_production_room_narration",
+      error: "Narration release requires a valid completed sequence IR and current campaign version.",
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+  try {
+    const result = await engineClient.releaseProductionRoomNarration(userId, userId, request.params.campaignId, parsed.data);
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
     sendWebEngineError(response, error);
