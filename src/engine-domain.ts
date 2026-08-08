@@ -3216,6 +3216,7 @@ function buildCombatTacticalState(
   return {
     tactical: {
       geometry,
+      movementMode: "walking",
       actorPosition: { ...actorPosition },
       actorFootprint: footprint,
       lastPlan: null,
@@ -3509,6 +3510,8 @@ function resolveCombatMove(
   if (command.geometryRevision !== tactical.geometry.revision) {
     return rejection(state, tool, "stale_tactical_geometry", "The tactical geometry changed; replan movement from the current revision.");
   }
+  const destinationFrameIssue = validatePositionFrame(command.destination, tactical.geometry.frameId);
+  if (destinationFrameIssue) return rejection(state, tool, destinationFrameIssue.code, destinationFrameIssue.message);
   if (positionEquals(tactical.actorPosition, command.destination)) {
     return rejection(state, tool, "tactical_no_movement", "The requested destination is your current tactical cell.");
   }
@@ -8129,6 +8132,7 @@ function emptyTacticalState(frameId = "none"): EngineCombatTacticalState {
       obstacles: [],
       difficultTerrain: [],
     },
+    movementMode: "walking",
     actorPosition: { frameId, x: 0, y: 0, z: 0 },
     actorFootprint: { width: 1, height: 1 },
     lastPlan: null,
@@ -8263,6 +8267,7 @@ function normalizeCombatTactical(
   if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallback;
   return {
     geometry,
+    movementMode: "walking",
     actorPosition,
     actorFootprint: normalizeFootprint(candidate.actorFootprint),
     lastPlan: normalizeMovementPlan(candidate.lastPlan, actorId, geometry.revision, frameId),
@@ -8463,7 +8468,7 @@ function createCombatants(
 ): EngineCombatant[] {
   return Array.from({ length: count }, (_, index) => {
     const position = positionBase
-      ? { ...positionBase, x: positionBase.x + index }
+      ? { ...positionBase, y: positionBase.y + index }
       : {
           frameId,
           x: Math.max(1, Math.ceil(Math.max(0, distanceFeet) / TACTICAL_CELL_FEET)) + index,
@@ -8752,7 +8757,10 @@ function characterData(character: EngineCharacter): EngineCharacterView {
 }
 
 function combatData(combat: EngineCombat): EngineCombatView {
-  syncDerivedCombatDistances(combat.tactical, combat.enemies);
+  const enemies = materializeCombatants(combat.enemies).map((enemy) => ({
+    ...enemy,
+    distanceFeet: tacticalDistanceFeet(combat, enemy),
+  }));
   return {
     status: combat.status,
     encounterId: combat.encounterId,
@@ -8762,7 +8770,7 @@ function combatData(combat: EngineCombat): EngineCombatView {
     turnBudget: combat.turnBudget,
     tactical: combat.tactical,
     pendingReaction: combat.pendingReaction,
-    enemies: materializeCombatants(combat.enemies),
+    enemies,
     lootClaimed: combat.lootClaimed,
     lastAction: combat.lastAction,
   };

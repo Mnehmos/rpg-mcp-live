@@ -58,6 +58,7 @@ const ALL_COMMAND_KINDS = [
   "prepare_spell",
   "cast_spell",
   "combat_action",
+  "combat_move",
   "end_turn",
   "advance_turn",
   "advancement_confirm",
@@ -351,6 +352,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "prepare_spell", tool: "prepare_spell", expectedCode: "spellcasting_unavailable", state: initialState, rawCommand: () => ({ kind: "prepare_spell", spellKey: BURNING_HANDS, prepared: true }) },
   { kind: "cast_spell", tool: "cast_spell", expectedCode: "spellcasting_unavailable", state: initialState, rawCommand: () => ({ kind: "cast_spell", spellKey: FIRE_BOLT, targetIds: [] }) },
   { kind: "combat_action", tool: "combat_action", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "combat_action", action: "dodge" }) },
+  { kind: "combat_move", tool: "combat_move", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "combat_move", geometryRevision: 1, destination: { frameId: "no-combat", x: 1, y: 0, z: 0 } }) },
   { kind: "end_turn", tool: "end_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "end_turn" }) },
   { kind: "advance_turn", tool: "advance_turn", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "advance_turn" }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", expectedCode: "advancement_not_pending", state: createdState, rawCommand: () => ({ kind: "advancement_confirm", pendingId: "missing-pending" }) },
@@ -426,6 +428,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "prepare_spell", tool: "prepare_spell", build: () => ({ state: (() => { const state = createdState("wizard"); return applyAccepted(state, { kind: "learn_spell", spellKey: BURNING_HANDS }, "learn_spell"); })(), command: parseCommand({ kind: "prepare_spell", spellKey: BURNING_HANDS, prepared: true }) }) },
   { kind: "cast_spell", tool: "cast_spell", build: () => { const state = wizardCombatState(); return { state, command: parseCommand({ kind: "cast_spell", spellKey: BURNING_HANDS, targetIds: [state.combat.enemies[0]!.id] }) }; } },
   { kind: "combat_action", tool: "combat_action", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "combat_action", action: "dodge" }) }) },
+  { kind: "combat_move", tool: "combat_move", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "combat_move", geometryRevision: state.combat.tactical.geometry.revision, destination: { ...state.combat.tactical.actorPosition, y: state.combat.tactical.actorPosition.y + 1 } }) }; } },
   { kind: "end_turn", tool: "end_turn", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "end_turn" }) }) },
   { kind: "advance_turn", tool: "advance_turn", build: () => ({ state: enemyTurnState(), command: parseCommand({ kind: "advance_turn", actionKey: "scimitar" }) }) },
   { kind: "advancement_confirm", tool: "advancement_confirm", build: () => { const state = pendingAdvancementState(); return { state, command: parseCommand({ kind: "advancement_confirm", pendingId: state.pendingAdvancement!.id }) }; } },
@@ -441,7 +444,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(40);
+    expect(ALL_COMMAND_KINDS).toHaveLength(41);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

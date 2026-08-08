@@ -436,6 +436,7 @@ export interface EngineMovementPlan {
 
 export interface EngineCombatTacticalState {
   geometry: EngineTacticalGeometry;
+  movementMode: "walking";
   actorPosition: EngineTacticalPosition;
   actorFootprint: EngineTacticalFootprint;
   lastPlan: EngineMovementPlan | null;
