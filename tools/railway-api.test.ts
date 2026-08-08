@@ -48,6 +48,7 @@ function scopeData(overrides: { serviceInstance?: Record<string, unknown>; servi
       railwayConfigFile: "/railway/engine.json",
       source: { repo: "Mnehmos/rpg-mcp-live", image: null },
       service: { repoTriggers: { edges: [{ node: trigger }] } },
+      activeDeployments: [{ id: "active-67", status: "SUCCESS", meta: { repo: "Mnehmos/rpg-mcp-live", branch: "main" } }],
       ...overrides.serviceInstance,
     },
     serviceInstanceAutoDeployStatus: { enabled: false, ...overrides.serviceInstanceAutoDeployStatus },
@@ -93,6 +94,19 @@ describe("Railway exact-SHA deployment API", () => {
   it("rejects an unconnected or wrong repository source", async () => {
     const { instance } = client([graphqlResponse(tokenData()), graphqlResponse(scopeData({ serviceInstance: { source: { repo: "other/repo", image: null } } }))]);
     await expect(instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "SOURCE_NOT_CONNECTED" });
+  });
+
+  it("accepts the current successful deployment source when Railway has no trigger records", async () => {
+    const scope = scopeData({
+      serviceInstance: {
+        source: null,
+        service: { repoTriggers: { edges: [] } },
+        activeDeployments: [{ id: "active-67", status: "SUCCESS", meta: { deployment: { repository: "Mnehmos/rpg-mcp-live", branch: "main" } } }],
+      },
+      deploymentTriggers: { edges: [] },
+    });
+    const { instance } = client([graphqlResponse(tokenData()), graphqlResponse(scope)]);
+    await expect(instance.validateScope(stagingScope)).resolves.toMatchObject({ sourceRepository: "Mnehmos/rpg-mcp-live", sourceBranch: "main" });
   });
 
   it("rejects current config drift and native Railway autodeploy", async () => {
@@ -233,5 +247,10 @@ describe("workflow ownership guardrails", () => {
     expect(helper).not.toMatch(/console\.(log|error).*variables/i);
     expect(staging).not.toMatch(/echo.*RAILWAY_PROJECT_TOKEN/i);
     expect(production).not.toMatch(/echo.*RAILWAY_PROJECT_TOKEN/i);
+  });
+
+  it("validates current source state without consulting stale latest-deployment metadata", () => {
+    expect(helper).toContain("activeDeployments");
+    expect(helper).not.toContain("latestDeployment");
   });
 });
