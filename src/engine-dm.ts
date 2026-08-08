@@ -509,7 +509,7 @@ export class LanternDungeonMaster {
       const publicResolution = projectResolutionForActor(resolution, context.actorId);
       return {
         tool: toolName,
-        readOnly: false,
+        readOnly: publicResolution.readOnly,
         accepted: publicResolution.accepted,
         code: publicResolution.code,
         message: publicResolution.message,

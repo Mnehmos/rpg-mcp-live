@@ -127,6 +127,7 @@ describe("systemic world-object affordances", () => {
       { target: "gatehouse-oil", affordance: "ignite" as const, code: "fire_source_required" },
       { target: "gatehouse-lever", affordance: "attach" as const, code: "wrong_material", extra: { sourceId: "gatehouse-weapon" } },
       { target: "gatehouse-clue", affordance: "break" as const, code: "critical_object_protected" },
+      { target: "gatehouse-crate", affordance: "drop" as const, code: "ownership_required", extra: { destinationId: "gatehouse-threshold" } },
     ];
     for (const testCase of cases) {
       const state = seededState();
@@ -138,6 +139,16 @@ describe("systemic world-object affordances", () => {
       expect(result.state.version, testCase.target).toBe(state.version);
       expect(result.event, testCase.target).toBeNull();
     }
+    const initial = createInitialCampaign("account-world-object-invalid", "actor-world-object-invalid");
+    const invalidFixture = ruinedGatehouseWorldContextCommand();
+    const invalidUpsert = invalidFixture.objects?.upsert;
+    if (!invalidUpsert?.[0]) throw new Error("world fixture must contain objects");
+    invalidUpsert[0] = { ...invalidUpsert[0], state: "destroyed" };
+    const initialBefore = JSON.stringify(initial);
+    const invalidSeed = apply(initial, invalidFixture, "world_context");
+    expect(invalidSeed.accepted).toBe(false);
+    expect(invalidSeed.code).toBe("object_state_not_authorable");
+    expect(JSON.stringify(invalidSeed.state)).toBe(initialBefore);
   });
 
   it("commits deterministic transitions and preserves early clue acquisition", () => {
@@ -160,6 +171,7 @@ describe("systemic world-object affordances", () => {
     expect(attached.accepted).toBe(true);
     expect(attached.state.worldContext?.objects.find((object) => object.id === "gatehouse-rope")?.state).toBe("attached");
     expect(attached.state.worldContext?.objects.find((object) => object.id === "gatehouse-lever")?.state).toBe("attached");
+    expect(attached.event?.stateChanges).toHaveLength(2);
 
     const taken = interaction(attached.state, "gatehouse-clue", "take");
     expect(taken.accepted).toBe(true);
@@ -172,6 +184,18 @@ describe("systemic world-object affordances", () => {
       ownerRef: { kind: "world", id: dropped.state.worldContext?.id },
       locationRef: "gatehouse-threshold",
     });
+
+    const lossCommand = {
+      ...ruinedGatehouseWorldContextCommand(),
+      objects: { remove: ["gatehouse-clue"] },
+    };
+    const lost = apply(dropped.state, lossCommand, "world_context");
+    expect(lost.accepted).toBe(true);
+    expect(lost.state.worldContext?.objects.some((object) => object.id === "gatehouse-clue")).toBe(false);
+    expect(lost.event?.stateChanges.some((change) => change.path === "/worldContext/objects/gatehouse-clue" && change.after === null)).toBe(true);
+    const protectedRemoval = apply(lost.state, { ...ruinedGatehouseWorldContextCommand(), objects: { remove: ["gatehouse-door"] } }, "world_context");
+    expect(protectedRemoval.accepted).toBe(false);
+    expect(protectedRemoval.code).toBe("critical_object_protected");
   });
 
   it("is exactly-once, stale-version safe, and restart-persistent", () => {
@@ -206,6 +230,7 @@ describe("systemic world-object affordances", () => {
     const reopened = new LanternEngineStore(databasePath);
     const reloaded = reopened.getCampaign(request);
     expect(reloaded.worldContext?.objects.find((object) => object.id === "gatehouse-door")?.state).toBe("unlocked");
+    expect(reloaded.worldContext?.objects.find((object) => object.id === "gatehouse-door")?.provenance.sourceCommandId).toBe(clientCommandId);
     const replayAfterRestart = reopened.executeCommand({
       context: request,
       clientCommandId,

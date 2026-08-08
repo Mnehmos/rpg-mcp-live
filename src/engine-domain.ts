@@ -1918,7 +1918,15 @@ function validateWorldObjectPatch(
       return { code: "field_not_authorable", message: "World-object ownership is engine-owned and cannot be authored through world_context." };
     }
     const previous = existingById.get(input.id);
-    if (!previous) continue;
+    if (!previous) {
+      if (["damaged", "destroyed", "open", "attached", "carried", "equipped"].includes(input.state)) {
+        return { code: "object_state_not_authorable", message: "A new world object may only enter an authored baseline state; resolve later outcomes through a typed affordance." };
+      }
+      if (input.state === "lit" && input.definition.material !== "fire") {
+        return { code: "object_state_not_authorable", message: "Only a fire-material object may enter the lit baseline state." };
+      }
+      continue;
+    }
     if (input.definition.key !== previous.definition.key || input.definition.sourceRef !== previous.definition.sourceRef) {
       return { code: "object_definition_conflict", message: "An existing world-object definition cannot be replaced in place." };
     }
