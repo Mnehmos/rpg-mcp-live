@@ -136,7 +136,7 @@ function isFullSha(value: string): boolean {
 function findCommitSha(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  for (const key of ["commitSha", "commitSHA", "gitCommitSha", "gitSha", "RAILWAY_GIT_COMMIT_SHA"]) {
+  for (const key of ["commitSha", "commitSHA", "commitHash", "gitCommitSha", "gitSha", "RAILWAY_GIT_COMMIT_SHA"]) {
     const candidate = record[key];
     if (typeof candidate === "string" && isFullSha(candidate)) return candidate;
   }
