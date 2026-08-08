@@ -117,3 +117,11 @@ same committed event and base revisions.
 This audit does not add production code, expose chain-of-thought, create a
 general scripting language, build a visual editor/VTT, or authorize Railway,
 workflow dispatch, live OpenRouter, or a second situation/knowledge engine.
+
+## Verification note
+
+The first hosted CI run for this documentation gate passed typecheck, tests,
+and build, then timed out in the unchanged two-service smoke while the engine
+was starting. No audit or ADR path was exercised by that failure; the hosted
+gate must still pass on the next exact head before this documentation gate is
+accepted.
