@@ -167,6 +167,9 @@ describe("generic magic effects kernel", () => {
     expect(pending).toMatchObject({ trigger: "incoming-attack-would-hit", status: "offered", eligibleReactionIds: [SHIELD] });
     expect(toSessionView(offered.state).availableActions).toEqual(["reaction_response:accept", "reaction_response:decline"]);
     expect(normalizeCampaignState(JSON.parse(JSON.stringify(offered.state))).combat.pendingReaction).toEqual(pending);
+    const blocked = apply(offered.state, { kind: "combat_action", action: "attack", targetId: offered.state.combat.enemies[0]!.id });
+    expect(blocked).toMatchObject({ accepted: false, code: "reaction_pending", event: null });
+    expect(JSON.stringify(blocked.state)).toBe(JSON.stringify(offered.state));
     const beforeSlot = offered.state.character.spellcasting!.slots["1"];
     const accepted = apply(offered.state, {
       kind: "reaction_response",

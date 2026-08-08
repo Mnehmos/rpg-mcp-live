@@ -403,6 +403,14 @@ export function resolveEngineCommand(
   tool: EngineToolName | "declare" | "listen",
   playerText?: string
 ): EngineResolution {
+  if (
+    state.combat.pendingReaction
+    && command.kind !== "observe"
+    && command.kind !== "reaction_response"
+    && !(command.kind === "cast_spell" && state.combat.pendingReaction.eligibleReactionIds.includes(command.spellKey))
+  ) {
+    return rejection(state, tool, "reaction_pending", "Resolve the offered incoming-hit reaction before taking another action.");
+  }
   switch (command.kind) {
     case "observe":
       return readOnlyResolution(state, tool, "The DM's current world context is available to you.", readToolData(state, "observe"));
@@ -2301,9 +2309,11 @@ function eligibleShieldReaction(state: LanternCampaignState): NonNullable<Return
   const references = spell.definition.level === 0 || progression.selectionMode === "known"
     ? spellcasting.knownSpells
     : spellcasting.preparedSpells;
+  const slotSelection = selectSpellSlot(spell.definition.level, undefined, spellcasting.slots);
   return spell.definition.castingTime === "reaction"
     && spell.effect.modifier.trigger === "incoming-attack-would-hit"
     && hasPinnedSpell(references, spell.contentKey, spell.packHash)
+    && !("code" in slotSelection)
     ? spell
     : null;
 }
