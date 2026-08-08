@@ -1,0 +1,33 @@
+name: Incident
+description: "A production issue requiring immediate attention and a corrective PR."
+labels: ["type:bug", "priority:P0"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: "What broke, when, and the user-visible impact."
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P0 — production down or data loss
+        - P1 — degraded, workaround exists
+        - P2 — minor, non-blocking
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: "Steps to reproduce, or the deployment SHA where it appeared."
+    validations:
+      required: true
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Mitigation / rollback
+      description: "What was done to stop the bleeding. Corrective PR should follow."

@@ -1,0 +1,121 @@
+name: Production migration
+
+# The ONLY manual workflow. Database and content migrations require explicit
+# backup confirmation and a reviewed plan hash. Never combined with code deployment.
+on:
+  workflow_dispatch:
+    inputs:
+      deployed_git_sha:
+        description: "Git SHA already deployed to production"
+        required: true
+      migration_kind:
+        description: "sqlite-schema | content-repin | event-compaction"
+        required: true
+        type: choice
+        default: sqlite-schema
+        options:
+          - sqlite-schema
+          - content-repin
+          - event-compaction
+      source_rules_version:
+        description: "Current rules version (before migration)"
+        required: true
+      target_rules_version:
+        description: "Target rules version (after migration)"
+        required: true
+      review_sha:
+        description: "SHA of the reviewed migration plan"
+        required: true
+      backup_confirmation:
+        description: "Type BACKUP-CONFIRMED to confirm a fresh backup was taken"
+        required: true
+      confirm:
+        description: 'Type APPLY-MIGRATION to proceed'
+        required: true
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: railway-production-migration
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Production migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production-migration
+
+    steps:
+      - name: Verify confirmations
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "APPLY-MIGRATION" ]; then
+            echo "::error::confirm must be APPLY-MIGRATION"
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.backup_confirmation }}" != "BACKUP-CONFIRMED" ]; then
+            echo "::error::backup_confirmation must be BACKUP-CONFIRMED"
+            exit 1
+          fi
+          echo "::notice::Confirmations accepted"
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.deployed_git_sha }}
+          persist-credentials: false
+
+      - name: Verify SHA is reachable from main
+        run: |
+          if git merge-base --is-ancestor "${{ github.event.inputs.deployed_git_sha }}" origin/main; then
+            echo "::notice::SHA is reachable from main"
+          else
+            echo "::error::SHA is NOT reachable from main"
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.18.x
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Run migration audit (dry-run on copy)
+        env:
+          ENGINE_DATABASE_PATH: ${{ secrets.PRODUCTION_DB_COPY_PATH }}
+          SOURCE_RULES: ${{ github.event.inputs.source_rules_version }}
+          TARGET_RULES: ${{ github.event.inputs.target_rules_version }}
+          REVIEW_SHA: ${{ github.event.inputs.review_sha }}
+          MIGRATION_KIND: ${{ github.event.inputs.migration_kind }}
+        run: |
+          echo "::notice::Running migration audit ($MIGRATION_KIND: $SOURCE_RULES → $TARGET_RULES)"
+          echo "::notice::Plan review SHA: $REVIEW_SHA"
+          # Run the audit harness against the backup copy (never production directly)
+          npm run open5e:audit-migration || {
+            echo "::error::Migration audit failed — production database was NOT touched"
+            exit 1
+          }
+
+      - name: Record migration evidence
+        run: |
+          node tools/ci/write-deployment-manifest.mjs \
+            --env production-migration \
+            --git-sha "${{ github.event.inputs.deployed_git_sha }}" \
+            --git-ref main \
+            --pack-version "${{ github.event.inputs.target_rules_version }}" \
+            --engine-health n/a \
+            --web-health n/a \
+            --smoke n/a \
+            --output migration-manifest.json
+
+      - name: Upload migration manifest
+        uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
+        with:
+          name: migration-manifest-${{ github.event.inputs.deployed_git_sha }}
+          path: migration-manifest.json
+          retention-days: 365

@@ -1,0 +1,62 @@
+name: Live model evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_model_calls:
+        description: "Hard maximum OpenRouter model calls"
+        required: true
+        default: "50"
+      max_cost_usd:
+        description: "Hard maximum estimated cost (USD)"
+        required: true
+        default: "5.00"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-eval
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: Live eval (staging only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: staging-eval
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.18.x
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run live evaluation
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_EVAL_KEY }}
+          MAX_MODEL_CALLS: ${{ github.event.inputs.max_model_calls }}
+          MAX_COST_USD: ${{ github.event.inputs.max_cost_usd }}
+        run: |
+          echo "::notice::Live eval uses staging credentials only. Max calls=${MAX_MODEL_CALLS}, max cost=\$${MAX_COST_USD}"
+          # Placeholder: run the eval harness against staging engine
+          # tsx tools/live-eval.ts --max-calls "$MAX_MODEL_CALLS" --max-cost "$MAX_COST_USD"
+
+      - name: Upload results
+        uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
+        with:
+          name: live-eval-results
+          path: live-eval-results/
+          retention-days: 14

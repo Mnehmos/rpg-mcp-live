@@ -1,0 +1,25 @@
+name: Audit
+description: "A research/audit task that produces findings but no production code."
+labels: ["type:audit", "status:ready"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Audit question
+      description: "What needs to be verified, classified, or measured?"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: "Files, systems, or game subsystems under review."
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: "Audit document, issue list, risk-register entries, or ADR proposals."
+    validations:
+      required: true

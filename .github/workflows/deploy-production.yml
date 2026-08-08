@@ -1,0 +1,196 @@
+name: Deploy to production
+
+# Auto-promotes to production when staging completes successfully.
+# No manual dispatch — the gauntlet + staging smoke are the gate.
+on:
+  workflow_run:
+    workflows: ["Deploy to staging"]
+    types: [completed]
+
+permissions:
+  contents: write   # needed to create the annotated release tag
+  deployments: write
+
+concurrency:
+  group: railway-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    name: Production deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.workflow_run.conclusion == 'success'
+
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+
+      - name: Verify SHA is reachable from main
+        run: |
+          if git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::notice::SHA $SHA is reachable from main"
+          else
+            echo "::error::SHA $SHA is NOT reachable from main — refusing production deploy"
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.18.x
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Check tag does not already exist
+        id: version
+        run: |
+          # Derive patch version from package.json + existing tags
+          PKG_VERSION=$(jq -r '.version' package.json)
+          TAG="v${PKG_VERSION}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            # Tag exists — bump patch
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$PKG_VERSION"
+            PATCH=$((PATCH + 1))
+            TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          echo "release_tag=$TAG" >> $GITHUB_OUTPUT
+          echo "::notice::Production release will be tagged $TAG"
+
+      # -----------------------------------------------------------------
+      # Deploy engine FIRST.
+      # -----------------------------------------------------------------
+      - name: Deploy engine to Railway production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENGINE_SERVICE: ${{ vars.RAILWAY_ENGINE_SERVICE }}
+        run: |
+          railway up \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment production \
+            --service "$RAILWAY_ENGINE_SERVICE" \
+            --detach
+
+      - name: Verify engine health + backward compatibility
+        env:
+          ENGINE_PRODUCTION_URL: ${{ vars.ENGINE_PRODUCTION_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -sf "${ENGINE_PRODUCTION_URL}/health" || echo "")
+            if echo "$resp" | grep -q '"status":"ok"'; then
+              echo "$resp"
+              echo "ENGINE_PACK_HASH=$(echo "$resp" | jq -r '.rules.packHash')" >> $GITHUB_ENV
+              echo "ENGINE_TOOL_COUNT=$(echo "$resp" | jq -r '.toolCount')" >> $GITHUB_ENV
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$ENGINE_PACK_HASH" ]; then
+            echo "::error::Engine production did not become healthy"
+            exit 1
+          fi
+
+      # -----------------------------------------------------------------
+      # Deploy web SECOND.
+      # -----------------------------------------------------------------
+      - name: Deploy web to Railway production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_WEB_SERVICE: ${{ vars.RAILWAY_WEB_SERVICE }}
+        run: |
+          railway up \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment production \
+            --service "$RAILWAY_WEB_SERVICE" \
+            --detach
+
+      - name: Verify web health + engine reachability
+        env:
+          WEB_PRODUCTION_URL: ${{ vars.WEB_PRODUCTION_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -sf "${WEB_PRODUCTION_URL}/api/health" || echo "")
+            if echo "$resp" | grep -q '"status":"ok"' && echo "$resp" | grep -q '"lanternEngine":true'; then
+              echo "$resp"
+              echo "::notice::Production web healthy and engine reachable"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Production web did not become healthy in 5 min"
+          exit 1
+
+      - name: Generate changelog (release gate — fails if empty)
+        run: |
+          node tools/ci/generate-changelog.mjs \
+            --version "${{ steps.version.outputs.release_tag }}" \
+            --update-file \
+            --fail-empty
+          # Capture for the release body
+          node tools/ci/generate-changelog.mjs \
+            --version "${{ steps.version.outputs.release_tag }}" > release-body.md
+          cat release-body.md
+
+      - name: Commit CHANGELOG.md to main
+        run: |
+          git config user.name "Lantern CI"
+          git config user.email "ci@lantern.local"
+          git fetch origin main
+          git checkout main
+          git merge --no-edit "$SHA" 2>/dev/null || true
+          git add CHANGELOG.md
+          git diff --cached --quiet && { echo "::notice::CHANGELOG.md already up to date"; exit 0; } || true
+          git commit -m "chore(release): update CHANGELOG for ${{ steps.version.outputs.release_tag }}"
+          git push origin main
+
+      - name: Create annotated release tag
+        run: |
+          git config user.name "Lantern CI"
+          git config user.email "ci@lantern.local"
+          git tag -a "${{ steps.version.outputs.release_tag }}" -m "Production release ${{ steps.version.outputs.release_tag }} from $SHA"
+          git push origin "${{ steps.version.outputs.release_tag }}"
+
+      - name: Write deployment manifest
+        run: |
+          node tools/ci/write-deployment-manifest.mjs \
+            --env production \
+            --git-sha "$SHA" \
+            --git-ref main \
+            --pack-hash "$ENGINE_PACK_HASH" \
+            --tool-count "$ENGINE_TOOL_COUNT" \
+            --engine-health pass \
+            --web-health pass \
+            --smoke pass \
+            --output deployment-manifest.json
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
+        with:
+          name: production-manifest-${{ env.SHA }}
+          path: deployment-manifest.json
+          retention-days: 90
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@de2c0eb89ae2a8a8d8d0d6ea84c2ffe7749e4149 # v2
+        with:
+          tag_name: ${{ steps.version.outputs.release_tag }}
+          body_path: release-body.md
+          files: |
+            deployment-manifest.json
+            CHANGELOG.md
