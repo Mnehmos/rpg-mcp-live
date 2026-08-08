@@ -167,7 +167,7 @@ try {
     arguments: { action: "dodge" },
   });
   assert(yielded.accepted, `S9 player combat action failed: ${yielded.code ?? yielded.message}`);
-  assert(yielded.commandResult.session.combat.activeActorId === createdCampaign.session.userId, "S9 player turn advanced before end_turn.");
+  assert(yielded.commandResult.session.combat.activeActorId === createdCharacter.session.character.id, "S9 player turn advanced before end_turn.");
   const endTurn = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
     expectedCampaignVersion: yielded.campaignVersion,
     toolName: "end_turn",
