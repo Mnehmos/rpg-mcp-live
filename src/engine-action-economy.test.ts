@@ -110,6 +110,9 @@ describe("typed action-economy kernel", () => {
     const started = encounter();
     const state = started.state;
     const targetId = state.combat.enemies[0]!.id;
+    // Keep this turn-handoff assertion independent of the random attack roll/damage.
+    state.combat.enemies[0]!.hp = 100;
+    state.combat.enemies[0]!.alive = true;
     const attack = apply(state, { kind: "combat_action", action: "attack", targetId });
     expect(attack.state.combat.activeActorId).toBe(attack.state.actorId);
     const ended = apply(attack.state, { kind: "end_turn" });
