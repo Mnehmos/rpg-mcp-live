@@ -197,6 +197,8 @@ describe("workflow ownership guardrails", () => {
   it("preflights release material before mutating production and uses the GitHub API for tags", () => {
     expect(production).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
     expect(production).not.toContain("actions/setup-node@49933a5288caeca8642d1e84afbd3f7d6820020");
+    expect(staging).toContain("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
+    expect(staging).not.toContain("actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4");
     expect(production).toContain("fetch-depth: 0");
     expect(production).toContain("git fetch --force --tags origin");
     expect(production).toContain("already exists; refusing to mutate production");
