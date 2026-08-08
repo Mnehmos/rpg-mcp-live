@@ -76,6 +76,24 @@ export const engineEquipmentSlotSchema = z.enum([
 ]);
 export type EngineEquipmentSlot = z.infer<typeof engineEquipmentSlotSchema>;
 
+export const engineItemOwnerRefSchema = z.object({
+  kind: z.enum(["actor", "merchant", "world"]),
+  id: z.string().trim().min(1).max(120),
+}).strict();
+export type EngineItemOwnerRef = z.infer<typeof engineItemOwnerRefSchema>;
+
+export const engineItemProvenanceSchema = z.object({
+  kind: z.enum(["starter", "loot", "merchant", "authored", "open5e"]),
+  sourceId: z.string().trim().min(1).max(160).optional(),
+}).strict();
+export type EngineItemProvenance = z.infer<typeof engineItemProvenanceSchema>;
+
+export const engineItemChargeStateSchema = z.object({
+  current: z.number().int().nonnegative(),
+  max: z.number().int().positive(),
+}).strict().refine((charges) => charges.current <= charges.max, "Current item charges cannot exceed the maximum.");
+export type EngineItemChargeState = z.infer<typeof engineItemChargeStateSchema>;
+
 const engineAuthoredItemDefinitionSchema = z.object({
   name: z.string().trim().min(1).max(160),
   kind: engineItemKindSchema,
@@ -87,6 +105,11 @@ const engineAuthoredItemDefinitionSchema = z.object({
   properties: z.array(z.string().max(120)).max(20).optional(),
   damage: z.string().max(80).optional(),
   armorClass: z.number().int().nonnegative().optional(),
+  containerCapacity: z.number().nonnegative().optional(),
+  ammunitionId: z.string().trim().min(1).max(120).optional(),
+  effectKey: z.enum(["lantern-ward-v1"]).optional(),
+  isMagic: z.boolean().optional(),
+  mechanicsTier: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional(),
 }).strict();
 
 const engineInventoryInstanceFields = {
@@ -277,6 +300,7 @@ export const engineToolNameSchema = z.enum([
   "character_create",
   "character_update",
   "inventory",
+  "inventory_transfer",
   "equip_item",
   "unequip_item",
   "drop_item",
@@ -661,6 +685,12 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     .strict(),
   z.object({ kind: z.literal("equip_item"), itemId: z.string().trim().min(1).max(120), slot: z.enum(["mainhand", "offhand", "armor", "head", "feet", "accessory"]) }).strict(),
   z.object({ kind: z.literal("unequip_item"), itemId: z.string().trim().min(1).max(120) }).strict(),
+  z.object({
+    kind: z.literal("inventory_transfer"),
+    itemId: z.string().trim().min(1).max(120),
+    targetContainerId: z.string().trim().min(1).max(120).optional(),
+    quantity: z.number().int().min(1).max(100).default(1),
+  }).strict(),
   z.object({ kind: z.literal("drop_item"), itemId: z.string().trim().min(1).max(120), quantity: z.number().int().min(1).max(100).default(1) }).strict(),
   z
     .object({
@@ -951,6 +981,9 @@ export interface EngineItemDefinition {
   properties?: string[];
   damage?: string;
   armorClass?: number;
+  containerCapacity?: number;
+  ammunitionId?: string;
+  effectKey?: "lantern-ward-v1";
   armorProfile?: {
     category: "light" | "medium" | "heavy";
     base: number;
@@ -973,6 +1006,10 @@ export interface EngineInventoryItem {
   slot?: EngineEquipmentSlot;
   equipped?: boolean;
   attuned?: boolean;
+  ownerRef?: EngineItemOwnerRef;
+  containerRef?: string;
+  charges?: EngineItemChargeState;
+  provenance?: EngineItemProvenance;
 }
 
 export interface EngineInventoryItemView extends EngineInventoryItem, EngineItemDefinition {
@@ -1369,6 +1406,7 @@ export interface EngineWeaponAttack {
   reachFeet: number | null;
   normalRangeFeet: number | null;
   longRangeFeet: number | null;
+  ammunitionId?: string;
   explanation: string;
 }
 

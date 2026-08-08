@@ -180,6 +180,11 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     })
     .strict(),
   inventory: noArguments,
+  inventory_transfer: z.object({
+    itemId: z.string().trim().min(1).max(120),
+    targetContainerId: z.string().trim().min(1).max(120).optional(),
+    quantity: z.number().int().min(1).max(100).default(1),
+  }).strict(),
   equip_item: z.object({ itemId: z.string().trim().min(1).max(120), slot: z.enum(["mainhand", "offhand", "armor", "head", "feet", "accessory"]) }).strict(),
   unequip_item: z.object({ itemId: z.string().trim().min(1).max(120) }).strict(),
   drop_item: z.object({ itemId: z.string().trim().min(1).max(120), quantity: z.number().int().min(1).max(100).default(1) }).strict(),
@@ -319,6 +324,11 @@ const inventoryItemJsonSchema = {
         properties: { type: "array", items: { type: "string" } },
         damage: { type: "string" },
         armorClass: { type: "integer", minimum: 0 },
+        containerCapacity: { type: "number", minimum: 0 },
+        ammunitionId: { type: "string" },
+        effectKey: { type: "string", enum: ["lantern-ward-v1"] },
+        isMagic: { type: "boolean" },
+        mechanicsTier: { type: "integer", enum: [0, 1, 2] },
       },
       required: ["id", "name", "kind", "quantity", "weight"],
       additionalProperties: false,
@@ -650,6 +660,20 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool("character_update", "Update player-authored character identity and sheet details. The DM may also populate durable personality, appearance, backstory, allies, treasure, inspiration, and temporary hit points.", { type: "object", properties: { name: { type: "string" }, background: { type: "string", description: "Legacy campaigns only." }, alignment: { type: "string", description: "Legacy campaigns only." }, description: { type: "string" }, abilityScores: { type: "object", description: "Legacy campaigns only." }, details: { type: "object", description: "Character sheet details such as appearance, personalityTraits, ideals, bonds, flaws, backstory, allies, treasure, inspiration, and temporaryHp." } }, additionalProperties: false }),
   tool("inventory", "Read authoritative items, quantities, gold, and carry weight. Read-only.", {}),
+  tool(
+    "inventory_transfer",
+    "Move an owned item stack between the character root and an owned bounded container. The engine owns location, quantity splitting, nesting, and capacity validation.",
+    {
+      type: "object",
+      properties: {
+        itemId: { type: "string", description: "Stable item instance or stack id from inventory." },
+        targetContainerId: { type: "string", description: "Owned container instance id; omit to move the stack to the character root." },
+        quantity: { type: "integer", minimum: 1, maximum: 100, description: "Quantity to move; defaults to one." },
+      },
+      required: ["itemId"],
+      additionalProperties: false,
+    }
+  ),
   tool("equip_item", "Equip a weapon or armor item in an equipment slot; the engine updates armor class.", { type: "object", properties: { itemId: { type: "string" }, slot: { type: "string", enum: ["mainhand", "offhand", "armor", "head", "feet", "accessory"] } }, required: ["itemId", "slot"], additionalProperties: false }),
   tool("unequip_item", "Unequip one item and recalculate armor class.", { type: "object", properties: { itemId: { type: "string" } }, required: ["itemId"], additionalProperties: false }),
   tool("drop_item", "Remove a quantity of an item from the player inventory.", { type: "object", properties: { itemId: { type: "string" }, quantity: { type: "integer", minimum: 1 } }, required: ["itemId"], additionalProperties: false }),
@@ -929,6 +953,8 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({ kind: "character_roll_stats", method: args.method });
     case "equip_item":
       return engineCommandSchema.parse({ kind: "equip_item", itemId: args.itemId, slot: args.slot });
+    case "inventory_transfer":
+      return engineCommandSchema.parse({ kind: "inventory_transfer", itemId: args.itemId, targetContainerId: args.targetContainerId, quantity: args.quantity ?? 1 });
     case "unequip_item":
       return engineCommandSchema.parse({ kind: "unequip_item", itemId: args.itemId });
     case "drop_item":

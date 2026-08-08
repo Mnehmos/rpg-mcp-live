@@ -21,8 +21,9 @@ The optional persisted metadata fields are:
 - `provenance`: the source kind and source identifier for the current instance;
 - `charges`: current and maximum uses for reviewed charge-backed effects.
 
-Legacy character inventory normalizes to the character as owner and root
-location. A transfer is one atomic command. It may split a positive quantity
+Legacy character inventory with missing ownership metadata is treated as
+character-owned at the root for validation; mutating inventory commands write
+explicit references without rewriting unrelated commands. A transfer is one atomic command. It may split a positive quantity
 into a new server-generated stack, but it may not create a second owner or
 physical location. Container graphs are actor-owned, acyclic, and bounded in
 depth. Weight and capacity are server-derived validation and projection data;

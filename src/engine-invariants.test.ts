@@ -47,6 +47,7 @@ const ALL_COMMAND_KINDS = [
   "character_roll_stats",
   "character_create",
   "equip_item",
+  "inventory_transfer",
   "unequip_item",
   "drop_item",
   "use_item",
@@ -340,6 +341,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "character_roll_stats", tool: "character_roll_stats", expectedCode: "ability_scores_already_rolled", state: rolledDraftState, rawCommand: () => ({ kind: "character_roll_stats", method: "rolled" }) },
   { kind: "character_create", tool: "character_create", expectedCode: "character_locked", state: createdState, rawCommand: () => ({ kind: "character_create", name: "Duplicate", species: "human", className: "fighter" }) },
   { kind: "equip_item", tool: "equip_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "equip_item", itemId: "missing-item", slot: "mainhand" }) },
+  { kind: "inventory_transfer", tool: "inventory_transfer", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "inventory_transfer", itemId: "missing-item", quantity: 1 }) },
   { kind: "unequip_item", tool: "unequip_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "unequip_item", itemId: "missing-item" }) },
   { kind: "drop_item", tool: "drop_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "drop_item", itemId: "missing-item", quantity: 1 }) },
   { kind: "use_item", tool: "use_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "use_item", itemId: "missing-item" }) },
@@ -395,6 +397,25 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "character_roll_stats", tool: "character_roll_stats", build: () => ({ state: initialState(), command: parseCommand({ kind: "character_roll_stats", method: "rolled" }) }) },
   { kind: "character_create", tool: "character_create", build: () => ({ state: initialState(), command: parseCommand({ kind: "character_create", name: "Replay Creator", species: "human", className: "fighter" }) }) },
   { kind: "equip_item", tool: "equip_item", build: () => ({ state: createdState(), command: parseCommand({ kind: "equip_item", itemId: "longsword", slot: "mainhand" }) }) },
+  {
+    kind: "inventory_transfer",
+    tool: "inventory_transfer",
+    build: () => {
+      const state = createdState();
+      state.character.inventory.push({
+        id: "replay-pack",
+        quantity: 1,
+        authoredDefinition: { name: "Replay pack", kind: "tool", weight: 1, containerCapacity: 20 },
+      });
+      state.character.inventory.push({
+        id: "replay-ration",
+        quantity: 1,
+        authoredDefinition: { name: "Replay ration", kind: "consumable", weight: 1 },
+      });
+      const normalized = normalizeCampaignState(state);
+      return { state: normalized, command: parseCommand({ kind: "inventory_transfer", itemId: "replay-ration", targetContainerId: "replay-pack", quantity: 1 }) };
+    },
+  },
   { kind: "unequip_item", tool: "unequip_item", build: () => ({ state: equippedState(), command: parseCommand({ kind: "unequip_item", itemId: "longsword" }) }) },
   { kind: "drop_item", tool: "drop_item", build: () => ({ state: createdState(), command: parseCommand({ kind: "drop_item", itemId: "ration", quantity: 1 }) }) },
   { kind: "use_item", tool: "use_item", build: () => ({ state: consumableState(), command: parseCommand({ kind: "use_item", itemId: "healing-draught" }) }) },
@@ -420,7 +441,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(39);
+    expect(ALL_COMMAND_KINDS).toHaveLength(40);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {
