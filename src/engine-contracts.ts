@@ -2211,6 +2211,7 @@ export type EngineControlledActorBehavior = "idle" | "attack" | "guard" | "follo
 export type EngineControlledActorCommandCost = "action" | "bonus-action";
 export type EngineControlledActorProgressionPolicy = "none";
 export type EngineControlledActorLootPolicy = "none";
+export type EngineControlledActorInventoryPolicy = "independent";
 
 export interface EngineControlledActorAttack {
   attackBonus: number;
@@ -2244,6 +2245,7 @@ export interface EngineControlledActor {
   defaultBehavior: EngineControlledActorDefaultBehavior;
   progressionPolicy: EngineControlledActorProgressionPolicy;
   lootPolicy: EngineControlledActorLootPolicy;
+  inventoryPolicy: EngineControlledActorInventoryPolicy;
   turnBudget: EngineTurnBudget;
   commandedThisTurn: boolean;
   lastCommandId: string | null;

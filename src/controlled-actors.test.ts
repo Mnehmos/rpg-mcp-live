@@ -61,6 +61,7 @@ describe("controlled actors", () => {
       defaultBehavior: "guard",
       progressionPolicy: "none",
       lootPolicy: "none",
+      inventoryPolicy: "independent",
     });
     expect(familiar.attack).toEqual({ attackBonus: 4, damageDice: "1d4", damageBonus: 2, damageType: "piercing", rangeFeet: 5 });
 
