@@ -170,7 +170,7 @@ jobs:
             --output deployment-manifest.json
 
       - name: Upload staging manifest
-        uses: actions/upload-artifact@65462800fd7603444615e87bf5d454d6f9ee93b4 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: staging-manifest-${{ env.SHA }}
           path: deployment-manifest.json
