@@ -38,6 +38,12 @@ import type {
   EngineCombat,
   EngineCombatView,
   EngineCheckEvidence,
+  EngineKnowledgeRecord,
+  EngineSenseCapabilities,
+  EngineWorldFact,
+  EngineWorldFactPatchOperations,
+  InformationTier,
+  PublicProjection,
   EnginePendingReaction,
   EnginePendingAdvancement,
   EngineTurnBudget,
@@ -365,6 +371,20 @@ const REVIEWED_CHALLENGE_DEFINITIONS: ChallengeDefinition[] = [
     actorCheck: { ability: "dex", skill: "stealth" },
     opposed: { ability: "wis", skill: "perception" },
   },
+  {
+    id: "search-hidden-fact-v1",
+    aliases: ["active-search", "search-hidden-fact"],
+    feasibility: "uncertain",
+    selectedRuleFamily: "perception-search",
+    dcSource: "reviewed_challenge",
+    dcByDifficulty: { gentle: 10, standard: 14, challenging: 18 },
+    dcProvenance: "reviewed-challenge:search-hidden-fact-v1:dc-band-v1",
+    stakes: ["opportunity"],
+    allowedOutcomes: ["success", "failure-with-complication"],
+    retryPolicy: "new_approach_or_state_change",
+    costs: { timeMinutes: 0, noise: 0, exposure: 0 },
+    actorCheck: { ability: "wis", skill: "perception" },
+  },
 ];
 
 function normalizeChallengeId(value: string): string {
@@ -386,10 +406,11 @@ function challengeApproachHash(
   actorId: string,
   challengeId: string,
   sceneId: string,
-  approach: string
+  approach: string,
+  targetId = ""
 ): string {
   return createHash("sha256")
-    .update([actorId, challengeId, sceneId, normalizeApproach(approach).toLocaleLowerCase()].join("\n"))
+    .update([actorId, challengeId, sceneId, targetId, normalizeApproach(approach).toLocaleLowerCase()].join("\n"))
     .digest("hex");
 }
 
@@ -410,7 +431,7 @@ function buildAdjudicationDecision(
     sceneId,
     goal: command.goal.trim(),
     approach: normalizeApproach(command.approach),
-    approachHash: challengeApproachHash(context.actorId, definition.id, sceneId, command.approach),
+    approachHash: challengeApproachHash(context.actorId, definition.id, sceneId, command.approach, command.factId),
     clarificationStatus: "not_needed",
     feasibility: definition.feasibility,
     selectedRuleFamily: definition.selectedRuleFamily,
@@ -425,7 +446,7 @@ function buildAdjudicationDecision(
     allowedOutcomes: [...definition.allowedOutcomes],
     retryPolicy: definition.retryPolicy,
     costs: { ...definition.costs },
-    informationPolicy: command.informationPolicy ?? "public",
+    informationPolicy: definition.id === "search-hidden-fact-v1" ? "withheld" : command.informationPolicy ?? "public",
     ...(command.helperId ? { helperId: command.helperId } : {}),
     ...(command.opponentId ? { opponentId: command.opponentId } : {}),
     ...(command.tool ? { tool: command.tool } : {}),
@@ -619,6 +640,15 @@ function resolveChallengeAttempt(
       decision
     );
   }
+  const searchFact = definition.id === "search-hidden-fact-v1"
+    ? state.worldFacts.find((fact) => fact.active && fact.visibility === "hidden" && fact.id === command.factId && fact.sceneId === (state.worldContext?.id ?? ""))
+    : null;
+  if (definition.id === "search-hidden-fact-v1") {
+    if (!searchFact) return adjudicationRejection(state, tool, "search_unavailable", "No searchable fact is authorized in the current scene.", decision);
+    if (state.actorKnowledge.some((record) => record.actorId === context.actorId && record.factId === searchFact.id && !record.stale && record.factRevision === searchFact.revision && record.tier === "known")) {
+      return adjudicationRejection(state, tool, "discovery_already_known", "That search has already revealed all currently authorized information.", decision);
+    }
+  }
   const helperRejection = validateChallengeHelper(state, context, decision.helperId, tool, decision);
   if (helperRejection) return helperRejection;
   if (definition.feasibility === "automatic") {
@@ -647,22 +677,50 @@ function resolveChallengeAttempt(
 
   const checkCommand = {
     kind: "roll_check" as const,
-    ability: "str" as const,
-    skill: "athletics",
+    ability: (definition.actorCheck?.ability ?? "str") as EngineAbility,
+    skill: definition.actorCheck?.skill ?? "athletics",
     goal: command.goal,
   };
-  return resolveCheck(
+  const result = resolveCheck(
     state,
     context,
     clientCommandId,
     checkCommand,
     tool,
-    "str",
-    "athletics",
+    definition.actorCheck?.ability ?? "str",
+    definition.actorCheck?.skill ?? "athletics",
     command.goal,
     decision,
     command
   );
+  return definition.id === "search-hidden-fact-v1" && searchFact
+    ? applySearchDiscoveryResolution(result, context.actorId, searchFact)
+    : result;
+}
+
+function applySearchDiscoveryResolution(
+  resolution: EngineResolution,
+  actorId: string,
+  fact: EngineWorldFact
+): EngineResolution {
+  if (!resolution.accepted || resolution.event?.adjudication?.challengeId !== "search-hidden-fact-v1" || resolution.event.adjudication.allowedOutcomes.length === 0) return resolution;
+  const outcome = resolution.state.adjudicationHistory.at(-1)?.outcome;
+  if (outcome !== "success") return resolution;
+  const next = cloneCampaign(resolution.state);
+  const record = appendKnowledgeRecord(next, actorId, fact, "known", "active-search", `active-search:${fact.id}`, next.version);
+  const change = { path: "/actorKnowledge/" + record.id, before: null, after: record };
+  const event = resolution.event ? {
+    ...resolution.event,
+    stateChanges: [...resolution.event.stateChanges, change],
+  } : null;
+  return {
+    ...resolution,
+    state: next,
+    message: "You discover: " + fact.title + ".",
+    data: { discovery: { factId: fact.id, title: fact.title, description: fact.description, tier: "known" }, informationPolicy: "public" },
+    event,
+    narration: rulesNarration("You discover: " + fact.title + "."),
+  };
 }
 
 export function defaultContentPolicy(): EngineContentPolicy {
@@ -732,6 +790,8 @@ export function createInitialCampaign(
     advancementPolicy: defaultAdvancementPolicy(),
     pendingAdvancement: null,
     worldContext: null,
+    worldFacts: [],
+    actorKnowledge: [],
     playerNotes: [],
     character,
     combat: emptyCombat(),
@@ -781,6 +841,8 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     contentPolicy?: EngineContentPolicy;
     experienceProfile?: unknown;
     adjudicationHistory?: unknown;
+    worldFacts?: unknown;
+    actorKnowledge?: unknown;
   };
   if (!next.campaign) next.campaign = defaultCampaignProfile();
   next.contentPolicy = normalizeContentPolicy(next.contentPolicy ?? defaultContentPolicy());
@@ -788,6 +850,8 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   next.adjudicationHistory = Array.isArray(next.adjudicationHistory)
     ? next.adjudicationHistory.slice(-100) as EngineAdjudicationAttempt[]
     : [];
+  next.worldFacts = normalizeWorldFacts(next.worldFacts);
+  next.actorKnowledge = normalizeKnowledgeRecords(next.actorKnowledge);
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
   if (!next.tutorialStep && next.tutorialStep !== 0) next.tutorialStep = 0;
@@ -802,6 +866,8 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.phase = "character_creation";
     next.tutorialStep = 0;
     next.worldContext = null;
+    next.worldFacts = [];
+    next.actorKnowledge = [];
     next.playerNotes = [];
     next.advancementPolicy = defaultAdvancementPolicy();
     next.pendingAdvancement = null;
@@ -847,6 +913,61 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
 
 export function cloneCampaign(state: LanternCampaignState): LanternCampaignState {
   return JSON.parse(JSON.stringify(state)) as LanternCampaignState;
+}
+
+function normalizeWorldFacts(value: unknown): EngineWorldFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Partial<EngineWorldFact>;
+    if (
+      typeof raw.id !== "string" || typeof raw.title !== "string" || typeof raw.description !== "string"
+      || !["object", "secret", "trap", "area"].includes(raw.kind ?? "")
+      || !["public", "hidden"].includes(raw.visibility ?? "")
+    ) return [];
+    return [{
+      id: raw.id,
+      kind: raw.kind as EngineWorldFact["kind"],
+      title: raw.title,
+      description: raw.description,
+      visibility: raw.visibility as EngineWorldFact["visibility"],
+      obscurity: raw.obscurity === "dark" ? "dark" : "clear",
+      requiredSense: ["normal", "darkvision", "blindsight", "tremorsense", "hearing"].includes(raw.requiredSense ?? "")
+        ? raw.requiredSense as EngineWorldFact["requiredSense"]
+        : "normal",
+      passiveDc: typeof raw.passiveDc === "number" ? Math.max(1, Math.min(30, Math.trunc(raw.passiveDc))) : null,
+      sceneId: typeof raw.sceneId === "string" ? raw.sceneId : "campaign-scene",
+      revision: typeof raw.revision === "number" ? Math.max(1, Math.trunc(raw.revision)) : 1,
+      active: raw.active !== false,
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
+      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date(0).toISOString(),
+    }];
+  });
+}
+
+function normalizeKnowledgeRecords(value: unknown): EngineKnowledgeRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Partial<EngineKnowledgeRecord>;
+    if (typeof raw.id !== "string" || typeof raw.actorId !== "string" || typeof raw.factId !== "string") return [];
+    const tiers: InformationTier[] = ["public", "perceived", "known", "rumor", "false-belief", "stale", "withheld"];
+    const sources: EngineKnowledgeRecord["source"][] = ["passive-observation", "active-search", "rumor", "false-belief", "dm"];
+    return [{
+      id: raw.id,
+      actorId: raw.actorId,
+      factId: raw.factId,
+      tier: tiers.includes(raw.tier as InformationTier) ? raw.tier as InformationTier : "stale",
+      source: sources.includes(raw.source as EngineKnowledgeRecord["source"]) ? raw.source as EngineKnowledgeRecord["source"] : "dm",
+      provenance: typeof raw.provenance === "string" ? raw.provenance : "legacy",
+      confidence: typeof raw.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : 0,
+      campaignVersion: typeof raw.campaignVersion === "number" ? Math.max(0, Math.trunc(raw.campaignVersion)) : 0,
+      factRevision: typeof raw.factRevision === "number" ? Math.max(1, Math.trunc(raw.factRevision)) : 1,
+      stale: raw.stale === true,
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
+      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date(0).toISOString(),
+    }];
+  }).slice(-500);
 }
 
 function normalizeAdvancementPolicy(value: unknown): EngineAdvancementPolicy {
@@ -1017,6 +1138,7 @@ function recalculateProgressionOnLoad(character: EngineCharacter): EngineCharact
 }
 
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
+  const projection = actorKnowledgeProjection(state.actorId, state);
   const sandboxActions = ["observe", "listen", "roll"];
   const advancementActions = state.pendingAdvancement?.status === "pending" ? ["advancement_confirm"] : [];
   const combatActions = state.combat.status === "active"
@@ -1044,7 +1166,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     advancementPolicy: state.advancementPolicy,
     pendingAdvancement: state.pendingAdvancement,
     characterCreated: state.character.created,
-    worldContext: projectWorldContext(state.worldContext),
+    worldContext: projection.worldContext,
     playerNotes: state.playerNotes,
     quests: state.quests,
     effects: state.effects.filter((effect) => effect.status === "active"),
@@ -1081,6 +1203,7 @@ export function readToolData(
     | "quest_progress"
     | "combat_state"
 ): unknown {
+  const projection = actorKnowledgeProjection(state.actorId, state);
   switch (tool) {
     case "campaign_context":
       return {
@@ -1093,7 +1216,8 @@ export function readToolData(
         tutorialStep: state.tutorialStep,
         advancementPolicy: state.advancementPolicy,
         pendingAdvancement: state.pendingAdvancement,
-        worldContext: projectWorldContext(state.worldContext),
+        worldContext: projection.worldContext,
+        knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
         quests: state.quests,
         effects: state.effects.filter((effect) => effect.status === "active"),
@@ -1106,16 +1230,16 @@ export function readToolData(
       };
     case "observe":
       return {
-        worldContext: projectWorldContext(state.worldContext),
+        worldContext: projection.worldContext,
         campaignVersion: state.version,
         combat: combatData(state.combat),
       };
     case "world_context":
-      return projectWorldContext(state.worldContext);
+      return projection.worldContext;
     case "player_notes":
       return state.playerNotes;
     case "npc_context":
-      return state.worldContext?.npcs ?? [];
+      return projection.worldContext?.npcs ?? [];
     case "merchant_catalog":
       return projectMerchants(state.worldContext?.merchants ?? []);
     case "character_sheet":
@@ -1486,8 +1610,10 @@ function resolveWorldContext(
   const currentWorldContext = state.worldContext;
   const npcPatch = applyNpcPatch(currentWorldContext?.npcs ?? [], command.npcs);
   const merchantPatch = applyMerchantPatch(currentWorldContext?.merchants ?? [], command.merchants);
+  const sceneId = currentWorldContext?.id ?? randomUUID();
+  const factPatch = applyWorldFactPatch(state.worldFacts, command.facts, sceneId);
   const worldContext = {
-    id: currentWorldContext?.id ?? randomUUID(),
+    id: sceneId,
     title: command.title,
     description: command.description,
     features: command.features,
@@ -1504,9 +1630,16 @@ function resolveWorldContext(
   appendWorldContextChange(stateChanges, "/worldContext/features", currentWorldContext?.features ?? null, worldContext.features);
   appendWorldContextChange(stateChanges, "/worldContext/exits", currentWorldContext?.exits ?? null, worldContext.exits);
   stateChanges.push(...npcPatch.stateChanges, ...merchantPatch.stateChanges);
+  stateChanges.push(...factPatch.stateChanges);
 
   const next = cloneCampaign(state);
   next.worldContext = worldContext;
+  next.worldFacts = factPatch.entities;
+  markKnowledgeStale(next, factPatch.changedFactIds);
+  evaluatePassiveKnowledge(next, context.actorId, state.version + 1);
+  if (JSON.stringify(state.actorKnowledge) !== JSON.stringify(next.actorKnowledge)) {
+    stateChanges.push({ path: "/actorKnowledge", before: state.actorKnowledge, after: next.actorKnowledge });
+  }
   return commit(
     next,
     context,
@@ -1514,7 +1647,7 @@ function resolveWorldContext(
     command,
     tool,
     "The DM establishes the current context: " + worldContext.title + ".",
-    { worldContext },
+    { worldContext: actorKnowledgeProjection(context.actorId, next).worldContext },
     "world_context_updated",
     [],
     [],
@@ -1524,6 +1657,66 @@ function resolveWorldContext(
 
 type WorldContextPatchValidation = { code: string; message: string };
 type WorldContextStateChange = { path: string; before: unknown; after: unknown };
+
+function validateWorldFactPatch(
+  existing: EngineWorldFact[],
+  operations: EngineWorldFactPatchOperations | undefined
+): WorldContextPatchValidation | null {
+  if (!operations) return null;
+  const upserts = operations.upsert ?? [];
+  const removals = operations.remove ?? [];
+  if (hasDuplicateEntityId(existing) || hasDuplicateEntityId(upserts) || hasDuplicateEntityId(removals)) {
+    return { code: "duplicate_fact_id", message: "Fact identifiers must be unique before a world context can be patched." };
+  }
+  const upsertIds = new Set(upserts.map((fact) => fact.id));
+  if (removals.some((id) => upsertIds.has(id))) {
+    return { code: "conflicting_fact_operation", message: "A fact cannot be upserted and removed in the same world_context command." };
+  }
+  const existingIds = new Set(existing.map((fact) => fact.id));
+  if (removals.some((id) => !existingIds.has(id))) {
+    return { code: "fact_not_found", message: "The requested fact removal is not established in the current context." };
+  }
+  if (existing.filter((fact) => fact.active).length - removals.filter((id) => existing.find((fact) => fact.id === id)?.active).length + upserts.filter((fact) => !existingIds.has(fact.id)).length > 40) {
+    return { code: "fact_limit_exceeded", message: "A world context can contain at most 40 active facts." };
+  }
+  return null;
+}
+
+function applyWorldFactPatch(
+  existing: EngineWorldFact[],
+  operations: EngineWorldFactPatchOperations | undefined,
+  sceneId: string
+): { entities: EngineWorldFact[]; changedFactIds: string[]; stateChanges: WorldContextStateChange[] } {
+  if (!operations) return { entities: existing, changedFactIds: [], stateChanges: [] };
+  const now = new Date().toISOString();
+  const byId = new Map(existing.map((fact) => [fact.id, fact]));
+  const changedFactIds: string[] = [];
+  const stateChanges: WorldContextStateChange[] = [];
+  for (const input of operations.upsert ?? []) {
+    const previous = byId.get(input.id);
+    const fact: EngineWorldFact = {
+      ...input,
+      passiveDc: input.passiveDc ?? null,
+      sceneId,
+      revision: (previous?.revision ?? 0) + 1,
+      active: true,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+    };
+    byId.set(input.id, fact);
+    changedFactIds.push(input.id);
+    stateChanges.push({ path: "/worldFacts/" + escapeJsonPointerSegment(input.id), before: previous ?? null, after: fact });
+  }
+  for (const id of operations.remove ?? []) {
+    const previous = byId.get(id);
+    if (!previous) continue;
+    const fact = { ...previous, active: false, revision: previous.revision + 1, updatedAt: now };
+    byId.set(id, fact);
+    changedFactIds.push(id);
+    stateChanges.push({ path: "/worldFacts/" + escapeJsonPointerSegment(id), before: previous, after: fact });
+  }
+  return { entities: [...byId.values()], changedFactIds: [...new Set(changedFactIds)], stateChanges };
+}
 
 function validateWorldContextPatch(
   state: LanternCampaignState,
@@ -1551,6 +1744,9 @@ function validateWorldContextPatch(
     (patch) => patch.name === undefined
   );
   if (npcValidation) return npcValidation;
+
+  const factValidation = validateWorldFactPatch(state.worldFacts, command.facts);
+  if (factValidation) return factValidation;
 
   return validateEntityPatchOperations(
     command.merchants,
@@ -5652,6 +5848,7 @@ function createCanonicalCharacter(
       tools: [...fixedTools, ...selectedTools],
       languages: languages.map((language) => language.name),
     },
+    senses: defaultSenseCapabilities(),
     features: features.map((feature) => feature.name),
     featureUses: { secondWind: characterClass.sourceKey === "srd_fighter" ? 1 : 0 },
     spellcasting: buildSpellcastingState(characterClass.definition.name, level, abilities),
@@ -5744,6 +5941,10 @@ function slugifyFeatureName(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
+function defaultSenseCapabilities(): EngineSenseCapabilities {
+  return { normalVision: true, darkvisionFeet: 0, blindsightFeet: 0, tremorsenseFeet: 0, hearing: true };
+}
+
 function createUnconfiguredCharacter(id: string): EngineCharacter {
   return createCharacter("", "", "fighter", id, false);
 }
@@ -5817,6 +6018,7 @@ function createCharacter(
       tools: classPreset.toolProficiencies,
       languages: speciesPreset.languages,
     },
+    senses: defaultSenseCapabilities(),
     features: [...classPreset.startingFeatures, ...speciesPreset.features],
     featureUses: { secondWind: className.toLocaleLowerCase("en-US") === "fighter" ? 1 : 0 },
     spellcasting: buildSpellcastingState(className, level, abilities),
@@ -5858,12 +6060,26 @@ function normalizeCharacter(character: EngineCharacter): EngineCharacter {
     conditions: Array.isArray(raw.conditions) ? raw.conditions : [],
     conditionEffects: normalizeAppliedConditions(raw.conditionEffects),
     featureUses: normalizeFeatureUses(raw.featureUses, raw.className),
+    senses: normalizeSenseCapabilities((raw as EngineCharacter & { senses?: unknown }).senses),
     deathSaveSuccesses: raw.deathSaveSuccesses ?? 0,
     deathSaveFailures: raw.deathSaveFailures ?? 0,
     xp: raw.xp ?? 0,
   });
   syncCurrencyProjection(hydrated);
   return hydrated;
+}
+
+function normalizeSenseCapabilities(value: unknown): EngineSenseCapabilities {
+  const defaults = defaultSenseCapabilities();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return defaults;
+  const raw = value as Partial<EngineSenseCapabilities>;
+  return {
+    normalVision: raw.normalVision !== false,
+    darkvisionFeet: typeof raw.darkvisionFeet === "number" ? Math.max(0, Math.trunc(raw.darkvisionFeet)) : defaults.darkvisionFeet,
+    blindsightFeet: typeof raw.blindsightFeet === "number" ? Math.max(0, Math.trunc(raw.blindsightFeet)) : defaults.blindsightFeet,
+    tremorsenseFeet: typeof raw.tremorsenseFeet === "number" ? Math.max(0, Math.trunc(raw.tremorsenseFeet)) : defaults.tremorsenseFeet,
+    hearing: raw.hearing !== false,
+  };
 }
 
 function normalizeFeatureUses(value: unknown, className: unknown): Record<string, number> {
@@ -6321,7 +6537,240 @@ function projectWorldContext(world: LanternCampaignState["worldContext"]): Engin
   return {
     ...world,
     merchants: projectMerchants(world.merchants),
+    facts: [],
   };
+}
+
+function actorSenseCapabilities(state: LanternCampaignState, actorId: string): EngineSenseCapabilities {
+  return actorId === state.actorId ? state.character.senses : defaultSenseCapabilities();
+}
+
+function actorCanPerceiveFact(state: LanternCampaignState, actorId: string, fact: EngineWorldFact): boolean {
+  const senses = actorSenseCapabilities(state, actorId);
+  if (hasActiveCondition(state.effects, actorId, "blinded") || hasActiveCondition(state.effects, "actor:" + actorId, "blinded")) return false;
+  if (fact.obscurity === "dark" && fact.requiredSense !== "hearing" && senses.darkvisionFeet <= 0 && senses.blindsightFeet <= 0) return false;
+  switch (fact.requiredSense) {
+    case "darkvision": return senses.darkvisionFeet > 0 || senses.blindsightFeet > 0;
+    case "blindsight": return senses.blindsightFeet > 0;
+    case "tremorsense": return senses.tremorsenseFeet > 0;
+    case "hearing": return senses.hearing;
+    default: return senses.normalVision || senses.darkvisionFeet > 0 || senses.blindsightFeet > 0;
+  }
+}
+
+function canonicalKnowledgeSkillModifier(state: LanternCampaignState, skill: string): number {
+  const entry = state.character.skills[skill];
+  if (!entry) return abilityModifier(state.character.abilities.wis);
+  return abilityModifier(state.character.abilities[entry.ability])
+    + (entry.proficient ? state.character.proficiencyBonus : 0)
+    + (entry.expertise ? state.character.proficiencyBonus : 0);
+}
+
+function appendKnowledgeRecord(
+  state: LanternCampaignState,
+  actorId: string,
+  fact: EngineWorldFact,
+  tier: InformationTier,
+  source: EngineKnowledgeRecord["source"],
+  provenance: string,
+  campaignVersion: number
+): EngineKnowledgeRecord {
+  const now = new Date().toISOString();
+  const existing = state.actorKnowledge.find((record) =>
+    record.actorId === actorId && record.factId === fact.id && record.factRevision === fact.revision && !record.stale && record.tier === tier
+  );
+  if (existing) return existing;
+  const record: EngineKnowledgeRecord = {
+    id: randomUUID(),
+    actorId,
+    factId: fact.id,
+    tier,
+    source,
+    provenance,
+    confidence: tier === "known" ? 1 : 0.75,
+    campaignVersion,
+    factRevision: fact.revision,
+    stale: false,
+    createdAt: now,
+    updatedAt: now,
+  };
+  state.actorKnowledge = [...state.actorKnowledge, record].slice(-500);
+  return record;
+}
+
+function evaluatePassiveKnowledge(state: LanternCampaignState, actorId: string, campaignVersion: number): void {
+  const passive = 10 + canonicalKnowledgeSkillModifier(state, "perception");
+  for (const fact of state.worldFacts) {
+    if (!fact.active || fact.visibility !== "hidden" || fact.passiveDc == null || fact.passiveDc > passive) continue;
+    if (!actorCanPerceiveFact(state, actorId, fact)) continue;
+    appendKnowledgeRecord(state, actorId, fact, "perceived", "passive-observation", `passive-perception:${fact.sceneId}`, campaignVersion);
+  }
+}
+
+function markKnowledgeStale(state: LanternCampaignState, changedFactIds: string[] = []): void {
+  const changed = new Set(changedFactIds);
+  state.actorKnowledge = state.actorKnowledge.map((record) => {
+    const fact = state.worldFacts.find((candidate) => candidate.id === record.factId);
+    if (changed.has(record.factId) || !fact || record.factRevision !== fact.revision) {
+      return { ...record, tier: "stale", stale: true, updatedAt: new Date().toISOString() };
+    }
+    return record;
+  });
+}
+
+export function actorKnowledgeProjection(actorId: string, state: LanternCampaignState): PublicProjection {
+  const knowledge = state.actorKnowledge.filter((record) => record.actorId === actorId).map((record) => ({ ...record }));
+  const currentKnowledge = new Map(
+    knowledge
+      .filter((record) => !record.stale && (record.tier === "known" || record.tier === "perceived"))
+      .map((record) => [record.factId, record])
+  );
+  const facts = state.worldFacts
+    .filter((fact) => fact.active)
+    .filter((fact) => fact.visibility === "public" || currentKnowledge.get(fact.id)?.factRevision === fact.revision)
+    .map((fact) => ({ ...fact }));
+  const base = projectWorldContext(state.worldContext);
+  return {
+    actorId,
+    informationTiers: ["public", "perceived", "known", "rumor", "false-belief", "stale", "withheld"],
+    worldContext: base ? { ...base, facts } : null,
+    facts,
+    knowledge,
+  };
+}
+
+export function projectResolutionForActor<T extends EngineResolution>(resolution: T, actorId: string): T {
+  const state = projectStateForActor(actorId, resolution.state);
+  const event = resolution.event
+    ? redactEventForActor(resolution.event)
+    : null;
+  return { ...resolution, state, event, data: redactResolutionData(resolution.data) } as T;
+}
+
+export function projectStateForActor(actorId: string, state: LanternCampaignState): LanternCampaignState {
+  const projection = actorKnowledgeProjection(actorId, state);
+  const projected = cloneCampaign(state);
+  projected.worldFacts = projection.facts;
+  projected.actorKnowledge = projection.knowledge;
+  return projected;
+}
+
+export function projectEventForActor(actorId: string, state: LanternCampaignState, event: EngineEvent): EngineEvent {
+  void actorId;
+  void state;
+  return redactEventForActor(event);
+}
+
+function redactEventForActor(event: EngineEvent): EngineEvent {
+  const command = redactCommand(event.command);
+  const withheld = event.check?.informationPolicy === "withheld"
+    || event.adjudication?.informationPolicy === "withheld"
+    || event.effects?.some((effect) => effect.check?.informationPolicy === "withheld" || effect.adjudication?.informationPolicy === "withheld");
+  return {
+    ...event,
+    command,
+    rolls: withheld ? [] : event.rolls,
+    modifiers: withheld ? [] : event.modifiers,
+    outcome: withheld ? "withheld" : event.outcome,
+    ...(withheld && event.check ? { check: redactWithheldCheck(event.check) } : {}),
+    ...(withheld && event.adjudication ? { adjudication: redactWithheldAdjudication(event.adjudication) } : {}),
+    ...(event.effects ? {
+      effects: event.effects.map((effect) => {
+        const effectWithheld = effect.check?.informationPolicy === "withheld"
+          || effect.adjudication?.informationPolicy === "withheld";
+        return {
+          ...effect,
+          command: redactCommand(effect.command),
+          rolls: effectWithheld ? [] : effect.rolls,
+          modifiers: effectWithheld ? [] : effect.modifiers,
+          ...(effectWithheld && effect.check ? { check: redactWithheldCheck(effect.check) } : {}),
+          ...(effectWithheld && effect.adjudication ? { adjudication: redactWithheldAdjudication(effect.adjudication) } : {}),
+          data: redactResolutionData(effect.data),
+          stateChanges: effect.stateChanges.filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge")),
+        };
+      }),
+    } : {}),
+    stateChanges: event.stateChanges.filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge")),
+  };
+}
+
+function redactResolutionData(data: unknown): unknown {
+  if (Array.isArray(data)) return data.map((entry) => redactResolutionData(entry));
+  if (!data || typeof data !== "object") return data;
+  const projected = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
+  if (projected.command && typeof projected.command === "object" && !Array.isArray(projected.command)) {
+    projected.command = redactCommand(projected.command as Record<string, unknown>);
+  }
+  if (Object.hasOwn(projected, "data")) projected.data = redactResolutionData(projected.data);
+  if (Array.isArray(projected.effects)) {
+    projected.effects = projected.effects.map((effect) => redactResolutionData(effect));
+  }
+  const adjudication = projected.adjudication;
+  if (adjudication && typeof adjudication === "object" && !Array.isArray(adjudication)) {
+    projected.adjudication = redactWithheldAdjudication(adjudication);
+  }
+  const check = projected.check;
+  if (check && typeof check === "object" && !Array.isArray(check)) {
+    projected.check = redactWithheldCheck(check);
+  }
+  const withheld = projected.informationPolicy === "withheld"
+    || (projected.adjudication && typeof projected.adjudication === "object" && !Array.isArray(projected.adjudication)
+      && (projected.adjudication as Record<string, unknown>).informationPolicy === "withheld");
+  if (withheld) {
+    delete projected.roll;
+    delete projected.total;
+    delete projected.modifier;
+    delete projected.opponentModifier;
+    delete projected.opponentTotal;
+    delete projected.opponentRoll;
+  }
+  return projected;
+}
+
+function redactCommand<T extends object>(command: T): T {
+  const projected = JSON.parse(JSON.stringify(command)) as Record<string, unknown>;
+  if (projected.kind === "world_context") delete projected.facts;
+  if (projected.kind === "challenge_attempt") delete projected.factId;
+  if (projected.kind === "turn_plan" && Array.isArray(projected.effects)) {
+    projected.effects = projected.effects.map((effect) => {
+      if (!effect || typeof effect !== "object" || Array.isArray(effect)) return effect;
+      const entry = effect as Record<string, unknown>;
+      return {
+        ...entry,
+        ...(entry.command && typeof entry.command === "object" && !Array.isArray(entry.command)
+          ? { command: redactCommand(entry.command as Record<string, unknown>) }
+          : {}),
+      };
+    });
+  }
+  return projected as T;
+}
+
+function redactWithheldAdjudication<T>(adjudication: T): T {
+  if (!adjudication || typeof adjudication !== "object" || Array.isArray(adjudication)) return adjudication;
+  const decision = adjudication as T & Record<string, unknown>;
+  if (decision.informationPolicy !== "withheld") return adjudication;
+  return {
+    ...decision,
+    dc: null,
+    dcProvenance: "withheld",
+    approachHash: undefined,
+  } as T;
+}
+
+function redactWithheldCheck<T>(check: T): T {
+  if (!check || typeof check !== "object" || Array.isArray(check)) return check;
+  const evidence = check as T & Record<string, unknown>;
+  if (evidence.informationPolicy !== "withheld") return check;
+  return {
+    ...evidence,
+    modifier: 0,
+    modifierSources: [],
+    advantageSources: [],
+    disadvantageSources: [],
+    opponentModifier: undefined,
+    opponentTotal: undefined,
+  } as T;
 }
 
 function normalizeQuest(quest: EngineQuest): EngineQuest {
@@ -6836,6 +7285,7 @@ function characterData(character: EngineCharacter): EngineCharacterView {
     proficiencyBonus: character.proficiencyBonus,
     savingThrows: character.savingThrows,
     skills: character.skills,
+    senses: character.senses,
     size: character.size,
     speed: character.speed,
     hitDie: character.hitDie,
