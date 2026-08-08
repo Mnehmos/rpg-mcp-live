@@ -120,6 +120,75 @@ export const engineInventoryItemInputSchema = z.union([
 ]);
 export type EngineInventoryItemInput = z.infer<typeof engineInventoryItemInputSchema>;
 
+const worldContextEntityIdSchema = z.string().trim().min(1).max(120);
+const worldContextDispositionSchema = z.enum(["hostile", "unfriendly", "neutral", "friendly", "helpful"]);
+
+export const engineMerchantListingInputSchema = z.object({
+  item: engineInventoryItemInputSchema,
+  stock: z.number().int().min(-1),
+  buyPriceCopper: z.number().int().nonnegative(),
+  sellPriceCopper: z.number().int().nonnegative(),
+}).strict();
+export type EngineMerchantListingInput = z.infer<typeof engineMerchantListingInputSchema>;
+
+export const engineNpcPatchSchema = z.object({
+  id: worldContextEntityIdSchema,
+  name: z.string().trim().min(1).max(160).optional(),
+  description: z.string().trim().max(2_000).optional(),
+  disposition: worldContextDispositionSchema.optional(),
+  goals: z.array(z.string().trim().min(1).max(240)).max(12).optional(),
+  socialDc: z.number().int().min(1).max(30).optional(),
+  // Rejection-only input: the domain rejects every supplied value as server-owned.
+  relationshipScore: z.number().int().min(-100).max(100).optional(),
+  memories: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+}).strict();
+export type EngineNpcPatch = z.infer<typeof engineNpcPatchSchema>;
+
+export const engineMerchantPatchSchema = z.object({
+  id: worldContextEntityIdSchema,
+  name: z.string().trim().min(1).max(160).optional(),
+  description: z.string().trim().max(2_000).optional(),
+  disposition: worldContextDispositionSchema.optional(),
+  items: z.array(engineMerchantListingInputSchema).max(100).optional(),
+}).strict();
+export type EngineMerchantPatch = z.infer<typeof engineMerchantPatchSchema>;
+
+export const engineNpcPatchOperationsSchema = z.object({
+  upsert: z.array(engineNpcPatchSchema).max(20).optional(),
+  remove: z.array(worldContextEntityIdSchema).max(20).optional(),
+}).strict().refine(
+  (operations) => (operations.upsert?.length ?? 0) + (operations.remove?.length ?? 0) > 0,
+  "A provided NPC patch needs at least one operation."
+);
+export type EngineNpcPatchOperations = z.infer<typeof engineNpcPatchOperationsSchema>;
+
+export const engineMerchantPatchOperationsSchema = z.object({
+  upsert: z.array(engineMerchantPatchSchema).max(20).optional(),
+  remove: z.array(worldContextEntityIdSchema).max(20).optional(),
+}).strict().refine(
+  (operations) => (operations.upsert?.length ?? 0) + (operations.remove?.length ?? 0) > 0,
+  "A provided merchant patch needs at least one operation."
+);
+export type EngineMerchantPatchOperations = z.infer<typeof engineMerchantPatchOperationsSchema>;
+
+export const engineWorldContextArgsSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  description: z.string().trim().min(1).max(6_000),
+  features: z.array(z.string().trim().min(1).max(120)).max(20),
+  exits: z.array(z.object({
+    id: worldContextEntityIdSchema,
+    label: z.string().trim().min(1).max(160),
+  }).strict()).max(20),
+  npcs: engineNpcPatchOperationsSchema.optional(),
+  merchants: engineMerchantPatchOperationsSchema.optional(),
+}).strict();
+export type EngineWorldContextArgs = z.infer<typeof engineWorldContextArgsSchema>;
+
+export const engineWorldContextCommandSchema = engineWorldContextArgsSchema.extend({
+  kind: z.literal("world_context"),
+}).strict();
+export type EngineWorldContextCommand = z.infer<typeof engineWorldContextCommandSchema>;
+
 export const engineToolNameSchema = z.enum([
   "campaign_context",
   "content_search",
@@ -228,52 +297,7 @@ export type EngineCampaignDeleteRequest = z.infer<typeof engineCampaignDeleteSch
 export const engineCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("observe") }).strict(),
   z.object({ kind: z.literal("listen") }).strict(),
-  z
-    .object({
-      kind: z.literal("world_context"),
-      title: z.string().trim().min(1).max(160),
-      description: z.string().trim().min(1).max(6_000),
-      features: z.array(z.string().trim().min(1).max(120)).max(20),
-      exits: z
-        .array(
-          z
-            .object({
-              id: z.string().trim().min(1).max(120),
-              label: z.string().trim().min(1).max(160),
-            })
-            .strict()
-        )
-        .max(20),
-      npcs: z.array(
-        z.object({
-          id: z.string().trim().min(1).max(120),
-          name: z.string().trim().min(1).max(160),
-          description: z.string().trim().max(2_000).default(""),
-          disposition: z.enum(["hostile", "unfriendly", "neutral", "friendly", "helpful"]).default("neutral"),
-          goals: z.array(z.string().trim().min(1).max(240)).max(12).default([]),
-          socialDc: z.number().int().min(1).max(30).default(12),
-          relationshipScore: z.number().int().min(-100).max(100).default(0),
-          memories: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
-        }).strict()
-      ).max(20).optional(),
-      merchants: z.array(
-        z.object({
-          id: z.string().trim().min(1).max(120),
-          name: z.string().trim().min(1).max(160),
-          description: z.string().trim().max(2_000).default(""),
-          disposition: z.enum(["hostile", "unfriendly", "neutral", "friendly", "helpful"]).default("neutral"),
-          items: z.array(
-            z.object({
-              item: engineInventoryItemInputSchema,
-              stock: z.number().int().min(-1),
-              buyPriceCopper: z.number().int().nonnegative(),
-              sellPriceCopper: z.number().int().nonnegative(),
-            }).strict()
-          ).max(100).default([]),
-        }).strict()
-      ).max(20).optional(),
-    })
-    .strict(),
+  engineWorldContextCommandSchema,
   z
     .object({
       kind: z.literal("player_note_add"),

@@ -30,8 +30,12 @@ import type {
   EngineImprovEffect,
   EngineInventoryItem,
   EngineMerchant,
+  EngineMerchantPatch,
+  EngineMerchantPatchOperations,
   EngineMerchantView,
   EngineNpc,
+  EngineNpcPatch,
+  EngineNpcPatchOperations,
   EngineMessage,
   EngineQuest,
   EngineResolution,
@@ -481,16 +485,32 @@ function resolveWorldContext(
   command: Extract<EngineCommand, { kind: "world_context" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
-  const next = cloneCampaign(state);
+  const validation = validateWorldContextPatch(state, command);
+  if (validation) return rejection(state, tool, validation.code, validation.message);
+
+  const currentWorldContext = state.worldContext;
+  const npcPatch = applyNpcPatch(currentWorldContext?.npcs ?? [], command.npcs);
+  const merchantPatch = applyMerchantPatch(currentWorldContext?.merchants ?? [], command.merchants);
   const worldContext = {
-    id: state.worldContext?.id ?? randomUUID(),
+    id: currentWorldContext?.id ?? randomUUID(),
     title: command.title,
     description: command.description,
     features: command.features,
     exits: command.exits,
-    npcs: (command.npcs ?? []).map(normalizeNpc),
-    merchants: (command.merchants ?? []).map(normalizeMerchant),
+    npcs: npcPatch.entities,
+    merchants: merchantPatch.entities,
   };
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+  if (!currentWorldContext) {
+    stateChanges.push({ path: "/worldContext/id", before: null, after: worldContext.id });
+  }
+  appendWorldContextChange(stateChanges, "/worldContext/title", currentWorldContext?.title ?? null, worldContext.title);
+  appendWorldContextChange(stateChanges, "/worldContext/description", currentWorldContext?.description ?? null, worldContext.description);
+  appendWorldContextChange(stateChanges, "/worldContext/features", currentWorldContext?.features ?? null, worldContext.features);
+  appendWorldContextChange(stateChanges, "/worldContext/exits", currentWorldContext?.exits ?? null, worldContext.exits);
+  stateChanges.push(...npcPatch.stateChanges, ...merchantPatch.stateChanges);
+
+  const next = cloneCampaign(state);
   next.worldContext = worldContext;
   return commit(
     next,
@@ -503,8 +523,235 @@ function resolveWorldContext(
     "world_context_updated",
     [],
     [],
-    [{ path: "/worldContext", before: state.worldContext, after: worldContext }]
+    stateChanges
   );
+}
+
+type WorldContextPatchValidation = { code: string; message: string };
+type WorldContextStateChange = { path: string; before: unknown; after: unknown };
+
+function validateWorldContextPatch(
+  state: LanternCampaignState,
+  command: Extract<EngineCommand, { kind: "world_context" }>
+): WorldContextPatchValidation | null {
+  for (const patch of command.npcs?.upsert ?? []) {
+    if (Object.hasOwn(patch, "relationshipScore")) {
+      return {
+        code: "field_not_authorable",
+        message: "relationshipScore is authoritative and cannot be authored through world_context.",
+      };
+    }
+  }
+
+  const npcValidation = validateEntityPatchOperations(
+    command.npcs,
+    state.worldContext?.npcs ?? [],
+    "npc",
+    (patch) => patch.name === undefined
+  );
+  if (npcValidation) return npcValidation;
+
+  return validateEntityPatchOperations(
+    command.merchants,
+    state.worldContext?.merchants ?? [],
+    "merchant",
+    (patch) => patch.name === undefined
+  );
+}
+
+function validateEntityPatchOperations<T extends { id: string }>(
+  operations: { upsert?: T[]; remove?: string[] } | undefined,
+  existing: Array<{ id: string }>,
+  entity: "npc" | "merchant",
+  missingName: (patch: T) => boolean
+): WorldContextPatchValidation | null {
+  if (!operations) return null;
+
+  const upserts = operations.upsert ?? [];
+  const removals = operations.remove ?? [];
+  if (hasDuplicateEntityId(existing)) {
+    return {
+      code: "ambiguous_entity_id",
+      message: "Existing " + entity + " identifiers are ambiguous and cannot be patched safely.",
+    };
+  }
+  if (hasDuplicateEntityId(upserts)) {
+    return {
+      code: "duplicate_entity_id",
+      message: "Each " + entity + " upsert identifier must appear only once.",
+    };
+  }
+  if (hasDuplicateEntityId(removals)) {
+    return {
+      code: "duplicate_entity_id",
+      message: "Each " + entity + " removal identifier must appear only once.",
+    };
+  }
+
+  const upsertIds = new Set(upserts.map((patch) => patch.id));
+  if (removals.some((id) => upsertIds.has(id))) {
+    return {
+      code: "conflicting_entity_operation",
+      message: "A " + entity + " cannot be upserted and removed in the same world_context command.",
+    };
+  }
+
+  const existingIds = new Set(existing.map((candidate) => candidate.id));
+  if (removals.some((id) => !existingIds.has(id))) {
+    return {
+      code: entity + "_not_found",
+      message: "The requested " + entity + " removal does not exist in the current context.",
+    };
+  }
+  if (upserts.some((patch) => !existingIds.has(patch.id) && missingName(patch))) {
+    return {
+      code: entity + "_name_required",
+      message: "A new " + entity + " requires a name.",
+    };
+  }
+
+  const additions = upserts.filter((patch) => !existingIds.has(patch.id)).length;
+  if (existing.length - removals.length + additions > 20) {
+    return {
+      code: entity + "_limit_exceeded",
+      message: "A world context can contain at most 20 " + entity + "s.",
+    };
+  }
+  return null;
+}
+
+function hasDuplicateEntityId(values: Array<{ id: string }> | string[]): boolean {
+  const seen = new Set<string>();
+  for (const value of values) {
+    const id = typeof value === "string" ? value : value.id;
+    if (seen.has(id)) return true;
+    seen.add(id);
+  }
+  return false;
+}
+
+function applyNpcPatch(
+  existing: EngineNpc[],
+  operations: EngineNpcPatchOperations | undefined
+): { entities: EngineNpc[]; stateChanges: WorldContextStateChange[] } {
+  if (!operations) return { entities: existing, stateChanges: [] };
+
+  const existingById = new Map(existing.map((npc) => [npc.id, npc]));
+  const updates = new Map<string, EngineNpc>();
+  const inserts: EngineNpc[] = [];
+  const stateChanges: WorldContextStateChange[] = [];
+  for (const patch of operations.upsert ?? []) {
+    const before = existingById.get(patch.id);
+    const after = mergeNpcPatch(before, patch);
+    updates.set(patch.id, after);
+    if (!sameWorldContextValue(before ?? null, after)) {
+      stateChanges.push({
+        path: "/worldContext/npcs/" + escapeJsonPointerSegment(patch.id),
+        before: before ?? null,
+        after,
+      });
+    }
+    if (!before) inserts.push(after);
+  }
+
+  const removals = new Set(operations.remove ?? []);
+  const entities = [
+    ...existing.filter((npc) => !removals.has(npc.id)).map((npc) => updates.get(npc.id) ?? npc),
+    ...inserts,
+  ];
+  for (const id of operations.remove ?? []) {
+    stateChanges.push({
+      path: "/worldContext/npcs/" + escapeJsonPointerSegment(id),
+      before: existingById.get(id) ?? null,
+      after: null,
+    });
+  }
+  return { entities, stateChanges };
+}
+
+function applyMerchantPatch(
+  existing: EngineMerchant[],
+  operations: EngineMerchantPatchOperations | undefined
+): { entities: EngineMerchant[]; stateChanges: WorldContextStateChange[] } {
+  if (!operations) return { entities: existing, stateChanges: [] };
+
+  const existingById = new Map(existing.map((merchant) => [merchant.id, merchant]));
+  const updates = new Map<string, EngineMerchant>();
+  const inserts: EngineMerchant[] = [];
+  const stateChanges: WorldContextStateChange[] = [];
+  for (const patch of operations.upsert ?? []) {
+    const before = existingById.get(patch.id);
+    const after = mergeMerchantPatch(before, patch);
+    updates.set(patch.id, after);
+    if (!sameWorldContextValue(before ?? null, after)) {
+      stateChanges.push({
+        path: "/worldContext/merchants/" + escapeJsonPointerSegment(patch.id),
+        before: before ?? null,
+        after,
+      });
+    }
+    if (!before) inserts.push(after);
+  }
+
+  const removals = new Set(operations.remove ?? []);
+  const entities = [
+    ...existing.filter((merchant) => !removals.has(merchant.id)).map((merchant) => updates.get(merchant.id) ?? merchant),
+    ...inserts,
+  ];
+  for (const id of operations.remove ?? []) {
+    stateChanges.push({
+      path: "/worldContext/merchants/" + escapeJsonPointerSegment(id),
+      before: existingById.get(id) ?? null,
+      after: null,
+    });
+  }
+  return { entities, stateChanges };
+}
+
+function mergeNpcPatch(existing: EngineNpc | undefined, patch: EngineNpcPatch): EngineNpc {
+  return normalizeNpc({
+    id: patch.id,
+    name: patch.name ?? existing?.name ?? "",
+    description: patch.description ?? existing?.description ?? "",
+    disposition: patch.disposition ?? existing?.disposition ?? "neutral",
+    goals: patch.goals ?? existing?.goals ?? [],
+    // TODO(#21): social DC authoring remains temporary until challenge-tier ownership is migrated.
+    socialDc: patch.socialDc ?? existing?.socialDc ?? 12,
+    relationshipScore: existing?.relationshipScore ?? 0,
+    memories: patch.memories ?? existing?.memories ?? [],
+  });
+}
+
+function mergeMerchantPatch(existing: EngineMerchant | undefined, patch: EngineMerchantPatch): EngineMerchant {
+  return normalizeMerchant({
+    id: patch.id,
+    name: patch.name ?? existing?.name ?? "",
+    description: patch.description ?? existing?.description ?? "",
+    disposition: patch.disposition ?? existing?.disposition ?? "neutral",
+    items: patch.items === undefined ? (existing?.items ?? []) : patch.items.map((listing) => ({
+      item: normalizeInventoryItem(listing.item),
+      stock: listing.stock,
+      buyPriceCopper: listing.buyPriceCopper,
+      sellPriceCopper: listing.sellPriceCopper,
+    })),
+  });
+}
+
+function appendWorldContextChange(
+  stateChanges: WorldContextStateChange[],
+  path: string,
+  before: unknown,
+  after: unknown
+): void {
+  if (!sameWorldContextValue(before, after)) stateChanges.push({ path, before, after });
+}
+
+function sameWorldContextValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function escapeJsonPointerSegment(value: string): string {
+  return value.replace(/~/g, "~0").replace(/\//g, "~1");
 }
 
 function resolvePlayerNoteAdd(
