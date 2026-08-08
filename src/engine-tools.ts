@@ -16,6 +16,7 @@ import {
   engineTacticalGeometryInputSchema,
   engineTacticalPositionSchema,
   engineToolNameSchema,
+  engineSocialActionCommandSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   type EngineCommand,
@@ -124,6 +125,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       offerUnitPriceCopper: z.number().int().nonnegative().optional(),
     })
     .strict(),
+  social_action: engineSocialActionCommandSchema.omit({ kind: true }),
   quest_create: z
     .object({
       title: z.string().trim().min(1).max(160),
@@ -632,6 +634,26 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     }
   ),
   tool(
+    "social_action",
+    "Record one authoritative social consequence: make or resolve a promise, record witnessed or unwitnessed theft evidence, or pass a bounded rumor. The engine owns trust, reputation, evidence status, and delayed propagation; never provide a truth update as a substitute for corroboration.",
+    {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["promise", "fulfill_promise", "breach_promise", "theft", "rumor"] },
+        targetId: { type: "string", description: "Established NPC or merchant for a promise, victim for theft, or recipient for a rumor." },
+        promiseId: { type: "string", description: "Existing open promise for fulfillment or breach." },
+        terms: { type: "string", description: "Concrete promise terms; required for a new promise." },
+        deadlineMinutes: { type: "integer", minimum: 1, description: "Optional server-relative deadline for a new promise." },
+        itemId: { type: "string", description: "Item identifier for a theft evidence record." },
+        witnessId: { type: "string", description: "Established witness; omission records an allegation rather than proven evidence." },
+        rumorText: { type: "string", description: "Bounded content of a rumor; it is never treated as truth by repetition." },
+        truthRelation: { type: "string", enum: ["true", "false", "unknown"], description: "Authoritative source relation for a rumor; propagation does not change it." },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
     "quest_create",
     "Create a DM-authored quest with a concrete objective and reward. The engine persists it and later applies its reward atomically.",
     {
@@ -1082,6 +1104,19 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({ kind: "social_check", npcId: args.npcId, ability: args.ability, skill: args.skill, goal: args.goal });
     case "merchant_trade":
       return engineCommandSchema.parse({ kind: "merchant_trade", merchantId: args.merchantId, itemId: args.itemId, side: args.side, quantity: args.quantity, offerUnitPriceCopper: args.offerUnitPriceCopper });
+    case "social_action":
+      return engineCommandSchema.parse({
+        kind: "social_action",
+        action: args.action,
+        targetId: args.targetId,
+        promiseId: args.promiseId,
+        terms: args.terms,
+        deadlineMinutes: args.deadlineMinutes,
+        itemId: args.itemId,
+        witnessId: args.witnessId,
+        rumorText: args.rumorText,
+        truthRelation: args.truthRelation,
+      });
     case "quest_create":
       return engineCommandSchema.parse({ kind: "quest_create", title: args.title, objective: args.objective, rewardXp: args.rewardXp, rewardCopper: args.rewardCopper, giverNpcId: args.giverNpcId, deadline: args.deadline });
     case "quest_update":
