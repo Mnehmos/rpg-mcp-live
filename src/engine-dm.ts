@@ -2,7 +2,9 @@ import { narrationEnvelopeSchema, type NarrationEnvelope } from "./ai-contracts.
 import type { Open5eContentResolver } from "./content/resolve.js";
 import {
   cloneCampaign,
+  actorKnowledgeProjection,
   projectExperienceProfile,
+  projectResolutionForActor,
   resolveEngineCommand,
   sanitizeNarrationForProfile,
 } from "./engine-domain.js";
@@ -68,6 +70,38 @@ interface ToolLoopResult {
 }
 
 type DmLoopMode = "player_turn" | "opening";
+
+export function buildDmContext(
+  state: LanternCampaignState,
+  context: RequestContext,
+  playerText: string,
+  mode: DmLoopMode
+): Record<string, unknown> {
+  const projection = actorKnowledgeProjection(context.actorId, state);
+  return {
+    playerText,
+    mode,
+    campaignId: context.campaignId,
+    actorId: context.actorId,
+    campaign: state.campaign,
+    phase: state.phase,
+    tutorialStep: state.tutorialStep,
+    rulesVersion: state.rulesVersion,
+    contentPolicy: state.contentPolicy,
+    experienceProfile: projectExperienceProfile(state.experienceProfile),
+    worldContext: projection.worldContext,
+    knowledge: projection.knowledge,
+    informationTiers: projection.informationTiers,
+    playerNotes: state.playerNotes,
+    quests: state.quests,
+    improvEffects: state.improvEffects,
+    currentBeat: state.currentBeat,
+    suggestedActions: state.suggestedActions,
+    character: state.character,
+    combat: state.combat,
+    recentLog: state.log.slice(-12),
+  };
+}
 
 interface ProvisionalToolResult extends EngineToolResult {
   stagedEffect?: StagedEngineTurnEffect;
@@ -282,6 +316,7 @@ export class LanternDungeonMaster {
           "The player experience profile is also player-owned. Use only its minimum projection for presentation and situation selection; never attempt to mutate it through DM tools.",
           "Do not deliberately introduce excluded or fade-to-black themes. If the player asks for one, redirect or fade before authoring detail. The difficulty policy key selects a reviewed band only; it never changes dice, modifiers, HP, enemy stats, or committed mechanics.",
           "For open-ended challenge adjudication, call challenge_attempt with a reviewed challenge id, explicit goal, and approach. The engine decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence.",
+          "The user context is an actor-scoped knowledge projection. Hidden facts absent from it are not available to infer, summarize, hint, or narrate. Use search-hidden-fact-v1 for an authorized active search; never pass raw campaign state or hidden fact identifiers through prose.",
           "For checks, the engine derives ability, skill proficiency, expertise, validated tools, passive scores, advantage cancellation, and opposed totals. Name a legal helper or established opponent only when the fiction supports it, and use informationPolicy=withheld when the player must not receive check details. Fictional improvise is non-mechanical; use a typed effect for a real consequence.",
           "Respect the campaign lifecycle: character creation and tutorial are onboarding chapters; the sandbox begins only after the tutorial is complete.",
           mode === "opening"
@@ -319,27 +354,7 @@ export class LanternDungeonMaster {
       },
       {
         role: "user",
-        content: JSON.stringify({
-          playerText,
-          mode,
-          campaignId: context.campaignId,
-          actorId: context.actorId,
-          campaign: initialState.campaign,
-          phase: initialState.phase,
-          tutorialStep: initialState.tutorialStep,
-          rulesVersion: initialState.rulesVersion,
-          contentPolicy: initialState.contentPolicy,
-          experienceProfile: projectExperienceProfile(initialState.experienceProfile),
-          worldContext: initialState.worldContext,
-          playerNotes: initialState.playerNotes,
-          quests: initialState.quests,
-          improvEffects: initialState.improvEffects,
-          currentBeat: initialState.currentBeat,
-          suggestedActions: initialState.suggestedActions,
-          character: initialState.character,
-          combat: initialState.combat,
-          recentLog: initialState.log.slice(-12),
-        }),
+        content: JSON.stringify(buildDmContext(initialState, context, playerText, mode)),
       },
     ];
 
@@ -489,13 +504,14 @@ export class LanternDungeonMaster {
         command,
         toolName
       );
+      const publicResolution = projectResolutionForActor(resolution, context.actorId);
       return {
         tool: toolName,
         readOnly: false,
-        accepted: resolution.accepted,
-        code: resolution.code,
-        message: resolution.message,
-        data: resolution.data,
+        accepted: publicResolution.accepted,
+        code: publicResolution.code,
+        message: publicResolution.message,
+        data: publicResolution.data,
         campaignVersion: currentState.version,
         provisional: resolution.accepted,
         ...(resolution.accepted && !resolution.readOnly

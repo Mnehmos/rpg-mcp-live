@@ -47,6 +47,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     sceneId: z.string().trim().min(1).max(120).optional(),
     difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
     requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
+    factId: z.string().trim().min(1).max(120).optional(),
     helperId: z.string().trim().min(1).max(120).optional(),
     opponentId: z.string().trim().min(1).max(120).optional(),
     informationPolicy: z.enum(["public", "withheld"]).optional(),
@@ -397,6 +398,15 @@ const merchantPatchOperationsJsonSchema = {
   additionalProperties: false,
 } as const;
 
+const worldFactPatchOperationsJsonSchema = {
+  type: "object",
+  properties: {
+    upsert: { type: "array", items: { type: "object", properties: { id: { type: "string" }, kind: { type: "string", enum: ["object", "secret", "trap", "area"] }, title: { type: "string" }, description: { type: "string" }, visibility: { type: "string", enum: ["public", "hidden"] }, obscurity: { type: "string", enum: ["clear", "dark"] }, requiredSense: { type: "string", enum: ["normal", "darkvision", "blindsight", "tremorsense", "hearing"] }, passiveDc: { type: ["integer", "null"], minimum: 1, maximum: 30 } }, required: ["id", "kind", "title", "description", "visibility"], additionalProperties: false }, maxItems: 40 },
+    remove: { type: "array", items: { type: "string" }, maxItems: 40 },
+  },
+  additionalProperties: false,
+};
+
 export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("campaign_context", "Read the campaign profile, emergent world context if one exists, character, notes, combat, quest, and recent log. Read-only.", {}),
   tool(
@@ -471,6 +481,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         exits: { type: "array", items: { type: "object", properties: { id: { type: "string" }, label: { type: "string" } }, required: ["id", "label"], additionalProperties: false }, description: "Only meaningful destinations the player can currently pursue." },
         npcs: npcPatchOperationsJsonSchema,
         merchants: merchantPatchOperationsJsonSchema,
+        facts: worldFactPatchOperationsJsonSchema,
       },
       required: ["title", "description", "features", "exits"],
       additionalProperties: false,
@@ -478,7 +489,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "challenge_attempt",
-    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, and stealth-perception-v1.",
+    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, stealth-perception-v1, and search-hidden-fact-v1.",
     {
       type: "object",
       properties: {
@@ -488,6 +499,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         sceneId: { type: "string", description: "Optional stable scene/situation id used for retry identity." },
         difficultyBand: { type: "string", enum: ["gentle", "standard", "challenging"], description: "Optional model proposal recorded as evidence; the active player profile selects the final band." },
         requestedStakes: { type: "array", items: { type: "string", enum: ["time", "noise", "exposure", "opportunity"] }, maxItems: 4, description: "Optional model-proposed stakes; the reviewed challenge definition controls the final stakes." },
+        factId: { type: "string", description: "For search-hidden-fact-v1 only: opaque target fact id; the engine never echoes an unavailable fact." },
         helperId: { type: "string", description: "Optional legal helper actor/NPC; the engine validates eligibility and supplies at most one advantage source." },
         opponentId: { type: "string", description: "Optional established opponent id for a reviewed opposed challenge." },
         informationPolicy: { type: "string", enum: ["public", "withheld"], description: "Whether player-facing check details are public; full evidence remains authoritative." },
@@ -871,6 +883,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         sceneId: args.sceneId,
         difficultyBand: args.difficultyBand,
         requestedStakes: args.requestedStakes,
+        factId: args.factId,
         helperId: args.helperId,
         opponentId: args.opponentId,
         informationPolicy: args.informationPolicy,

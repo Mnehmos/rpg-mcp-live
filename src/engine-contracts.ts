@@ -123,6 +123,64 @@ export type EngineInventoryItemInput = z.infer<typeof engineInventoryItemInputSc
 const worldContextEntityIdSchema = z.string().trim().min(1).max(120);
 const worldContextDispositionSchema = z.enum(["hostile", "unfriendly", "neutral", "friendly", "helpful"]);
 
+export const informationTierSchema = z.enum(["public", "perceived", "known", "rumor", "false-belief", "stale", "withheld"]);
+export type InformationTier = z.infer<typeof informationTierSchema>;
+
+export const engineSenseCapabilitiesSchema = z.object({
+  normalVision: z.boolean(),
+  darkvisionFeet: z.number().int().nonnegative().max(1_000),
+  blindsightFeet: z.number().int().nonnegative().max(1_000),
+  tremorsenseFeet: z.number().int().nonnegative().max(1_000),
+  hearing: z.boolean(),
+}).strict();
+export type EngineSenseCapabilities = z.infer<typeof engineSenseCapabilitiesSchema>;
+
+const worldFactKindSchema = z.enum(["object", "secret", "trap", "area"]);
+const worldFactSenseSchema = z.enum(["normal", "darkvision", "blindsight", "tremorsense", "hearing"]);
+const worldFactInputSchema = z.object({
+  id: worldContextEntityIdSchema,
+  kind: worldFactKindSchema,
+  title: z.string().trim().min(1).max(160),
+  description: z.string().trim().min(1).max(4_000),
+  visibility: z.enum(["public", "hidden"]),
+  obscurity: z.enum(["clear", "dark"]).default("clear"),
+  requiredSense: worldFactSenseSchema.default("normal"),
+  passiveDc: z.number().int().min(1).max(30).nullable().optional(),
+}).strict();
+export type EngineWorldFactInput = z.infer<typeof worldFactInputSchema>;
+
+export const engineWorldFactPatchOperationsSchema = z.object({
+  upsert: z.array(worldFactInputSchema).max(40).optional(),
+  remove: z.array(worldContextEntityIdSchema).max(40).optional(),
+}).strict().refine(
+  (operations) => (operations.upsert?.length ?? 0) + (operations.remove?.length ?? 0) > 0,
+  "A provided fact patch needs at least one operation."
+);
+export type EngineWorldFactPatchOperations = z.infer<typeof engineWorldFactPatchOperationsSchema>;
+
+export interface EngineWorldFact extends EngineWorldFactInput {
+  sceneId: string;
+  revision: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EngineKnowledgeRecord {
+  id: string;
+  actorId: string;
+  factId: string;
+  tier: InformationTier;
+  source: "passive-observation" | "active-search" | "rumor" | "false-belief" | "dm";
+  provenance: string;
+  confidence: number;
+  campaignVersion: number;
+  factRevision: number;
+  stale: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export const engineMerchantListingInputSchema = z.object({
   item: engineInventoryItemInputSchema,
   stock: z.number().int().min(-1),
@@ -181,6 +239,7 @@ export const engineWorldContextArgsSchema = z.object({
   }).strict()).max(20),
   npcs: engineNpcPatchOperationsSchema.optional(),
   merchants: engineMerchantPatchOperationsSchema.optional(),
+  facts: engineWorldFactPatchOperationsSchema.optional(),
 }).strict();
 export type EngineWorldContextArgs = z.infer<typeof engineWorldContextArgsSchema>;
 
@@ -426,6 +485,7 @@ export const engineChallengeAttemptCommandSchema = z.object({
   sceneId: z.string().trim().min(1).max(120).optional(),
   difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
   requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
+  factId: z.string().trim().min(1).max(120).optional(),
   helperId: z.string().trim().min(1).max(120).optional(),
   opponentId: z.string().trim().min(1).max(120).optional(),
   informationPolicy: z.enum(["public", "withheld"]).optional(),
@@ -930,6 +990,15 @@ export interface EngineMerchantView extends Omit<EngineMerchant, "items"> {
 
 export interface EngineWorldContextView extends Omit<EngineWorldContext, "merchants"> {
   merchants: EngineMerchantView[];
+  facts: EngineWorldFact[];
+}
+
+export interface PublicProjection {
+  actorId: string;
+  informationTiers: InformationTier[];
+  worldContext: EngineWorldContextView | null;
+  facts: EngineWorldFact[];
+  knowledge: EngineKnowledgeRecord[];
 }
 
 export interface EngineSpellReference {
@@ -1011,6 +1080,7 @@ export interface EngineCharacter {
   hitDie: number;
   hitDiceRemaining: number;
   proficiencies: { armor: string[]; weapons: string[]; tools: string[]; languages: string[] };
+  senses: EngineSenseCapabilities;
   features: string[];
   featureUses: Record<string, number>;
   spellcasting: EngineSpellcasting | null;
@@ -1419,6 +1489,8 @@ export interface LanternCampaignState {
   advancementPolicy: EngineAdvancementPolicy;
   pendingAdvancement: EnginePendingAdvancement | null;
   worldContext: EngineWorldContext | null;
+  worldFacts: EngineWorldFact[];
+  actorKnowledge: EngineKnowledgeRecord[];
   playerNotes: EngineNote[];
   character: EngineCharacter;
   combat: EngineCombat;

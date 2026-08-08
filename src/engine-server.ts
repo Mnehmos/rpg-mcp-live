@@ -23,7 +23,7 @@ import {
   type LanternCampaignState,
   type RequestContext,
 } from "./engine-contracts.js";
-import { createInitialCampaign, resolveEngineCommand, toSessionView } from "./engine-domain.js";
+import { createInitialCampaign, projectEventForActor, projectResolutionForActor, projectStateForActor, resolveEngineCommand, toSessionView } from "./engine-domain.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
 import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js";
 import {
@@ -202,7 +202,7 @@ app.get("/v1/campaigns/:campaignId", (request, response) => {
   try {
     const context = createRequestContext(request, request.params.campaignId);
     const state = store.getCampaign(context);
-    response.json({ campaign: toSessionView(state), state });
+    response.json({ campaign: toSessionView(state), state: projectStateForActor(context.actorId, state) });
   } catch (error) {
     sendError(response, error);
   }
@@ -231,7 +231,12 @@ app.get("/v1/campaigns/:campaignId/events", (request, response) => {
     const context = createRequestContext(request, request.params.campaignId);
     const state = store.getCampaign(context);
     const policy = resolverPolicyForCampaign(state.contentPolicy);
-    const events = store.listCampaignEvents(context).map((event) => contentRegistry.resolveEvent(event, policy));
+    const events = store.listCampaignEvents(context)
+      .map((event) => contentRegistry.resolveEvent(event, policy))
+      .map((resolved) => ({
+        ...resolved,
+        event: projectEventForActor(context.actorId, state, resolved.event),
+      }));
     response.json({ events });
   } catch (error) {
     sendError(response, error);
@@ -280,7 +285,7 @@ app.post("/v1/campaigns/:campaignId/commands", async (request, response) => {
           resolveEngineCommand(current, context, parsed.data.clientCommandId, selected.command, selected.tool),
       });
     }
-    response.json(result);
+    response.json(projectResolutionForActor(result, context.actorId));
   } catch (error) {
     sendError(response, error);
   }
@@ -322,7 +327,7 @@ app.post("/v1/campaigns/:campaignId/opening", async (request, response) => {
       parsed.data.clientCommandId,
       parsed.data.expectedCampaignVersion
     );
-    response.json(result);
+    response.json(projectResolutionForActor(result, context.actorId));
   } catch (error) {
     sendError(response, error);
   }
@@ -354,15 +359,16 @@ app.post("/v1/campaigns/:campaignId/tool-calls", (request, response) => {
       resolve: (current) =>
         resolveEngineCommand(current, context, parsed.data.clientCommandId, command, parsed.data.toolName, parsed.data.playerText),
     });
+    const publicResult = projectResolutionForActor(result, context.actorId);
     response.json({
       tool: parsed.data.toolName,
       readOnly: false,
-      accepted: result.accepted,
-      code: result.code,
-      message: result.message,
-      data: result.data,
-      campaignVersion: result.state.version,
-      commandResult: result,
+      accepted: publicResult.accepted,
+      code: publicResult.code,
+      message: publicResult.message,
+      data: publicResult.data,
+      campaignVersion: publicResult.state.version,
+      commandResult: publicResult,
     });
   } catch (error) {
     sendError(response, error);
