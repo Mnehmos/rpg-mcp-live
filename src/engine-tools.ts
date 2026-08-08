@@ -219,6 +219,27 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   quest_progress: noArguments,
   combat_state: noArguments,
   controlled_actor_context: noArguments,
+  party_context: noArguments,
+  party_create: noArguments,
+  party_set_viewpoint: z.object({ actorId: z.string().trim().min(1).max(120) }).strict(),
+  party_split: z.object({
+    actorId: z.string().trim().min(1).max(120),
+    sceneId: z.string().trim().min(1).max(120),
+    locationRef: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
+  party_rejoin: noArguments,
+  party_shared_transfer: z.object({
+    actorId: z.string().trim().min(1).max(120),
+    itemId: z.string().trim().min(1).max(120),
+    quantity: z.number().int().min(1).max(100).default(1),
+    direction: z.enum(["to_shared", "from_shared"]),
+  }).strict(),
+  party_group_check: z.object({
+    ability: z.enum(["str", "dex", "con", "int", "wis", "cha"]),
+    skill: z.string().trim().min(1).max(80).optional(),
+    goal: z.string().trim().min(1).max(2_000),
+    actorIds: z.array(z.string().trim().min(1).max(120)).min(1).max(3),
+  }).strict(),
   controlled_actor_create: z.object({ profileId: z.enum(["familiar-scout-v1", "summon-scout-v1"]) }).strict(),
   controlled_actor_command: z.object({
     actorId: z.string().trim().min(1).max(120),
@@ -344,6 +365,7 @@ const readOnlyTools = new Set<EngineToolName>([
   "quest_progress",
   "combat_state",
   "controlled_actor_context",
+  "party_context",
 ]);
 
 const inventoryItemJsonSchema = {
@@ -841,6 +863,13 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     "Dismiss one controlled companion or summon. Dismissal is authoritative, replay-safe, and removes source-linked effects.",
     { type: "object", properties: { actorId: { type: "string" } }, required: ["actorId"], additionalProperties: false }
   ),
+  tool("party_context", "Read the current party membership, active viewpoint, personal/shared ownership policy, split scenes, and shared container. Only the active viewpoint knowledge projection is exposed.", {}),
+  tool("party_create", "Create the single-player party around the PC and active controlled actors. Membership, leadership, consent, and reward allocation are server-owned.", {}),
+  tool("party_set_viewpoint", "Switch the active presentation viewpoint to a party member without transferring ownership or revealing another actor's hidden knowledge.", { type: "object", properties: { actorId: { type: "string" } }, required: ["actorId"], additionalProperties: false }),
+  tool("party_split", "Place one allied actor in an explicit separate scene context. The party remains one authorized group and can rejoin later.", { type: "object", properties: { actorId: { type: "string" }, sceneId: { type: "string" }, locationRef: { type: "string" } }, required: ["actorId", "sceneId"], additionalProperties: false }),
+  tool("party_rejoin", "Reunite all party members in the current world context and restore a coherent shared scene.", {}),
+  tool("party_shared_transfer", "Move a typed owned item between one party member's personal inventory and the explicit shared container exactly once.", { type: "object", properties: { actorId: { type: "string" }, itemId: { type: "string" }, quantity: { type: "integer", minimum: 1, maximum: 100 }, direction: { type: "string", enum: ["to_shared", "from_shared"] } }, required: ["actorId", "itemId", "direction"], additionalProperties: false }),
+  tool("party_group_check", "Resolve one reviewed server-owned group ability check. The leader's derived modifier and bounded ally assistance determine the result; model text cannot author the roll or DC.", { type: "object", properties: { ability: { type: "string", enum: ["str", "dex", "con", "int", "wis", "cha"] }, skill: { type: "string" }, goal: { type: "string" }, actorIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 } }, required: ["ability", "goal", "actorIds"], additionalProperties: false }),
   tool(
     "combat_start",
     "Start a DM-authored encounter using installed Open5e creature content keys. Search creatures first; never supply or invent stats.",
@@ -1259,6 +1288,18 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({ kind: "controlled_actor_command", actorId: args.actorId, action: args.action, targetId: args.targetId });
     case "controlled_actor_dismiss":
       return engineCommandSchema.parse({ kind: "controlled_actor_dismiss", actorId: args.actorId });
+    case "party_create":
+      return engineCommandSchema.parse({ kind: "party_create" });
+    case "party_set_viewpoint":
+      return engineCommandSchema.parse({ kind: "party_set_viewpoint", actorId: args.actorId });
+    case "party_split":
+      return engineCommandSchema.parse({ kind: "party_split", actorId: args.actorId, sceneId: args.sceneId, locationRef: args.locationRef });
+    case "party_rejoin":
+      return engineCommandSchema.parse({ kind: "party_rejoin" });
+    case "party_shared_transfer":
+      return engineCommandSchema.parse({ kind: "party_shared_transfer", actorId: args.actorId, itemId: args.itemId, quantity: args.quantity ?? 1, direction: args.direction });
+    case "party_group_check":
+      return engineCommandSchema.parse({ kind: "party_group_check", ability: args.ability, skill: args.skill, goal: args.goal, actorIds: args.actorIds });
     case "advancement_confirm":
       return engineCommandSchema.parse({ kind: "advancement_confirm", pendingId: args.pendingId });
     case "npc_advance":
@@ -1358,6 +1399,8 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "combat_state":
       return null;
     case "controlled_actor_context":
+      return null;
+    case "party_context":
       return null;
   }
   return null;
@@ -1545,6 +1588,7 @@ export function executeReadTool(
         | "quest_progress"
         | "combat_state"
         | "controlled_actor_context"
+        | "party_context"
     ),
     campaignVersion: state.version,
   };

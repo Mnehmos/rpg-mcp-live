@@ -82,6 +82,9 @@ import type {
   EngineControlledActorCommandOffer,
   EngineControlledActorProfile,
   EngineControlledActorView,
+  EnginePartyState,
+  EnginePartyMember,
+  EnginePartySharedState,
   EngineEncounterApproachEvidence,
   EngineEncounterInitiative,
   EngineEncounterInitiativeEntry,
@@ -1444,6 +1447,7 @@ export function createInitialCampaign(
     pendingAdvancement: null,
     claimedRewards: [],
     controlledActors: [],
+    party: null,
     time: defaultTimeState(),
     social: defaultSocialState(),
     worldContext: null,
@@ -1510,6 +1514,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     ? [...new Set((next as LanternCampaignState & { claimedRewards?: unknown }).claimedRewards!.filter((key): key is string => typeof key === "string"))]
     : [];
   next.controlledActors = normalizeControlledActors((next as LanternCampaignState & { controlledActors?: unknown }).controlledActors, next);
+  next.party = normalizePartyState((next as LanternCampaignState & { party?: unknown }).party, next);
   const terminalControlledActorIds = new Set(next.controlledActors.filter((actor) => actor.status !== "active").map((actor) => actor.id));
   for (const actor of next.controlledActors) {
     if (actor.status !== "active" && actor.sourceRef) removeRuntimeSource(next, actor.sourceRef);
@@ -1547,6 +1552,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.pendingAdvancement = null;
     next.claimedRewards = [];
     next.controlledActors = [];
+    next.party = null;
     next.quest = {
       id: "first-light",
       title: "The first chapter",
@@ -1688,6 +1694,7 @@ function normalizeControlledActors(value: unknown, state: LanternCampaignState):
       lastBehavior,
       guardedUntilRound: typeof raw.guardedUntilRound === "number" ? Math.max(0, Math.trunc(raw.guardedUntilRound)) : null,
       attack: { ...profile.attack },
+      effects: Array.isArray(raw.effects) ? raw.effects.map((effect) => ({ ...effect })) : [],
       inventory: Array.isArray(raw.inventory) ? raw.inventory.map((item) => normalizeInventoryItem(item)) : [],
       createdAtMinutes,
       expiresAtMinutes,
@@ -1699,6 +1706,67 @@ function normalizeControlledActors(value: unknown, state: LanternCampaignState):
       },
     } satisfies EngineControlledActor];
   });
+}
+
+function normalizePartyState(value: unknown, state: LanternCampaignState): EnginePartyState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Partial<EnginePartyState>;
+  if (typeof raw.id !== "string" || !raw.id) return null;
+  const scene = state.worldContext?.id ?? `campaign:${state.id}`;
+  const validActorIds = new Set([state.actorId, ...state.controlledActors.map((actor) => actor.id)]);
+  const rawMembers = Array.isArray(raw.members) ? raw.members : [];
+  const members: EnginePartyMember[] = [];
+  const seen = new Set<string>();
+  for (const entry of rawMembers) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const candidate = entry as Partial<EnginePartyMember>;
+    if (typeof candidate.actorId !== "string" || !validActorIds.has(candidate.actorId) || seen.has(candidate.actorId)) continue;
+    const role = candidate.actorId === state.actorId ? "leader" : "companion";
+    members.push({
+      actorId: candidate.actorId,
+      role,
+      controllerActorId: typeof candidate.controllerActorId === "string" && candidate.controllerActorId ? candidate.controllerActorId : state.actorId,
+      sceneId: typeof candidate.sceneId === "string" && candidate.sceneId ? candidate.sceneId : scene,
+      locationRef: typeof candidate.locationRef === "string" && candidate.locationRef ? candidate.locationRef : scene,
+      joinedAtVersion: typeof candidate.joinedAtVersion === "number" ? Math.max(0, Math.trunc(candidate.joinedAtVersion)) : 0,
+    });
+    seen.add(candidate.actorId);
+  }
+  if (!seen.has(state.actorId)) {
+    members.unshift({ actorId: state.actorId, role: "leader", controllerActorId: state.actorId, sceneId: scene, locationRef: scene, joinedAtVersion: 0 });
+  }
+  const memberIds = new Set(members.map((member) => member.actorId));
+  for (const actor of state.controlledActors) {
+    if (actor.status !== "active" || memberIds.has(actor.id)) continue;
+    members.push({ actorId: actor.id, role: "companion", controllerActorId: actor.controllerActorId, sceneId: scene, locationRef: scene, joinedAtVersion: state.version });
+  }
+  const sharedRaw = raw.shared && typeof raw.shared === "object" && !Array.isArray(raw.shared) ? raw.shared as Partial<EnginePartySharedState> : {};
+  const containerRaw = sharedRaw.container && typeof sharedRaw.container === "object" && !Array.isArray(sharedRaw.container) ? sharedRaw.container as Partial<EnginePartySharedState["container"]> : {};
+  const containerId = typeof containerRaw.id === "string" && containerRaw.id ? containerRaw.id : `party-shared:${state.id}`;
+  const currencyRaw = sharedRaw.currency && typeof sharedRaw.currency === "object" ? sharedRaw.currency as Partial<{ copper: unknown }> : {};
+  const shared: EnginePartySharedState = {
+    questIds: Array.isArray(sharedRaw.questIds) ? [...new Set(sharedRaw.questIds.filter((id): id is string => typeof id === "string" && id.length > 0))] : state.quests.map((quest) => quest.id),
+    currency: { copper: typeof currencyRaw.copper === "number" ? Math.max(0, Math.trunc(currencyRaw.copper)) : 0 },
+    container: {
+      id: containerId,
+      name: typeof containerRaw.name === "string" && containerRaw.name ? containerRaw.name : "Party shared container",
+      inventory: Array.isArray(containerRaw.inventory) ? containerRaw.inventory.map((item) => ({ ...normalizeInventoryItem(item), ownerRef: { kind: "world", id: containerId }, equipped: false, slot: undefined, containerRef: undefined })) : [],
+    },
+  };
+  const leaderActorId = members.some((member) => member.actorId === raw.leaderActorId) ? raw.leaderActorId! : state.actorId;
+  const activeViewpointActorId = members.some((member) => member.actorId === raw.activeViewpointActorId) ? raw.activeViewpointActorId! : leaderActorId;
+  const mode = raw.mode === "split" ? "split" : "together";
+  return {
+    id: raw.id,
+    leaderActorId,
+    activeViewpointActorId,
+    mode,
+    members,
+    shared,
+    rewardAllocation: "leader-only",
+    consent: { mode: "single-controller-future-member-seam", permanentChoiceRequires: "leader-confirmation" },
+    revision: typeof raw.revision === "number" ? Math.max(1, Math.trunc(raw.revision)) : 1,
+  };
 }
 
 function normalizeCorpses(value: unknown): EngineCorpse[] {
@@ -2027,7 +2095,7 @@ function recalculateProgressionOnLoad(character: EngineCharacter): EngineCharact
 }
 
 export function toSessionView(state: LanternCampaignState): EngineSessionView {
-  const projection = actorKnowledgeProjection(state.actorId, state);
+  const projection = actorKnowledgeProjection(activePartyViewpointId(state), state);
   const controlledActors = projectControlledActors(state);
   const sandboxActions = ["observe", "listen", "roll"];
   const controlledActorActions = state.character.created
@@ -2086,6 +2154,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     character: characterData(state.character) as EngineSessionView["character"],
     combat: combatData(state.combat),
     controlledActors,
+    party: partyProjection(state),
     updatedAt: state.updatedAt,
   };
 }
@@ -2133,11 +2202,14 @@ function controlledActorView(state: LanternCampaignState, actor: EngineControlle
     lastBehavior: actor.lastBehavior,
     guardedUntilRound: actor.guardedUntilRound,
     attack: actor.attack,
+    effects: actor.effects.filter((effect) => effect.status === "active"),
     createdAtMinutes: actor.createdAtMinutes,
     expiresAtMinutes: actor.expiresAtMinutes,
     terminalAtMinutes: actor.terminalAtMinutes,
     inventory: materializeInventory(actor.inventory),
-    knowledge: state.actorKnowledge.filter((record) => record.actorId === actor.id),
+    knowledge: activePartyViewpointId(state) === actor.id
+      ? state.actorKnowledge.filter((record) => record.actorId === actor.id)
+      : [],
     legalCommands: controlledActorLegalCommands(state, actor, viewerActorId),
   };
 }
@@ -2162,8 +2234,10 @@ export function readToolData(
     | "quest_progress"
     | "combat_state"
     | "controlled_actor_context"
+    | "party_context"
 ): unknown {
-  const projection = actorKnowledgeProjection(state.actorId, state);
+  const viewpointActorId = activePartyViewpointId(state);
+  const projection = actorKnowledgeProjection(viewpointActorId, state);
   switch (tool) {
     case "campaign_context":
       return {
@@ -2189,6 +2263,7 @@ export function readToolData(
         character: characterData(state.character),
         combat: combatData(state.combat),
         controlledActors: projectControlledActors(state),
+        party: partyStateData(state),
         quest: projectQuestForActor(state.quest, state, state.actorId),
         recentLog: state.log.slice(-8),
       };
@@ -2226,6 +2301,8 @@ export function readToolData(
       return combatData(state.combat);
     case "controlled_actor_context":
       return { controlledActors: projectControlledActors(state), campaignVersion: state.version };
+    case "party_context":
+      return { ...partyStateData(state), worldContext: projection.worldContext, campaignVersion: state.version };
   }
 }
 
@@ -2526,6 +2603,18 @@ export function resolveEngineCommand(
       return resolveControlledActorCommand(state, context, clientCommandId, command, tool);
     case "controlled_actor_dismiss":
       return resolveControlledActorDismiss(state, context, clientCommandId, command, tool);
+    case "party_create":
+      return resolvePartyCreate(state, context, clientCommandId, command, tool);
+    case "party_set_viewpoint":
+      return resolvePartySetViewpoint(state, context, clientCommandId, command, tool);
+    case "party_split":
+      return resolvePartySplit(state, context, clientCommandId, command, tool);
+    case "party_rejoin":
+      return resolvePartyRejoin(state, context, clientCommandId, command, tool);
+    case "party_shared_transfer":
+      return resolvePartySharedTransfer(state, context, clientCommandId, command, tool);
+    case "party_group_check":
+      return resolvePartyGroupCheck(state, context, clientCommandId, command, tool);
     case "combat_start":
       return resolveCombatStart(state, context, clientCommandId, command, tool);
     case "encounter_decision":
@@ -7289,6 +7378,7 @@ function resolveControlledActorCreate(
     lastBehavior: "idle",
     guardedUntilRound: null,
     attack: { ...profile.attack },
+    effects: [],
     inventory: [],
     createdAtMinutes,
     expiresAtMinutes: profile.expiresAfterMinutes === null ? null : createdAtMinutes + profile.expiresAfterMinutes,
@@ -7472,6 +7562,305 @@ function resolveControlledActorDismiss(
     [],
     changes,
   );
+}
+
+function activePartyViewpointId(state: LanternCampaignState): string {
+  const candidate = state.party?.activeViewpointActorId;
+  if (!candidate) return state.actorId;
+  return state.party?.members.some((member) => member.actorId === candidate) ? candidate : state.actorId;
+}
+
+function partyProjection(state: LanternCampaignState): EnginePartyState | null {
+  return state.party ? cloneCampaign({ ...state, party: state.party }).party : null;
+}
+
+function partyMember(state: LanternCampaignState, actorId: string): EnginePartyMember | null {
+  return state.party?.members.find((member) => member.actorId === actorId) ?? null;
+}
+
+function controlledPartyActor(state: LanternCampaignState, actorId: string): EngineControlledActor | null {
+  return state.controlledActors.find((actor) => actor.id === actorId && actor.status === "active") ?? null;
+}
+
+function partyPersonalInventory(state: LanternCampaignState, actorId: string): EngineInventoryItem[] | null {
+  if (actorId === state.actorId) return state.character.inventory;
+  return controlledPartyActor(state, actorId)?.inventory ?? null;
+}
+
+function partyCreateMembers(state: LanternCampaignState): EnginePartyMember[] {
+  const scene = state.worldContext?.id ?? `campaign:${state.id}`;
+  return [
+    { actorId: state.actorId, role: "leader", controllerActorId: state.actorId, sceneId: scene, locationRef: scene, joinedAtVersion: state.version },
+    ...state.controlledActors
+      .filter((actor) => actor.status === "active")
+      .map((actor) => ({
+        actorId: actor.id,
+        role: "companion" as const,
+        controllerActorId: actor.controllerActorId,
+        sceneId: scene,
+        locationRef: scene,
+        joinedAtVersion: state.version,
+      })),
+  ];
+}
+
+function partyStateData(state: LanternCampaignState): { party: EnginePartyState | null; viewpoint: { actorId: string; knowledge: EngineKnowledgeRecord[] } } {
+  const viewpointActorId = activePartyViewpointId(state);
+  return {
+    party: partyProjection(state),
+    viewpoint: {
+      actorId: viewpointActorId,
+      knowledge: state.actorKnowledge.filter((record) => record.actorId === viewpointActorId).map((record) => ({ ...record })),
+    },
+  };
+}
+
+function resolvePartyCreate(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "party_create" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.character.created) return rejection(state, tool, "character_required", "Create the controlling character before forming a party.");
+  if (context.actorId !== state.actorId) return rejection(state, tool, "party_unauthorized", "Only the campaign owner may form this party.");
+  if (state.party) return rejection(state, tool, "party_exists", "This campaign already has a party.");
+  if (!state.controlledActors.some((actor) => actor.status === "active")) return rejection(state, tool, "controlled_actor_required", "Create one active controlled companion before forming a party.");
+  const members = partyCreateMembers(state);
+  const party: EnginePartyState = {
+    id: `party:${state.id}`,
+    leaderActorId: state.actorId,
+    activeViewpointActorId: state.actorId,
+    mode: "together",
+    members,
+    shared: {
+      questIds: state.quests.map((quest) => quest.id),
+      currency: { copper: 0 },
+      container: { id: `party-shared:${state.id}`, name: "Party shared container", inventory: [] },
+    },
+    rewardAllocation: "leader-only",
+    consent: { mode: "single-controller-future-member-seam", permanentChoiceRequires: "leader-confirmation" },
+    revision: 1,
+  };
+  const next = cloneCampaign(state);
+  next.party = party;
+  return commit(next, context, clientCommandId, command, tool, "The party forms around the controlling character and active companion.", partyStateData(next), "party_created", [], [], [
+    { path: "/party", before: state.party, after: next.party },
+  ]);
+}
+
+function resolvePartySetViewpoint(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "party_set_viewpoint" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.party) return rejection(state, tool, "party_required", "Form a party before switching viewpoints.");
+  if (context.actorId !== state.party.leaderActorId) return rejection(state, tool, "party_unauthorized", "Only the party leader's controller may switch the active viewpoint.");
+  const member = partyMember(state, command.actorId);
+  if (!member) return rejection(state, tool, "party_member_not_found", "That actor is not a member of this party.");
+  if (command.actorId !== state.actorId && !controlledPartyActor(state, command.actorId)) return rejection(state, tool, "party_member_inactive", "An inactive controlled actor cannot become the active viewpoint.");
+  if (state.party.activeViewpointActorId === command.actorId) return rejection(state, tool, "party_viewpoint_unchanged", "That actor is already the active viewpoint.");
+  const next = cloneCampaign(state);
+  if (!next.party) return rejection(state, tool, "party_required", "Form a party before switching viewpoints.");
+  const before = next.party.activeViewpointActorId;
+  next.party.activeViewpointActorId = command.actorId;
+  next.party.revision += 1;
+  return commit(next, context, clientCommandId, command, tool, "The active viewpoint changes without transferring ownership or hidden knowledge.", partyStateData(next), "party_viewpoint_changed", [], [], [
+    { path: "/party/activeViewpointActorId", before, after: command.actorId },
+    { path: "/party/revision", before: state.party.revision, after: next.party.revision },
+  ]);
+}
+
+function resolvePartySplit(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "party_split" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.party) return rejection(state, tool, "party_required", "Form a party before splitting scenes.");
+  if (context.actorId !== state.party.leaderActorId) return rejection(state, tool, "party_unauthorized", "Only the party leader's controller may split the party.");
+  const member = partyMember(state, command.actorId);
+  if (!member) return rejection(state, tool, "party_member_not_found", "That actor is not a member of this party.");
+  if (command.actorId === state.party.leaderActorId) return rejection(state, tool, "party_leader_anchor", "The leader remains the party's shared-scene anchor in this slice.");
+  if (!controlledPartyActor(state, command.actorId)) return rejection(state, tool, "party_member_inactive", "Only an active controlled actor can split from the party.");
+  const locationRef = command.locationRef ?? command.sceneId;
+  if (member.sceneId === command.sceneId && member.locationRef === locationRef) return rejection(state, tool, "party_split_unchanged", "That actor is already in the requested scene context.");
+  const next = cloneCampaign(state);
+  if (!next.party) return rejection(state, tool, "party_required", "Form a party before splitting scenes.");
+  const nextMember = next.party.members.find((candidate) => candidate.actorId === command.actorId);
+  if (!nextMember) return rejection(state, tool, "party_member_not_found", "That actor is not a member of this party.");
+  nextMember.sceneId = command.sceneId;
+  nextMember.locationRef = locationRef;
+  next.party.mode = "split";
+  next.party.revision += 1;
+  return commit(next, context, clientCommandId, command, tool, `${command.actorId} moves into a separate party scene context.`, partyStateData(next), "party_split", [], [], [
+    { path: `/party/members/${command.actorId}/sceneId`, before: member.sceneId, after: command.sceneId },
+    { path: `/party/members/${command.actorId}/locationRef`, before: member.locationRef, after: locationRef },
+    { path: "/party/mode", before: state.party.mode, after: "split" },
+    { path: "/party/revision", before: state.party.revision, after: next.party.revision },
+  ]);
+}
+
+function resolvePartyRejoin(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "party_rejoin" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.party) return rejection(state, tool, "party_required", "Form a party before rejoining scenes.");
+  if (context.actorId !== state.party.leaderActorId) return rejection(state, tool, "party_unauthorized", "Only the party leader's controller may rejoin the party.");
+  const scene = state.worldContext?.id ?? `campaign:${state.id}`;
+  if (state.party.mode === "together" && state.party.members.every((member) => member.sceneId === scene && member.locationRef === scene)) return rejection(state, tool, "party_already_together", "The party is already together in the current scene.");
+  const next = cloneCampaign(state);
+  if (!next.party) return rejection(state, tool, "party_required", "Form a party before rejoining scenes.");
+  next.party.members = next.party.members.map((member) => ({ ...member, sceneId: scene, locationRef: scene }));
+  next.party.mode = "together";
+  next.party.revision += 1;
+  return commit(next, context, clientCommandId, command, tool, "The party reunites in the current world context.", partyStateData(next), "party_rejoined", [], [], [
+    { path: "/party/members", before: state.party.members, after: next.party.members },
+    { path: "/party/mode", before: state.party.mode, after: "together" },
+    { path: "/party/revision", before: state.party.revision, after: next.party.revision },
+  ]);
+}
+
+function resolvePartySharedTransfer(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "party_shared_transfer" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.party) return rejection(state, tool, "party_required", "Form a party before using the shared container.");
+  if (context.actorId !== state.party.leaderActorId) return rejection(state, tool, "party_unauthorized", "Only the party leader's controller may move shared items in this slice.");
+  const member = partyMember(state, command.actorId);
+  if (!member) return rejection(state, tool, "party_member_not_found", "That actor is not a member of this party.");
+  const personal = partyPersonalInventory(state, command.actorId);
+  if (!personal) return rejection(state, tool, "party_member_inactive", "That party member has no active personal inventory.");
+  const shared = state.party.shared.container.inventory;
+  const source = command.direction === "to_shared" ? personal : shared;
+  const item = source.find((candidate) => candidate.id === command.itemId && candidate.quantity >= command.quantity);
+  if (!item) return rejection(state, tool, "item_not_found", command.direction === "to_shared" ? "That item is not in the selected member's personal inventory." : "That item is not in the shared container.");
+  if (item.equipped) return rejection(state, tool, "item_equipped", "Unequip an item before moving it into a shared container.");
+  const next = cloneCampaign(state);
+  if (!next.party) return rejection(state, tool, "party_required", "Form a party before using the shared container.");
+  const nextPersonal = partyPersonalInventory(next, command.actorId);
+  if (!nextPersonal) return rejection(state, tool, "party_member_inactive", "That party member has no active personal inventory.");
+  const nextShared = next.party.shared.container.inventory;
+  const nextSource = command.direction === "to_shared" ? nextPersonal : nextShared;
+  const nextTarget = command.direction === "to_shared" ? nextShared : nextPersonal;
+  const sourceIndex = nextSource.findIndex((candidate) => candidate.id === command.itemId);
+  if (sourceIndex < 0 || nextSource[sourceIndex]!.quantity < command.quantity) return rejection(state, tool, "item_not_found", "The item changed before the shared transfer could commit.");
+  const moved = {
+    ...nextSource[sourceIndex]!,
+    quantity: command.quantity,
+    ownerRef: command.direction === "to_shared" ? { kind: "world" as const, id: next.party.shared.container.id } : { kind: "actor" as const, id: command.actorId },
+    containerRef: undefined,
+    equipped: false,
+    slot: undefined,
+  };
+  nextSource[sourceIndex]!.quantity -= command.quantity;
+  if (nextSource[sourceIndex]!.quantity <= 0) nextSource.splice(sourceIndex, 1);
+  addInventory(nextTarget, moved);
+  next.party.revision += 1;
+  const personalPath = command.actorId === state.actorId ? "/character/inventory" : `/controlledActors/${command.actorId}/inventory`;
+  const sharedPath = "/party/shared/container/inventory";
+  return commit(next, context, clientCommandId, command, tool, command.direction === "to_shared" ? "The item moves into the explicit party shared container." : "The item moves from the shared container into personal ownership.", {
+    party: partyProjection(next),
+    actorId: command.actorId,
+    personalInventory: materializeInventory(nextPersonal),
+    sharedInventory: materializeInventory(next.party.shared.container.inventory),
+  }, "party_shared_transfer", [], [], [
+    { path: personalPath, before: personal, after: nextPersonal },
+    { path: sharedPath, before: shared, after: next.party.shared.container.inventory },
+    { path: "/party/revision", before: state.party.revision, after: next.party.revision },
+  ]);
+}
+
+function resolvePartyGroupCheck(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "party_group_check" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!state.party) return rejection(state, tool, "party_required", "Form a party before attempting a group check.");
+  if (context.actorId !== state.party.leaderActorId) return rejection(state, tool, "party_unauthorized", "Only the party leader's controller may resolve a group check.");
+  if (command.actorIds[0] !== state.party.leaderActorId) return rejection(state, tool, "party_leader_required", "The group check's first participant must be the party leader.");
+  if (new Set(command.actorIds).size !== command.actorIds.length) return rejection(state, tool, "party_duplicate_participant", "A group check cannot count one actor twice.");
+  for (const actorId of command.actorIds) {
+    if (!partyMember(state, actorId)) return rejection(state, tool, "party_member_not_found", `Actor ${actorId} is not a party member.`);
+    if (actorId !== state.actorId && !controlledPartyActor(state, actorId)) return rejection(state, tool, "party_member_inactive", `Actor ${actorId} is not active.`);
+  }
+  const combatAssistance = state.combat.status === "active";
+  if (combatAssistance) {
+    if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "The party leader's turn is not active for this group check.");
+    if (state.combat.turnBudget.action.spent) return rejection(state, tool, "action_already_used", "The party leader's action is already spent.");
+    for (const actorId of command.actorIds.slice(1)) {
+      const actor = controlledPartyActor(state, actorId);
+      if (actor?.turnBudget.action.spent) return rejection(state, tool, "party_assistance_action_used", `Actor ${actorId}'s assistance action is already spent.`);
+    }
+  }
+  const derived = deriveCheck(state, command.ability, command.skill ?? null, null, tool);
+  if ("accepted" in derived) return derived;
+  const assistance = Math.min(2, Math.max(0, command.actorIds.length - 1));
+  const modifier = derived.modifier + assistance;
+  const roll = randomInt(1, 21);
+  const dc = state.combat.status === "active" ? 14 : 12;
+  const total = roll + modifier;
+  const success = total >= dc;
+  const check: EngineCheckEvidence = {
+    kind: "ability-check",
+    actorId: state.party.leaderActorId,
+    ability: command.ability,
+    skill: derived.skill,
+    tool: null,
+    proficiency: derived.proficiency,
+    expertise: derived.expertise,
+    modifier,
+    modifierSources: [...derived.modifierSources, ...command.actorIds.slice(1).map((actorId) => `party-assistance:${actorId}`), "party-group-check-v1"],
+    advantageSources: [],
+    disadvantageSources: [],
+    mode: "normal",
+    informationPolicy: "public",
+    formulaRevision: "party-group-check-v1",
+  };
+  const next = cloneCampaign(state);
+  next.lastRoll = roll;
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [
+    { path: "/lastRoll", before: state.lastRoll, after: roll },
+  ];
+  if (combatAssistance) {
+    const beforeLeaderAction = state.combat.turnBudget.action;
+    spendTurnSlot(next.combat.turnBudget, "action");
+    stateChanges.push({ path: "/combat/turnBudget/action", before: beforeLeaderAction, after: next.combat.turnBudget.action });
+    for (const actorId of command.actorIds.slice(1)) {
+      const beforeActor = state.controlledActors.find((actor) => actor.id === actorId)!;
+      const nextActor = next.controlledActors.find((actor) => actor.id === actorId);
+      if (!nextActor) continue;
+      const beforeAction = beforeActor.turnBudget.action;
+      spendTurnSlot(nextActor.turnBudget, "action");
+      stateChanges.push({ path: `/controlledActors/${actorId}/turnBudget/action`, before: beforeAction, after: nextActor.turnBudget.action });
+    }
+  }
+  return commit(next, context, clientCommandId, command, tool, `The party makes a ${command.ability.toUpperCase()} group check: ${total} against DC ${dc}. ${success ? "Success." : "Failure."}`, {
+    ability: command.ability,
+    skill: derived.skill,
+    goal: command.goal,
+    participants: command.actorIds,
+    dc,
+    roll,
+    modifier,
+    total,
+    success,
+    policy: "party-group-check-v1",
+    assistanceCost: combatAssistance ? "one-action-per-participant" : "none-out-of-combat",
+  }, success ? "success" : "failure", [{ kind: "d20", value: roll, sides: 20 }], [{ name: `${command.ability}_modifier`, value: derived.modifier }, { name: "party_assistance", value: assistance }, { name: "dc", value: dc }], [
+    ...stateChanges,
+  ], [], undefined, check);
 }
 
 function resolvePlayerEndTurn(
@@ -10897,7 +11286,10 @@ export function projectResolutionForActor<T extends EngineResolution>(resolution
 }
 
 export function projectStateForActor(actorId: string, state: LanternCampaignState): LanternCampaignState {
-  const projection = actorKnowledgeProjection(actorId, state);
+  const projectionActorId = state.party?.members.some((member) => member.actorId === state.party?.activeViewpointActorId)
+    ? state.party.activeViewpointActorId
+    : actorId;
+  const projection = actorKnowledgeProjection(projectionActorId, state);
   const projected = cloneCampaign(state);
   projected.worldFacts = projection.facts;
   projected.actorKnowledge = projection.knowledge;
