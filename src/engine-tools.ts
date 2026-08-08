@@ -255,6 +255,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   death_save: noArguments,
   loot: z
     .object({
+      corpseId: z.string().trim().min(1).max(120).optional(),
       items: z.array(lootItemSchema).max(50).default([]),
       rewardXp: z.number().int().nonnegative().max(1_000_000).default(0),
       rewardCopper: z.number().int().nonnegative().max(100_000_000).default(0),
@@ -845,6 +846,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     {
       type: "object",
       properties: {
+        corpseId: { type: "string", description: "Existing corpse/remains id for a DM-authorized exactly-once transfer." },
         items: { type: "array", items: inventoryItemJsonSchema, maxItems: 50 },
         rewardXp: { type: "integer", minimum: 0 },
         rewardCopper: { type: "integer", minimum: 0 },
@@ -1025,6 +1027,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "loot":
       return engineCommandSchema.parse({
         kind: "loot",
+        corpseId: args.corpseId,
         items: args.items ?? [],
         rewardXp: args.rewardXp ?? 0,
         rewardCopper: args.rewardCopper ?? 0,

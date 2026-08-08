@@ -79,3 +79,35 @@ Issue slice: *living → damage to 0 → unconscious + death saves → damage-at
 ## 7. Recommendation
 
 Sequence: **#2/#3/#4 → #8/#9** (EPIC guide). Tightly couple #9 with #4 on the **single `applyHealing` contract** — that one function fixes the confirmed BROKEN potion path and prevents three more divergent heal implementations. Build the death-save nat-1/nat-20 + damage-at-0 rules next (small, well-specified). Defer corpse/poison/exhaustion until #2 and #8 provide the effect and ownership substrates.
+
+---
+
+## 2026-08-08 re-audit after #4 and #8
+
+The historical observations above remain preserved. The following deltas are
+the current implementation evidence used for issue #9:
+
+- #4 now supplies `applyHealing` and the potion, rest, Second Wind, and spell
+  paths call it. Healing above zero removes `unconscious`/`stable` effects and
+  resets death-save counters; the old potion contradiction is fixed.
+- #8 now supplies optional persisted `ownerRef`, `containerRef`,
+  `provenance`, and `charges` on item instances, with exactly-once transfer,
+  loot, merchant, and restart/replay transactions. No corpse/remains entity
+  exists yet, so corpse ownership transfer is still this issue's work.
+- The actor contract still has no explicit lifecycle enum, death source/time,
+  remains identity/location, maximum-HP reduction, or poison/disease/exhaustion
+  level. Effects/conditions are represented by ADR-H26's effect list and
+  compatibility projections.
+- `resolveDeathSave` still treats every d20 roll at or above 10 as one
+  success, lacks natural-1/natural-20 rules, does not reject stale positive-HP
+  unconscious state explicitly, and turns three failures into only a `dead`
+  condition with no corpse record.
+- Damage at zero still applies the downed marker but does not add a death-save
+  failure (or two for a critical hit). Rest and ordinary action guards have no
+  corpse target to reject.
+
+The implementation slice therefore remains: explicit lifecycle/corpse state,
+critical death-save semantics, damage-at-zero failures, corpse-safe ownership
+transfer, replay/restart proof, and one producer-backed poison or exhaustion
+effect only after the core transitions are green. Resurrection windows and
+full injury/disease catalogs remain deferred to #12/later slices.

@@ -28,6 +28,9 @@ import type {
   EngineCharacterFeatureView,
   EngineCharacterSourceDetailsView,
   EngineCharacterView,
+  EngineCorpse,
+  EngineDeathRecord,
+  EngineLifecycleState,
   EngineCampaignBeat,
   EngineCommand,
   EngineChallengeAttemptCommand,
@@ -818,6 +821,7 @@ export function createInitialCampaign(
         progress: 0,
       },
     ],
+    corpses: [],
     effects: [],
     improvEffects: [],
     currentBeat: null,
@@ -855,6 +859,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     : [];
   next.worldFacts = normalizeWorldFacts(next.worldFacts);
   next.actorKnowledge = normalizeKnowledgeRecords(next.actorKnowledge);
+  next.corpses = normalizeCorpses((next as LanternCampaignState & { corpses?: unknown }).corpses);
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
   if (!next.tutorialStep && next.tutorialStep !== 0) next.tutorialStep = 0;
@@ -902,6 +907,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   if (currentQuest) next.quest = currentQuest;
   if (!Array.isArray(next.improvEffects)) next.improvEffects = [];
   next.effects = normalizeEffects((next as LanternCampaignState & { effects?: unknown }).effects, next);
+  normalizeLifecycleConsistency(next);
   // Persisted timed stat effects (for example Shield) are authoritative for
   // the derived AC projection after a save/load or process restart.
   next.character.ac = deriveArmorClass(next.character, next.effects);
@@ -912,6 +918,74 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   // from play; old scene data must not leak back into the player experience.
   delete next.scene;
   return next;
+}
+
+function normalizeCorpses(value: unknown): EngineCorpse[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Partial<EngineCorpse>;
+    if (
+      typeof raw.id !== "string"
+      || typeof raw.formerActorId !== "string"
+      || typeof raw.formerActorName !== "string"
+      || !["lootable", "looted"].includes(raw.status ?? "")
+      || !raw.provenance
+      || typeof raw.provenance.sourceCommandId !== "string"
+      || typeof raw.provenance.sourceVersion !== "number"
+      || typeof raw.provenance.occurredAt !== "string"
+    ) return [];
+    const corpseId = raw.id;
+    const formerActorId = raw.formerActorId;
+    const formerActorName = raw.formerActorName;
+    return [{
+      id: corpseId,
+      formerActorId,
+      formerActorName,
+      locationRef: typeof raw.locationRef === "string" ? raw.locationRef : null,
+      inventory: Array.isArray(raw.inventory)
+        ? raw.inventory.map((item) => ({
+            ...normalizeInventoryItem(item),
+            equipped: false,
+            ownerRef: { kind: "world" as const, id: corpseId },
+          }))
+        : [],
+      status: raw.status as EngineCorpse["status"],
+      provenance: {
+        sourceCommandId: raw.provenance.sourceCommandId,
+        sourceVersion: Math.max(0, Math.trunc(raw.provenance.sourceVersion)),
+        occurredAt: raw.provenance.occurredAt,
+      },
+      ...(typeof raw.lootedAt === "string" ? { lootedAt: raw.lootedAt } : {}),
+    }];
+  });
+}
+
+function normalizeLifecycleConsistency(state: LanternCampaignState): void {
+  const character = state.character;
+  if (character.lifecycleState === "dead" || hasRuntimeCondition(state, character.id, "dead")) {
+    character.lifecycleState = "dead";
+    character.hp = 0;
+    removeRuntimeCondition(state, character.id, "unconscious");
+    removeRuntimeCondition(state, character.id, "stable");
+    syncConditionProjections(state);
+    return;
+  }
+  if (character.hp > 0) {
+    character.lifecycleState = "conscious";
+    character.deathRecord = null;
+    character.deathSaveSuccesses = 0;
+    character.deathSaveFailures = 0;
+    removeRuntimeCondition(state, character.id, "unconscious");
+    removeRuntimeCondition(state, character.id, "stable");
+    syncConditionProjections(state);
+    return;
+  }
+  if (hasRuntimeCondition(state, character.id, "stable") || character.deathSaveSuccesses >= 3) {
+    character.lifecycleState = "stable";
+    return;
+  }
+  character.lifecycleState = "dying";
 }
 
 export function cloneCampaign(state: LanternCampaignState): LanternCampaignState {
@@ -1172,6 +1246,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     worldContext: projection.worldContext,
     playerNotes: state.playerNotes,
     quests: state.quests,
+    corpses: state.corpses,
     effects: state.effects.filter((effect) => effect.status === "active"),
     improvEffects: state.improvEffects,
     currentBeat: state.currentBeat,
@@ -1223,6 +1298,7 @@ export function readToolData(
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
         quests: state.quests,
+        corpses: state.corpses,
         effects: state.effects.filter((effect) => effect.status === "active"),
         improvEffects: state.improvEffects,
         currentBeat: state.currentBeat,
@@ -1451,6 +1527,26 @@ export function resolveEngineCommand(
   tool: EngineToolName | "declare" | "listen",
   playerText?: string
 ): EngineResolution {
+  if (
+    state.character.lifecycleState === "dead"
+    && command.kind !== "observe"
+    && command.kind !== "world_context"
+    && command.kind !== "player_note_add"
+    && command.kind !== "experience_profile_update"
+    && command.kind !== "experience_feedback_add"
+    && command.kind !== "experience_boundary"
+    && command.kind !== "campaign_beat"
+    && command.kind !== "quest_create"
+    && command.kind !== "quest_update"
+  ) {
+    return rejection(state, tool, "actor_dead", "A dead character cannot act, rest, cast, or receive ordinary healing.");
+  }
+  if (
+    state.character.lifecycleState === "stable"
+    && ["combat_action", "cast_spell", "move", "interact", "social_check", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot"].includes(command.kind)
+  ) {
+    return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
+  }
   const experienceCommand = command.kind === "experience_profile_update"
     || command.kind === "experience_feedback_add"
     || command.kind === "experience_boundary";
@@ -2511,14 +2607,11 @@ function resolveImprovise(
   if (command.effectType === "damage" || command.effectType === "healing") {
     if (targetIsPlayer) {
       const amount = command.amount ?? 0;
-      if (command.effectType === "damage") next.character.hp = Math.max(0, next.character.hp - amount);
+      if (command.effectType === "damage") applyCharacterDamage(next, amount, "improvise", clientCommandId, changes, [], [], false);
       else {
         if (amount <= 0) return rejection(state, tool, "healing_amount_required", "Healing must provide a positive amount.");
         if (state.character.hp >= state.character.maxHp) return rejection(state, tool, "already_full_health", "The target is already at full hit points.");
         applyHealing(next, amount, "improvise", changes);
-      }
-      if (next.character.hp === 0 && command.effectType === "damage") {
-        applyConditionRuntimeEffect(next, "unconscious", `actor:${state.actorId}`, next.character.id, { kind: "persistent" }, "condition:unconscious", ["never"], clientCommandId, changes);
       }
     }
   }
@@ -3686,10 +3779,7 @@ function resolveReactionResponse(
     ];
     next.combat.pendingReaction = null;
     const damage = rollStoredReactionDamage(pending, rolls);
-    const beforeHp = next.character.hp;
-    next.character.hp = Math.max(0, next.character.hp - damage);
-    if (beforeHp !== next.character.hp) changes.push({ path: "/character/hp", before: beforeHp, after: next.character.hp });
-    applyConcentrationAndDownedState(next, damage, rolls, modifiers, changes);
+    applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
     next.combat.lastAction = `reaction:${pending.id}:declined`;
     const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
     return commit(
@@ -3786,10 +3876,7 @@ function resolveReactionResponse(
   let damage = 0;
   if (hitAfter) {
     damage = rollStoredReactionDamage(pending, rolls);
-    const beforeHp = next.character.hp;
-    next.character.hp = Math.max(0, next.character.hp - damage);
-    if (beforeHp !== next.character.hp) changes.push({ path: "/character/hp", before: beforeHp, after: next.character.hp });
-    applyConcentrationAndDownedState(next, damage, rolls, modifiers, changes);
+    applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
   }
   next.combat.lastAction = `reaction:${pending.id}:shield`;
   const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
@@ -4469,9 +4556,8 @@ function resolveAdvanceTurn(
       () => randomInt(1, attack.damage.dieSides + 1)
     );
     const damage = Math.max(0, damageDice.reduce((sum, value) => sum + value, 0) + attack.damage.bonus);
-    const beforeHp = next.character.hp;
-    next.character.hp = Math.max(0, next.character.hp - damage);
-    changes.push({ path: "/character/hp", before: beforeHp, after: next.character.hp });
+    const concentrationBefore = next.character.spellcasting?.concentration;
+    applyCharacterDamage(next, damage, "enemy-attack", clientCommandId, changes, rolls, modifiers, critical);
     for (const die of damageDice) {
       rolls.push({ kind: "enemy_damage", value: die, sides: attack.damage.dieSides });
     }
@@ -4479,15 +4565,14 @@ function resolveAdvanceTurn(
     message = enemyView.name + " " + (critical ? "critically " : "") + "hits with " + attack.name + " for " + damage + " " + attack.damage.typeName.toLowerCase() + " damage.";
     outcome = "enemy_hit";
     if (next.character.hp === 0) {
-      if (next.character.spellcasting?.concentration) {
-        const beforeConcentration = next.character.spellcasting.concentration;
-        next.character.spellcasting.concentration = null;
-        changes.push({ path: "/character/spellcasting/concentration", before: beforeConcentration, after: null });
-        message += " Concentration ends.";
+      if (concentrationBefore && !next.character.spellcasting?.concentration) message += " Concentration ends.";
+      if (next.character.lifecycleState === "dead") {
+        message += " You die; your remains are left behind.";
+        outcome = "dead";
+      } else {
+        message += " You fall unconscious.";
+        outcome = "downed";
       }
-      applyConditionRuntimeEffect(next, "unconscious", `combatant:${enemy.id}`, next.character.id, { kind: "persistent" }, "condition:unconscious", ["never"], clientCommandId, changes);
-      message += " You fall unconscious.";
-      outcome = "downed";
     } else if (damage > 0 && next.character.spellcasting?.concentration) {
       const concentrationDc = Math.max(10, Math.floor(damage / 2));
       const concentrationRoll = randomInt(1, 21);
@@ -4508,7 +4593,10 @@ function resolveAdvanceTurn(
   }
 
   const nextEnemyId = nextLiveCombatantId(next.combat, enemy.id);
-  if (nextEnemyId) {
+  if (next.character.lifecycleState === "dead") {
+    next.combat.status = "ended";
+    next.combat.activeActorId = null;
+  } else if (nextEnemyId) {
     next.combat.activeActorId = nextEnemyId;
     message += " The next foe acts.";
   } else {
@@ -4665,16 +4753,23 @@ function resolveCompiledMultiattack(
 
   const attackMessages: string[] = [];
   let hitCount = 0;
-  for (let index = 0; index < attacks.length && next.character.hp > 0; index += 1) {
+  for (let index = 0; index < attacks.length && next.character.lifecycleState !== "dead"; index += 1) {
     const attack = attacks[index];
     if (!attack) continue;
-    const result = resolveOneCreatureAttack(next, attack, index + 1, rolls, modifiers, changes);
+    const result = resolveOneCreatureAttack(next, attack, index + 1, rolls, modifiers, changes, clientCommandId);
     attackMessages.push(result.message);
     if (result.hit) hitCount += 1;
   }
   next.combat.lastAction = program.sourceActionKey;
   const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
   const message = `${enemyView.name} uses ${program.sourceName}. ${attackMessages.join(" ")}${turnSuffix}`;
+  const outcome = next.character.lifecycleState === "dead"
+    ? "dead"
+    : next.character.hp === 0
+      ? "downed"
+      : hitCount > 0
+        ? "enemy_multiattack_hit"
+        : "enemy_multiattack_miss";
   return commit(
     next,
     context,
@@ -4691,7 +4786,7 @@ function resolveCompiledMultiattack(
       combat: combatData(next.combat),
       character: characterData(next.character),
     },
-    next.character.hp === 0 ? "downed" : hitCount > 0 ? "enemy_multiattack_hit" : "enemy_multiattack_miss",
+    outcome,
     rolls,
     modifiers,
     changes,
@@ -4753,12 +4848,7 @@ function resolveCompiledSaveDamage(
   const appliedDamage = succeeded
     ? damage.saveOnSuccess === "half" ? Math.floor(rolledDamage / 2) : 0
     : rolledDamage;
-  const beforeHp = next.character.hp;
-  next.character.hp = Math.max(0, next.character.hp - appliedDamage);
-  if (next.character.hp !== beforeHp) {
-    changes.push({ path: "/character/hp", before: beforeHp, after: next.character.hp });
-  }
-  applyConcentrationAndDownedState(next, appliedDamage, rolls, modifiers, changes);
+  applyCharacterDamage(next, appliedDamage, "compiled-effect", clientCommandId, changes, rolls, modifiers, false);
   next.combat.lastAction = program.sourceActionKey;
   const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
   const area = program.operations.find((operation) => operation.kind === "area");
@@ -4996,7 +5086,8 @@ function resolveOneCreatureAttack(
   sequenceNumber: number,
   rolls: Array<{ kind: string; value: number; sides?: number }>,
   modifiers: Array<{ name: string; value: number }>,
-  changes: Array<{ path: string; before: unknown; after: unknown }>
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+  sourceCommandId: string,
 ): { hit: boolean; message: string } {
   const attackRoll = randomInt(1, 21);
   const modifierQuery = queryModifiers(state.effects, state.character.id, "attack-roll");
@@ -5028,10 +5119,7 @@ function resolveOneCreatureAttack(
   }
   damage = Math.max(0, damage);
   modifiers.push({ name: `enemy_damage_${sequenceNumber}_bonus`, value: attack.damage.bonus });
-  const beforeHp = state.character.hp;
-  state.character.hp = Math.max(0, state.character.hp - damage);
-  changes.push({ path: "/character/hp", before: beforeHp, after: state.character.hp });
-  applyConcentrationAndDownedState(state, damage, rolls, modifiers, changes);
+  applyCharacterDamage(state, damage, "enemy-multiattack", sourceCommandId, changes, rolls, modifiers, critical);
   return {
     hit: true,
     message: `${attack.name} ${critical ? "critically " : ""}hits for ${damage} ${attack.damage.typeName.toLocaleLowerCase("en-US")} damage.`,
@@ -5052,18 +5140,71 @@ function rollCompiledDamage(
   return Math.max(0, total);
 }
 
+function applyCharacterDamage(
+  state: LanternCampaignState,
+  amount: number,
+  source: string,
+  sourceCommandId: string,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+  rolls: Array<{ kind: string; value: number; sides?: number }>,
+  modifiers: Array<{ name: string; value: number }>,
+  critical = false,
+): { beforeHp: number; afterHp: number; applied: number } {
+  const beforeHp = state.character.hp;
+  if (state.character.lifecycleState === "dead") return { beforeHp, afterHp: beforeHp, applied: 0 };
+  const applied = Math.max(0, Math.trunc(Number.isFinite(amount) ? amount : 0));
+  state.character.hp = Math.max(0, beforeHp - applied);
+  if (beforeHp !== state.character.hp) changes.push({ path: "/character/hp", before: beforeHp, after: state.character.hp });
+  applyConcentrationAndDownedState(state, applied, rolls, modifiers, changes, critical, sourceCommandId, source, beforeHp);
+  return { beforeHp, afterHp: state.character.hp, applied };
+}
+
 function applyConcentrationAndDownedState(
   state: LanternCampaignState,
   damage: number,
   rolls: Array<{ kind: string; value: number; sides?: number }>,
   modifiers: Array<{ name: string; value: number }>,
-  changes: Array<{ path: string; before: unknown; after: unknown }>
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+  critical = false,
+  sourceCommandId: string | null = null,
+  source = "damage",
+  beforeHp = state.character.hp,
 ): void {
   if (state.character.hp === 0) {
     if (state.character.spellcasting?.concentration) {
       const before = state.character.spellcasting.concentration;
       state.character.spellcasting.concentration = null;
       changes.push({ path: "/character/spellcasting/concentration", before, after: null });
+    }
+    if (damage > 0 && beforeHp === 0 && state.character.lifecycleState !== "dead") {
+      const beforeFailures = state.character.deathSaveFailures;
+      const beforeSuccesses = state.character.deathSaveSuccesses;
+      const addedFailures = critical ? 2 : 1;
+      state.character.deathSaveFailures = Math.min(3, beforeFailures + addedFailures);
+      state.character.deathSaveSuccesses = 0;
+      if (beforeFailures !== state.character.deathSaveFailures) {
+        changes.push({ path: "/character/deathSaveFailures", before: beforeFailures, after: state.character.deathSaveFailures });
+      }
+      if (beforeSuccesses !== 0) {
+        changes.push({ path: "/character/deathSaveSuccesses", before: beforeSuccesses, after: 0 });
+      }
+      state.character.lifecycleState = "dying";
+      removeRuntimeCondition(state, state.character.id, "stable", changes);
+      if (state.character.deathSaveFailures >= 3) {
+        transitionActorToDead(state, sourceCommandId ?? randomUUID(), source === "death-save" ? "death-save" : "damage", changes);
+        return;
+      }
+    } else if (beforeHp > 0 && state.character.lifecycleState !== "dead") {
+      const beforeLifecycle = state.character.lifecycleState;
+      state.character.lifecycleState = "dying";
+      const beforeDeathRecord = state.character.deathRecord;
+      state.character.deathRecord = sourceCommandId
+        ? { source: source === "death-save" ? "death-save" : "damage", sourceCommandId, sourceVersion: state.version, occurredAt: new Date().toISOString() }
+        : state.character.deathRecord;
+      if (beforeLifecycle !== state.character.lifecycleState) changes.push({ path: "/character/lifecycleState", before: beforeLifecycle, after: state.character.lifecycleState });
+      if (JSON.stringify(beforeDeathRecord) !== JSON.stringify(state.character.deathRecord)) {
+        changes.push({ path: "/character/deathRecord", before: beforeDeathRecord, after: state.character.deathRecord });
+      }
     }
     const beforeConditions = [...state.character.conditions];
     applyConditionRuntimeEffect(
@@ -5074,7 +5215,7 @@ function applyConcentrationAndDownedState(
       { kind: "persistent" },
       "condition:unconscious",
       ["never"],
-      null,
+      sourceCommandId,
       changes,
     );
     if (JSON.stringify(beforeConditions) !== JSON.stringify(state.character.conditions)) {
@@ -5104,6 +5245,9 @@ function applyHealing(
 ): { source: string; requested: number; healed: number; beforeHp: number; afterHp: number } {
   const requested = Number.isFinite(amount) ? Math.max(0, Math.trunc(amount)) : 0;
   const beforeHp = state.character.hp;
+  if (state.character.lifecycleState === "dead" || hasRuntimeCondition(state, state.character.id, "dead")) {
+    return { source, requested, healed: 0, beforeHp, afterHp: beforeHp };
+  }
   const afterHp = Math.min(state.character.maxHp, beforeHp + requested);
   state.character.hp = afterHp;
   if (changes && beforeHp !== afterHp) changes.push({ path: "/character/hp", before: beforeHp, after: afterHp });
@@ -5121,6 +5265,12 @@ function applyHealing(
       if (changes && beforeSuccesses !== 0) changes.push({ path: "/character/deathSaveSuccesses", before: beforeSuccesses, after: 0 });
       if (changes && beforeFailures !== 0) changes.push({ path: "/character/deathSaveFailures", before: beforeFailures, after: 0 });
     }
+    const beforeLifecycle = state.character.lifecycleState;
+    const beforeDeathRecord = state.character.deathRecord;
+    state.character.lifecycleState = "conscious";
+    state.character.deathRecord = null;
+    if (changes && beforeLifecycle !== "conscious") changes.push({ path: "/character/lifecycleState", before: beforeLifecycle, after: "conscious" });
+    if (changes && beforeDeathRecord !== null) changes.push({ path: "/character/deathRecord", before: beforeDeathRecord, after: null });
     syncConditionProjections(state);
   }
   return { source, requested, healed: afterHp - beforeHp, beforeHp, afterHp };
@@ -5293,40 +5443,58 @@ function resolveDeathSave(
   command: Extract<EngineCommand, { kind: "death_save" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
-  if (!hasRuntimeCondition(state, state.character.id, "unconscious")) {
+  if (state.character.hp !== 0 || state.character.lifecycleState !== "dying" || !hasRuntimeCondition(state, state.character.id, "unconscious")) {
     return rejection(state, tool, "not_unconscious", "Death saves are only made when your character is unconscious at 0 HP.");
   }
   const roll = randomInt(1, 21);
-  const success = roll >= 10;
   const next = cloneCampaign(state);
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
-  if (success) next.character.deathSaveSuccesses += 1;
-  else next.character.deathSaveFailures += 1;
-  let outcome = success ? "death_save_success" : "death_save_failure";
-  let message = "Death save: d20 " + roll + ". " + (success ? "A success." : "A failure.");
-  if (next.character.deathSaveSuccesses >= 3) {
+  let success = false;
+  let outcome = "death_save_failure";
+  let message = "Death save: d20 " + roll + ". ";
+  if (roll === 20) {
+    success = true;
+    applyHealing(next, 1, "death-save-natural-20", changes);
+    next.character.lifecycleState = "conscious";
+    next.character.deathRecord = null;
+    message += "Natural 20; you regain 1 hit point and stand.";
+    outcome = "death_save_natural_20";
+    next.combat.activeActorId = firstLiveCombatantId(next.combat);
+    spendTurnSlot(next.combat.turnBudget, "action");
+  } else if (roll === 1) {
+    next.character.deathSaveFailures = Math.min(3, next.character.deathSaveFailures + 2);
+    message += "Natural 1; two failures.";
+    outcome = "death_save_natural_1";
+  } else if (roll >= 10) {
+    success = true;
+    next.character.deathSaveSuccesses += 1;
+    message += "A success.";
+    outcome = "death_save_success";
+  } else {
+    next.character.deathSaveFailures += 1;
+    message += "A failure.";
+  }
+  if (next.character.lifecycleState === "conscious") {
+    // Natural 20 already recovered the actor and does not enter a terminal branch.
+  } else if (next.character.deathSaveSuccesses >= 3) {
     const beforeConditions = [...next.character.conditions];
     removeRuntimeCondition(next, next.character.id, "unconscious", changes);
     applyConditionRuntimeEffect(next, "stable", "system:death-save", next.character.id, { kind: "persistent" }, "condition:stable", ["never"], clientCommandId, changes);
     if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
       changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
     }
+    const beforeLifecycle = next.character.lifecycleState;
+    next.character.lifecycleState = "stable";
+    if (beforeLifecycle !== next.character.lifecycleState) changes.push({ path: "/character/lifecycleState", before: beforeLifecycle, after: next.character.lifecycleState });
     next.combat.activeActorId = firstLiveCombatantId(next.combat);
     spendTurnSlot(next.combat.turnBudget, "action");
     message += " You stabilize.";
     outcome = "stable";
   } else if (next.character.deathSaveFailures >= 3) {
-    const beforeConditions = [...next.character.conditions];
-    removeRuntimeCondition(next, next.character.id, "unconscious", changes);
-    applyConditionRuntimeEffect(next, "dead", "system:death-save", next.character.id, { kind: "persistent" }, "condition:dead", ["never"], clientCommandId, changes);
-    if (JSON.stringify(beforeConditions) !== JSON.stringify(next.character.conditions)) {
-      changes.push({ path: "/character/conditions", before: beforeConditions, after: next.character.conditions });
-    }
-    next.combat.status = "ended";
-    next.combat.activeActorId = null;
+    transitionActorToDead(next, clientCommandId, "death-save", changes);
     message += " The character dies.";
     outcome = "dead";
-  } else {
+  } else if (outcome !== "death_save_natural_20") {
     next.combat.activeActorId = firstLiveCombatantId(next.combat);
     spendTurnSlot(next.combat.turnBudget, "action");
   }
@@ -5350,6 +5518,7 @@ function resolveDeathSave(
     [],
     [
       { path: "/character/deathSaveSuccesses", before: state.character.deathSaveSuccesses, after: next.character.deathSaveSuccesses },
+      { path: "/character/deathSaveFailures", before: state.character.deathSaveFailures, after: next.character.deathSaveFailures },
       ...changes,
     ]
   );
@@ -5362,6 +5531,7 @@ function resolveLoot(
   command: Extract<EngineCommand, { kind: "loot" }>,
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
+  if (command.corpseId) return resolveCorpseLoot(state, context, clientCommandId, command, tool);
   if (state.combat.status !== "ended") return rejection(state, tool, "encounter_active", "There is no defeated encounter to loot.");
   if (state.combat.lootClaimed) return rejection(state, tool, "loot_claimed", "The encounter area has already been searched.");
   const quest = command.questId ? state.quests.find((candidate) => candidate.id === command.questId) : null;
@@ -5439,6 +5609,50 @@ function resolveLoot(
       ...(quest ? [{ path: "/quests/" + quest.id, before: quest, after: next.quests.find((candidate) => candidate.id === quest.id) }] : []),
       ...(pendingAdvancement ? [{ path: "/pendingAdvancement", before: state.pendingAdvancement, after: pendingAdvancement }] : []),
     ]
+  );
+}
+
+function resolveCorpseLoot(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "loot" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!context.capabilities.includes("dm")) return rejection(state, tool, "dm_required", "Only the DM may adjudicate corpse recovery in this single-actor slice.");
+  if (state.character.lifecycleState === "dead") return rejection(state, tool, "actor_dead", "A dead character cannot receive corpse loot.");
+  const corpse = state.corpses.find((candidate) => candidate.id === command.corpseId);
+  if (!corpse) return rejection(state, tool, "corpse_not_found", "That corpse is not present in this campaign.");
+  if (corpse.status !== "lootable") return rejection(state, tool, "corpse_looted", "That corpse has already been looted.");
+  const duplicate = corpse.inventory.some((item) => state.character.inventory.some((candidate) => candidate.id === item.id));
+  if (duplicate) return rejection(state, tool, "duplicate_item_instance", "Corpse recovery would duplicate an existing item instance.");
+  const next = cloneCampaign(state);
+  const nextCorpse = next.corpses.find((candidate) => candidate.id === command.corpseId);
+  if (!nextCorpse) return rejection(state, tool, "corpse_not_found", "That corpse is not present in this campaign.");
+  const recovered = nextCorpse.inventory.map((item) => withActorOwnership(item, next.character.id, { kind: "loot", sourceId: clientCommandId }));
+  for (const item of recovered) addInventory(next.character.inventory, item);
+  const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+  if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+  nextCorpse.inventory = [];
+  nextCorpse.status = "looted";
+  nextCorpse.lootedAt = new Date().toISOString();
+  const beforeInventory = state.character.inventory;
+  const beforeCorpse = corpse;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `The DM recovers ${recovered.length} item instance${recovered.length === 1 ? "" : "s"} from ${corpse.formerActorName}'s remains.`,
+    { corpse: nextCorpse, items: materializeInventory(recovered), inventory: materializeInventory(next.character.inventory) },
+    "corpse_looted",
+    [],
+    [],
+    [
+      { path: `/corpses/${corpse.id}`, before: beforeCorpse, after: nextCorpse },
+      { path: "/character/inventory", before: beforeInventory, after: next.character.inventory },
+    ],
   );
 }
 
@@ -6082,6 +6296,9 @@ function createCanonicalCharacter(
     spellcasting: buildSpellcastingState(characterClass.definition.name, level, abilities),
     hp: maxHp,
     maxHp,
+    lifecycleState: "conscious",
+    deathRecord: null,
+    corpseId: null,
     ac: 10 + open5eAbilityModifier(abilities.dex),
     inventory,
     currency: { copper: background.profile.startingCurrencyCopper },
@@ -6252,6 +6469,9 @@ function createCharacter(
     spellcasting: buildSpellcastingState(className, level, abilities),
     hp: maxHp,
     maxHp,
+    lifecycleState: "conscious",
+    deathRecord: null,
+    corpseId: null,
     ac: 10 + open5eAbilityModifier(abilities.dex),
     inventory,
     currency: { copper: 500 },
@@ -6267,7 +6487,12 @@ function createCharacter(
 }
 
 function normalizeCharacter(character: EngineCharacter): EngineCharacter {
-  const raw = character as EngineCharacter & { currency?: { copper?: number } };
+  const raw = character as EngineCharacter & {
+    currency?: { copper?: number };
+    lifecycleState?: unknown;
+    deathRecord?: unknown;
+    corpseId?: unknown;
+  };
   const currencyCopper = raw.currency?.copper ?? Math.max(0, Math.trunc(raw.gold ?? 0) * 100);
   const hydrated = hydrateCharacter({
     ...raw,
@@ -6291,10 +6516,128 @@ function normalizeCharacter(character: EngineCharacter): EngineCharacter {
     senses: normalizeSenseCapabilities((raw as EngineCharacter & { senses?: unknown }).senses),
     deathSaveSuccesses: raw.deathSaveSuccesses ?? 0,
     deathSaveFailures: raw.deathSaveFailures ?? 0,
+    lifecycleState: normalizeLifecycleStateValue(raw.lifecycleState, raw.hp, raw.conditions, raw.deathSaveSuccesses, raw.deathSaveFailures),
+    deathRecord: normalizeDeathRecord(raw.deathRecord),
+    corpseId: typeof raw.corpseId === "string" && raw.corpseId.trim() ? raw.corpseId.trim() : null,
     xp: raw.xp ?? 0,
   });
   syncCurrencyProjection(hydrated);
   return hydrated;
+}
+
+function transitionActorToDead(
+  state: LanternCampaignState,
+  sourceCommandId: string,
+  source: "damage" | "death-save",
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): EngineCorpse {
+  const existing = state.corpses.find((corpse) => corpse.formerActorId === state.character.id && corpse.status === "lootable");
+  if (existing) {
+    const beforeInventory = state.character.inventory;
+    const beforeLifecycle = state.character.lifecycleState;
+    const beforeDeathRecord = state.character.deathRecord;
+    const beforeCorpseId = state.character.corpseId;
+    for (const item of beforeInventory) removeRuntimeSource(state, `item:${item.id}`, changes);
+    state.character.inventory = [];
+    if (beforeInventory.length > 0) changes.push({ path: "/character/inventory", before: beforeInventory, after: [] });
+    state.character.lifecycleState = "dead";
+    state.character.corpseId = existing.id;
+    state.character.hp = 0;
+    state.character.deathRecord = {
+      source,
+      sourceCommandId,
+      sourceVersion: state.version,
+      occurredAt: new Date().toISOString(),
+    };
+    if (beforeLifecycle !== "dead") changes.push({ path: "/character/lifecycleState", before: beforeLifecycle, after: "dead" });
+    if (JSON.stringify(beforeDeathRecord) !== JSON.stringify(state.character.deathRecord)) {
+      changes.push({ path: "/character/deathRecord", before: beforeDeathRecord, after: state.character.deathRecord });
+    }
+    if (beforeCorpseId !== existing.id) changes.push({ path: "/character/corpseId", before: beforeCorpseId, after: existing.id });
+    removeRuntimeCondition(state, state.character.id, "unconscious", changes);
+    removeRuntimeCondition(state, state.character.id, "stable", changes);
+    applyConditionRuntimeEffect(state, "dead", "system:death", state.character.id, { kind: "persistent" }, "condition:dead", ["never"], sourceCommandId, changes);
+    state.combat.status = "ended";
+    state.combat.activeActorId = null;
+    state.combat.pendingReaction = null;
+    return existing;
+  }
+  const corpseId = randomUUID();
+  const occurredAt = new Date().toISOString();
+  const inventory = state.character.inventory.map((item) => ({
+    ...item,
+    ownerRef: { kind: "world" as const, id: corpseId },
+    equipped: false,
+    slot: undefined,
+  }));
+  for (const item of state.character.inventory) removeRuntimeSource(state, `item:${item.id}`, changes);
+  const corpse: EngineCorpse = {
+    id: corpseId,
+    formerActorId: state.character.id,
+    formerActorName: state.character.name || "The fallen character",
+    locationRef: state.worldContext?.id ?? null,
+    inventory,
+    status: "lootable",
+    provenance: { sourceCommandId, sourceVersion: state.version, occurredAt },
+  };
+  const beforeCorpses = state.corpses;
+  state.corpses = [...state.corpses, corpse];
+  changes.push({ path: "/corpses", before: beforeCorpses, after: state.corpses });
+  const beforeInventory = state.character.inventory;
+  state.character.inventory = [];
+  changes.push({ path: "/character/inventory", before: beforeInventory, after: [] });
+  const beforeLifecycle = state.character.lifecycleState;
+  const beforeCorpseId = state.character.corpseId;
+  const beforeDeathRecord = state.character.deathRecord;
+  state.character.lifecycleState = "dead";
+  state.character.deathRecord = {
+    source,
+    sourceCommandId,
+    sourceVersion: state.version,
+    occurredAt,
+  };
+  state.character.corpseId = corpseId;
+  state.character.hp = 0;
+  if (beforeLifecycle !== "dead") changes.push({ path: "/character/lifecycleState", before: beforeLifecycle, after: "dead" });
+  if (JSON.stringify(beforeDeathRecord) !== JSON.stringify(state.character.deathRecord)) {
+    changes.push({ path: "/character/deathRecord", before: beforeDeathRecord, after: state.character.deathRecord });
+  }
+  changes.push({ path: "/character/corpseId", before: beforeCorpseId, after: corpseId });
+  removeRuntimeCondition(state, state.character.id, "unconscious", changes);
+  removeRuntimeCondition(state, state.character.id, "stable", changes);
+  applyConditionRuntimeEffect(state, "dead", "system:death", state.character.id, { kind: "persistent" }, "condition:dead", ["never"], sourceCommandId, changes);
+  state.combat.status = "ended";
+  state.combat.activeActorId = null;
+  state.combat.pendingReaction = null;
+  return corpse;
+}
+
+function normalizeLifecycleStateValue(
+  value: unknown,
+  hp: unknown,
+  conditions: unknown,
+  successes: unknown,
+  failures: unknown,
+): EngineLifecycleState {
+  if (value === "conscious" || value === "dying" || value === "stable" || value === "dead") return value;
+  const names = Array.isArray(conditions) ? conditions.map((condition) => String(condition).toLocaleLowerCase("en-US")) : [];
+  if (names.includes("dead")) return "dead";
+  if (names.includes("stable") || (typeof successes === "number" && successes >= 3)) return "stable";
+  if (names.includes("unconscious") || Number(hp ?? 0) <= 0 || (typeof failures === "number" && failures > 0)) return "dying";
+  return "conscious";
+}
+
+function normalizeDeathRecord(value: unknown): EngineDeathRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EngineDeathRecord>;
+  if (candidate.source !== "damage" && candidate.source !== "death-save") return null;
+  if (typeof candidate.sourceCommandId !== "string" || typeof candidate.occurredAt !== "string" || typeof candidate.sourceVersion !== "number") return null;
+  return {
+    source: candidate.source,
+    sourceCommandId: candidate.sourceCommandId,
+    sourceVersion: Math.max(0, Math.trunc(candidate.sourceVersion)),
+    occurredAt: candidate.occurredAt,
+  };
 }
 
 function normalizeSenseCapabilities(value: unknown): EngineSenseCapabilities {
@@ -7725,6 +8068,9 @@ function characterData(character: EngineCharacter): EngineCharacterView {
     spellcasting: materializeSpellcasting(character),
     hp: character.hp,
     maxHp: character.maxHp,
+    lifecycleState: character.lifecycleState,
+    deathRecord: character.deathRecord,
+    corpseId: character.corpseId,
     ac: character.ac,
     inventory: materializeInventory(character.inventory),
     currency: character.currency,
