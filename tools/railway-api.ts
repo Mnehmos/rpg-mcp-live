@@ -96,6 +96,7 @@ interface ScopeResponse {
         edges: Array<{ node: { repository: string; branch: string; environmentId: string; serviceId: string | null } }>;
       };
     };
+    activeDeployments: Array<{ id: string; status: string; meta: unknown }>;
   } | null;
   serviceInstanceAutoDeployStatus: { enabled: boolean } | null;
   deploymentTriggers: {
@@ -151,9 +152,27 @@ interface CurrentSourceRecord {
   branch: string;
 }
 
+function findDeploymentSource(value: unknown): CurrentSourceRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const repository = typeof record.repo === "string"
+    ? record.repo
+    : typeof record.repository === "string"
+      ? record.repository
+      : null;
+  const branch = typeof record.branch === "string" ? record.branch : null;
+  if (repository && branch) return { repository, branch };
+  for (const nested of Object.values(record)) {
+    const found = findDeploymentSource(nested);
+    if (found) return found;
+  }
+  return null;
+}
+
 function currentSource(
   source: { repo: string | null; image: string | null } | null,
   triggers: Array<{ repository: string; branch: string; environmentId: string; serviceId: string | null }>,
+  activeDeployments: Array<{ status: string; meta: unknown }>,
   environmentId: string,
   serviceId: string,
 ): CurrentSourceRecord | null {
@@ -162,11 +181,23 @@ function currentSource(
   const uniqueTriggers = Array.from(new Map(
     scopedTriggers.map((trigger) => [`${trigger.repository}\u0000${trigger.branch}`, { repository: trigger.repository, branch: trigger.branch }]),
   ).values());
-  if (uniqueTriggers.length !== 1) return null;
-  const trigger = uniqueTriggers[0];
   if (source?.image && !source.repo) return null;
-  if (source?.repo && source.repo !== trigger.repository) return null;
-  return trigger;
+  const activeSources = Array.from(new Map(
+    activeDeployments
+      .filter((deployment) => deployment.status === "SUCCESS")
+      .map((deployment) => findDeploymentSource(deployment.meta))
+      .filter((candidate): candidate is CurrentSourceRecord => candidate !== null)
+      .map((candidate) => [`${candidate.repository}\u0000${candidate.branch}`, candidate]),
+  ).values());
+  if (activeSources.length > 1 || uniqueTriggers.length > 1) return null;
+  const active = activeSources[0] ?? null;
+  const trigger = uniqueTriggers[0] ?? null;
+  if (source?.repo && active && source.repo !== active.repository) return null;
+  if (trigger && active && (trigger.repository !== active.repository || trigger.branch !== active.branch)) return null;
+  const current = trigger ?? active;
+  if (!current) return null;
+  if (source?.repo && source.repo !== current.repository) return null;
+  return current;
 }
 
 export class RailwayApiClient {
@@ -252,6 +283,7 @@ export class RailwayApiClient {
           service {
             repoTriggers { edges { node { repository branch environmentId serviceId } } }
           }
+          activeDeployments { id status meta }
         }
         serviceInstanceAutoDeployStatus(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) { enabled }
         deploymentTriggers(first: 100, projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) {
@@ -283,6 +315,7 @@ export class RailwayApiClient {
         ...instance.service.repoTriggers.edges.map((edge) => edge.node),
         ...data.deploymentTriggers.edges.map((edge) => edge.node),
       ],
+      instance.activeDeployments,
       scope.environmentId,
       scope.serviceId,
     );
