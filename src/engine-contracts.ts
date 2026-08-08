@@ -88,6 +88,31 @@ export const engineItemProvenanceSchema = z.object({
 }).strict();
 export type EngineItemProvenance = z.infer<typeof engineItemProvenanceSchema>;
 
+export const engineLifecycleStateSchema = z.enum(["conscious", "dying", "stable", "dead"]);
+export type EngineLifecycleState = z.infer<typeof engineLifecycleStateSchema>;
+
+export interface EngineDeathRecord {
+  source: "damage" | "death-save";
+  sourceCommandId: string;
+  sourceVersion: number;
+  occurredAt: string;
+}
+
+export interface EngineCorpse {
+  id: string;
+  formerActorId: string;
+  formerActorName: string;
+  locationRef: string | null;
+  inventory: EngineInventoryItem[];
+  status: "lootable" | "looted";
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+    occurredAt: string;
+  };
+  lootedAt?: string;
+}
+
 export const engineItemChargeStateSchema = z.object({
   current: z.number().int().nonnegative(),
   max: z.number().int().positive(),
@@ -794,6 +819,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("loot"),
+      corpseId: z.string().trim().min(1).max(120).optional(),
       items: z
         .array(
           engineInventoryItemInputSchema.refine((item) => item.quantity > 0, {
@@ -1123,6 +1149,9 @@ export interface EngineCharacter {
   spellcasting: EngineSpellcasting | null;
   hp: number;
   maxHp: number;
+  lifecycleState: EngineLifecycleState;
+  deathRecord: EngineDeathRecord | null;
+  corpseId: string | null;
   ac: number;
   inventory: EngineInventoryItem[];
   currency: EngineCurrency;
@@ -1534,6 +1563,7 @@ export interface LanternCampaignState {
   combat: EngineCombat;
   quest: EngineQuest;
   quests: EngineQuest[];
+  corpses: EngineCorpse[];
   effects: EngineEffectInstance[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
@@ -1588,6 +1618,7 @@ export interface EngineSessionView {
   lastRoll: number | null;
   character: EngineCharacterView;
   quests: EngineQuest[];
+  corpses: EngineCorpse[];
   effects: EngineEffectInstance[];
   improvEffects: EngineImprovEffect[];
   currentBeat: EngineCampaignBeat | null;
