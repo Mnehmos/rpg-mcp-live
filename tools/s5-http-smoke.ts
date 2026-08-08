@@ -48,7 +48,7 @@ try {
   assert(engineHealth.status === "ok", "Engine health was not ok.");
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "56bdfbda9d59a398f3c9cb0e02aaf2b411e4280e99fb32c550cf158b38f7b07f", "Engine booted an unexpected pack hash.");
-  assert(engineHealth.toolCount === 42, "Engine tool count drifted.");
+  assert(engineHealth.toolCount === 43, "Engine tool count drifted.");
 
   const page = await fetch(`${webBaseUrl}/play`);
   const pageHtml = await page.text();
@@ -167,10 +167,17 @@ try {
     arguments: { action: "dodge" },
   });
   assert(yielded.accepted, `S9 player combat action failed: ${yielded.code ?? yielded.message}`);
-  const activeEnemyId = yielded.commandResult.session.combat.activeActorId;
+  assert(yielded.commandResult.session.combat.activeActorId === "s9-http-player", "S9 player turn advanced before end_turn.");
+  const endTurn = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
+    expectedCampaignVersion: yielded.campaignVersion,
+    toolName: "end_turn",
+    arguments: {},
+  });
+  assert(endTurn.accepted, `S9 end_turn failed: ${endTurn.code ?? endTurn.message}`);
+  const activeEnemyId = endTurn.commandResult.session.combat.activeActorId;
   assert(Boolean(activeEnemyId), "S9 combat did not hand initiative to the creature.");
   const multiattack = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
-    expectedCampaignVersion: yielded.campaignVersion,
+    expectedCampaignVersion: endTurn.campaignVersion,
     toolName: "advance_turn",
     arguments: { combatantId: activeEnemyId, actionKey: "multiattack" },
   });

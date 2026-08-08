@@ -203,11 +203,13 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   }).strict(),
   combat_action: z
     .object({
-      action: z.enum(["attack", "dodge", "dash", "disengage", "help"]),
+      action: z.enum(["attack", "dodge", "dash", "disengage", "help", "ready", "second_wind"]),
       targetId: z.string().trim().min(1).max(80).optional(),
+      weaponId: z.string().trim().min(1).max(120).optional(),
       goal: z.string().trim().min(1).max(2_000).optional(),
     })
     .strict(),
+  end_turn: noArguments,
   advance_turn: z.object({
     combatantId: z.string().trim().min(1).max(120).optional(),
     actionKey: z.string().trim().min(1).max(300).optional(),
@@ -686,14 +688,16 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["attack", "dodge", "dash", "disengage", "help"] },
+        action: { type: "string", enum: ["attack", "dodge", "dash", "disengage", "help", "ready", "second_wind"] },
         targetId: { type: "string" },
+        weaponId: { type: "string", description: "Optional id of an equipped weapon; omitted uses mainhand." },
         goal: { type: "string" },
       },
       required: ["action"],
       additionalProperties: false,
     }
   ),
+  tool("end_turn", "Explicitly end the player's combat turn and offer the opposition its turn.", {}),
   tool(
     "advance_turn",
     "Resolve the active creature's turn with a source-backed executable action. Choose actionKey from combat_state. Exact S7 multiattack and save/damage programs run atomically; incomplete prose, legendary timing, and unsupported fragments are rejected without mutation. attackKey remains a compatibility alias.",
@@ -812,8 +816,11 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         kind: "combat_action",
         action: args.action,
         targetId: args.targetId,
+        weaponId: args.weaponId,
         goal: args.goal,
       });
+    case "end_turn":
+      return engineCommandSchema.parse({ kind: "end_turn" });
     case "combat_start":
       return engineCommandSchema.parse({
         kind: "combat_start",
@@ -886,6 +893,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "combat_state":
       return null;
   }
+  return null;
 }
 
 export function executeReadTool(

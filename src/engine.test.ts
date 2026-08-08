@@ -142,6 +142,7 @@ describe("Lantern engine boundary", () => {
         "prepare_spell",
         "cast_spell",
         "combat_action",
+        "end_turn",
         "advance_turn",
         "death_save",
         "loot",
@@ -150,7 +151,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(42);
+    expect(names).toHaveLength(43);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");
@@ -402,7 +403,7 @@ describe("Lantern engine boundary", () => {
       "combat_action"
     );
     expect(attack.accepted).toBe(true);
-    expect(attack.state.combat.activeActorId).toBe(targetId);
+    expect(attack.state.combat.activeActorId).toBe(campaign.actorId);
 
     const offTurn = resolveEngineCommand(
       attack.state,
@@ -412,7 +413,7 @@ describe("Lantern engine boundary", () => {
       "combat_action"
     );
     expect(offTurn.accepted).toBe(false);
-    expect(offTurn.code).toBe("off_turn");
+    expect(offTurn.code).toBe("action_already_used");
     expect(offTurn.state.version).toBe(attack.state.version);
 
     campaign.character.hp = 2;
@@ -485,7 +486,7 @@ describe("Lantern engine boundary", () => {
     );
     const firstGoblinId = dodged.state.combat.enemies[0]!.id;
     const secondGoblinId = dodged.state.combat.enemies[1]!.id;
-    expect(dodged.state.combat.activeActorId).toBe(firstGoblinId);
+    expect(dodged.state.combat.activeActorId).toBe(campaign.actorId);
 
     const ambiguous = resolveEngineCommand(
       dodged.state,
@@ -1356,7 +1357,7 @@ describe("Lantern engine boundary", () => {
 
     expect(cast.accepted).toBe(true);
     expect(cast.state.character.spellcasting?.slots).toEqual(slotsBefore);
-    expect(cast.state.combat.actionUsed).toBe(true);
+    expect(cast.state.combat.turnBudget.action.spent).toBe(true);
     expect(cast.event?.contentKeys).toContain(fireBoltKey);
     expect(cast.data).toMatchObject({ slotLevel: null, deferredProseEffects: true });
   });
