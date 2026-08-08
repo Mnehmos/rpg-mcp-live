@@ -29,14 +29,20 @@ Rejects tracked files matching: `.env`, `*.db`, `*.sqlite`, `*.pem`, `*.key`, `i
 
 Scans browser assets for secret-variable names: `OPENROUTER_API_KEY`, `CLERK_SECRET_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ENGINE_INTERNAL_TOKEN`. Reports filenames only — never values.
 
-### After #22 lands
+### Deterministic evaluation harness
 
-These become required CI steps:
+Issue #22 adds two deterministic, stubbed evaluation commands. They use the
+authoritative engine resolver and store; they never contact OpenRouter:
 
 ```
 npm run test:invariants
 npm run test:gauntlet:ci
 ```
+
+The gauntlet emits ten versioned traces, hard privacy/atomicity/idempotency
+assertions, a stable baseline digest, and separate pending human scorecards.
+Live-provider evaluation remains opt-in and budget-capped through
+`live-eval.yml`; it is never a required CI or deployment step.
 
 ## Automated changelog
 
