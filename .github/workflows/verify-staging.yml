@@ -1,0 +1,110 @@
+name: Verify staging deployment
+
+# Railway native GitHub autodeploy owns the build and deployment. This workflow
+# runs only after Railway reports a successful staging deployment and records
+# health/readback evidence; it never calls Railway's deployment API.
+on:
+  deployment_status:
+    types: [success]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-staging-${{ github.event.deployment.sha }}
+  cancel-in-progress: true
+
+jobs:
+  verify-staging:
+    name: Verify native staging deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: staging
+    if: >
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment.environment == 'RPG MCP Live / staging' &&
+      github.event.deployment.ref == 'main' &&
+      github.event.deployment.creator.login == 'railway-app[bot]'
+    env:
+      SHA: ${{ github.event.deployment.sha }}
+      DEPLOYMENT_ID: ${{ github.event.deployment.id }}
+      DEPLOYMENT_ENVIRONMENT: ${{ github.event.deployment.environment }}
+      DEPLOYMENT_REF: ${{ github.event.deployment.ref }}
+      DEPLOYMENT_CREATOR: ${{ github.event.deployment.creator.login }}
+
+    steps:
+      - name: Checkout the Railway deployment SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+
+      - name: Verify Railway deployment identity
+        run: |
+          test "${#SHA}" -eq 40
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$DEPLOYMENT_ENVIRONMENT" = "RPG MCP Live / staging"
+          test "$DEPLOYMENT_REF" = "main"
+          test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
+
+      - name: Read engine health
+        env:
+          ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -fsS "$ENGINE_STAGING_URL/health" || true)
+            if echo "$resp" | jq -e \
+              '.status == "ok" and .service == "lantern-engine" and .environment == "staging"' >/dev/null; then
+              printf '%s\n' "$resp" > engine-health.json
+              echo "$resp" | jq '{status,service,environment,rules,toolCount}'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Native staging engine did not become healthy in 5 minutes"
+          exit 1
+
+      - name: Read web health and engine reachability
+        env:
+          WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -fsS "$WEB_STAGING_URL/api/health" || true)
+            if echo "$resp" | jq -e \
+              '.status == "ok" and .service == "rpg-mcp-live-web" and .environment == "staging" and
+               .integrations.lanternEngine == true and .engine.service == "lantern-engine" and
+               .engine.environment == "staging"' >/dev/null; then
+              printf '%s\n' "$resp" > web-health.json
+              echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Native staging web did not become healthy or reach the engine in 5 minutes"
+          exit 1
+
+      - name: Write deployment status evidence
+        env:
+          ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
+          WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
+        run: |
+          jq -n \
+            --arg deploymentId "$DEPLOYMENT_ID" \
+            --arg sha "$SHA" \
+            --arg ref "$DEPLOYMENT_REF" \
+            --arg environment "$DEPLOYMENT_ENVIRONMENT" \
+            --arg creator "$DEPLOYMENT_CREATOR" \
+            --arg engineUrl "$ENGINE_STAGING_URL" \
+            --arg webUrl "$WEB_STAGING_URL" \
+            '{controller:"railway-native-github-autodeploy",deploymentId:$deploymentId,sha:$sha,ref:$ref,environment:$environment,creator:$creator,engineUrl:$engineUrl,webUrl:$webUrl,engineHealth:"pass",webHealth:"pass"}' \
+            > staging-deployment-evidence.json
+
+      - name: Upload deployment evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-deployment-evidence-${{ env.SHA }}
+          path: |
+            staging-deployment-evidence.json
+            engine-health.json
+            web-health.json
+          retention-days: 30

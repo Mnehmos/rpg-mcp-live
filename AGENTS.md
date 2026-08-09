@@ -54,17 +54,21 @@ CI never makes live OpenRouter calls. All tests use stubbed model output and det
 ## Automated pipeline (no human gate)
 
 ```
-PR → CI / required → auto-merge → staging deploy → staging smoke+gauntlet → production deploy
+PR → CI / required → auto-merge → Railway native staging autodeploy (Wait for CI)
+  → deployment_status health/readback → production disabled
 ```
 
-The human is the **playtester and vision-holder** — not a merge gate or deployment approver. If staging reveals a problem, the playtester opens an issue and the fix flows through the same pipeline.
+GitHub Actions owns CI and post-deploy evidence. Railway's connected GitHub
+integration owns deployment. The human is the **playtester and vision-holder**
+— not a merge gate or deployment caller. If staging reveals a problem, the
+playtester opens an issue and the fix flows through the same pipeline.
 
 | Gate            | Who/what enforces it                      |
 | --------------- | ------------------------------------------ |
 | CI passes       | Required status check `CI / required`      |
-| Staging smoke   | `deploy-staging` workflow                  |
-| Staging gauntlet | (after #22) `test:gauntlet:ci`            |
-| Production      | Auto-promoted when staging is green        |
+| Staging health/readback | `verify-staging` deployment-status workflow |
+| Staging smoke/gauntlet | CI before Railway deploy                   |
+| Production      | Disabled until promotion policy is settled  |
 | DB migration    | Manual `workflow_dispatch` (separate) — the only human gate, because databases can't be auto-rolled-back |
 
 ## Risk classes

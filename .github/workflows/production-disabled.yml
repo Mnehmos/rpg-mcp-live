@@ -1,0 +1,14 @@
+name: Production deployment (disabled)
+
+# Production is intentionally disabled while the promotion policy is settled.
+# The staging native GitHub autodeploy path is the only deployment path in this
+# correction. Do not add a Railway deployment caller here.
+on:
+  workflow_dispatch:
+
+jobs:
+  disabled:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Production deployment is disabled."
