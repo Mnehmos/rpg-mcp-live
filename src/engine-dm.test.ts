@@ -327,12 +327,38 @@ describe("Lantern OpenRouter tool loop", () => {
           }],
         }),
       })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-service-passage-check",
+                type: "function",
+                function: {
+                  name: "roll_check",
+                  arguments: JSON.stringify({
+                    ability: "wis",
+                    skill: "perception",
+                    goal: "keep Titus hidden from Ledrus",
+                    passive: true,
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
       .mockRejectedValueOnce(new Error("provider timeout after context commit"));
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createStore();
     const state = createInitialCampaign("account-context-fallback", "actor-context-fallback");
     state.character.created = true;
+    state.character.abilities.wis = 20;
     state.phase = "sandbox";
     state.worldContext = {
       id: "ludus-vault",
@@ -357,9 +383,11 @@ describe("Lantern OpenRouter tool loop", () => {
     const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
 
     expect(result).toMatchObject({ narrationSource: "rules", state: { version: 1 } });
-    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context"]);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context", "roll_check"]);
     expect(result.narration.text).toContain("You reach The Ludus Service Passage.");
     expect(result.narration.text).toContain("Cold lamplight catches on damp stone");
+    expect(result.narration.text).toContain("The attempt succeeds");
+    expect(result.narration.text).not.toContain("against DC");
     expect(result.narration.text).toContain("Paths onward: Descend the drain stairs; Search the storage niche.");
     const playerFacing = JSON.stringify({
       narration: result.narration,
@@ -370,7 +398,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(playerFacing).not.toMatch(/The DM must establish|The DM establishes|toward Slip/i);
     expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules", state: { version: 1 } });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     store.close();
   });
 
