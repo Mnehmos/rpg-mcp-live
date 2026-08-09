@@ -786,6 +786,25 @@ function rulesNarration(text: string, suffix?: string): NarrationEnvelope {
 
 function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope {
   const effects = result.event?.effects ?? [];
+  const worldContext = effects.some((effect) => effect.command.kind === "world_context")
+    ? result.state.worldContext
+    : null;
+  if (worldContext) {
+    const title = worldContext.title.trim().replace(/[.!?]+$/, "");
+    const description = worldContext.description.trim();
+    const entersContext = effects.some((effect) =>
+      effect.command.kind === "world_context"
+      && effect.stateChanges.some((change) => change.path === "/worldContext/id" || change.path === "/worldContext/title")
+    );
+    const scene = `${entersContext ? `You reach ${title}.` : `${title}:`} ${description}${/[.!?]$/.test(description) ? "" : "."}`;
+    const paths = worldContext.exits
+      .slice(0, 3)
+      .map((exit) => exit.label.trim().replace(/[.!?]+$/, ""));
+    return rulesNarration(
+      scene,
+      paths.length > 0 ? `Paths onward: ${paths.join("; ")}.` : "What do you do next?"
+    );
+  }
   const checkData = effects.length === 1 && effects[0]?.check
     ? effects[0].data
     : effects.length === 0 && result.event?.check

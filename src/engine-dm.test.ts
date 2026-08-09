@@ -279,6 +279,101 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it("persists immersive context fallback narration without orchestration text", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-service-arch-move",
+                type: "function",
+                function: { name: "move", arguments: JSON.stringify({ destinationId: "service-arch" }) },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-service-passage-context",
+                type: "function",
+                function: {
+                  name: "world_context",
+                  arguments: JSON.stringify({
+                    title: "The Ludus Service Passage",
+                    description: "Cold lamplight catches on damp stone while Titus listens for Ledrus behind you.",
+                    features: ["damp stone", "cold lamplight"],
+                    exits: [
+                      { id: "drain-stairs", label: "Descend the drain stairs" },
+                      { id: "storage-niche", label: "Search the storage niche" },
+                    ],
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error("provider timeout after context commit"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-context-fallback", "actor-context-fallback");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "ludus-vault",
+      title: "The Ludus Holding Vault",
+      description: "Iron bars divide the vault from the arena corridor.",
+      features: ["iron bars"],
+      exits: [{ id: "service-arch", label: "Slip through a side arch toward the ludus service passages" }],
+      npcs: [], merchants: [], objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I guide Titus into the narrow service arch and move quietly through it.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
+    const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
+
+    expect(result).toMatchObject({ narrationSource: "rules", state: { version: 1 } });
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context"]);
+    expect(result.narration.text).toContain("You reach The Ludus Service Passage.");
+    expect(result.narration.text).toContain("Cold lamplight catches on damp stone");
+    expect(result.narration.text).toContain("Paths onward: Descend the drain stairs; Search the storage niche.");
+    const playerFacing = JSON.stringify({
+      narration: result.narration,
+      log: result.session.log,
+      replayNarration: replay.narration,
+      replayLog: replay.session.log,
+    });
+    expect(playerFacing).not.toMatch(/The DM must establish|The DM establishes|toward Slip/i);
+    expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
+    expect(replay).toMatchObject({ replayed: true, narrationSource: "rules", state: { version: 1 } });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    store.close();
+  });
+
   it("preserves the authoritative non-check outcome when its data also has success", async () => {
     const fetchMock = vi
       .fn()
