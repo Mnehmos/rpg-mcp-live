@@ -74,7 +74,9 @@ try {
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa", "Engine booted an unexpected pack hash.");
   assert(engineHealth.toolCount === 72, "Engine tool count drifted.");
-  const toolCatalog = await requestJson<{ tools: Array<{ function: { name: string } }> }>(
+  const toolCatalog = await requestJson<{
+    tools: Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
+  }>(
     `${engineBaseUrl}/v1/tools`,
     { headers: { "x-lantern-engine-token": internalToken } }
   );
@@ -86,6 +88,13 @@ try {
       (name) => !advertisedToolNames.includes(name)
     ),
     "A player-only experience command was advertised to the DM."
+  );
+  const rollCheckParameters = toolCatalog.tools.find(
+    (definition) => definition.function.name === "roll_check"
+  )?.function.parameters as { properties?: Record<string, { type?: string }> } | undefined;
+  assert(
+    rollCheckParameters?.properties?.passive?.type === "boolean",
+    "The roll_check catalog omitted the runtime-supported passive argument."
   );
 
   const page = await fetch(`${webBaseUrl}/play`);
@@ -203,8 +212,14 @@ try {
     hiddenToolResponse.status === 400 && hiddenToolBody.code === "tool_not_model_facing",
     "The generic tool-call endpoint accepted a player-only experience command."
   );
-  const encounter = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
+  const passiveCheck = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
     expectedCampaignVersion: createdCharacter.session.version,
+    toolName: "roll_check",
+    arguments: { ability: "wis", goal: "Notice a quiet test signal.", passive: true },
+  });
+  assert(passiveCheck.accepted, `Advertised passive roll_check failed: ${passiveCheck.code ?? passiveCheck.message}`);
+  const encounter = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
+    expectedCampaignVersion: passiveCheck.campaignVersion,
     toolName: "combat_start",
     arguments: {
       encounterId: "s9-http-elemental",
