@@ -496,6 +496,62 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it("persists player-facing no-check fallback narration without internal declare text", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-declare-fallback", "actor-declare-fallback");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "ludus-service-passage",
+      title: "The Ludus Service Passage",
+      description: "Cold lamplight skims the cramped drain passage below the rear stairs.",
+      features: ["rear stairs", "cramped drain passage", "deep shadow"],
+      exits: [
+        { id: "drain-passage", label: "Descend into the drain passage" },
+        { id: "service-arch", label: "Return to the service arch" },
+      ],
+      npcs: [], merchants: [], objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I pull Titus down into the cramped drain passage and motion for him to stay low while we use the darkness to slip past Ledrus.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+    const replay = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+
+    expect(result).toMatchObject({
+      tool: "declare",
+      narrationSource: "rules",
+      message: "You put your plan into motion.",
+      state: { version: 1 },
+      event: { command: { kind: "declare" }, rolls: [], stateChanges: [] },
+    });
+    expect(result.event?.check).toBeUndefined();
+    expect(result.narration.text).toBe(
+      "You put your plan into motion in The Ludus Service Passage. "
+      + "Cold lamplight skims the cramped drain passage below the rear stairs. "
+      + "Paths onward: Descend into the drain passage; Return to the service arch."
+    );
+    expect(JSON.stringify({ result, storedLog: store.getCampaign(context).log })).not.toMatch(
+      /You declare|No mechanical check was required|DM must answer|\.\./i
+    );
+    expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
+    expect(replay).toMatchObject({ replayed: true, narrationSource: "rules", state: { version: 1 } });
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    store.close();
+  });
+
   it("keeps the exact rest result when the provider is unavailable before the tool loop", async () => {
     const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
     vi.stubGlobal("fetch", fetchMock);

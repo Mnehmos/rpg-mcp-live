@@ -3228,7 +3228,7 @@ export function resolveEngineCommand(
         clientCommandId,
         command,
         tool,
-        "You declare: " + command.goal + ". No mechanical check was required; the DM must answer with the immediate fictional consequence.",
+        "You put your plan into motion.",
         { goal: command.goal },
         "declared",
         [],

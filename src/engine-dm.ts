@@ -809,8 +809,24 @@ function committedMoveText(data: unknown): string {
   return label ? `You continue along the chosen path: ${label}.` : "You continue along the chosen path.";
 }
 
+function committedDeclarationText(result: EngineCommandResult): string {
+  const worldContext = result.state.worldContext;
+  if (!worldContext) return "You put your plan into motion. What do you do next?";
+  const title = worldContext.title.trim().replace(/[.!?]+$/, "");
+  const description = worldContext.description.trim();
+  const detail = description ? `${description}${/[.!?]$/.test(description) ? "" : "."}` : "";
+  const paths = worldContext.exits
+    .slice(0, 3)
+    .map((exit) => exit.label.trim().replace(/[.!?]+$/, ""));
+  const nextChoice = paths.length > 0 ? `Paths onward: ${paths.join("; ")}.` : "What do you do next?";
+  return [`You put your plan into motion in ${title}.`, detail, nextChoice].filter(Boolean).join(" ");
+}
+
 function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope {
   const effects = result.event?.effects ?? [];
+  if (effects.length === 0 && result.event?.command.kind === "declare") {
+    return rulesNarration(committedDeclarationText(result));
+  }
   const worldContext = effects.some((effect) => effect.command.kind === "world_context")
     ? result.state.worldContext
     : null;
