@@ -27,6 +27,24 @@ export function findExactHeadCleanCodexComment(comments, headSha) {
     .at(-1) ?? null;
 }
 
+export function findLatestExactHeadCodexVerdict(reviews, comments, headSha) {
+  const findings = findExactHeadCodexReview(reviews, headSha);
+  const clean = findExactHeadCleanCodexComment(comments, headSha);
+  if (!findings && !clean) return null;
+  if (!findings) return { kind: "clean", evidence: clean };
+  if (!clean) return { kind: "findings", evidence: findings };
+
+  // GitHub timestamps are UTC ISO-8601 strings. Treat an equal or malformed
+  // timestamp conservatively: only a strictly newer clean result supersedes
+  // findings for the same commit.
+  const findingsAt = Date.parse(findings.submitted_at ?? "");
+  const cleanAt = Date.parse(clean.created_at ?? "");
+  if (Number.isFinite(cleanAt) && Number.isFinite(findingsAt) && cleanAt > findingsAt) {
+    return { kind: "clean", evidence: clean };
+  }
+  return { kind: "findings", evidence: findings };
+}
+
 function githubApiUrl(pathOrUrl) {
   return pathOrUrl.startsWith("https://") ? pathOrUrl : `https://api.github.com${pathOrUrl}`;
 }
@@ -123,14 +141,13 @@ async function waitForReview() {
         fetchAllGitHubPages(`/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`, token),
         fetchAllGitHubPages(`/repos/${repository}/issues/${pullNumber}/comments?per_page=100`, token),
       ]);
-      const cleanComment = findExactHeadCleanCodexComment(comments, headSha);
-      if (cleanComment) {
+      const verdict = findLatestExactHeadCodexVerdict(reviews, comments, headSha);
+      if (verdict?.kind === "clean") {
         await setCommitStatus(repository, headSha, token, "success", "Subscription Codex found no major issues on this commit.", runUrl);
-        console.log(`Clean Codex subscription review comment ${cleanComment.id} covers exact head ${headSha}.`);
+        console.log(`Clean Codex subscription review comment ${verdict.evidence.id} covers exact head ${headSha}.`);
         return;
       }
-      const review = findExactHeadCodexReview(reviews, headSha);
-      if (review) {
+      if (verdict?.kind === "findings") {
         throw new Error(`Codex reported findings for exact head ${headSha}; resolve them and request a clean review.`);
       }
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));

@@ -4,6 +4,7 @@ import {
   fetchAllGitHubPages,
   findExactHeadCleanCodexComment,
   findExactHeadCodexReview,
+  findLatestExactHeadCodexVerdict,
   nextPageFromLinkHeader,
 } from "./wait-for-codex-review.mjs";
 
@@ -40,6 +41,29 @@ describe("subscription-backed Codex review gate", () => {
     expect(findExactHeadCleanCodexComment([
       { id: 4, user: { login: CODEX_REVIEWER }, body: cleanBody("123456789"), created_at: "2026-01-04" },
     ], "1234567890abcdef")).toBeNull();
+  });
+
+  it("honors the newest exact-head Codex verdict", () => {
+    const cleanBody = "Codex Review: Didn't find any major issues. Keep them coming!\n\n**Reviewed commit:** `1234567890`";
+    const review = {
+      id: 10,
+      user: { login: CODEX_REVIEWER },
+      commit_id: "1234567890abcdef",
+      state: "COMMENTED",
+      submitted_at: "2026-01-02T00:00:00Z",
+    };
+    const clean = {
+      id: 11,
+      user: { login: CODEX_REVIEWER },
+      body: cleanBody,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+
+    expect(findLatestExactHeadCodexVerdict([review], [clean], "1234567890abcdef"))
+      .toMatchObject({ kind: "findings", evidence: { id: 10 } });
+    clean.created_at = "2026-01-03T00:00:00Z";
+    expect(findLatestExactHeadCodexVerdict([review], [clean], "1234567890abcdef"))
+      .toMatchObject({ kind: "clean", evidence: { id: 11 } });
   });
 
   it("follows every GitHub evidence page", async () => {

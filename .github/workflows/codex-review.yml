@@ -14,7 +14,9 @@ permissions:
   statuses: write
 
 concurrency:
-  group: codex-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  # Irrelevant comments get a unique group so their skipped runs cannot cancel
+  # the active gate for this pull request.
+  group: codex-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name == 'issue_comment' && github.event.comment.user.login != 'chatgpt-codex-connector[bot]' && github.run_id || 'gate' }}
   cancel-in-progress: true
 
 jobs:
