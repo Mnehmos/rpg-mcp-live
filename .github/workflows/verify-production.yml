@@ -20,10 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: production
+    # Railway records the connected GitHub deployment ref as the full SHA.
     if: >
       github.event.deployment_status.state == 'success' &&
       github.event.deployment.environment == 'RPG MCP Live / production' &&
-      github.event.deployment.ref == 'production' &&
+      github.event.deployment.ref == github.event.deployment.sha &&
       github.event.deployment.creator.login == 'railway-app[bot]'
     env:
       SHA: ${{ github.event.deployment.sha }}
@@ -47,7 +48,7 @@ jobs:
           test "${#SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$DEPLOYMENT_ENVIRONMENT" = "RPG MCP Live / production"
-          test "$DEPLOYMENT_REF" = "production"
+          test "$DEPLOYMENT_REF" = "$SHA"
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
       - name: Confirm native Railway deployment status
