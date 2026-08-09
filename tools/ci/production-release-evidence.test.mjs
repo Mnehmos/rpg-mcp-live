@@ -128,6 +128,23 @@ describe("production release evidence", () => {
   it("rejects draft-like or unpublished evidence as complete", () => {
     expect(() =>
       assessProductionReleaseEvidence(
+        evidence({
+          release: {
+            ...evidence().release,
+            draft: true,
+            prerelease: true,
+            published_at: null,
+          },
+        })
+      )
+    ).toThrow("Prerelease draft");
+    expect(() =>
+      assessProductionReleaseEvidence(
+        evidence({ release: { ...evidence().release, prerelease: true } })
+      )
+    ).toThrow("not a published stable release");
+    expect(() =>
+      assessProductionReleaseEvidence(
         evidence({ release: { ...evidence().release, draft: undefined } })
       )
     ).toThrow("not a published stable release");
