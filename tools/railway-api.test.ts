@@ -149,6 +149,17 @@ describe("Railway exact-SHA deployment API", () => {
     await expect(instance.deployExactCommit(stagingScope, SHA)).resolves.toMatchObject({ deploymentId, requestedCommitSha: SHA, railwayCommitSha: SHA });
   });
 
+  it("recognizes Railway's current commitHash deployment metadata", async () => {
+    const deploymentId = "deployment-67-hash";
+    const { instance } = client([
+      graphqlResponse(tokenData()),
+      graphqlResponse(scopeData()),
+      graphqlResponse({ serviceInstanceDeployV2: deploymentId }),
+      graphqlResponse({ deployment: { id: deploymentId, status: "SUCCESS", projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: { commitHash: SHA } } }),
+    ]);
+    await expect(instance.deployExactCommit(stagingScope, SHA)).resolves.toMatchObject({ deploymentId, requestedCommitSha: SHA, railwayCommitSha: SHA });
+  });
+
   it.each(["FAILED", "CANCELED"])("fails closed on a %s deployment", async (status) => {
     const { instance } = client([
       graphqlResponse(tokenData()),
