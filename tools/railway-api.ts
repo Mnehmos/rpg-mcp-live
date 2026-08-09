@@ -181,7 +181,7 @@ function currentSource(
   const uniqueTriggers = Array.from(new Map(
     scopedTriggers.map((trigger) => [`${trigger.repository}\u0000${trigger.branch}`, { repository: trigger.repository, branch: trigger.branch }]),
   ).values());
-  if (source?.image && !source.repo) return null;
+  if (!source?.repo) return null;
   const activeSources = Array.from(new Map(
     activeDeployments
       .filter((deployment) => deployment.status === "SUCCESS")
@@ -196,7 +196,7 @@ function currentSource(
   if (trigger && active && (trigger.repository !== active.repository || trigger.branch !== active.branch)) return null;
   const current = trigger ?? active;
   if (!current) return null;
-  if (source?.repo && source.repo !== current.repository) return null;
+  if (source.repo !== current.repository) return null;
   return current;
 }
 

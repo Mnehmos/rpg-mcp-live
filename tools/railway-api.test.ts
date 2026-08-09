@@ -99,7 +99,7 @@ describe("Railway exact-SHA deployment API", () => {
   it("accepts the current successful deployment source when Railway has no trigger records", async () => {
     const scope = scopeData({
       serviceInstance: {
-        source: null,
+        source: { repo: "Mnehmos/rpg-mcp-live", image: null },
         service: { repoTriggers: { edges: [] } },
         activeDeployments: [{ id: "active-67", status: "SUCCESS", meta: { deployment: { repository: "Mnehmos/rpg-mcp-live", branch: "main" } } }],
       },
@@ -107,6 +107,18 @@ describe("Railway exact-SHA deployment API", () => {
     });
     const { instance } = client([graphqlResponse(tokenData()), graphqlResponse(scope)]);
     await expect(instance.validateScope(stagingScope)).resolves.toMatchObject({ sourceRepository: "Mnehmos/rpg-mcp-live", sourceBranch: "main" });
+  });
+
+  it("rejects active deployment metadata when the service has no connected source", async () => {
+    const scope = scopeData({
+      serviceInstance: {
+        source: null,
+        service: { repoTriggers: { edges: [] } },
+      },
+      deploymentTriggers: { edges: [] },
+    });
+    const { instance } = client([graphqlResponse(tokenData()), graphqlResponse(scope)]);
+    await expect(instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "SOURCE_NOT_CONNECTED" });
   });
 
   it("rejects current config drift and native Railway autodeploy", async () => {
