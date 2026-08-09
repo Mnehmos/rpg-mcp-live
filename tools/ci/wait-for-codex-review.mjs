@@ -45,6 +45,12 @@ export function findLatestExactHeadCodexVerdict(reviews, comments, headSha) {
   return { kind: "findings", evidence: findings };
 }
 
+export function isCleanVerdictSettled(verdict, settleMs, nowMs = Date.now()) {
+  if (verdict?.kind !== "clean") return false;
+  const createdAt = Date.parse(verdict.evidence?.created_at ?? "");
+  return Number.isFinite(createdAt) && nowMs - createdAt >= settleMs;
+}
+
 function githubApiUrl(pathOrUrl) {
   return pathOrUrl.startsWith("https://") ? pathOrUrl : `https://api.github.com${pathOrUrl}`;
 }
@@ -135,7 +141,9 @@ async function waitForReview() {
 
   const attempts = Number.parseInt(process.env.CODEX_REVIEW_ATTEMPTS ?? "90", 10);
   const delayMs = Number.parseInt(process.env.CODEX_REVIEW_DELAY_MS ?? "10000", 10);
+  const settleMs = Number.parseInt(process.env.CODEX_REVIEW_SETTLE_MS ?? "60000", 10);
   let latestFindingsId = null;
+  let settlingCleanId = null;
   try {
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const [reviews, comments] = await Promise.all([
@@ -143,10 +151,14 @@ async function waitForReview() {
         fetchAllGitHubPages(`/repos/${repository}/issues/${pullNumber}/comments?per_page=100`, token),
       ]);
       const verdict = findLatestExactHeadCodexVerdict(reviews, comments, headSha);
-      if (verdict?.kind === "clean") {
+      if (isCleanVerdictSettled(verdict, settleMs)) {
         await setCommitStatus(repository, headSha, token, "success", "Subscription Codex found no major issues on this commit.", runUrl);
         console.log(`Clean Codex subscription review comment ${verdict.evidence.id} covers exact head ${headSha}.`);
         return;
+      }
+      if (verdict?.kind === "clean" && settlingCleanId !== verdict.evidence.id) {
+        settlingCleanId = verdict.evidence.id;
+        console.log(`Clean Codex result ${verdict.evidence.id} is settling before the gate succeeds.`);
       }
       if (verdict?.kind === "findings") {
         if (latestFindingsId !== verdict.evidence.id) {

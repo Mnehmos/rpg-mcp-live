@@ -5,6 +5,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   # GitHub resolves issue_comment workflows from the default branch, so a clean
   # connector result can safely refresh a failed or expired polling run.
+  # pull_request_review is intentionally omitted because it executes against
+  # the PR merge ref. Later inline findings remain a separate hard blocker via
+  # the main ruleset's required review-thread resolution rule.
   issue_comment:
     types: [created, edited]
 

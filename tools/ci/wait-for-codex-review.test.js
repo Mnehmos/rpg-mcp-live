@@ -6,6 +6,7 @@ import {
   findExactHeadCleanCodexComment,
   findExactHeadCodexReview,
   findLatestExactHeadCodexVerdict,
+  isCleanVerdictSettled,
   nextPageFromLinkHeader,
 } from "./wait-for-codex-review.mjs";
 
@@ -79,6 +80,17 @@ describe("subscription-backed Codex review gate", () => {
     clean.created_at = "2026-01-03T00:00:00Z";
     expect(findLatestExactHeadCodexVerdict([review], [clean], "1234567890abcdef"))
       .toMatchObject({ kind: "clean", evidence: { id: 11 } });
+  });
+
+  it("settles a clean verdict before allowing success", () => {
+    const verdict = {
+      kind: "clean",
+      evidence: { id: 11, created_at: "2026-01-01T00:00:00Z" },
+    };
+
+    expect(isCleanVerdictSettled(verdict, 60_000, Date.parse("2026-01-01T00:00:59Z"))).toBe(false);
+    expect(isCleanVerdictSettled(verdict, 60_000, Date.parse("2026-01-01T00:01:00Z"))).toBe(true);
+    expect(isCleanVerdictSettled({ kind: "findings", evidence: {} }, 60_000)).toBe(false);
   });
 
   it("follows every GitHub evidence page", async () => {
