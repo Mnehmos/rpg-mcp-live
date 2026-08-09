@@ -50,6 +50,8 @@ jobs:
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
       - name: Confirm native Railway deployment status
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             --jq '[.[] | select(.creator.login == "railway-app[bot]")][0].state // ""')
