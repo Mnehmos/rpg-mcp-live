@@ -3,10 +3,6 @@ name: Codex review gate
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-  pull_request_review:
-    types: [submitted, dismissed]
-  issue_comment:
-    types: [created, edited]
 
 permissions:
   contents: read
@@ -14,18 +10,13 @@ permissions:
   statuses: write
 
 concurrency:
-  # Irrelevant comments get a unique group so their skipped runs cannot cancel
-  # the active gate for this pull request.
-  group: codex-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name == 'issue_comment' && github.event.comment.user.login != 'chatgpt-codex-connector[bot]' && github.run_id || 'gate' }}
+  group: codex-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   review:
     name: Subscription Codex review gate
-    if: >-
-      (github.event_name != 'issue_comment' ||
-       (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')) &&
-      (github.event_name == 'issue_comment' || github.event.pull_request.draft == false)
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -40,7 +31,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CODEX_REPOSITORY: ${{ github.repository }}
-          CODEX_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          CODEX_PR_NUMBER: ${{ github.event.pull_request.number }}
           CODEX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CODEX_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node tools/ci/wait-for-codex-review.mjs

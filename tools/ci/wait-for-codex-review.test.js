@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   CODEX_REVIEWER,
@@ -9,6 +10,17 @@ import {
 } from "./wait-for-codex-review.mjs";
 
 describe("subscription-backed Codex review gate", () => {
+  it("starts only from the trusted pull_request_target event", () => {
+    const workflow = readFileSync(
+      new URL("../../.github/workflows/codex-review.yml", import.meta.url),
+      "utf8"
+    );
+
+    expect(workflow).toMatch(/^\s{2}pull_request_target:/m);
+    expect(workflow).not.toMatch(/^\s{2}(pull_request_review|issue_comment):/m);
+    expect(workflow).toContain("github.event.pull_request.base.sha || github.event.repository.default_branch");
+  });
+
   it("accepts a connector review only for the exact head", () => {
     const review = findExactHeadCodexReview([
       { id: 1, user: { login: CODEX_REVIEWER }, commit_id: "old", state: "COMMENTED", submitted_at: "2026-01-01" },
