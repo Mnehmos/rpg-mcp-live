@@ -53,6 +53,9 @@ export function assessProductionReleaseEvidence({
   if (release.tag_name !== expectedTag) throw new Error("GitHub release tag does not match");
 
   if (release.draft === true) {
+    if (release.prerelease !== false) {
+      throw new Error("Prerelease draft cannot become production release evidence");
+    }
     if (release.published_at !== null && release.published_at !== undefined) {
       throw new Error("Draft release has contradictory publication evidence");
     }
