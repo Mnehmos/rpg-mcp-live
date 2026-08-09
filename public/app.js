@@ -2,6 +2,11 @@ import {
   reconcileAbilityScoreAssignments,
   uniqueAbilityScoreOptions,
 } from "./ability-score-pool.js";
+import {
+  composerSubmission,
+  settleComposer,
+  updateComposerCounter,
+} from "./turn-composer.js";
 
 (function () {
   "use strict";
@@ -1607,7 +1612,7 @@ import {
     });
   }
 
-  function submitCommand(command) {
+  function submitCommand(command, clientCommandId) {
     if (!state.session) {
       if (isSignedIn()) {
         setStatus("Your campaign is still loading", "error");
@@ -1627,7 +1632,7 @@ import {
     return requestJson("/api/campaigns/" + campaignId + "/commands", {
       method: "POST",
       body: JSON.stringify(Object.assign({
-        clientCommandId: newCommandId(),
+        clientCommandId: clientCommandId || newCommandId(),
         expectedCampaignVersion: state.session.version
       }, command))
     }).then(function (result) {
@@ -1666,8 +1671,8 @@ import {
     return submitCommand({ action: action });
   }
 
-  function playText(playerText) {
-    return submitCommand({ playerText: playerText });
+  function playText(playerText, clientCommandId) {
+    return submitCommand({ playerText: playerText }, clientCommandId);
   }
 
   function createCampaign(event) {
@@ -2117,8 +2122,12 @@ import {
   function bind() {
     var playerInput = $("#player-input");
     var inputCounter = $("#input-counter");
+    var pendingComposerSubmission = null;
     function updateInputCounter() {
-      if (inputCounter && playerInput) inputCounter.textContent = playerInput.value.length + " / " + playerInput.maxLength;
+      updateComposerCounter(playerInput, inputCounter);
+      if (pendingComposerSubmission && playerInput.value.trim() !== pendingComposerSubmission.playerText) {
+        pendingComposerSubmission = null;
+      }
     }
     if (playerInput) {
       playerInput.addEventListener("input", updateInputCounter);
@@ -2140,10 +2149,16 @@ import {
       var button = this.querySelector("button[type=submit]");
       var playerText = input.value.trim();
       if (!playerText) return;
+      pendingComposerSubmission = composerSubmission(
+        pendingComposerSubmission,
+        state.session && state.session.id,
+        playerText,
+        newCommandId
+      );
       input.disabled = true;
       button.disabled = true;
-      playText(playerText).then(function (sent) {
-        if (sent) input.value = "";
+      playText(playerText, pendingComposerSubmission.clientCommandId).then(function (sent) {
+        if (settleComposer(input, inputCounter, sent)) pendingComposerSubmission = null;
       }).finally(function () {
         input.disabled = false;
         button.disabled = false;
