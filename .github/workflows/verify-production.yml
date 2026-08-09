@@ -1,0 +1,127 @@
+name: Verify production deployment and publish release
+
+# Railway native GitHub autodeploy owns production. This workflow runs after
+# Railway reports successful deployment of the production ref, verifies both
+# services, and records the release; it never calls Railway's deployment API.
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+  deployments: read
+
+concurrency:
+  group: verify-production-${{ github.event.deployment.sha }}
+  cancel-in-progress: false
+
+jobs:
+  verify-and-release:
+    name: Verify native production deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    if: >
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment.environment == 'RPG MCP Live / production' &&
+      github.event.deployment.ref == 'production' &&
+      github.event.deployment.creator.login == 'railway-app[bot]'
+    env:
+      SHA: ${{ github.event.deployment.sha }}
+      DEPLOYMENT_ID: ${{ github.event.deployment.id }}
+      DEPLOYMENT_ENVIRONMENT: ${{ github.event.deployment.environment }}
+      DEPLOYMENT_REF: ${{ github.event.deployment.ref }}
+      DEPLOYMENT_CREATOR: ${{ github.event.deployment.creator.login }}
+      GH_TOKEN: ${{ secrets.PRODUCTION_PROMOTION_TOKEN }}
+
+    steps:
+      - name: Checkout the Railway deployment SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Railway deployment identity
+        run: |
+          test -n "$GH_TOKEN" || { echo "::error::PRODUCTION_PROMOTION_TOKEN is required for release recording"; exit 1; }
+          test "${#SHA}" -eq 40
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$DEPLOYMENT_ENVIRONMENT" = "RPG MCP Live / production"
+          test "$DEPLOYMENT_REF" = "production"
+          test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
+
+      - name: Confirm native Railway deployment status
+        run: |
+          state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            --jq '[.[] | select(.creator.login == "railway-app[bot]")][0].state // ""')
+          test "$state" = "success"
+          echo "RAILWAY_DEPLOYMENT_IDS=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+          echo "Railway native production deployment $DEPLOYMENT_ID succeeded for $SHA."
+
+      - name: Read engine health
+        env:
+          ENGINE_PRODUCTION_URL: ${{ vars.ENGINE_PRODUCTION_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -fsS "$ENGINE_PRODUCTION_URL/health" || true)
+            if echo "$resp" | jq -e \
+              '.status == "ok" and .service == "lantern-engine" and .environment == "production"' >/dev/null; then
+              printf '%s\n' "$resp" > engine-health.json
+              echo "$resp" | jq '{status,service,environment,rules,toolCount}'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Native production engine did not become healthy"
+          exit 1
+
+      - name: Read web health and engine reachability
+        env:
+          WEB_PRODUCTION_URL: ${{ vars.WEB_PRODUCTION_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            resp=$(curl -fsS "$WEB_PRODUCTION_URL/api/health" || true)
+            if echo "$resp" | jq -e \
+              '.status == "ok" and .service == "rpg-mcp-live-web" and .environment == "production" and
+               .integrations.lanternEngine == true and .engine.service == "lantern-engine" and
+               .engine.environment == "production"' >/dev/null; then
+              printf '%s\n' "$resp" > web-health.json
+              echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Native production web did not become healthy or reach the engine"
+          exit 1
+
+      - name: Create release manifest and publish tag
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; this duplicate deployment-status event is complete."
+            exit 0
+          fi
+          node tools/ci/generate-changelog.mjs --version "$TAG" --fail-empty > release-body.md
+          jq -n \
+            --arg ids "$RAILWAY_DEPLOYMENT_IDS" \
+            --arg sha "$SHA" \
+            --arg ref "$DEPLOYMENT_REF" \
+            --arg environment "$DEPLOYMENT_ENVIRONMENT" \
+            '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,ref:$ref,environment:$environment,engineHealth:"pass",webHealth:"pass",release:"pass"}' \
+            > deployment-manifest.json
+          tag_object_sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$TAG" -f message="Production release $TAG from $SHA" \
+            -f object="$SHA" -f type=commit --jq '.sha')
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$tag_object_sha" >/dev/null
+          gh release create "$TAG" --title "$TAG" --notes-file release-body.md deployment-manifest.json
+
+      - name: Upload production release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-release-evidence-${{ env.SHA }}
+          path: |
+            deployment-manifest.json
+            engine-health.json
+            web-health.json
+          retention-days: 30

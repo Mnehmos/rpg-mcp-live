@@ -51,13 +51,19 @@ GitHub Actions staging proof.
 3. After CI succeeds, Railway builds and deploys the repository natively for
    the engine and web services using `/railway/engine.json` and
    `/railway/web.json`.
-4. `verify-staging.yml` receives the successful `deployment_status`, verifies
-   the Railway bot, staging environment, `main` ref, exact deployment SHA, and
-   both health endpoints, then uploads readback evidence.
+4. `verify-staging.yml` receives the successful environment
+   `deployment_status`, verifies its exact SHA, runs evaluation, verifies both
+   service health endpoints, and advances the `production` ref directly with a
+   scoped GitHub token.
+5. Production CI runs on that ref. Railway's production triggers use the
+   `production` branch with native autodeploy and `checkSuites: true`; after CI,
+   `verify-production.yml` verifies both services and publishes release
+   evidence.
 
 GitHub Actions never calls `serviceInstanceDeployV2`, uploads a local archive,
-or uses `railway up`. Project-token secrets are retained until this corrected
-path has been proven; they are not used by the ordinary path.
+or uses `railway up`. Railway project-token secrets are retained until this
+corrected path has been proven; they are not used by the ordinary path. The
+only promotion credential is the narrowly scoped `PRODUCTION_PROMOTION_TOKEN`.
 
 ## GitHub scope
 
@@ -65,8 +71,9 @@ The `staging` GitHub environment holds only the existing public health URL
 variables used by the post-deploy evidence workflow. Railway project-token
 secrets are retained during this cutover so they can be removed only after the
 native path is proven; the ordinary CI or verification path does not read them.
-The `production` environment remains disabled and its promotion policy is
-unset.
+The `production` environment contains only existing health/release variables.
+The `PRODUCTION_PROMOTION_TOKEN` must be a narrowly scoped GitHub App token or
+fine-grained PAT that can update the `production` ref and publish the release.
 
 ## Cutover and rollback
 

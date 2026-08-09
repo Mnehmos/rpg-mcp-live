@@ -2,15 +2,17 @@
 
 ## Overview
 
-Production release material is disabled while the promotion policy is settled.
-This correction proves only the native staging path.
+Production release material is published automatically after the verified
+staging SHA is promoted to the `production` branch.
 
 ```
 PR merges to main
      → GitHub CI passes
-     → Railway waits for CI, then natively deploys the connected repository
-     → deployment_status health/readback evidence
-     → production remains disabled
+     → Railway waits for CI, then natively deploys staging
+     → staging health/evaluation passes
+     → production ref advances directly to the same SHA
+     → production CI passes and Railway natively deploys
+     → production health/readback and release evidence
 ```
 
 ## Automated changelog (release gate)
@@ -40,22 +42,22 @@ Because the repo uses **squash merge** and the PR title **is** the commit messag
 | `chore`, `style`        | *(skipped)*         |
 | any type with `!` suffix | Breaking changes   |
 
-## Staging deployment
+## Staging-to-production deployment
 
 1. Merge a harmless change to `main` through the normal protected flow.
 2. GitHub CI runs on the push.
 3. Railway creates a native GitHub deployment in `WAITING` while CI runs.
 4. After CI succeeds, Railway builds/deploys the connected repository for both
-   services and records the exact merge SHA.
-5. `verify-staging.yml` receives `deployment_status`, checks both health
-   endpoints, and uploads readback evidence.
+   staging services and records the exact merge SHA.
+5. `verify-staging.yml` verifies the successful staging environment deployment,
+   runs invariant and deterministic evaluation, checks both health endpoints, and updates the
+   `production` ref directly to that SHA without creating a commit.
+6. The production push runs CI; Railway waits for it, then deploys both
+   production services natively from the `production` branch.
+7. `verify-production.yml` checks both production health endpoints and publishes
+   the manifest, annotated tag, and GitHub release.
 
 GitHub Actions never uploads source or calls a Railway deployment mutation.
-
-## Production deployment
-
-Production remains disabled. No production deployment, tag, release, or data
-migration is performed by this correction.
 
 ## Health evidence
 

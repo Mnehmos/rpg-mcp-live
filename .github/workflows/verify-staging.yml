@@ -1,24 +1,25 @@
-name: Verify staging deployment
+name: Verify staging and promote production
 
-# Railway native GitHub autodeploy owns the build and deployment. This workflow
-# runs only after Railway reports a successful staging deployment and records
-# health/readback evidence; it never calls Railway's deployment API.
+# Railway native GitHub autodeploy owns staging. This workflow runs only after
+# Railway reports a successful staging deployment. It verifies both services,
+# runs the deterministic evaluation, then advances the production ref directly
+# to the verified SHA; it never calls Railway's deployment API.
 on:
   deployment_status:
-    types: [success]
 
 permissions:
   contents: read
+  deployments: read
 
 concurrency:
   group: verify-staging-${{ github.event.deployment.sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  verify-staging:
-    name: Verify native staging deployment
+  verify-and-promote:
+    name: Verify staging and promote exact SHA
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     environment: staging
     if: >
       github.event.deployment_status.state == 'success' &&
@@ -47,6 +48,29 @@ jobs:
           test "$DEPLOYMENT_REF" = "main"
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
+      - name: Confirm native Railway deployment status
+        run: |
+          state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            --jq '[.[] | select(.creator.login == "railway-app[bot]")][0].state // ""')
+          test "$state" = "success"
+          echo "RAILWAY_DEPLOYMENT_IDS=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+          echo "Railway native staging deployment $DEPLOYMENT_ID succeeded for $SHA."
+
+      - name: Set up Node for staging evaluation
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.18.x
+          cache: npm
+
+      - name: Install evaluation dependencies
+        run: npm ci
+
+      - name: Run staging invariant evaluation
+        run: npm run test:invariants
+
+      - name: Run staging deterministic evaluation
+        run: npm run test:gauntlet:ci
+
       - name: Read engine health
         env:
           ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
@@ -61,7 +85,7 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error::Native staging engine did not become healthy in 5 minutes"
+          echo "::error::Native staging engine did not become healthy"
           exit 1
 
       - name: Read web health and engine reachability
@@ -80,31 +104,44 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error::Native staging web did not become healthy or reach the engine in 5 minutes"
+          echo "::error::Native staging web did not become healthy or reach the engine"
           exit 1
 
-      - name: Write deployment status evidence
+      - name: Promote production ref to the verified SHA
+        env:
+          GH_TOKEN: ${{ secrets.PRODUCTION_PROMOTION_TOKEN }}
+        run: |
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/production" --jq '.object.sha')
+          if [ "$current" != "$SHA" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/production" \
+              -f sha="$SHA" -F force=true --jq '.object.sha'
+            echo "Production ref advanced directly to $SHA without creating a commit."
+          else
+            echo "Production ref already points at $SHA."
+          fi
+
+      - name: Write staging promotion evidence
         env:
           ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
           WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
         run: |
           jq -n \
-            --arg deploymentId "$DEPLOYMENT_ID" \
+            --arg ids "$RAILWAY_DEPLOYMENT_IDS" \
             --arg sha "$SHA" \
             --arg ref "$DEPLOYMENT_REF" \
             --arg environment "$DEPLOYMENT_ENVIRONMENT" \
             --arg creator "$DEPLOYMENT_CREATOR" \
             --arg engineUrl "$ENGINE_STAGING_URL" \
             --arg webUrl "$WEB_STAGING_URL" \
-            '{controller:"railway-native-github-autodeploy",deploymentId:$deploymentId,sha:$sha,ref:$ref,environment:$environment,creator:$creator,engineUrl:$engineUrl,webUrl:$webUrl,engineHealth:"pass",webHealth:"pass"}' \
-            > staging-deployment-evidence.json
+            '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,ref:$ref,environment:$environment,creator:$creator,engineHealth:"pass",webHealth:"pass",invariants:"pass",evaluation:"pass",productionRef:$sha,engineUrl:$engineUrl,webUrl:$webUrl}' \
+            > staging-promotion-evidence.json
 
-      - name: Upload deployment evidence
+      - name: Upload staging promotion evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: staging-deployment-evidence-${{ env.SHA }}
+          name: staging-promotion-evidence-${{ env.SHA }}
           path: |
-            staging-deployment-evidence.json
+            staging-promotion-evidence.json
             engine-health.json
             web-health.json
           retention-days: 30

@@ -80,19 +80,20 @@ successful suite lets Railway build the repository using the service-specific
 `/railway/engine.json` or `/railway/web.json` config.
 
 `.github/workflows/verify-staging.yml` listens only for Railway's successful
-`deployment_status` event. It checks the event's repository, `main` ref,
-Railway deployment ID, and exact 40-character commit SHA, then reads the
-engine and web health endpoints and uploads the evidence. It has no Railway
-token, does not call GraphQL, does not upload source, and never calls
+`deployment_status` events. It verifies the Railway environment deployment's
+exact 40-character SHA, runs the deterministic staging evaluation, reads both
+service health endpoints, and advances the `production` branch ref directly
+to that SHA with the narrowly scoped `PRODUCTION_PROMOTION_TOKEN`. It has no
+Railway token, does not call GraphQL, does not upload source, and never calls
 `railway up`.
 
 ## Production deployment
 
-Production is disabled for this correction. The only production workflow is a
-disabled placeholder; no production Railway source, autodeploy, or deployment
-mutation is changed. A future policy may use a protected `production` branch
-with the same native GitHub source plus Wait for CI, promoted from a proven
-staging SHA.
+Production uses the same existing services and repository, but its connected
+branch is `production`. Native autodeploy and **Wait for CI** are enabled for
+both production instances. A direct ref update from the verified staging SHA
+starts production CI; after it passes, Railway natively deploys that SHA and
+`verify-production.yml` checks health and publishes the release manifest/tag.
 
 ## Production migration
 
