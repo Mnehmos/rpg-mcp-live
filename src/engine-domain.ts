@@ -475,6 +475,20 @@ const REVIEWED_CHALLENGE_DEFINITIONS: ChallengeDefinition[] = [
     costs: { timeMinutes: 5, noise: 2, exposure: 1 },
   },
   {
+    id: "seize-held-object-v1",
+    aliases: ["seize-held-object", "snatch-held-object", "grab-held-object"],
+    feasibility: "uncertain",
+    selectedRuleFamily: "sleight-of-hand",
+    dcSource: "reviewed_challenge",
+    dcByDifficulty: { gentle: 10, standard: 14, challenging: 18 },
+    dcProvenance: "reviewed-challenge:seize-held-object-v1:dc-band-v1",
+    stakes: ["exposure", "opportunity"],
+    allowedOutcomes: ["success", "failure-with-complication"],
+    retryPolicy: "new_approach_or_state_change",
+    costs: { timeMinutes: 0, noise: 0, exposure: 1 },
+    actorCheck: { ability: "dex", skill: "sleightOfHand" },
+  },
+  {
     id: "stealth-perception-v1",
     aliases: ["stealth-v-perception", "opposed-stealth-perception"],
     feasibility: "uncertain",
@@ -738,6 +752,12 @@ function resolveChallengeAttempt(
   const definition = reviewedChallengeDefinition(command.challengeId);
   if (!definition) return rejection(state, tool, "unknown_challenge_definition", "That challenge has no reviewed adjudication definition.");
   const decision = buildAdjudicationDecision(state, context, clientCommandId, command, definition);
+  if (definition.id === "seize-held-object-v1") {
+    if (!command.opponentId) return adjudicationRejection(state, tool, "opponent_required", "Seizing a held object needs its established holder.", decision);
+    if (!state.worldContext?.npcs.some((npc) => npc.id === command.opponentId)) {
+      return adjudicationRejection(state, tool, "opponent_not_found", "The object's claimed holder is not established in the current context.", decision);
+    }
+  }
   if (definition.feasibility === "impossible") {
     return adjudicationRejection(
       state,
@@ -5522,8 +5542,24 @@ function resolveWorldObjectAffordance(
       if (object.ownerRef.kind === "actor" && object.ownerRef.id === context.actorId) {
         return rejection(state, tool, "already_owned", "The acting character already owns that object.", { objectId: object.id });
       }
-      if (!object.definition.criticalPolicy.canLose && command.affordance === "steal") {
+      const establishedHolder = world.npcs.find((npc) => npc.id === object.locationRef);
+      if (!object.definition.criticalPolicy.canLose && (command.affordance === "steal" || establishedHolder)) {
         return rejection(state, tool, "critical_object_protected", "This critical object cannot be lost through that interaction.", { objectId: object.id });
+      }
+      if (establishedHolder) {
+        const contest = state.adjudicationHistory.at(-1);
+        if (
+          !contest
+          || contest.challengeId !== "seize-held-object-v1"
+          || contest.opponentId !== establishedHolder.id
+          || contest.sceneId !== `${world.id}:${object.id}`
+          || contest.attemptVersion !== state.version + 1
+        ) {
+          return rejection(state, tool, "contest_required", "Seizing an object from its established holder requires a current target-bound contest.", { objectId: object.id, holderId: establishedHolder.id });
+        }
+        if (contest.outcome !== "success") {
+          return rejection(state, tool, "contest_failed", "The current contest did not transfer the held object.", { objectId: object.id, holderId: establishedHolder.id });
+        }
       }
       setObject(object.id, { ownerRef: { kind: "actor", id: context.actorId }, locationRef: null, state: "carried" });
       message = "The engine records " + object.definition.name + " as carried by the acting character.";

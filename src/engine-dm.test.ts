@@ -156,6 +156,10 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(firstRequest.tools).toHaveLength(72);
+    const worldContextTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
+      .find((candidate) => candidate.function.name === "world_context");
+    expect(worldContextTool?.function.parameters).toHaveProperty("properties.objects");
+    expect(JSON.stringify(worldContextTool?.function.parameters)).not.toContain('"ownerRef"');
     expect(firstRequest.provider).toEqual({ require_parameters: true });
     expect(firstRequest.response_format).toMatchObject({
       type: "json_schema",
@@ -176,6 +180,9 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(systemPrompt).toContain("never supplies fixed demo loot");
     expect(systemPrompt).toContain("challenge_attempt");
     expect(systemPrompt).toContain("commits the complete plan atomically");
+    expect(systemPrompt).toContain("seize-held-object-v1");
+    expect(systemPrompt).toContain("world_context.objects.upsert");
+    expect(systemPrompt).toContain("Never expose missing engine state");
     expect(systemPrompt).toContain("context-aware moves");
     expect(systemPrompt).toContain('The shorthand kinds "npc" and "location" are invalid');
     expect(result.event?.tool).toBe("turn_plan");
