@@ -23,6 +23,7 @@ jobs:
     if: >
       github.event.deployment_status.state == 'success' &&
       github.event.deployment.environment == 'RPG MCP Live / production' &&
+      # Railway records the connected GitHub deployment ref as the full SHA.
       github.event.deployment.ref == github.event.deployment.sha &&
       github.event.deployment.creator.login == 'railway-app[bot]'
     env:
