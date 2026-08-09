@@ -2149,7 +2149,12 @@ import {
       var button = this.querySelector("button[type=submit]");
       var playerText = input.value.trim();
       if (!playerText) return;
-      pendingComposerSubmission = composerSubmission(pendingComposerSubmission, playerText, newCommandId);
+      pendingComposerSubmission = composerSubmission(
+        pendingComposerSubmission,
+        state.session && state.session.id,
+        playerText,
+        newCommandId
+      );
       input.disabled = true;
       button.disabled = true;
       playText(playerText, pendingComposerSubmission.clientCommandId).then(function (sent) {

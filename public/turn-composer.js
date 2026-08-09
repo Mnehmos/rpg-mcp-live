@@ -1,7 +1,7 @@
-export function composerSubmission(previous, playerText, createCommandId) {
+export function composerSubmission(previous, campaignId, playerText, createCommandId) {
   var text = playerText.trim();
-  if (previous && previous.playerText === text) return previous;
-  return { playerText: text, clientCommandId: createCommandId() };
+  if (previous && previous.campaignId === campaignId && previous.playerText === text) return previous;
+  return { campaignId: campaignId, playerText: text, clientCommandId: createCommandId() };
 }
 
 export function updateComposerCounter(input, counter) {

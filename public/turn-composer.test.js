@@ -22,12 +22,23 @@ describe("turn composer", () => {
     const createCommandId = vi.fn()
       .mockReturnValueOnce("command-1")
       .mockReturnValueOnce("command-2");
-    const first = composerSubmission(null, "I distract the lanista.", createCommandId);
-    const retry = composerSubmission(first, "I distract the lanista.", createCommandId);
-    const edited = composerSubmission(retry, "I call to Titus.", createCommandId);
+    const first = composerSubmission(null, "campaign-a", "I distract the lanista.", createCommandId);
+    const retry = composerSubmission(first, "campaign-a", "I distract the lanista.", createCommandId);
+    const edited = composerSubmission(retry, "campaign-a", "I call to Titus.", createCommandId);
 
     expect(retry).toBe(first);
     expect(edited.clientCommandId).toBe("command-2");
+    expect(createCommandId).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces the command id when the active campaign changes", () => {
+    const createCommandId = vi.fn()
+      .mockReturnValueOnce("command-a")
+      .mockReturnValueOnce("command-b");
+    const first = composerSubmission(null, "campaign-a", "I wait.", createCommandId);
+    const nextCampaign = composerSubmission(first, "campaign-b", "I wait.", createCommandId);
+
+    expect(nextCampaign.clientCommandId).toBe("command-b");
     expect(createCommandId).toHaveBeenCalledTimes(2);
   });
 });
