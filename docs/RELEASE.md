@@ -55,7 +55,10 @@ Because the repo uses **squash merge** and the PR title **is** the commit messag
 6. The production push runs CI; Railway waits for it, then deploys both
    production services natively from the `production` branch.
 7. `verify-production.yml` checks both production health endpoints and publishes
-   the manifest, annotated tag, and GitHub release.
+   the manifest, annotated tag, and GitHub release. Each verified SHA uses the
+   immutable tag `v<package-version>-<full-production-sha>`. A repeated event
+   succeeds only after its tag, release, and attached manifest are verified
+   against that same SHA.
 
 GitHub Actions never uploads source or calls a Railway deployment mutation.
 
