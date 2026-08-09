@@ -60,6 +60,31 @@ GitHub Actions staging proof.
    `verify-production.yml` verifies both services and publishes release
    evidence.
 
+## Playtest freshness check
+
+Railway supplies `RAILWAY_GIT_COMMIT_SHA`, `RAILWAY_DEPLOYMENT_ID`, and
+`RAILWAY_ENVIRONMENT_NAME` to repository-triggered deployments. Lantern exposes
+only those non-secret values plus the service role under `deployment` in both
+health responses. The public web response also includes the reachable engine's
+identity under `engine.deployment`.
+
+~~~powershell
+$health = Invoke-RestMethod https://rpg-mcp-live-production.up.railway.app/api/health
+$health.deployment
+$health.engine.deployment
+gh api repos/Mnehmos/rpg-mcp-live/git/ref/heads/production --jq .object.sha
+~~~
+
+Before recording a production playtest, require both health identities to have
+environment `production`, distinct non-empty deployment IDs, and the same
+40-character commit SHA as the `production` ref. For staging, use
+`https://rpg-mcp-live-staging.up.railway.app/api/health`, require environment
+`staging`, and compare both identities with `refs/heads/main`. Hosted smoke
+checks should make the same assertions against the exact SHA that triggered the
+deployment. A missing SHA or deployment ID means freshness is unverified; do
+not infer it from page appearance or local source. Railway's variable contract
+is documented at https://docs.railway.com/variables/reference.
+
 GitHub Actions never calls `serviceInstanceDeployV2`, uploads a local archive,
 or uses `railway up`. Railway project-token secrets are retained until this
 corrected path has been proven; they are not used by the ordinary path. The

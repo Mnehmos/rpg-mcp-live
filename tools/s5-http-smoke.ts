@@ -9,6 +9,13 @@ const probeRoot = await mkdtemp(join(tmpdir(), "rpg-mcp-s9-http-"));
 const enginePort = await availablePort();
 const webPort = await availablePort();
 const internalToken = "s9-local-http-smoke";
+const smokeCommitSha = "0123456789abcdef0123456789abcdef01234567";
+type DeploymentIdentity = {
+  service?: string;
+  environment?: string;
+  commitSha?: string | null;
+  deploymentId?: string | null;
+};
 const commonEnvironment = {
   ...process.env,
   NODE_ENV: "development",
@@ -19,12 +26,15 @@ const commonEnvironment = {
   STRIPE_PRICE_ID: "",
   OPENROUTER_API_KEY: "",
   ENGINE_TIMEOUT_MS: "60000",
+  RAILWAY_ENVIRONMENT_NAME: "smoke",
+  RAILWAY_GIT_COMMIT_SHA: smokeCommitSha,
 };
 const engine = startService("engine", "dist/engine-server.js", {
   ...commonEnvironment,
   ENGINE_PORT: String(enginePort),
   ENGINE_DATABASE_PATH: join(probeRoot, "engine.db"),
   ENGINE_INTERNAL_TOKEN: internalToken,
+  RAILWAY_DEPLOYMENT_ID: "smoke-engine-deployment",
 });
 const web = startService("web", "dist/server.js", {
   ...commonEnvironment,
@@ -35,17 +45,27 @@ const web = startService("web", "dist/server.js", {
   DEV_USER_ID: "s9-http-player",
   ENGINE_URL: `http://127.0.0.1:${enginePort}`,
   ENGINE_SHARED_SECRET: internalToken,
+  RAILWAY_DEPLOYMENT_ID: "smoke-web-deployment",
 });
 
 try {
   const webBaseUrl = `http://127.0.0.1:${webPort}`;
   const health = await waitForHealth(webBaseUrl);
+  const webDeployment = health.deployment as DeploymentIdentity;
   assert((health.integrations as { lanternEngine?: boolean }).lanternEngine === true, "Web could not reach the engine.");
   const engineHealth = health.engine as {
     status?: string;
     toolCount?: number;
     rules?: { packVersion?: string; packHash?: string };
+    deployment?: DeploymentIdentity;
   };
+  const engineDeployment = engineHealth.deployment ?? {};
+  assert(JSON.stringify(Object.keys(webDeployment).sort()) === JSON.stringify(["commitSha", "deploymentId", "environment", "service"]), "Web deployment identity exposed an unexpected field.");
+  assert(JSON.stringify(Object.keys(engineDeployment).sort()) === JSON.stringify(["commitSha", "deploymentId", "environment", "service"]), "Engine deployment identity exposed an unexpected field.");
+  assert(webDeployment.service === "web" && engineDeployment.service === "engine", "Health did not distinguish the web and engine services.");
+  assert(webDeployment.environment === "smoke" && engineDeployment.environment === "smoke", "Health did not report the Railway environment.");
+  assert(webDeployment.commitSha === smokeCommitSha && engineDeployment.commitSha === smokeCommitSha, "Health did not report the deployed Git SHA.");
+  assert(webDeployment.deploymentId === "smoke-web-deployment" && engineDeployment.deploymentId === "smoke-engine-deployment", "Health did not report immutable deployment IDs.");
   assert(engineHealth.status === "ok", "Engine health was not ok.");
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa", "Engine booted an unexpected pack hash.");
