@@ -24,7 +24,7 @@ jobs:
     if: >
       github.event.deployment_status.state == 'success' &&
       github.event.deployment.environment == 'RPG MCP Live / staging' &&
-      github.event.deployment.ref == 'main' &&
+      github.event.deployment.ref == github.event.deployment.sha &&
       github.event.deployment.creator.login == 'railway-app[bot]'
     env:
       SHA: ${{ github.event.deployment.sha }}
@@ -45,7 +45,7 @@ jobs:
           test "${#SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$DEPLOYMENT_ENVIRONMENT" = "RPG MCP Live / staging"
-          test "$DEPLOYMENT_REF" = "main"
+          test "$DEPLOYMENT_REF" = "$SHA"
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
       - name: Confirm native Railway deployment status
