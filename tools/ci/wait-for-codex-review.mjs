@@ -14,9 +14,22 @@ export function findExactHeadCodexReview(reviews, headSha) {
     .at(-1) ?? null;
 }
 
-async function fetchReviews(repository, pullNumber, token) {
+export function findExactHeadCleanCodexComment(comments, headSha) {
+  const normalizedHead = headSha.toLowerCase();
+  return [...comments]
+    .filter((comment) => {
+      if (comment?.user?.login !== CODEX_REVIEWER || typeof comment.body !== "string") return false;
+      if (!comment.body.startsWith("Codex Review: Didn't find any major issues.")) return false;
+      const reviewedCommit = comment.body.match(/\*\*Reviewed commit:\*\*\s*`([0-9a-f]{10,40})`/i)?.[1]?.toLowerCase();
+      return Boolean(reviewedCommit && normalizedHead.startsWith(reviewedCommit));
+    })
+    .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)))
+    .at(-1) ?? null;
+}
+
+async function fetchGitHubJson(path, token) {
   const response = await fetch(
-    `https://api.github.com/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`,
+    `https://api.github.com${path}`,
     {
       headers: {
         Accept: "application/vnd.github+json",
@@ -26,7 +39,7 @@ async function fetchReviews(repository, pullNumber, token) {
       },
     }
   );
-  if (!response.ok) throw new Error(`GitHub reviews API returned HTTP ${response.status}.`);
+  if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status} for ${path}.`);
   return response.json();
 }
 
@@ -42,13 +55,21 @@ async function waitForReview() {
   const attempts = Number.parseInt(process.env.CODEX_REVIEW_ATTEMPTS ?? "90", 10);
   const delayMs = Number.parseInt(process.env.CODEX_REVIEW_DELAY_MS ?? "10000", 10);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const reviews = await fetchReviews(repository, pullNumber, token);
+    const [reviews, comments] = await Promise.all([
+      fetchGitHubJson(`/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`, token),
+      fetchGitHubJson(`/repos/${repository}/issues/${pullNumber}/comments?per_page=100&sort=created&direction=desc`, token),
+    ]);
     const review = findExactHeadCodexReview(reviews, headSha);
     if (review) {
       if (review.state === "CHANGES_REQUESTED") {
         throw new Error(`Codex requested changes for exact head ${headSha}.`);
       }
       console.log(`Codex subscription review ${review.id} covers exact head ${headSha}.`);
+      return;
+    }
+    const cleanComment = findExactHeadCleanCodexComment(comments, headSha);
+    if (cleanComment) {
+      console.log(`Clean Codex subscription review comment ${cleanComment.id} covers exact head ${headSha}.`);
       return;
     }
     if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CODEX_REVIEWER,
+  findExactHeadCleanCodexComment,
   findExactHeadCodexReview,
 } from "./wait-for-codex-review.mjs";
 
@@ -23,5 +24,19 @@ describe("subscription-backed Codex review gate", () => {
     expect(findExactHeadCodexReview([
       { id: 2, user: { login: CODEX_REVIEWER }, commit_id: "head", state: "DISMISSED" },
     ], "head")).toBeNull();
+  });
+
+  it("accepts only a clean connector comment naming the exact head", () => {
+    const cleanBody = (commit) => `Codex Review: Didn't find any major issues. Keep them coming!\n\n**Reviewed commit:** \`${commit}\``;
+    const comment = findExactHeadCleanCodexComment([
+      { id: 1, user: { login: CODEX_REVIEWER }, body: cleanBody("aaaaaaaaaa"), created_at: "2026-01-01" },
+      { id: 2, user: { login: "human" }, body: cleanBody("1234567890"), created_at: "2026-01-02" },
+      { id: 3, user: { login: CODEX_REVIEWER }, body: cleanBody("1234567890"), created_at: "2026-01-03" },
+    ], "1234567890abcdef");
+
+    expect(comment).toMatchObject({ id: 3 });
+    expect(findExactHeadCleanCodexComment([
+      { id: 4, user: { login: CODEX_REVIEWER }, body: cleanBody("123456789"), created_at: "2026-01-04" },
+    ], "1234567890abcdef")).toBeNull();
   });
 });
