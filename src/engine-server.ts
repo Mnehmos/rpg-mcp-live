@@ -33,6 +33,7 @@ import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js"
 import {
   commandForTool,
   executeReadTool,
+  isModelFacingEngineToolName,
   lanternToolDefinitions,
   parseToolArguments,
 } from "./engine-tools.js";
@@ -57,6 +58,7 @@ const deploymentContentPolicy: DeploymentContentPolicy = {
   baseDocuments: engineConfig.contentBaseDocuments,
 };
 const contentCatalog = buildOpen5eContentCatalog(contentPack, deploymentContentPolicy);
+const trustedHttpCapabilities = ["player", "dm"] as const;
 const contentResolverCache = new Map<string, Open5eContentResolver>();
 function contentResolverFor(state: LanternCampaignState): Open5eContentResolver {
   const campaignPack = contentRegistry.requireByRulesVersion(state.rulesVersion);
@@ -480,6 +482,13 @@ app.post("/v1/campaigns/:campaignId/tool-calls", (request, response) => {
       response.status(400).json({ code: "invalid_tool_call", error: "The tool call envelope is invalid.", details: parsed.error.flatten() });
       return;
     }
+    if (!isModelFacingEngineToolName(parsed.data.toolName)) {
+      response.status(400).json({
+        code: "tool_not_model_facing",
+        error: "That engine tool is not available through the model-facing tool-call endpoint.",
+      });
+      return;
+    }
     const state = store.getCampaign(context);
     const args = parseToolArguments(parsed.data.toolName, parsed.data.arguments);
     const command = commandForTool(parsed.data.toolName, args);
@@ -540,7 +549,7 @@ function createRequestContext(request: Request, campaignId = request.params.camp
     accountId,
     campaignId,
     actorId,
-    capabilities: parseCapabilities(request.header("x-lantern-capabilities")),
+    capabilities: [...trustedHttpCapabilities],
   };
 }
 
@@ -552,16 +561,8 @@ function createCampaignContext(request: Request): CreateCampaignContext {
     requestId: request.header("x-request-id")?.trim() || randomUUID(),
     accountId,
     actorId,
-    capabilities: parseCapabilities(request.header("x-lantern-capabilities")),
+    capabilities: [...trustedHttpCapabilities],
   };
-}
-
-function parseCapabilities(value: string | undefined): string[] {
-  const capabilities = value
-    ?.split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return capabilities?.length ? capabilities : ["player", "dm"];
 }
 
 function commandForLegacyAction(action: string): { command: EngineCommand; tool: EngineToolName | "listen" } | null {

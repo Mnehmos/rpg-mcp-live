@@ -95,53 +95,20 @@ The web service owns:
 - proxying authenticated commands to the private engine;
 - safe rendering of returned structured data and narration.
 
-The engine exposes a narrow internal HTTP facade. Its current 41 capability names are:
-
-~~~text
-campaign_context
-content_search
-content_get
-rules_reference
-character_options
-world_context
-player_notes
-player_note_add
-npc_context
-merchant_catalog
-observe
-move
-interact
-social_check
-merchant_trade
-quest_create
-quest_update
-improvise
-campaign_beat
-character_sheet
-character_create
-character_update
-inventory
-equip_item
-unequip_item
-drop_item
-use_item
-quest_progress
-combat_state
-combat_start
-spawn_creature
-learn_spell
-prepare_spell
-cast_spell
-combat_action
-advance_turn
-death_save
-loot
-rest
-roll_check
-tutorial_advance
-~~~
+The engine exposes a narrow internal HTTP facade. Its canonical model-facing
+catalog is `lanternToolDefinitions` in `src/engine-tools.ts` (currently 72
+tools). `/v1/tools`, the OpenRouter DM request, and the health `toolCount` all
+consume that same catalog. Startup parity checks require every ordinary engine
+tool name and argument schema to be either advertised exactly once or named in
+the explicit player-only set. The three `experience_*` commands are
+player-only and `/v1/campaigns/:campaignId/tool-calls` rejects them.
 
 These capabilities are available to the DM tool loop and can be called by a trusted player-facing proxy. They are not arbitrary state patches. Every mutating call is checked against the explicit campaign context and expected version. Content-authoring tools are intentionally expressive; their mechanical effects still commit through the same transaction.
+
+ADR-H26's production-room registry is a separate phase-scoped narration and
+projection boundary. Its permission metadata does not implicitly advertise a
+tool to the ordinary DM catalog; a tool joins that catalog only through
+`lanternToolDefinitions` and the parity guard.
 
 ## Request context
 
@@ -157,7 +124,11 @@ interface RequestContext {
 }
 ~~~
 
-The web service constructs this context after Clerk authentication and sends it over the private service boundary with an internal token. The engine validates the token and treats accountId, campaignId, and actorId as a single scope.
+The web service constructs identity after Clerk authentication and sends it over
+the private service boundary with an internal token. The engine validates that
+token, treats accountId, campaignId, and actorId as a single scope, and assigns
+the product-route `player,dm` capabilities itself. Caller-supplied capability
+headers do not grant roles.
 
 ## Command lifecycle
 

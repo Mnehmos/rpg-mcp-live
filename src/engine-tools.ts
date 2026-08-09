@@ -358,7 +358,14 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     .strict(),
 };
 
-const readOnlyTools = new Set<EngineToolName>([
+export const enginePlayerOnlyToolNames = [
+  "experience_profile_update",
+  "experience_feedback_add",
+  "experience_boundary",
+] as const satisfies readonly EngineToolName[];
+const playerOnlyTools = new Set<EngineToolName>(enginePlayerOnlyToolNames);
+
+export const engineReadOnlyToolNames = [
   "campaign_context",
   "content_search",
   "content_get",
@@ -375,7 +382,9 @@ const readOnlyTools = new Set<EngineToolName>([
   "controlled_actor_context",
   "party_context",
   "situation_context",
-]);
+] as const satisfies readonly EngineToolName[];
+export type EngineReadOnlyToolName = (typeof engineReadOnlyToolNames)[number];
+const readOnlyTools = new Set<EngineToolName>(engineReadOnlyToolNames);
 
 const inventoryItemJsonSchema = {
   oneOf: [
@@ -1155,7 +1164,15 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       additionalProperties: false,
     }
   ),
-  tool("rest", "Take a rest outside active combat. Recovery is server-owned and transactional.", {}),
+  tool(
+    "rest",
+    "Take a rest outside active combat. Recovery is server-owned and transactional.",
+    {
+      type: "object",
+      properties: { restType: { type: "string", enum: ["short", "long"], default: "long" } },
+      additionalProperties: false,
+    }
+  ),
   tool(
     "project",
     "Start or work one reviewed downtime project. The engine derives work duration, material cost, progress, and completion.",
@@ -1176,6 +1193,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         ability: { type: "string", enum: ["str", "dex", "con", "int", "wis", "cha"] },
         skill: { type: "string" },
         goal: { type: "string" },
+        passive: { type: "boolean", description: "Use the character's passive score instead of rolling a d20." },
       },
       required: ["ability", "goal"],
       additionalProperties: false,
@@ -1183,7 +1201,53 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
 ];
 
-export function isReadOnlyTool(toolName: EngineToolName): boolean {
+const modelFacingToolNames = new Set<EngineToolName>();
+
+function assertToolRegistryParity(): void {
+  const allToolNames = new Set<EngineToolName>(engineToolNameSchema.options);
+  const argumentSchemaNames = Object.keys(toolArgumentSchemas) as EngineToolName[];
+  if (
+    argumentSchemaNames.length !== allToolNames.size
+    || argumentSchemaNames.some((name) => !allToolNames.has(name))
+  ) {
+    throw new Error("Engine tool argument schemas do not match the engine tool enum.");
+  }
+
+  for (const name of enginePlayerOnlyToolNames) {
+    if (!allToolNames.has(name)) {
+      throw new Error(`Player-only engine tool is missing from the engine enum: ${name}`);
+    }
+  }
+  for (const definition of lanternToolDefinitions) {
+    const name = definition.function.name;
+    if (modelFacingToolNames.has(name)) {
+      throw new Error(`Duplicate model-facing engine tool definition: ${name}`);
+    }
+    if (playerOnlyTools.has(name)) {
+      throw new Error(`Player-only engine tool was advertised to the DM: ${name}`);
+    }
+    assertArgumentPropertyParity(name, definition.function.parameters);
+    modelFacingToolNames.add(name);
+  }
+
+  const expectedModelFacingNames = [...allToolNames].filter(
+    (name) => !playerOnlyTools.has(name)
+  );
+  if (
+    modelFacingToolNames.size !== expectedModelFacingNames.length
+    || expectedModelFacingNames.some((name) => !modelFacingToolNames.has(name))
+  ) {
+    throw new Error("The model-facing engine catalog does not match the engine tool enum.");
+  }
+}
+
+assertToolRegistryParity();
+
+export function isModelFacingEngineToolName(value: string): value is EngineToolName {
+  return isEngineToolName(value) && modelFacingToolNames.has(value);
+}
+
+export function isReadOnlyTool(toolName: EngineToolName): toolName is EngineReadOnlyToolName {
   return readOnlyTools.has(toolName);
 }
 
@@ -1421,26 +1485,9 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         goal: args.goal,
         passive: args.passive,
       });
-    case "campaign_context":
-    case "content_search":
-    case "content_get":
-    case "rules_reference":
-    case "character_options":
-    case "player_notes":
-    case "npc_context":
-    case "merchant_catalog":
-    case "observe":
-    case "character_sheet":
-    case "inventory":
-    case "quest_progress":
-    case "combat_state":
-      return null;
-    case "controlled_actor_context":
-      return null;
-    case "party_context":
-      return null;
   }
-  return null;
+  const exhaustiveToolName: never = toolName;
+  return exhaustiveToolName;
 }
 
 export function executeReadTool(
@@ -1641,6 +1688,33 @@ function tool(
     type: "function",
     function: { name, description, parameters },
   };
+}
+
+function assertArgumentPropertyParity(name: EngineToolName, advertised: Record<string, unknown>): void {
+  const runtime = z.toJSONSchema(toolArgumentSchemas[name], { unrepresentable: "any" }) as Record<string, unknown>;
+  const runtimeProperties = topLevelPropertyNames(runtime);
+  const advertisedProperties = topLevelPropertyNames(advertised);
+  if (JSON.stringify(runtimeProperties) !== JSON.stringify(advertisedProperties)) {
+    throw new Error(
+      `Advertised arguments do not match the runtime schema for ${name}: runtime=${runtimeProperties.join(",")}; advertised=${advertisedProperties.join(",")}.`
+    );
+  }
+}
+
+function topLevelPropertyNames(schema: Record<string, unknown>): string[] {
+  const properties = schema.properties;
+  const direct = properties && typeof properties === "object"
+    ? Object.keys(properties)
+    : [];
+  const alternatives = Array.isArray(schema.anyOf)
+    ? schema.anyOf
+    : Array.isArray(schema.oneOf) ? schema.oneOf : [];
+  const alternativeProperties = alternatives.flatMap((candidate) =>
+      candidate && typeof candidate === "object"
+        ? topLevelPropertyNames(candidate as Record<string, unknown>)
+        : []
+    );
+  return [...new Set([...direct, ...alternativeProperties])].sort();
 }
 
 function isRulesReferenceKind(kind: string): boolean {

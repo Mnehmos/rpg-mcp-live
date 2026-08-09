@@ -56,14 +56,11 @@ The current test catalog is a recurring 5 USD/month Player Pass. It does not mak
 
 ## Engine tools
 
-The engine currently exposes 41 constrained capabilities:
-
-~~~text
-campaign_context, content_search, content_get, rules_reference, character_options, world_context, player_notes, player_note_add, npc_context, merchant_catalog, observe, move,
-interact, social_check, merchant_trade, quest_create, quest_update, improvise, campaign_beat, character_sheet,
-character_create, character_update, inventory, equip_item, unequip_item, drop_item, use_item, quest_progress,
-combat_state, combat_start, spawn_creature, learn_spell, prepare_spell, cast_spell, combat_action, advance_turn, death_save, loot, rest, roll_check, tutorial_advance
-~~~
+The engine currently advertises 72 constrained model-facing tools. The canonical
+catalog is `lanternToolDefinitions` in `src/engine-tools.ts`; `/v1/tools`, the DM
+request, and the health `toolCount` all consume that same array. The three
+`experience_*` commands are explicit player-only engine commands and are not
+accepted by the generic model-facing tool-call endpoint.
 
 Read tools inspect authoritative state. A player turn may contain multiple ordered typed effects, but the engine validates and commits the complete plan as one versioned transaction. The DM may request tools, but the engine owns rolls, DCs, modifiers, turn legality, resource changes, persistence, and event evidence.
 
@@ -102,7 +99,7 @@ S9 keeps S1, S7, and S8 installed together. Pack-backed historical events resolv
 
 The local S0-S9 implementation plus the legacy migration seam passes pack verification, type checking, the 83-test regression suite, and the built two-service HTTP smoke against S8. The engine owns tenant-scoped state, rules, tools, events, and the OpenRouter DM loop; the web service owns Clerk, Stripe, browser assets, content-source setup, attribution, and the authenticated proxy.
 
-Railway now runs the verified S8 pair plus the player-owned campaign manager. The private engine deployment is `a4a50b7f-53ed-4bae-8c62-473b0b92e033`; the public web deployment is `11c55560-3d12-4815-9b13-eced61300469`. All four legacy campaigns were reviewed and migrated exactly once; all 38 original events remain byte-identical legacy evidence, and the four migration events resolve under S8. Public health reports the exact pack hash and 41 tools. The remaining release proof is an authenticated Clerk/OpenRouter browser playtest; no controllable signed-in browser was attached to this agent session.
+Railway now runs the verified S8 pair plus the player-owned campaign manager. The private engine deployment is `a4a50b7f-53ed-4bae-8c62-473b0b92e033`; the public web deployment is `11c55560-3d12-4815-9b13-eced61300469`. All four legacy campaigns were reviewed and migrated exactly once; all 38 original events remain byte-identical legacy evidence, and the four migration events resolve under S8. Public health reports the exact pack hash and model-facing catalog count. The remaining release proof is an authenticated Clerk/OpenRouter browser playtest; no controllable signed-in browser was attached to this agent session.
 
 See:
 
