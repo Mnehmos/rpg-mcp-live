@@ -3,6 +3,10 @@ import { pathToFileURL } from "node:url";
 
 export const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 
+function cleanCommentTimestamp(comment) {
+  return comment?.updated_at ?? comment?.created_at ?? "";
+}
+
 export function findExactHeadCodexReview(reviews, headSha) {
   return [...reviews]
     .filter((review) =>
@@ -23,7 +27,7 @@ export function findExactHeadCleanCodexComment(comments, headSha) {
       const reviewedCommit = comment.body.match(/\*\*Reviewed commit:\*\*\s*`([0-9a-f]{10,40})`/i)?.[1]?.toLowerCase();
       return Boolean(reviewedCommit && normalizedHead.startsWith(reviewedCommit));
     })
-    .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)))
+    .sort((left, right) => cleanCommentTimestamp(left).localeCompare(cleanCommentTimestamp(right)))
     .at(-1) ?? null;
 }
 
@@ -38,7 +42,7 @@ export function findLatestExactHeadCodexVerdict(reviews, comments, headSha) {
   // timestamp conservatively: only a strictly newer clean result supersedes
   // findings for the same commit.
   const findingsAt = Date.parse(findings.submitted_at ?? "");
-  const cleanAt = Date.parse(clean.created_at ?? "");
+  const cleanAt = Date.parse(cleanCommentTimestamp(clean));
   if (Number.isFinite(cleanAt) && Number.isFinite(findingsAt) && cleanAt > findingsAt) {
     return { kind: "clean", evidence: clean };
   }
@@ -47,8 +51,8 @@ export function findLatestExactHeadCodexVerdict(reviews, comments, headSha) {
 
 export function isCleanVerdictSettled(verdict, settleMs, nowMs = Date.now()) {
   if (verdict?.kind !== "clean") return false;
-  const createdAt = Date.parse(verdict.evidence?.created_at ?? "");
-  return Number.isFinite(createdAt) && nowMs - createdAt >= settleMs;
+  const effectiveAt = Date.parse(cleanCommentTimestamp(verdict.evidence));
+  return Number.isFinite(effectiveAt) && nowMs - effectiveAt >= settleMs;
 }
 
 function githubApiUrl(pathOrUrl) {

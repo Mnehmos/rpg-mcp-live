@@ -80,6 +80,11 @@ describe("subscription-backed Codex review gate", () => {
     clean.created_at = "2026-01-03T00:00:00Z";
     expect(findLatestExactHeadCodexVerdict([review], [clean], "1234567890abcdef"))
       .toMatchObject({ kind: "clean", evidence: { id: 11 } });
+
+    clean.created_at = "2026-01-01T00:00:00Z";
+    clean.updated_at = "2026-01-04T00:00:00Z";
+    expect(findLatestExactHeadCodexVerdict([review], [clean], "1234567890abcdef"))
+      .toMatchObject({ kind: "clean", evidence: { id: 11 } });
   });
 
   it("settles a clean verdict before allowing success", () => {
@@ -90,6 +95,8 @@ describe("subscription-backed Codex review gate", () => {
 
     expect(isCleanVerdictSettled(verdict, 60_000, Date.parse("2026-01-01T00:00:59Z"))).toBe(false);
     expect(isCleanVerdictSettled(verdict, 60_000, Date.parse("2026-01-01T00:01:00Z"))).toBe(true);
+    verdict.evidence.updated_at = "2026-01-01T00:00:30Z";
+    expect(isCleanVerdictSettled(verdict, 60_000, Date.parse("2026-01-01T00:01:00Z"))).toBe(false);
     expect(isCleanVerdictSettled({ kind: "findings", evidence: {} }, 60_000)).toBe(false);
   });
 
