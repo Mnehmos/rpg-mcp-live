@@ -946,6 +946,42 @@ describe("Lantern engine boundary", () => {
     }
 
     const assigned = draft?.scores ?? [];
+    const differentIndex = assigned.findIndex((score) => score !== assigned[0]);
+    expect(differentIndex).toBeGreaterThan(0);
+    const duplicated = assigned.slice();
+    duplicated[differentIndex] = assigned[0] ?? 8;
+    const rejected = resolveEngineCommand(
+      rolled.state,
+      commandContext,
+      randomUUID(),
+      {
+        kind: "character_create",
+        name: "Duplicated Hero",
+        speciesKey: "open5e:species:5e-2014:srd-2014:srd_human",
+        classKey: "open5e:class:5e-2014:srd-2014:srd_fighter",
+        backgroundKey: "open5e:background:5e-2014:srd-2014:srd_acolyte",
+        alignmentKey: "open5e:alignment:5e-2014:srd-2014:neutral",
+        abilityScoreMethod: "rolled",
+        abilityScoreDraftId: draft?.id,
+        abilityScores: {
+          str: duplicated[0] ?? 8,
+          dex: duplicated[1] ?? 8,
+          con: duplicated[2] ?? 8,
+          int: duplicated[3] ?? 8,
+          wis: duplicated[4] ?? 8,
+          cha: duplicated[5] ?? 8,
+        },
+      },
+      "character_create"
+    );
+    expect(rejected).toMatchObject({
+      accepted: false,
+      code: "invalid_ability_scores",
+      message: expect.stringContaining("exactly the six values rolled"),
+    });
+    expect(rejected.state.version).toBe(rolled.state.version);
+    expect(rejected.state.characterCreation.abilityScoreDraft).toEqual(draft);
+
     const created = resolveEngineCommand(
       rolled.state,
       commandContext,

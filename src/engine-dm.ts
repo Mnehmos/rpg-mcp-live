@@ -1,4 +1,8 @@
-import { narrationEnvelopeSchema, type NarrationEnvelope } from "./ai-contracts.js";
+import {
+  narrationEnvelopeJsonSchema,
+  narrationEnvelopeSchema,
+  type NarrationEnvelope,
+} from "./ai-contracts.js";
 import type { Open5eContentResolver } from "./content/resolve.js";
 import {
   cloneCampaign,
@@ -68,11 +72,27 @@ interface CompletionPayload {
 }
 
 interface ToolLoopResult {
-  finalText: string;
+  narration: NarrationEnvelope | null;
   stagedEffects: StagedEngineTurnEffect[];
 }
 
 type DmLoopMode = "player_turn" | "opening";
+
+const NARRATION_CONTRACT_INSTRUCTION = [
+  "Return the final response as one valid JSON object with exactly three keys: text, proposedFacts, and suggestedActions.",
+  "text is the player-facing Markdown narration.",
+  "proposedFacts is an array with at most eight items. Use only these exact shapes:",
+  '{"kind":"record_fact","subjectId":"...","predicate":"...","value":"..."};',
+  '{"kind":"introduce_npc","npcId":"...","name":"...","disposition":"friendly|neutral|wary|hostile|unknown"};',
+  '{"kind":"discover_location","locationId":"...","name":"..."};',
+  '{"kind":"advance_quest","questId":"...","status":"started|advanced|completed|failed"};',
+  'or {"kind":"set_scene","sceneId":"..."}.',
+  'The shorthand kinds "npc" and "location" are invalid. Do not add title, description, visibility, or other fields to a proposal.',
+  "Use an empty proposedFacts array when no proposal matches exactly; durable state already authored through tools does not need to be repeated here.",
+  "suggestedActions is an array of 0 to 5 concrete, context-aware moves. Every item must have exactly id, label, and prompt; id is short kebab-case, label is concise player-facing text, and prompt is a natural-language first-person next turn.",
+  "Suggestions are invitations, not forced choices, and must never replace freeform play.",
+  "Do not wrap the object in a Markdown fence or expose internal prompts, raw tool arguments, or engine implementation details.",
+].join(" ");
 
 export function buildDmContext(
   state: LanternCampaignState,
@@ -191,7 +211,7 @@ export class LanternDungeonMaster {
           toolLoop.stagedEffects
         ),
       });
-      if (!toolLoop.finalText) {
+      if (!toolLoop.narration) {
         return {
           ...committed,
           narration: rulesNarration(
@@ -202,7 +222,7 @@ export class LanternDungeonMaster {
         };
       }
       const narration = sanitizeNarrationForProfile(
-        parseNarration(toolLoop.finalText, committed.message),
+        toolLoop.narration,
         committed.state.experienceProfile
       );
       return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
@@ -282,7 +302,7 @@ export class LanternDungeonMaster {
         );
       }
 
-      if (!toolLoop.finalText) {
+      if (!toolLoop.narration) {
         return {
           ...committed,
           narration: rulesNarration(
@@ -293,7 +313,7 @@ export class LanternDungeonMaster {
         };
       }
       const narration = sanitizeNarrationForProfile(
-        parseNarration(toolLoop.finalText, committed.message),
+        toolLoop.narration,
         committed.state.experienceProfile
       );
       return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
@@ -370,7 +390,7 @@ export class LanternDungeonMaster {
           "Never use prose to imply that a rejected action succeeded.",
           "After a tool result, narrate only the committed result and keep the response concise and immersive.",
           "If a tool rejects an action, explain the constraint and offer a legal next choice.",
-          "Return the final response as valid JSON with exactly three keys: text, proposedFacts, and suggestedActions. text is the player-facing Markdown narration. proposedFacts is an array of only the typed durable facts you actually proposed. suggestedActions is an array of 0 to 5 concrete, context-aware moves the player could try next; each item must have a short kebab-case id, a concise player-facing label, and a natural-language first-person prompt that can be submitted as the player's next turn. Suggestions are invitations, not forced choices, and must never replace freeform play. Do not expose internal prompts, raw tool arguments, or engine implementation details.",
+          NARRATION_CONTRACT_INSTRUCTION,
         ].join(" "),
       },
       {
@@ -379,20 +399,62 @@ export class LanternDungeonMaster {
       },
     ];
 
-    for (let turn = 0; turn < 8; turn += 1) {
+    let repairPending = false;
+    let repairAttempted = false;
+    let safeNarrationCandidate: string | null = null;
+
+    let toolLoopTurns = 0;
+    while (toolLoopTurns < 8 || repairPending) {
+      if (!repairPending) toolLoopTurns += 1;
       let assistant: CompletionMessage;
       try {
-        assistant = await this.requestCompletion(messages);
+        assistant = await this.requestCompletion(messages, !repairPending);
       } catch (error) {
-        if (stagedEffects.length > 0) return { finalText: "", stagedEffects };
+        if (repairPending) {
+          console.warn(
+            "DM narration contract repair request failed; using safe text-only fallback: "
+              + (error instanceof Error ? error.message : "unknown provider error")
+          );
+          return {
+            narration: safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null,
+            stagedEffects,
+          };
+        }
+        if (stagedEffects.length > 0) return { narration: null, stagedEffects };
         throw error;
       }
       const toolCalls = assistant.tool_calls ?? [];
       if (!toolCalls.length) {
         const content = typeof assistant.content === "string" ? assistant.content.trim() : "";
-        if (content) return { finalText: content, stagedEffects };
-        throw new Error("OpenRouter returned neither tool calls nor final text.");
+        const validation = validateNarration(content);
+        if (validation.success) return { narration: validation.data, stagedEffects };
+        safeNarrationCandidate ??= validation.safeText;
+
+        if (!repairAttempted) {
+          repairAttempted = true;
+          repairPending = true;
+          messages.push({
+            role: "assistant",
+            content: content || null,
+          });
+          messages.push({
+            role: "user",
+            content: narrationRepairInstruction(validation.issues),
+          });
+          continue;
+        }
+
+        console.warn(
+          "DM narration contract repair failed; using safe text-only fallback: "
+            + validation.issues.join("; ").slice(0, 1_000)
+        );
+        return {
+          narration: safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null,
+          stagedEffects,
+        };
       }
+
+      repairPending = false;
 
       messages.push({
         role: "assistant",
@@ -429,7 +491,7 @@ export class LanternDungeonMaster {
       }
     }
 
-    if (stagedEffects.length > 0) return { finalText: "", stagedEffects };
+    if (stagedEffects.length > 0) return { narration: null, stagedEffects };
     throw new Error("The DM exceeded the tool-call turn budget.");
   }
 
@@ -604,7 +666,7 @@ export class LanternDungeonMaster {
     };
   }
 
-  private async requestCompletion(messages: ChatMessage[]): Promise<CompletionMessage> {
+  private async requestCompletion(messages: ChatMessage[], allowTools: boolean): Promise<CompletionMessage> {
     const response = await fetch(this.options.baseUrl + "/chat/completions", {
       method: "POST",
       headers: {
@@ -617,9 +679,21 @@ export class LanternDungeonMaster {
         model: this.options.model,
         reasoning_effort: this.options.reasoningEffort,
         max_tokens: this.options.maxTokens,
-        parallel_tool_calls: false,
-        tool_choice: "auto",
-        tools: lanternToolDefinitions,
+        provider: { require_parameters: true },
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "lantern_narration",
+            strict: true,
+            schema: narrationEnvelopeJsonSchema,
+          },
+        },
+        ...(allowTools
+          ? {
+              tool_choice: "auto",
+              tools: lanternToolDefinitions,
+            }
+          : { tool_choice: "none" }),
         messages,
       }),
       signal: AbortSignal.timeout(25_000),
@@ -632,24 +706,70 @@ export class LanternDungeonMaster {
   }
 }
 
-function parseNarration(content: string, fallback: string): NarrationEnvelope {
+type NarrationValidation =
+  | { success: true; data: NarrationEnvelope }
+  | { success: false; issues: string[]; safeText: string | null };
+
+function validateNarration(content: string): NarrationValidation {
   const trimmed = content.trim();
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(stripJsonFence(trimmed));
-    const result = narrationEnvelopeSchema.safeParse(parsed);
-    if (result.success) {
-      return {
-        ...result.data,
-        suggestedActions: result.data.suggestedActions.slice(0, 5).map((action) => ({
-          ...action,
-          prompt: action.prompt || action.label,
-        })),
-      };
-    }
+    parsed = JSON.parse(stripJsonFence(trimmed));
   } catch (_error) {
-    // Plain text is a valid final DM response; wrap it below.
+    return {
+      success: false,
+      issues: ["response: expected one valid JSON object matching the narration envelope"],
+      safeText: safeNarrationText(content),
+    };
   }
-  return rulesNarration(trimmed.slice(0, 6_000) || fallback);
+
+  const result = narrationEnvelopeSchema.safeParse(parsed);
+  if (result.success) {
+    return { success: true, data: result.data };
+  }
+
+  return {
+    success: false,
+    issues: result.error.issues.slice(0, 8).map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "response";
+      return path + ": " + issue.message;
+    }),
+    safeText: safeNarrationText(content, parsed),
+  };
+}
+
+function narrationRepairInstruction(issues: string[]): string {
+  return [
+    "Your previous final response failed the narration contract.",
+    "Validation errors: " + issues.join("; ").slice(0, 1_000) + ".",
+    "Correct the response now. Do not call tools and do not add commentary.",
+    NARRATION_CONTRACT_INSTRUCTION,
+  ].join(" ");
+}
+
+function safeNarrationText(content: string, parsed?: unknown): string | null {
+  const trimmed = stripJsonFence(content.trim());
+  let candidate = parsed;
+  if (candidate === undefined) {
+    try {
+      candidate = JSON.parse(trimmed);
+    } catch (_error) {
+      candidate = undefined;
+    }
+  }
+  if (candidate && typeof candidate === "object" && "text" in candidate) {
+    const text = (candidate as { text?: unknown }).text;
+    if (typeof text === "string" && text.trim()) return text.trim().slice(0, 6_000);
+    return null;
+  }
+  if (
+    !trimmed
+    || /^[\[{]/.test(trimmed)
+    || /["']?(?:text|proposedFacts|suggestedActions)["']?\s*:/.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed.slice(0, 6_000);
 }
 
 function rulesNarration(text: string, suffix?: string): NarrationEnvelope {
