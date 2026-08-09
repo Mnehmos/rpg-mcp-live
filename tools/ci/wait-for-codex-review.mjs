@@ -135,6 +135,7 @@ async function waitForReview() {
 
   const attempts = Number.parseInt(process.env.CODEX_REVIEW_ATTEMPTS ?? "90", 10);
   const delayMs = Number.parseInt(process.env.CODEX_REVIEW_DELAY_MS ?? "10000", 10);
+  let latestFindingsId = null;
   try {
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const [reviews, comments] = await Promise.all([
@@ -148,9 +149,25 @@ async function waitForReview() {
         return;
       }
       if (verdict?.kind === "findings") {
-        throw new Error(`Codex reported findings for exact head ${headSha}; resolve them and request a clean review.`);
+        if (latestFindingsId !== verdict.evidence.id) {
+          latestFindingsId = verdict.evidence.id;
+          await setCommitStatus(
+            repository,
+            headSha,
+            token,
+            "failure",
+            "Subscription Codex reported findings on this commit.",
+            runUrl
+          );
+          console.log(
+            `Codex review ${verdict.evidence.id} reported findings for exact head ${headSha}; waiting for a newer clean rerun.`
+          );
+        }
       }
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    if (latestFindingsId !== null) {
+      throw new Error(`Codex findings remain for exact head ${headSha}; resolve them and request a clean review.`);
     }
     throw new Error(
       `No review from ${CODEX_REVIEWER} covers exact head ${headSha}. `
