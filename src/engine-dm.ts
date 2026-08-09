@@ -401,6 +401,8 @@ export class LanternDungeonMaster {
     let repairPending = false;
     let repairAttempted = false;
     let safeNarrationCandidate: string | null = null;
+    const objectIntent = detectObjectTurnIntent(initialState, playerText);
+    let objectRepairAttempted = false;
 
     let toolLoopTurns = 0;
     while (toolLoopTurns < 8 || repairPending) {
@@ -425,6 +427,21 @@ export class LanternDungeonMaster {
       const toolCalls = assistant.tool_calls ?? [];
       if (!toolCalls.length) {
         const content = typeof assistant.content === "string" ? assistant.content.trim() : "";
+        if (objectIntent) {
+          const repair = objectTurnRepair(objectIntent, currentState, stagedEffects);
+          if (repair) {
+            if (!objectRepairAttempted) {
+              objectRepairAttempted = true;
+              messages.push({ role: "assistant", content: content || null });
+              messages.push({ role: "user", content: repair });
+              continue;
+            }
+            return {
+              narration: null,
+              stagedEffects: stagedEffects.filter((effect) => objectIntent.kind !== "held-transfer" || heldContest(effect)?.outcome !== "success"),
+            };
+          }
+        }
         const validation = validateNarration(content);
         if (validation.success) return { narration: validation.data, stagedEffects };
         safeNarrationCandidate ??= validation.safeText;
@@ -741,6 +758,93 @@ function narrationRepairInstruction(issues: string[]): string {
     "Validation errors: " + issues.join("; ").slice(0, 1_000) + ".",
     "Correct the response now. Do not call tools and do not add commentary.",
     NARRATION_CONTRACT_INSTRUCTION,
+  ].join(" ");
+}
+
+type ObjectTurnIntent = {
+  kind: "held-transfer" | "object-action";
+  objectId?: string;
+};
+
+function objectReferenceMatches(value: string, aliases: string[]): boolean {
+  const normalized = value.toLocaleLowerCase();
+  return aliases.some((alias) => {
+    const phrase = alias.toLocaleLowerCase().replace(/[-_]+/g, " ").trim();
+    if (phrase.length >= 3 && normalized.includes(phrase)) return true;
+    return phrase.split(/\s+/).some((token) => token.length >= 4 && normalized.includes(token));
+  });
+}
+
+function detectObjectTurnIntent(state: LanternCampaignState, playerText: string): ObjectTurnIntent | null {
+  const world = state.worldContext;
+  if (!world) return null;
+  const transferVerb = /\b(seize|snatch|grab|wrench|steal|take|carry|pick\s+up|pocket|claim|secure)\b/i.test(playerText);
+  const actionVerb = /\b(use|unlock|open|close|lock|equip|drop|throw|move|ignite|extinguish|break|damage|attach|activate)\b/i.test(playerText);
+  if (!transferVerb && !actionVerb) return null;
+
+  for (const object of world.objects) {
+    const aliases = [object.id, object.definition.name, ...object.definition.tags];
+    if (!objectReferenceMatches(playerText, aliases)) continue;
+    const holder = object.locationRef && world.npcs.some((npc) => npc.id === object.locationRef);
+    if (transferVerb && holder && object.ownerRef.kind !== "actor") {
+      return { kind: "held-transfer", objectId: object.id };
+    }
+    return { kind: "object-action", objectId: object.id };
+  }
+
+  if (!transferVerb) return null;
+  const npcMentioned = world.npcs.some((npc) => objectReferenceMatches(playerText, [npc.id, npc.name]));
+  const holderLanguage = /\b(from|away|off|grip|belt|hands?|held|loosened|before\s+.+\s+react)\b/i.test(playerText);
+  const evidenceTokens = new Set(
+    [world.description, ...world.features, ...state.log.slice(-12).map((entry) => entry.text)]
+      .join(" ").toLocaleLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 4)
+  );
+  const sharedEvidence = playerText.toLocaleLowerCase().split(/[^a-z0-9]+/).some((token) => token.length >= 4 && evidenceTokens.has(token));
+  return npcMentioned && holderLanguage && sharedEvidence ? { kind: "held-transfer" } : null;
+}
+
+function heldContest(effect: StagedEngineTurnEffect): { outcome: string; targetId: string | null } | null {
+  if (effect.command.kind !== "challenge_attempt" || effect.command.challengeId !== "seize-held-object-v1") return null;
+  const latest = effect.resolution.state.adjudicationHistory.at(-1);
+  return latest ? { outcome: latest.outcome, targetId: effect.command.sceneId?.split(":").at(-1) ?? null } : null;
+}
+
+function objectTurnResolved(intent: ObjectTurnIntent, effects: StagedEngineTurnEffect[]): boolean {
+  if (intent.kind === "object-action") {
+    return effects.some((effect) =>
+      effect.command.kind === "interact"
+      && (!intent.objectId || effect.command.targetId === intent.objectId || effect.command.sourceId === intent.objectId)
+    );
+  }
+
+  const contest = effects.map(heldContest).find((value) => value !== null);
+  if (!contest) return false;
+  if (contest.outcome === "failure-with-complication") return true;
+  if (contest.outcome !== "success") return false;
+  const targetId = intent.objectId ?? contest.targetId;
+  return effects.some((effect) =>
+    effect.command.kind === "interact"
+    && (effect.command.affordance === "take" || effect.command.affordance === "steal")
+    && (!targetId || effect.command.targetId === targetId)
+  );
+}
+
+function objectTurnRepair(intent: ObjectTurnIntent, state: LanternCampaignState, effects: StagedEngineTurnEffect[]): string | null {
+  if (objectTurnResolved(intent, effects)) return null;
+  if (intent.kind === "held-transfer") {
+    return [
+      "The previous plan did not complete the player's attempted transfer of an established NPC-held object.",
+      "Continue with tools before narration; do not claim possession in prose.",
+      "If the object is present in recentLog or features but absent from worldContext.objects, call world_context first and preserve the existing context while upserting exactly one stable object with a public-evidence sourceRef, the established holder's id as locationRef, and ordinary affordances.",
+      "Then call challenge_attempt with challengeId seize-held-object-v1, the established holder as opponentId, and sceneId exactly worldContext.id + ':' + targetId.",
+      "If the contest succeeds, immediately call interact with that same targetId and affordance take or steal. If it fails, do not call interact; preserve the holder's ownership and narrate that outcome.",
+      `Current authoritative context: ${state.worldContext?.id ?? "none"}.`,
+    ].join(" ");
+  }
+  return [
+    "The previous response did not resolve the player's use of an authoritative object.",
+    "Continue with tools before narration; do not substitute a generic no-check or prose-only consequence.",
+    "Use the actor-owned source object from worldContext.objects. If the target is described publicly but missing, upsert it with world_context while preserving the current context, then call interact with the typed affordance and sourceId for that source object.",
   ].join(" ");
 }
 
