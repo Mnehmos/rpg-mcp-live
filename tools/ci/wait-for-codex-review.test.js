@@ -10,14 +10,17 @@ import {
 } from "./wait-for-codex-review.mjs";
 
 describe("subscription-backed Codex review gate", () => {
-  it("starts only from the trusted pull_request_target event", () => {
+  it("uses only default-branch-backed workflow events", () => {
     const workflow = readFileSync(
       new URL("../../.github/workflows/codex-review.yml", import.meta.url),
       "utf8"
     );
 
     expect(workflow).toMatch(/^\s{2}pull_request_target:/m);
-    expect(workflow).not.toMatch(/^\s{2}(pull_request_review|issue_comment):/m);
+    expect(workflow).toMatch(/^\s{2}issue_comment:/m);
+    expect(workflow).not.toMatch(/^\s{2}pull_request_review:/m);
+    expect(workflow).toContain("github.event.comment.user.login == 'chatgpt-codex-connector[bot]'");
+    expect(workflow).toContain("github.run_id || 'gate'");
     expect(workflow).toContain("github.event.pull_request.base.sha || github.event.repository.default_branch");
   });
 
