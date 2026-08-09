@@ -53,6 +53,7 @@ const web = startService("web", "dist/server.js", {
 
 try {
   const webBaseUrl = `http://127.0.0.1:${webPort}`;
+  const engineBaseUrl = `http://127.0.0.1:${enginePort}`;
   const health = await waitForHealth(webBaseUrl);
   const webDeployment = health.deployment as DeploymentIdentity;
   assert((health.integrations as { lanternEngine?: boolean }).lanternEngine === true, "Web could not reach the engine.");
@@ -73,6 +74,19 @@ try {
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa", "Engine booted an unexpected pack hash.");
   assert(engineHealth.toolCount === 72, "Engine tool count drifted.");
+  const toolCatalog = await requestJson<{ tools: Array<{ function: { name: string } }> }>(
+    `${engineBaseUrl}/v1/tools`,
+    { headers: { "x-lantern-engine-token": internalToken } }
+  );
+  const advertisedToolNames = toolCatalog.tools.map((tool) => tool.function.name);
+  assert(advertisedToolNames.length === engineHealth.toolCount, "Health and the advertised tool catalog disagree.");
+  assert(new Set(advertisedToolNames).size === advertisedToolNames.length, "The advertised tool catalog contains duplicate names.");
+  assert(
+    ["experience_profile_update", "experience_feedback_add", "experience_boundary"].every(
+      (name) => !advertisedToolNames.includes(name)
+    ),
+    "A player-only experience command was advertised to the DM."
+  );
 
   const page = await fetch(`${webBaseUrl}/play`);
   const pageHtml = await page.text();
@@ -165,12 +179,30 @@ try {
   assert(sheet.inventory.length >= 9, "Reviewed class and background inventory was not materialized.");
   assert(sheet.sourceDetails.features.length > 0, "Source-backed feature descriptions were not hydrated.");
 
-  const engineBaseUrl = `http://127.0.0.1:${enginePort}`;
   const engineHeaders = {
     "x-lantern-engine-token": internalToken,
     "x-lantern-account-id": "s9-http-player",
     "x-lantern-actor-id": "s9-http-player",
+    "x-lantern-capabilities": "admin",
   };
+  const hiddenToolResponse = await fetch(
+    `${engineBaseUrl}/v1/campaigns/${encodeURIComponent(createdCampaign.session.id)}/tool-calls`,
+    {
+      method: "POST",
+      headers: { ...engineHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientCommandId: crypto.randomUUID(),
+        expectedCampaignVersion: createdCharacter.session.version,
+        toolName: "experience_feedback_add",
+        arguments: { rating: 5 },
+      }),
+    }
+  );
+  const hiddenToolBody = await hiddenToolResponse.json() as { code?: string };
+  assert(
+    hiddenToolResponse.status === 400 && hiddenToolBody.code === "tool_not_model_facing",
+    "The generic tool-call endpoint accepted a player-only experience command."
+  );
   const encounter = await engineToolCall(engineBaseUrl, engineHeaders, createdCampaign.session.id, {
     expectedCampaignVersion: createdCharacter.session.version,
     toolName: "combat_start",
