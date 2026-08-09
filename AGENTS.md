@@ -55,7 +55,9 @@ CI never makes live OpenRouter calls. All tests use stubbed model output and det
 
 ```
 PR → CI / required → auto-merge → Railway native staging autodeploy (Wait for CI)
-  → deployment_status health/readback → production disabled
+  → staging verification → direct production-ref promotion
+  → production CI / Wait for CI → Railway native production autodeploy
+  → production verification and release
 ```
 
 GitHub Actions owns CI and post-deploy evidence. Railway's connected GitHub
@@ -66,9 +68,9 @@ playtester opens an issue and the fix flows through the same pipeline.
 | Gate            | Who/what enforces it                      |
 | --------------- | ------------------------------------------ |
 | CI passes       | Required status check `CI / required`      |
-| Staging health/readback | `verify-staging` deployment-status workflow |
-| Staging smoke/gauntlet | CI before Railway deploy                   |
-| Production      | Disabled until promotion policy is settled  |
+| Staging health/evaluation | `verify-staging` deployment-status workflow |
+| Production ref promotion | `verify-staging` with scoped GitHub token    |
+| Production health/release | `verify-production` deployment-status workflow |
 | DB migration    | Manual `workflow_dispatch` (separate) — the only human gate, because databases can't be auto-rolled-back |
 
 ## Risk classes
