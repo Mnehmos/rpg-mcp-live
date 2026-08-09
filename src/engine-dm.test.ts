@@ -198,6 +198,87 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it.each([
+    { label: "successful", wisdom: 20, outcome: "The attempt succeeds" },
+    { label: "failed", wisdom: 8, outcome: "The attempt falls short" },
+  ])("persists a contextual rules fallback for a $label check", async ({ wisdom, outcome }) => {
+    const goal = "retrieve the fallen key without alerting Titus";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-fallback-check",
+                type: "function",
+                function: {
+                  name: "roll_check",
+                  arguments: JSON.stringify({ ability: "wis", goal, passive: true }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error("provider timeout after commit"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign(`account-${wisdom}`, `actor-${wisdom}`);
+    state.character.abilities.wis = wisdom;
+    state.worldContext = {
+      id: "ludus-vault",
+      title: "The Ludus Holding Vault",
+      description: "Titus guards a fallen key beyond the bars.",
+      features: ["fallen key", "barred opening"],
+      exits: [],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I quietly retrieve the fallen key without alerting Titus.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
+
+    const rollText = result.session.log.filter((message) => message.kind === "roll").at(-1)?.text;
+    const narrationText = result.session.log.at(-1)?.text;
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).toBe(narrationText);
+    expect(result.narration.text).toContain(outcome);
+    expect(result.narration.text).toContain("The Ludus Holding Vault");
+    expect(result.narration.text).toContain(goal);
+    expect(result.narration.text).not.toBe(rollText);
+    expect(result.narration.text).not.toContain("against DC");
+
+    const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
+    expect(replay).toMatchObject({ replayed: true, narrationSource: "rules" });
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
   it("authors and persists a proactive opening before the first player turn", async () => {
     const fetchMock = vi
       .fn()

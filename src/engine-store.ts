@@ -433,7 +433,8 @@ export class LanternEngineStore {
   public updateCommandNarration(
     context: RequestContext,
     clientCommandId: string,
-    narration: NarrationEnvelope
+    narration: NarrationEnvelope,
+    narrationSource: EngineCommandResult["narrationSource"] = "llm"
   ): EngineCommandResult | null {
     const row = this.db
       .prepare(
@@ -478,7 +479,7 @@ export class LanternEngineStore {
       state: nextState,
       session: toSessionView(nextState),
       narration,
-      narrationSource: "llm",
+      narrationSource,
     };
     this.db
       .prepare(

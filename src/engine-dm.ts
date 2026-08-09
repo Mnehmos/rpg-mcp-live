@@ -304,12 +304,10 @@ export class LanternDungeonMaster {
       }
 
       if (!toolLoop.narration) {
-        return {
+        const fallback = committedRulesNarration(committed);
+        return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
           ...committed,
-          narration: rulesNarration(
-            committed.message,
-            "The atomic rules result is committed; the prose provider did not complete its final response."
-          ),
+          narration: fallback,
           narrationSource: "rules",
         };
       }
@@ -320,11 +318,9 @@ export class LanternDungeonMaster {
       return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
     } catch (error) {
       if (committed) {
-        const fallback = rulesNarration(
-          committed.message,
-          "The rules result is committed. The DM prose provider needs a moment, so the table keeps the mechanical result."
-        );
-        return { ...committed, narration: fallback, narrationSource: "rules" };
+        const fallback = committedRulesNarration(committed);
+        return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules")
+          ?? { ...committed, narration: fallback, narrationSource: "rules" };
       }
       console.warn(error instanceof Error ? "DM tool loop fallback: " + error.message : "DM tool loop fallback.");
       return this.resolveFallback(context, state, clientCommandId, expectedCampaignVersion, playerText);
@@ -659,12 +655,10 @@ export class LanternDungeonMaster {
       resolve: (current) =>
         resolveEngineCommand(current, context, clientCommandId, selected.command, selected.tool, playerText),
     });
-    return {
+    const fallback = committedRulesNarration(result);
+    return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
       ...result,
-      narration: rulesNarration(
-        result.message,
-        "The rules engine resolved the action; the model narrator is not configured."
-      ),
+      narration: fallback,
       narrationSource: "rules",
     };
   }
@@ -788,6 +782,38 @@ function rulesNarration(text: string, suffix?: string): NarrationEnvelope {
     proposedFacts: [],
     suggestedActions: [],
   };
+}
+
+function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope {
+  const candidates = [
+    ...[...(result.event?.effects ?? [])].reverse().map((effect) => effect.data),
+    result.data,
+  ];
+  const check = candidates.find((candidate) => (
+    candidate !== null
+    && typeof candidate === "object"
+    && typeof (candidate as { success?: unknown }).success === "boolean"
+  )) as { success: boolean; goal?: unknown } | undefined;
+  const scene = result.state.worldContext?.title.trim();
+
+  if (check) {
+    const goal = typeof check.goal === "string"
+      ? check.goal.trim().replace(/[.!?]+$/, "")
+      : "";
+    const outcome = check.success ? "The attempt succeeds" : "The attempt falls short";
+    const location = scene ? " in " + scene : "";
+    const purpose = goal ? ": " + goal : "";
+    const consequence = check.success
+      ? "The outcome now stands in the scene."
+      : "The setback now stands, and the situation continues from there.";
+    return rulesNarration(`${outcome}${location}${purpose}. ${consequence}`);
+  }
+
+  return rulesNarration(
+    scene
+      ? `The action changes the situation in ${scene}. Continue from that established outcome.`
+      : "The action changes the situation. Continue from that established outcome."
+  );
 }
 
 function stripJsonFence(content: string): string {
