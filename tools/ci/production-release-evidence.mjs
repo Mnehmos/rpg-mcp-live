@@ -40,13 +40,34 @@ export function assessProductionReleaseEvidence({
 }) {
   const evidence = [tagRef, tagObject, release, manifest];
   if (evidence.every((value) => value === undefined)) return "create";
-  if (!tagRef || !release || !manifest) {
+  if (!tagRef) {
     throw new Error("Existing production release evidence is incomplete");
   }
 
   const targetSha = resolveTagCommit(tagRef, tagObject, expectedTag);
   if (targetSha !== expectedSha) throw new Error("Release tag targets a different SHA");
+  if (!release) {
+    if (manifest) throw new Error("Existing production release evidence is incomplete");
+    return "create-release";
+  }
   if (release.tag_name !== expectedTag) throw new Error("GitHub release tag does not match");
+
+  if (release.draft === true) {
+    if (release.published_at !== null && release.published_at !== undefined) {
+      throw new Error("Draft release has contradictory publication evidence");
+    }
+    return "publish-draft";
+  }
+  if (release.draft !== false || release.prerelease !== false) {
+    throw new Error("Production release is not a published stable release");
+  }
+  if (
+    typeof release.published_at !== "string" ||
+    Number.isNaN(Date.parse(release.published_at))
+  ) {
+    throw new Error("Production release has no valid publication timestamp");
+  }
+  if (!manifest) throw new Error("Existing production release evidence is incomplete");
 
   const manifestShas = [manifest.sha, manifest.gitSha].filter(
     (value) => value !== undefined
