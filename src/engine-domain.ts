@@ -5542,22 +5542,20 @@ function resolveWorldObjectAffordance(
       if (object.ownerRef.kind === "actor" && object.ownerRef.id === context.actorId) {
         return rejection(state, tool, "already_owned", "The acting character already owns that object.", { objectId: object.id });
       }
-      if (!object.definition.criticalPolicy.canLose && command.affordance === "steal") {
+      const establishedHolder = world.npcs.find((npc) => npc.id === object.locationRef);
+      if (!object.definition.criticalPolicy.canLose && (command.affordance === "steal" || establishedHolder)) {
         return rejection(state, tool, "critical_object_protected", "This critical object cannot be lost through that interaction.", { objectId: object.id });
       }
-      const establishedHolder = command.affordance === "steal"
-        ? world.npcs.find((npc) => npc.id === object.locationRef)
-        : undefined;
       if (establishedHolder) {
         const contest = state.adjudicationHistory.at(-1);
         if (
           !contest
           || contest.challengeId !== "seize-held-object-v1"
           || contest.opponentId !== establishedHolder.id
-          || contest.sceneId !== world.id
+          || contest.sceneId !== `${world.id}:${object.id}`
           || contest.attemptVersion !== state.version + 1
         ) {
-          return rejection(state, tool, "contest_required", "Seizing an object from its established holder requires a current reviewed contest.", { objectId: object.id, holderId: establishedHolder.id });
+          return rejection(state, tool, "contest_required", "Seizing an object from its established holder requires a current target-bound contest.", { objectId: object.id, holderId: establishedHolder.id });
         }
         if (contest.outcome !== "success") {
           return rejection(state, tool, "contest_failed", "The current contest did not transfer the held object.", { objectId: object.id, holderId: establishedHolder.id });

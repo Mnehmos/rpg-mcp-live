@@ -97,7 +97,32 @@ function heldKeyRingState(accountId: string, actorId: string): LanternCampaignSt
   return state;
 }
 
-function keyRingMaterializationCommand(): EngineCommand {
+function keyRingMaterializationCommand(includeSecondHeldObject = false): EngineCommand {
+  const keyRing = {
+    id: "titus-key-ring",
+    definition: {
+      key: "mundane-key-ring",
+      sourceRef: "public-log:released-key-ring-beat",
+      name: "Titus's key ring",
+      description: "A mundane ring of iron keys established in released narration.",
+      material: "metal",
+      tags: ["key-ring", "keys", "mundane"],
+      affordances: ["inspect", "take", "steal", "carry", "drop"],
+      prerequisites: [],
+      effectInteractions: [],
+      weight: 0.25,
+      criticalPolicy: {
+        kind: "ordinary_consequence",
+        canDestroy: true,
+        canLose: true,
+        canSell: false,
+        canConsume: false,
+        canHide: true,
+      },
+    },
+    state: "intact",
+    locationRef: "titus",
+  };
   return command({
     kind: "world_context",
     title: "The Ludus Holding Vault",
@@ -105,31 +130,18 @@ function keyRingMaterializationCommand(): EngineCommand {
     features: ["Titus's key ring"],
     exits: [],
     objects: {
-      upsert: [{
-        id: "titus-key-ring",
+      upsert: [keyRing, ...(includeSecondHeldObject ? [{
+        ...keyRing,
+        id: "titus-bronze-seal",
         definition: {
-          key: "mundane-key-ring",
-          sourceRef: "public-log:released-key-ring-beat",
-          name: "Titus's key ring",
-          description: "A mundane ring of iron keys established in released narration.",
-          material: "metal",
-          tags: ["key-ring", "keys", "mundane"],
-          affordances: ["inspect", "take", "steal", "carry", "drop"],
-          prerequisites: [],
-          effectInteractions: [],
-          weight: 0.25,
-          criticalPolicy: {
-            kind: "ordinary_consequence",
-            canDestroy: true,
-            canLose: true,
-            canSell: false,
-            canConsume: false,
-            canHide: true,
-          },
+          ...keyRing.definition,
+          key: "mundane-bronze-seal",
+          sourceRef: "public-log:released-bronze-seal-beat",
+          name: "Titus's bronze seal",
+          description: "A mundane bronze seal established in released narration.",
+          tags: ["bronze-seal", "seal", "mundane"],
         },
-        state: "intact",
-        locationRef: "titus",
-      }],
+      }] : [])],
     },
   });
 }
@@ -150,7 +162,7 @@ describe("server-owned challenge adjudication", () => {
       challengeId: "seize-held-object-v1",
       goal: "Seize Titus's key ring",
       approach: "Lunge through the opening and snatch it",
-      sceneId: "ludus-vault",
+      sceneId: "ludus-vault:titus-key-ring",
       opponentId: "titus",
     });
     const contested = resolveEngineCommand(
@@ -232,7 +244,7 @@ describe("server-owned challenge adjudication", () => {
       challengeId: "seize-held-object-v1",
       goal: "Seize Titus's key ring",
       approach: "Lunge through the opening and snatch it",
-      sceneId: "ludus-vault",
+      sceneId: "ludus-vault:titus-key-ring",
       opponentId: "titus",
     });
     const contested = resolveEngineCommand(provisionalState(materialized, state.version), context, "failed-key:1", contest, "challenge_attempt");
@@ -241,6 +253,14 @@ describe("server-owned challenge adjudication", () => {
     const steal = command({ kind: "interact", targetId: "titus-key-ring", affordance: "steal", goal: "Take the key ring from Titus" });
     const rejected = resolveEngineCommand(provisionalState(contested, state.version), context, "failed-key:2", steal, "interact");
     expect(rejected).toMatchObject({ accepted: false, code: "contest_failed" });
+    const rejectedTake = resolveEngineCommand(
+      provisionalState(contested, state.version),
+      context,
+      "failed-key:3",
+      command({ kind: "interact", targetId: "titus-key-ring", affordance: "take", goal: "Take the key ring from Titus" }),
+      "interact",
+    );
+    expect(rejectedTake).toMatchObject({ accepted: false, code: "contest_failed" });
 
     const plan = compileAtomicTurnResolution(state, context, randomUUID(), [
       { tool: "world_context", command: materialize, resolution: materialized },
@@ -251,6 +271,27 @@ describe("server-owned challenge adjudication", () => {
       ownerRef: { kind: "world", id: "ludus-vault" },
       locationRef: "titus",
     });
+  });
+
+  it("binds one successful held-object contest to one target", () => {
+    deterministicRandomInt.mockClear();
+    deterministicRandomInt.mockReturnValue(20);
+    const state = heldKeyRingState("account-key-binding", "actor-key-binding");
+    const context = contextFor(state);
+    const materialize = keyRingMaterializationCommand(true);
+    const materialized = resolveEngineCommand(state, context, "bound-key:0", materialize, "world_context");
+    const contest = command({
+      kind: "challenge_attempt",
+      challengeId: "seize-held-object-v1",
+      goal: "Seize Titus's key ring",
+      approach: "Lunge through the opening and snatch it",
+      sceneId: "ludus-vault:titus-key-ring",
+      opponentId: "titus",
+    });
+    const contested = resolveEngineCommand(provisionalState(materialized, state.version), context, "bound-key:1", contest, "challenge_attempt");
+    const secondObject = command({ kind: "interact", targetId: "titus-bronze-seal", affordance: "steal", goal: "Take Titus's bronze seal" });
+    const rejected = resolveEngineCommand(provisionalState(contested, state.version), context, "bound-key:2", secondObject, "interact");
+    expect(rejected).toMatchObject({ accepted: false, code: "contest_required" });
   });
 
   it("resolves an ordinary unlocked door automatically without RNG", () => {
