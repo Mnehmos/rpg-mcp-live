@@ -757,6 +757,13 @@ function safeNarrationText(content: string, parsed?: unknown): string | null {
       candidate = undefined;
     }
   }
+  if (typeof candidate === "string") {
+    const decoded = candidate.trim();
+    return decoded ? decoded.slice(0, 6_000) : null;
+  }
+  if (candidate !== undefined && (candidate === null || typeof candidate !== "object")) {
+    return null;
+  }
   if (candidate && typeof candidate === "object" && "text" in candidate) {
     const text = (candidate as { text?: unknown }).text;
     if (typeof text === "string" && text.trim()) return text.trim().slice(0, 6_000);

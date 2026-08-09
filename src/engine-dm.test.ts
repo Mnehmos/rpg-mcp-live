@@ -440,6 +440,60 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it("decodes a top-level JSON string before using it as safe narration", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: JSON.stringify("The hall is dark.\nSomething moves.") } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: JSON.stringify("The repair is still only a string.") } }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-scalar-fallback", "actor-scalar-fallback");
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      0,
+      "I listen for movement."
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("narration contract repair failed"));
+    expect(result.narration.text).toBe("The hall is dark.\nSomething moves.");
+    expect(result.narration.proposedFacts).toEqual([]);
+    expect(result.narration.suggestedActions).toEqual([]);
+    store.close();
+  });
+
   it("stages multiple ordered effects and commits them as one idempotent campaign version", async () => {
     const fetchMock = vi
       .fn()
