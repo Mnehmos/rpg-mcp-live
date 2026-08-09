@@ -19,6 +19,7 @@ import {
   engineSocialActionCommandSchema,
   engineNpcTickCommandSchema,
   engineQuestGraphInputSchema,
+  engineWorldObjectInputSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   engineSituationTemplateIdSchema,
@@ -504,6 +505,17 @@ const worldFactPatchOperationsJsonSchema = {
   additionalProperties: false,
 };
 
+const worldObjectPatchOperationsJsonSchema = (() => {
+  const authoringSchema = z.object({
+    upsert: z.array(engineWorldObjectInputSchema.omit({ ownerRef: true })).max(40).optional(),
+    remove: z.array(z.string().trim().min(1).max(120)).max(40).optional(),
+  }).strict().describe(
+    "Create or update authoritative world objects. Ownership is engine-owned: use locationRef for an object held or guarded by an established NPC."
+  );
+  const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(authoringSchema) as Record<string, unknown>;
+  return jsonSchema;
+})();
+
 export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("campaign_context", "Read the campaign profile, emergent world context if one exists, character, notes, combat, quest, and recent log. Read-only.", {}),
   tool(
@@ -568,7 +580,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "world_context",
-    "Establish or update the current fictional context. Use this when the player reaches a town, ship, battlefield, wilderness, or any other meaningful place; there is no fixed opening room or pre-authored map.",
+    "Establish or update the current fictional context. Concrete actionable objects belong in objects.upsert, not only in features or narration. Preserve omitted NPC, merchant, fact, and object collections when patching the current context.",
     {
       type: "object",
       properties: {
@@ -579,6 +591,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         npcs: npcPatchOperationsJsonSchema,
         merchants: merchantPatchOperationsJsonSchema,
         facts: worldFactPatchOperationsJsonSchema,
+        objects: worldObjectPatchOperationsJsonSchema,
       },
       required: ["title", "description", "features", "exits"],
       additionalProperties: false,
@@ -586,7 +599,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "challenge_attempt",
-    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, stealth-perception-v1, and search-hidden-fact-v1.",
+    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, seize-held-object-v1, stealth-perception-v1, and search-hidden-fact-v1.",
     {
       type: "object",
       properties: {
