@@ -450,6 +450,19 @@ h1 i { color: var(--amber); font-style: italic; }
 .death-save-row { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(242, 236, 223, .08); color: var(--faint); font-size: 8px; letter-spacing: .14em; }
 .death-save-row strong { color: var(--ink); font-size: 11px; letter-spacing: .08em; }
 .notes-card { padding: 14px 15px; border: 1px solid var(--line); background: rgba(10, 12, 17, .6); }
+.procedural-notice-card { border-color: rgba(206, 156, 75, .45); }
+.procedural-notices { display: grid; gap: 10px; margin-top: 12px; }
+.procedural-notice-entry { display: grid; gap: 9px; padding: 10px; border: 1px solid var(--line); background: rgba(18, 18, 22, .75); }
+.procedural-notice-entry .note-entry-meta { color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.procedural-notice-entry .note-entry-meta strong { color: var(--ink); font-size: 12px; text-transform: none; letter-spacing: 0; }
+.procedural-notice-terms { display: grid; gap: 7px; margin: 0; }
+.procedural-notice-terms div { display: grid; gap: 2px; }
+.procedural-notice-terms dt { color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.procedural-notice-terms dd { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.4; }
+.procedural-notice-attempts { display: grid; gap: 4px; }
+.notice-attempt { color: var(--faint); font-size: 10px; line-height: 1.35; }
+.notice-attempt.denied { color: #d89b86; }
+.notice-attempt.granted { color: #9bc79b; }
 .character-edit-card { padding: 14px 15px; border: 1px solid var(--line); background: rgba(10, 12, 17, .45); }
 .notes-heading .tiny-label { margin-bottom: 0; }
 .notes-heading > span:last-child { color: var(--faint); font-size: 9px; }

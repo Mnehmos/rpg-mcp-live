@@ -3,6 +3,7 @@ import type { NarrationEnvelope } from "./ai-contracts.js";
 import {
   engineExperienceProfileInputSchema,
   engineExperienceProfileSchema,
+  engineProceduralNoticeSchema,
   engineQuestGraphInputSchema,
   engineWorldObjectInputSchema,
 } from "./engine-contracts.js";
@@ -48,6 +49,10 @@ import type {
   EngineCombatView,
   EngineCheckEvidence,
   EngineKnowledgeRecord,
+  EngineProceduralNotice,
+  EngineProceduralNoticeAttempt,
+  EngineProceduralNoticeCommand,
+  EngineProceduralNoticeStatus,
   EngineSenseCapabilities,
   EngineWorldFact,
   EngineWorldFactPatchOperations,
@@ -1515,6 +1520,7 @@ export function createInitialCampaign(
     time: defaultTimeState(),
     social: defaultSocialState(),
     worldContext: null,
+    proceduralNotices: [],
     worldFacts: [],
     actorKnowledge: [],
     playerNotes: [],
@@ -1573,6 +1579,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     worldFacts?: unknown;
     worldObjects?: unknown;
     actorKnowledge?: unknown;
+    proceduralNotices?: unknown;
     productionRoom?: unknown;
     orchestration?: unknown;
     time?: unknown;
@@ -1598,6 +1605,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     ? next.adjudicationHistory.slice(-100) as EngineAdjudicationAttempt[]
     : [];
   next.worldFacts = normalizeWorldFacts(next.worldFacts);
+  next.proceduralNotices = normalizeProceduralNotices((next as LanternCampaignState & { proceduralNotices?: unknown }).proceduralNotices);
   next.actorKnowledge = normalizeKnowledgeRecords(next.actorKnowledge);
   next.productionRoom = next.productionRoom ? parseProductionRoomState(next.productionRoom) : null;
   next.orchestration = normalizeOrchestrationState(next.orchestration, next.updatedAt);
@@ -1640,6 +1648,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.phase = "character_creation";
     next.tutorialStep = 0;
     next.worldContext = null;
+    next.proceduralNotices = [];
     next.worldFacts = [];
     next.actorKnowledge = [];
     next.playerNotes = [];
@@ -1998,6 +2007,17 @@ function normalizeWorldObjects(value: unknown, sceneId: string): EngineWorldObje
       },
     }];
   });
+}
+
+function normalizeProceduralNotices(value: unknown): EngineProceduralNotice[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((entry) => {
+    const parsed = engineProceduralNoticeSchema.safeParse(entry);
+    if (!parsed.success || seen.has(parsed.data.id)) return [];
+    seen.add(parsed.data.id);
+    return [parsed.data];
+  }).slice(-20);
 }
 
 function normalizeKnowledgeRecords(value: unknown): EngineKnowledgeRecord[] {
@@ -2360,6 +2380,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     social: projection.social,
     characterCreated: state.character.created,
     worldContext: projection.worldContext,
+    proceduralNotices: projection.proceduralNotices,
     playerNotes: state.playerNotes,
     quests: projectQuestsForActor(state, state.actorId),
     corpses: state.corpses,
@@ -2368,7 +2389,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     currentBeat: state.currentBeat,
     situation: state.situation ? projectSituationForActor(state.situation, state, activePartyViewpointId(state)) : null,
     scene: state.orchestration?.activeScene ?? null,
-    suggestedActions: state.suggestedActions,
+    suggestedActions: sanitizeProceduralNoticeActions(state.suggestedActions, state.proceduralNotices),
     log: state.log.slice(-40),
     availableActions: actionOffers.filter((offer) => offer.reasonUnavailable === null).map((offer) => offer.actionId),
     actionOffers,
@@ -2476,6 +2497,7 @@ export function readToolData(
         time: state.time,
         social: projection.social,
         worldContext: projection.worldContext,
+        proceduralNotices: projection.proceduralNotices,
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
         quests: projectQuestsForActor(state, state.actorId),
@@ -2496,6 +2518,7 @@ export function readToolData(
     case "observe":
       return {
         worldContext: projection.worldContext,
+        proceduralNotices: projection.proceduralNotices,
         campaignVersion: state.version,
         time: state.time,
         social: projection.social,
@@ -3066,6 +3089,7 @@ export function resolveEngineCommand(
     state.character.lifecycleState === "dead"
     && command.kind !== "observe"
     && command.kind !== "world_context"
+    && command.kind !== "procedural_notice"
     && command.kind !== "player_note_add"
     && command.kind !== "experience_profile_update"
     && command.kind !== "experience_feedback_add"
@@ -3105,6 +3129,8 @@ export function resolveEngineCommand(
       return resolveCheck(state, context, clientCommandId, command, tool, "wis", "perception", playerText ?? "Listen carefully.");
     case "world_context":
       return resolveWorldContext(state, context, clientCommandId, command, tool);
+    case "procedural_notice":
+      return resolveProceduralNotice(state, context, clientCommandId, command, tool);
     case "player_note_add":
       return resolvePlayerNoteAdd(state, context, clientCommandId, command, tool);
     case "experience_profile_update":
@@ -3280,6 +3306,179 @@ function resolveMove(
     next.situation && JSON.stringify(state.situation) !== JSON.stringify(next.situation)
       ? [{ path: "/situation", before: projectSituationForActor(state.situation!, state, context.actorId), after: projectSituationForActor(next.situation, next, context.actorId) }]
       : []
+  );
+}
+
+function proceduralNoticeView(notice: EngineProceduralNotice): PublicProjection["proceduralNotices"][number] {
+  return {
+    ...notice,
+    terms: notice.status === "delivered" || notice.status === "resolved" ? { ...notice.terms } : null,
+    attempts: notice.attempts.map((attempt) => ({ ...attempt })),
+  };
+}
+
+function sanitizeProceduralNoticeActions(
+  actions: NarrationEnvelope["suggestedActions"],
+  notices: EngineProceduralNotice[],
+): NarrationEnvelope["suggestedActions"] {
+  const hasSealed = notices.some((notice) => notice.status === "sealed");
+  const hasAuthorized = notices.some((notice) => notice.status === "authorized");
+  const authorizeUnavailable = notices.length > 0 && !hasSealed;
+  const deliverUnavailable = notices.length > 0 && !hasAuthorized;
+  if (!notices.length) return actions;
+  return actions.filter((action) => {
+    const text = `${action.id} ${action.label} ${action.prompt}`.toLocaleLowerCase();
+    if ((text.includes("open") || text.includes("read-back") || text.includes("read back")) && (text.includes("notice") || text.includes("letter") || text.includes("clerk") || text.includes("order"))) return false;
+    if (authorizeUnavailable && (text.includes("authorize") || text.includes("authorise"))) return false;
+    if (deliverUnavailable && (text.includes("deliver") || text.includes("clerk delivery"))) return false;
+    return true;
+  });
+}
+
+function resolveProceduralNotice(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineProceduralNoticeCommand,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const notices = state.proceduralNotices ?? [];
+  const now = new Date().toISOString();
+  if (command.action === "upsert") {
+    const input = command.notice!;
+    const existing = notices.find((notice) => notice.id === input.id);
+    if (existing && existing.status !== "sealed") {
+      return rejection(state, tool, "notice_locked", "Operative notice terms cannot change after authorization or delivery.", { notice: proceduralNoticeView(existing) });
+    }
+    const notice: EngineProceduralNotice = existing
+      ? {
+          ...existing,
+          title: input.title,
+          terms: input.terms,
+          revision: existing.revision + 1,
+          updatedAt: now,
+          provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version + 1 },
+        }
+      : {
+          ...input,
+          status: "sealed",
+          attempts: [],
+          revision: 1,
+          authorizedAtVersion: null,
+          deliveredAtVersion: null,
+          createdAt: now,
+          updatedAt: now,
+          provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version + 1 },
+        };
+    const next = cloneCampaign(state);
+    next.proceduralNotices = existing
+      ? notices.map((candidate) => candidate.id === notice.id ? notice : candidate)
+      : [...notices, notice].slice(-20);
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      "A sealed procedural notice is recorded. Its operative terms remain closed until the prescribed delivery step.",
+      { notice: proceduralNoticeView(notice) },
+      "procedural_notice_sealed",
+      [],
+      [],
+      [{ path: `/proceduralNotices/${notice.id}`, before: existing ?? null, after: notice }],
+    );
+  }
+
+  const noticeId = command.noticeId!;
+  const existing = notices.find((candidate) => candidate.id === noticeId);
+  if (!existing) return rejection(state, tool, "notice_not_found", "That procedural notice is not established in the campaign.");
+  const expectedStatus: Partial<Record<Exclude<EngineProceduralNoticeCommand["action"], "upsert">, EngineProceduralNoticeStatus>> = {
+    authorize: "sealed",
+    deliver: "authorized",
+    request_copy: "delivered",
+    request_clarification: "delivered",
+    resolve: "delivered",
+    withdraw: "sealed",
+  };
+  if (existing.status !== expectedStatus[command.action]) {
+    if (command.action === "deliver" && existing.status === "delivered") {
+      return rejection(state, tool, "notice_already_delivered", "This notice has already been delivered; its operative projection is available below.", { notice: proceduralNoticeView(existing) });
+    }
+    return rejection(state, tool, "notice_action_unavailable", `The ${command.action.replaceAll("_", " ")} step is unavailable while this notice is ${existing.status}.`, { notice: proceduralNoticeView(existing) });
+  }
+
+  const nextNotice: EngineProceduralNotice = {
+    ...existing,
+    attempts: existing.attempts.map((attempt) => ({ ...attempt })),
+    revision: existing.revision + 1,
+    updatedAt: now,
+    provenance: { ...existing.provenance },
+  };
+  let message = "The procedural notice is updated.";
+  let outcome = "procedural_notice_updated";
+  let request: { kind: "copy" | "clarification"; outcome: "granted" | "denied"; reason: string } | undefined;
+  if (command.action === "authorize") {
+    nextNotice.status = "authorized";
+    nextNotice.authorizedAtVersion = state.version + 1;
+    message = "The notice is authorized for the prescribed clerk-delivery step. Its operative terms remain closed until delivery.";
+    outcome = "procedural_notice_authorized";
+  } else if (command.action === "deliver") {
+    nextNotice.status = "delivered";
+    nextNotice.deliveredAtVersion = state.version + 1;
+    message = "The authorized clerk-delivery step is complete. The player-safe operative terms are now available.";
+    outcome = "procedural_notice_delivered";
+  } else if (command.action === "resolve") {
+    nextNotice.status = "resolved";
+    message = "The procedural notice is resolved; its delivered terms remain available for replay.";
+    outcome = "procedural_notice_resolved";
+  } else if (command.action === "withdraw") {
+    nextNotice.status = "withdrawn";
+    message = "The sealed procedural notice is withdrawn before delivery.";
+    outcome = "procedural_notice_withdrawn";
+  } else {
+    const kind = command.action === "request_copy" ? "copy" : "clarification";
+    const policy = nextNotice.terms[kind];
+    const requestOutcome = policy.allowed ? "granted" : "denied";
+    const reason = policy.allowed
+      ? kind === "copy"
+        ? "The player-safe operative terms are copied; restricted records remain closed."
+        : "The player-safe clarification is delivered from the operative terms; restricted records remain closed."
+      : policy.denialReason!;
+    const attempt: EngineProceduralNoticeAttempt = {
+      id: randomUUID(),
+      kind,
+      outcome: requestOutcome,
+      requestText: command.requestText ?? null,
+      reason,
+      sourceCommandId: clientCommandId,
+      sourceVersion: state.version + 1,
+      occurredAt: now,
+    };
+    nextNotice.attempts = [...nextNotice.attempts, attempt].slice(-20);
+    request = { kind, outcome: requestOutcome, reason };
+    message = requestOutcome === "granted"
+      ? reason
+      : `${reason} The operative terms remain available so the procedure does not become a dead end.`;
+    outcome = `procedural_notice_${kind}_${requestOutcome}`;
+  }
+
+  const next = cloneCampaign(state);
+  next.proceduralNotices = notices.map((candidate) => candidate.id === nextNotice.id ? nextNotice : candidate);
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    message,
+    {
+      notice: proceduralNoticeView(nextNotice),
+      ...(request ? { request } : {}),
+    },
+    outcome,
+    [],
+    [],
+    [{ path: `/proceduralNotices/${nextNotice.id}`, before: existing, after: nextNotice }],
   );
 }
 
@@ -12191,6 +12390,7 @@ export function actorKnowledgeProjection(actorId: string, state: LanternCampaign
     actorId,
     informationTiers: ["public", "perceived", "known", "rumor", "false-belief", "stale", "withheld"],
     worldContext: base ? { ...base, facts } : null,
+    proceduralNotices: state.proceduralNotices.map(proceduralNoticeView),
     facts,
     knowledge,
     social: projectSocialForActor(actorId, state),
@@ -12212,6 +12412,10 @@ export function projectStateForActor(actorId: string, state: LanternCampaignStat
   const projection = actorKnowledgeProjection(projectionActorId, state);
   const projected = cloneCampaign(state);
   projected.worldFacts = projection.facts;
+  projected.proceduralNotices = state.proceduralNotices.map((notice) => ({
+    ...notice,
+    terms: notice.status === "delivered" || notice.status === "resolved" ? { ...notice.terms } : null,
+  })) as unknown as LanternCampaignState["proceduralNotices"];
   projected.actorKnowledge = projection.knowledge;
   projected.controlledActors = projected.controlledActors
     .filter((actor) => actor.ownerActorId === actorId || actor.controllerActorId === actorId)
@@ -12287,9 +12491,24 @@ function redactControlledActorValue(value: unknown): unknown {
 function redactStateChanges(changes: Array<{ path: string; before: unknown; after: unknown }>): Array<{ path: string; before: unknown; after: unknown }> {
   return changes
     .filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge") && !change.path.startsWith("/productionRoom"))
-    .map((change) => change.path.startsWith("/controlledActors") || change.path.startsWith("/time/scheduledEvents")
-      ? { ...change, before: redactControlledActorValue(change.before), after: redactControlledActorValue(change.after) }
-      : change);
+    .map((change) => {
+      if (change.path.startsWith("/controlledActors") || change.path.startsWith("/time/scheduledEvents")) {
+        return { ...change, before: redactControlledActorValue(change.before), after: redactControlledActorValue(change.after) };
+      }
+      if (change.path.startsWith("/proceduralNotices/")) {
+        const redactNotice = (value: unknown): unknown => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+          const notice = value as EngineProceduralNotice;
+          if (typeof notice.id !== "string" || typeof notice.status !== "string") return value;
+          return {
+            ...notice,
+            terms: notice.status === "delivered" || notice.status === "resolved" ? notice.terms : null,
+          };
+        };
+        return { ...change, before: redactNotice(change.before), after: redactNotice(change.after) };
+      }
+      return change;
+    });
 }
 
 function redactResolutionData(data: unknown): unknown {
@@ -12337,6 +12556,10 @@ function redactResolutionData(data: unknown): unknown {
 function redactCommand<T extends object>(command: T): T {
   const projected = JSON.parse(JSON.stringify(command)) as Record<string, unknown>;
   if (projected.kind === "world_context") delete projected.facts;
+  if (projected.kind === "procedural_notice" && projected.action === "upsert" && projected.notice && typeof projected.notice === "object" && !Array.isArray(projected.notice)) {
+    const notice = projected.notice as Record<string, unknown>;
+    projected.notice = { ...notice, terms: null };
+  }
   if (projected.kind === "challenge_attempt") delete projected.factId;
   if (projected.kind === "quest_create" && projected.graph && typeof projected.graph === "object" && !Array.isArray(projected.graph)) {
     const graph = projected.graph as Record<string, unknown>;

@@ -22,6 +22,8 @@ import {
   engineWorldObjectInputSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
+  engineProceduralNoticeInputSchema,
+  proceduralNoticeActionSchema,
   engineSituationTemplateIdSchema,
   type EngineCommand,
   type EngineToolName,
@@ -85,6 +87,15 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   ]),
   character_options: noArguments,
   world_context: engineWorldContextArgsSchema,
+  procedural_notice: z.object({
+    action: proceduralNoticeActionSchema,
+    noticeId: z.string().trim().min(1).max(120).optional(),
+    notice: engineProceduralNoticeInputSchema.optional(),
+    requestText: z.string().trim().min(1).max(1_000).optional(),
+  }).strict().superRefine((value, context) => {
+    if (value.action === "upsert" && !value.notice) context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Upsert requires typed notice terms." });
+    if (value.action !== "upsert" && !value.noticeId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["noticeId"], message: "Notice actions require a notice id." });
+  }),
   player_notes: noArguments,
   player_note_add: z
     .object({
@@ -603,6 +614,47 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         objects: worldObjectPatchOperationsJsonSchema,
       },
       required: ["title", "description", "features", "exits"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
+    "procedural_notice",
+    "Persist a player-safe formal notice and its delivery state. Use this for sealed letters, warrants, orders, dockets, or clerk procedures instead of prose-only narration. Upsert requires the exact operative terms: authorized action, actor scope, admissible/excluded evidence, response window or deadline, attendance, custody effect, and the next changing event. Restricted records never belong in these fields. Authorize, deliver, and resolve the notice explicitly; copy or clarification requests always return the minimum operative projection even when the request is denied.",
+    {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["upsert", "authorize", "deliver", "request_copy", "request_clarification", "resolve", "withdraw"] },
+        noticeId: { type: "string", description: "Stable notice id for an existing formal notice." },
+        notice: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            title: { type: "string" },
+            terms: {
+              type: "object",
+              properties: {
+                authorizedAction: { type: "string" },
+                actorScope: { type: "string" },
+                admissibleEvidence: { type: "array", items: { type: "string" }, maxItems: 8 },
+                excludedEvidence: { type: "array", items: { type: "string" }, maxItems: 8 },
+                responseWindow: { type: "string" },
+                deadlineAtMinutes: { type: ["integer", "null"], minimum: 0 },
+                attendance: { type: "string" },
+                custodyEffect: { type: "string" },
+                nextChange: { type: "string" },
+                copy: { type: "object", properties: { allowed: { type: "boolean" }, denialReason: { type: "string" } }, required: ["allowed"], additionalProperties: false },
+                clarification: { type: "object", properties: { allowed: { type: "boolean" }, denialReason: { type: "string" } }, required: ["allowed"], additionalProperties: false },
+              },
+              required: ["authorizedAction", "actorScope", "admissibleEvidence", "excludedEvidence", "responseWindow", "attendance", "custodyEffect", "nextChange", "copy", "clarification"],
+              additionalProperties: false,
+            },
+          },
+          required: ["id", "title", "terms"],
+          additionalProperties: false,
+        },
+        requestText: { type: "string", description: "Optional player request recorded without exposing restricted records." },
+      },
+      required: ["action"],
       additionalProperties: false,
     }
   ),
@@ -1267,6 +1319,14 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({
         kind: "world_context",
         ...args,
+      });
+    case "procedural_notice":
+      return engineCommandSchema.parse({
+        kind: "procedural_notice",
+        action: args.action,
+        noticeId: args.noticeId,
+        notice: args.notice,
+        requestText: args.requestText,
       });
     case "player_note_add":
       return engineCommandSchema.parse({ kind: "player_note_add", text: args.text, source: args.source ?? "dm" });

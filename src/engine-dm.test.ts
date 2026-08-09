@@ -155,7 +155,7 @@ describe("Lantern OpenRouter tool loop", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(firstRequest.tools).toHaveLength(72);
+    expect(firstRequest.tools).toHaveLength(73);
     const worldContextTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
       .find((candidate) => candidate.function.name === "world_context");
     expect(worldContextTool?.function.parameters).toHaveProperty("properties.objects");
@@ -178,6 +178,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(systemPrompt).toContain("combat_start");
     expect(systemPrompt).toContain("creature content keys");
     expect(systemPrompt).toContain("never supplies fixed demo loot");
+    expect(systemPrompt).toContain("procedural_notice");
     expect(systemPrompt).toContain("challenge_attempt");
     expect(systemPrompt).toContain("commits the complete plan atomically");
     expect(systemPrompt).toContain("seize-held-object-v1");
