@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CODEX_REVIEWER,
+  fetchAllGitHubPages,
   findExactHeadCleanCodexComment,
   findExactHeadCodexReview,
+  nextPageFromLinkHeader,
 } from "./wait-for-codex-review.mjs";
 
 describe("subscription-backed Codex review gate", () => {
@@ -38,5 +40,32 @@ describe("subscription-backed Codex review gate", () => {
     expect(findExactHeadCleanCodexComment([
       { id: 4, user: { login: CODEX_REVIEWER }, body: cleanBody("123456789"), created_at: "2026-01-04" },
     ], "1234567890abcdef")).toBeNull();
+  });
+
+  it("follows every GitHub evidence page", async () => {
+    const secondPage = "https://api.github.com/example?page=2";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ link: `<${secondPage}>; rel="next", <${secondPage}>; rel="last"` }),
+        json: async () => [{ id: 1 }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => [{ id: 2 }],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await expect(fetchAllGitHubPages("/example?page=1", "token")).resolves.toEqual([{ id: 1 }, { id: 2 }]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(nextPageFromLinkHeader(`<${secondPage}>; rel="next"`)).toBe(secondPage);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -27,9 +27,13 @@ export function findExactHeadCleanCodexComment(comments, headSha) {
     .at(-1) ?? null;
 }
 
-async function fetchGitHubJson(path, token) {
+function githubApiUrl(pathOrUrl) {
+  return pathOrUrl.startsWith("https://") ? pathOrUrl : `https://api.github.com${pathOrUrl}`;
+}
+
+async function fetchGitHubResponse(pathOrUrl, token) {
   const response = await fetch(
-    `https://api.github.com${path}`,
+    githubApiUrl(pathOrUrl),
     {
       headers: {
         Accept: "application/vnd.github+json",
@@ -39,8 +43,36 @@ async function fetchGitHubJson(path, token) {
       },
     }
   );
-  if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status} for ${path}.`);
+  if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status} for ${pathOrUrl}.`);
+  return response;
+}
+
+async function fetchGitHubJson(path, token) {
+  const response = await fetchGitHubResponse(path, token);
   return response.json();
+}
+
+export function nextPageFromLinkHeader(linkHeader) {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(",")) {
+    const match = part.trim().match(/^<([^>]+)>;\s*rel="([^"]+)"$/);
+    if (match?.[2]?.split(/\s+/).includes("next")) return match[1];
+  }
+  return null;
+}
+
+export async function fetchAllGitHubPages(path, token) {
+  const items = [];
+  let nextPage = path;
+  for (let page = 0; nextPage && page < 100; page += 1) {
+    const response = await fetchGitHubResponse(nextPage, token);
+    const batch = await response.json();
+    if (!Array.isArray(batch)) throw new Error(`GitHub paginated API did not return an array for ${nextPage}.`);
+    items.push(...batch);
+    nextPage = nextPageFromLinkHeader(response.headers.get("link"));
+  }
+  if (nextPage) throw new Error("GitHub review evidence exceeded 100 pages.");
+  return items;
 }
 
 async function setCommitStatus(repository, headSha, token, state, description, targetUrl) {
@@ -88,23 +120,18 @@ async function waitForReview() {
   try {
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const [reviews, comments] = await Promise.all([
-        fetchGitHubJson(`/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`, token),
-        fetchGitHubJson(`/repos/${repository}/issues/${pullNumber}/comments?per_page=100&sort=created&direction=desc`, token),
+        fetchAllGitHubPages(`/repos/${repository}/pulls/${pullNumber}/reviews?per_page=100`, token),
+        fetchAllGitHubPages(`/repos/${repository}/issues/${pullNumber}/comments?per_page=100`, token),
       ]);
-      const review = findExactHeadCodexReview(reviews, headSha);
-      if (review) {
-        if (review.state === "CHANGES_REQUESTED") {
-          throw new Error(`Codex requested changes for exact head ${headSha}.`);
-        }
-        await setCommitStatus(repository, headSha, token, "success", "Subscription Codex reviewed this exact commit.", runUrl);
-        console.log(`Codex subscription review ${review.id} covers exact head ${headSha}.`);
-        return;
-      }
       const cleanComment = findExactHeadCleanCodexComment(comments, headSha);
       if (cleanComment) {
         await setCommitStatus(repository, headSha, token, "success", "Subscription Codex found no major issues on this commit.", runUrl);
         console.log(`Clean Codex subscription review comment ${cleanComment.id} covers exact head ${headSha}.`);
         return;
+      }
+      const review = findExactHeadCodexReview(reviews, headSha);
+      if (review) {
+        throw new Error(`Codex reported findings for exact head ${headSha}; resolve them and request a clean review.`);
       }
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
