@@ -13665,6 +13665,6 @@ function makeMessage(kind: EngineMessage["kind"], text: string): EngineMessage {
   return { id: randomUUID(), kind, text, createdAt: new Date().toISOString() };
 }
 
-function rulesNarration(text: string, suggestedActions: Array<{ id: string; label: string }> = []): NarrationEnvelope {
+function rulesNarration(text: string, suggestedActions: NarrationEnvelope["suggestedActions"] = []): NarrationEnvelope {
   return { text, proposedFacts: [], suggestedActions };
 }

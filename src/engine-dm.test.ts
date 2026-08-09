@@ -155,8 +155,20 @@ describe("Lantern OpenRouter tool loop", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(firstRequest.parallel_tool_calls).toBe(false);
     expect(firstRequest.tools).toHaveLength(72);
+    expect(firstRequest.provider).toEqual({ require_parameters: true });
+    expect(firstRequest.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: {
+        name: "lantern_narration",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "proposedFacts", "suggestedActions"],
+        },
+      },
+    });
     const systemPrompt = firstRequest.messages[0]?.content;
     expect(systemPrompt).toContain("creative director");
     expect(systemPrompt).toContain("combat_start");
@@ -165,6 +177,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(systemPrompt).toContain("challenge_attempt");
     expect(systemPrompt).toContain("commits the complete plan atomically");
     expect(systemPrompt).toContain("context-aware moves");
+    expect(systemPrompt).toContain('The shorthand kinds "npc" and "location" are invalid');
     expect(result.event?.tool).toBe("turn_plan");
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check"]);
     expect(result.event?.rolls[0]?.kind).toBe("d20");
@@ -213,7 +226,11 @@ describe("Lantern OpenRouter tool loop", () => {
         ok: true,
         status: 200,
         json: async () => ({
-          choices: [{ message: { role: "assistant", content: "Dawn finds you at the road's first impossible tremor. The watch post door swings open by itself." } }],
+          choices: [{ message: { role: "assistant", content: JSON.stringify({
+            text: "Dawn finds you at the road's first impossible tremor. The watch post door swings open by itself.",
+            proposedFacts: [],
+            suggestedActions: [],
+          }) } }],
         }),
       });
     vi.stubGlobal("fetch", fetchMock);
@@ -249,6 +266,231 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(result.narrationSource).toBe("llm");
     expect(result.session.log.at(-1)?.text).toContain("impossible tremor");
     expect(result.session.log.some((message) => message.kind === "player")).toBe(false);
+    store.close();
+  });
+
+  it("returns narration validation errors for one bounded repair before accepting an opening", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-repair-context",
+                type: "function",
+                function: {
+                  name: "world_context",
+                  arguments: JSON.stringify({
+                    title: "The Ludus Holding Vault",
+                    description: "Iron bars separate the holding vault from the arena corridor.",
+                    features: ["a dropped key"],
+                    exits: [{ id: "arena-corridor", label: "Enter the arena corridor" }],
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: JSON.stringify({
+            text: "A key rings against the stones just beyond the bars.",
+            proposedFacts: [{
+              kind: "location",
+              title: "The Ludus Holding Vault",
+              description: "A cell beneath the arena.",
+              visibility: "public",
+            }],
+            suggestedActions: [],
+          }) } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: JSON.stringify({
+            text: "A key rings against the stones just beyond the bars. The guard has not noticed it fall.",
+            proposedFacts: [],
+            suggestedActions: [{
+              id: "reach-for-key",
+              label: "Reach for the key",
+              prompt: "I reach through the bars and try to draw the key closer.",
+            }],
+          }) } }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-opening-repair", "actor-opening-repair");
+    state.version = 1;
+    state.character.created = true;
+    state.character.name = "Mnehmos";
+    state.phase = "tutorial";
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const dm = new LanternDungeonMaster(store, options);
+    const commandId = randomUUID();
+    const result = await dm.startOpening(
+      context,
+      state,
+      commandId,
+      1
+    );
+    const replay = await dm.startOpening(context, state, commandId, 1);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const repairRequest = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
+    expect(repairRequest.tools).toBeUndefined();
+    expect(repairRequest.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("proposedFacts.0.kind"),
+    });
+    expect(repairRequest.messages.at(-1)?.content).toContain("discover_location");
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.text).toContain("guard has not noticed");
+    expect(result.narration.text).not.toContain("proposedFacts");
+    expect(result.state.version).toBe(2);
+    expect(result.state.worldContext?.title).toBe("The Ludus Holding Vault");
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["world_context"]);
+    expect(replay).toMatchObject({ replayed: true, state: { version: 2 } });
+    store.close();
+  });
+
+  it("never exposes raw JSON when the narration repair also fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const malformed = (text: string) => JSON.stringify({
+      text,
+      proposedFacts: [{ kind: "npc", title: "Invalid shorthand" }],
+      suggestedActions: [],
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: malformed("The bellkeeper lowers her voice.") } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: malformed("The invalid repair should not replace safe text.") } }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-repair-fallback", "actor-repair-fallback");
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      0,
+      "I ask what the bellkeeper knows."
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("narration contract repair failed"));
+    expect(result.narration.text).toBe("The bellkeeper lowers her voice.");
+    expect(result.narration.text).not.toContain("proposedFacts");
+    expect(result.narration.proposedFacts).toEqual([]);
+    expect(result.narration.suggestedActions).toEqual([]);
+    store.close();
+  });
+
+  it("decodes a top-level JSON string before using it as safe narration", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: JSON.stringify("The hall is dark.\nSomething moves.") } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: JSON.stringify("The repair is still only a string.") } }],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-scalar-fallback", "actor-scalar-fallback");
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      0,
+      "I listen for movement."
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("narration contract repair failed"));
+    expect(result.narration.text).toBe("The hall is dark.\nSomething moves.");
+    expect(result.narration.proposedFacts).toEqual([]);
+    expect(result.narration.suggestedActions).toEqual([]);
     store.close();
   });
 
@@ -301,7 +543,11 @@ describe("Lantern OpenRouter tool loop", () => {
         ok: true,
         status: 200,
         json: async () => ({
-          choices: [{ message: { role: "assistant", content: "Narin seals the bargain and orders the caravan east." } }],
+          choices: [{ message: { role: "assistant", content: JSON.stringify({
+            text: "Narin seals the bargain and orders the caravan east.",
+            proposedFacts: [],
+            suggestedActions: [],
+          }) } }],
         }),
       });
     vi.stubGlobal("fetch", fetchMock);
@@ -418,7 +664,11 @@ describe("Lantern OpenRouter tool loop", () => {
         ok: true,
         status: 200,
         json: async () => ({
-          choices: [{ message: { role: "assistant", content: "The bellkeeper taps the ledger and points toward the storm-dark channel." } }],
+          choices: [{ message: { role: "assistant", content: JSON.stringify({
+            text: "The bellkeeper taps the ledger and points toward the storm-dark channel.",
+            proposedFacts: [],
+            suggestedActions: [],
+          }) } }],
         }),
       });
     vi.stubGlobal("fetch", fetchMock);

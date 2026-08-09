@@ -51,27 +51,27 @@ export const narrativeFactProposalSchema = z.discriminatedUnion("kind", [
     subjectId: identifierSchema,
     predicate: identifierSchema,
     value: shortTextSchema,
-  }),
+  }).strict(),
   z.object({
     kind: z.literal("introduce_npc"),
     npcId: identifierSchema,
     name: shortTextSchema,
     disposition: z.enum(["friendly", "neutral", "wary", "hostile", "unknown"]),
-  }),
+  }).strict(),
   z.object({
     kind: z.literal("discover_location"),
     locationId: identifierSchema,
     name: shortTextSchema,
-  }),
+  }).strict(),
   z.object({
     kind: z.literal("advance_quest"),
     questId: identifierSchema,
     status: z.enum(["started", "advanced", "completed", "failed"]),
-  }),
+  }).strict(),
   z.object({
     kind: z.literal("set_scene"),
     sceneId: identifierSchema,
-  }),
+  }).strict(),
 ]);
 
 export type NarrativeFactProposal = z.infer<typeof narrativeFactProposalSchema>;
@@ -79,15 +79,31 @@ export type NarrativeFactProposal = z.infer<typeof narrativeFactProposalSchema>;
 export const suggestedActionSchema = z.object({
   id: identifierSchema,
   label: z.string().trim().min(1).max(96),
-  prompt: z.string().trim().min(1).max(500).optional(),
-});
+  prompt: z.string().trim().min(1).max(500),
+}).strict();
 
 export type SuggestedAction = z.infer<typeof suggestedActionSchema>;
 
 export const narrationEnvelopeSchema = z.object({
   text: z.string().trim().min(1).max(6_000),
   proposedFacts: z.array(narrativeFactProposalSchema).max(8),
-  suggestedActions: z.array(suggestedActionSchema).max(6),
-});
+  suggestedActions: z.array(suggestedActionSchema).max(5),
+}).strict();
+
+/** Provider-facing schema generated from the runtime contract, not a duplicate. */
+export const narrationEnvelopeJsonSchema = providerJsonSchema(
+  z.toJSONSchema(narrationEnvelopeSchema)
+);
+
+function providerJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(providerJsonSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, child]) => {
+      if (key === "$schema") return [];
+      return [[key === "oneOf" ? "anyOf" : key, providerJsonSchema(child)]];
+    })
+  );
+}
 
 export type NarrationEnvelope = z.infer<typeof narrationEnvelopeSchema>;
