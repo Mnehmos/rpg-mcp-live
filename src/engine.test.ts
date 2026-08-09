@@ -946,10 +946,8 @@ describe("Lantern engine boundary", () => {
     }
 
     const assigned = draft?.scores ?? [];
-    const differentIndex = assigned.findIndex((score) => score !== assigned[0]);
-    expect(differentIndex).toBeGreaterThan(0);
-    const duplicated = assigned.slice();
-    duplicated[differentIndex] = assigned[0] ?? 8;
+    const tampered = assigned.slice();
+    tampered[0] = assigned[0] === 18 ? 17 : (assigned[0] ?? 8) + 1;
     const rejected = resolveEngineCommand(
       rolled.state,
       commandContext,
@@ -964,12 +962,12 @@ describe("Lantern engine boundary", () => {
         abilityScoreMethod: "rolled",
         abilityScoreDraftId: draft?.id,
         abilityScores: {
-          str: duplicated[0] ?? 8,
-          dex: duplicated[1] ?? 8,
-          con: duplicated[2] ?? 8,
-          int: duplicated[3] ?? 8,
-          wis: duplicated[4] ?? 8,
-          cha: duplicated[5] ?? 8,
+          str: tampered[0] ?? 8,
+          dex: tampered[1] ?? 8,
+          con: tampered[2] ?? 8,
+          int: tampered[3] ?? 8,
+          wis: tampered[4] ?? 8,
+          cha: tampered[5] ?? 8,
         },
       },
       "character_create"
