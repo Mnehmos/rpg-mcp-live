@@ -11,6 +11,7 @@ import { Open5eContentResolver } from "./content/resolve.js";
 import { loadInstalledOpen5ePackRegistry } from "./content/registry.js";
 import { LanternDungeonMaster } from "./engine-dm.js";
 import { engineConfig } from "./engine-config.js";
+import { deploymentIdentity } from "./deployment-identity.js";
 import {
   engineCommandRequestSchema,
   engineCampaignCreateSchema,
@@ -46,6 +47,7 @@ import {
 
 const contentRegistry = await loadInstalledOpen5ePackRegistry();
 const contentPack = contentRegistry.activePack;
+const deployment = deploymentIdentity("engine");
 const deploymentContentPolicy: DeploymentContentPolicy = {
   defaultGamesystem: engineConfig.contentGamesystem,
   defaultBaseDocument: engineConfig.contentDefaultBaseDocument,
@@ -99,6 +101,7 @@ app.get("/health", (_request, response) => {
     status: "ok",
     service: "lantern-engine",
     environment: engineConfig.nodeEnv,
+    deployment,
     database: Boolean(engineConfig.databasePath),
     openRouter: {
       enabled: Boolean(engineConfig.openRouterApiKey),

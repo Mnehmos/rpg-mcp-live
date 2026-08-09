@@ -5,6 +5,7 @@ import { clerkMiddleware, createClerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
 import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent } from "./billing.js";
 import { config } from "./config.js";
+import { deploymentIdentity } from "./deployment-identity.js";
 import { EngineHttpError, LanternEngineClient } from "./engine-client.js";
 import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema, engineProductionRoomEnterRequestSchema } from "./engine-contracts.js";
 import { productionRoomNarrationReleaseRequestSchema } from "./engine-production-room.js";
@@ -15,6 +16,7 @@ import { GameStore } from "./store.js";
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
 const publicDirectory = path.join(projectRoot, "public");
+const deployment = deploymentIdentity("web");
 const store = new GameStore(config.databasePath);
 const stripe = createStripeClient();
 const engineClient = new LanternEngineClient({
@@ -195,6 +197,7 @@ app.get("/api/health", async (_request, response) => {
     status: "ok",
     service: "rpg-mcp-live-web",
     environment: config.nodeEnv,
+    deployment,
     integrations: {
       clerk: config.clerkConfigured,
       stripeCheckout: config.stripeCheckoutConfigured,
