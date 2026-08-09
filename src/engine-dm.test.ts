@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInitialCampaign } from "./engine-domain.js";
+import { createInitialCampaign, normalizeCampaignState } from "./engine-domain.js";
 import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
@@ -276,6 +276,121 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules" });
     expect(replay.narration.text).toBe(result.narration.text);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
+  it("preserves the authoritative non-check outcome when its data also has success", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-death-save",
+                type: "function",
+                function: { name: "death_save", arguments: "{}" },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error("provider timeout after death save"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const initial = createInitialCampaign("account-death-fallback", "actor-death-fallback");
+    initial.character.hp = 0;
+    initial.character.lifecycleState = "dying";
+    initial.character.conditions = ["unconscious"];
+    initial.character.deathRecord = {
+      source: "damage",
+      sourceCommandId: randomUUID(),
+      sourceVersion: initial.version,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const state = normalizeCampaignState(initial);
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I make my death save."
+    );
+
+    expect(result.event?.effects?.[0]).toMatchObject({ tool: "death_save" });
+    expect(result.event?.effects?.[0]?.data).toHaveProperty("success");
+    expect(result.narration.text).toContain("Death save: d20");
+    expect(result.narration.text).not.toContain("The attempt succeeds");
+    expect(result.narration.text).not.toContain("The attempt falls short");
+    expect(result.session.log.at(-1)?.text).toBe(result.narration.text);
+    store.close();
+  });
+
+  it("keeps the exact rest result when the provider is unavailable before the tool loop", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-rest-fallback", "actor-rest-fallback");
+    state.worldContext = {
+      id: "roadside-camp",
+      title: "The Roadside Camp",
+      description: "A quiet camp beside the road.",
+      features: ["banked fire"],
+      exits: [],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I rest at the camp."
+    );
+
+    expect(result.tool).toBe("rest");
+    expect(result.narration.text).toContain("You complete a long rest. Your wounds close and your resources recover.");
+    expect(result.narration.text).toContain("The Roadside Camp");
+    expect(result.session.log.at(-1)?.text).toBe(result.narration.text);
     store.close();
   });
 

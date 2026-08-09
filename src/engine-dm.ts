@@ -785,15 +785,17 @@ function rulesNarration(text: string, suffix?: string): NarrationEnvelope {
 }
 
 function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope {
-  const candidates = [
-    ...[...(result.event?.effects ?? [])].reverse().map((effect) => effect.data),
-    result.data,
-  ];
-  const check = candidates.find((candidate) => (
-    candidate !== null
-    && typeof candidate === "object"
-    && typeof (candidate as { success?: unknown }).success === "boolean"
-  )) as { success: boolean; goal?: unknown } | undefined;
+  const effects = result.event?.effects ?? [];
+  const checkData = effects.length === 1 && effects[0]?.check
+    ? effects[0].data
+    : effects.length === 0 && result.event?.check
+      ? result.data
+      : null;
+  const check = checkData !== null
+    && typeof checkData === "object"
+    && typeof (checkData as { success?: unknown }).success === "boolean"
+    ? checkData as { success: boolean; goal?: unknown }
+    : null;
   const scene = result.state.worldContext?.title.trim();
 
   if (check) {
@@ -809,11 +811,8 @@ function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope
     return rulesNarration(`${outcome}${location}${purpose}. ${consequence}`);
   }
 
-  return rulesNarration(
-    scene
-      ? `The action changes the situation in ${scene}. Continue from that established outcome.`
-      : "The action changes the situation. Continue from that established outcome."
-  );
+  const authoritative = result.message.trim() || "The action changes the situation.";
+  return rulesNarration(scene ? `${authoritative} The situation in ${scene} now reflects that result.` : authoritative);
 }
 
 function stripJsonFence(content: string): string {
