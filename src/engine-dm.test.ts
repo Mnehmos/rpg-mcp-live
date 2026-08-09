@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInitialCampaign } from "./engine-domain.js";
+import { createInitialCampaign, normalizeCampaignState } from "./engine-domain.js";
 import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
@@ -195,6 +195,234 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(result.session.suggestedActions[0]?.id).toBe("study-lead");
     expect(store.getCampaign(context).suggestedActions[0]?.id).toBe("study-lead");
     expect(result.session.log.slice(-3).map((message) => message.kind)).toEqual(["player", "roll", "narration"]);
+    store.close();
+  });
+
+  it.each([
+    { label: "successful", wisdom: 20, outcome: "The attempt succeeds" },
+    { label: "failed", wisdom: 8, outcome: "The attempt falls short" },
+  ])("persists a contextual rules fallback for a $label check", async ({ wisdom, outcome }) => {
+    const goal = "retrieve the fallen key without alerting Titus";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-fallback-check",
+                type: "function",
+                function: {
+                  name: "roll_check",
+                  arguments: JSON.stringify({ ability: "wis", goal, passive: true }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error("provider timeout after commit"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign(`account-${wisdom}`, `actor-${wisdom}`);
+    state.character.abilities.wis = wisdom;
+    state.worldContext = {
+      id: "ludus-vault",
+      title: "The Ludus Holding Vault",
+      description: "Titus guards a fallen key beyond the bars.",
+      features: ["fallen key", "barred opening"],
+      exits: [],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I quietly retrieve the fallen key without alerting Titus.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
+
+    const rollText = result.session.log.filter((message) => message.kind === "roll").at(-1)?.text;
+    const narrationText = result.session.log.at(-1)?.text;
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).toBe(narrationText);
+    expect(result.narration.text).toContain(outcome);
+    expect(result.narration.text).toContain("The Ludus Holding Vault");
+    expect(result.narration.text).toContain(goal);
+    expect(result.narration.text).not.toBe(rollText);
+    expect(result.narration.text).not.toContain("against DC");
+
+    const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
+    expect(replay).toMatchObject({ replayed: true, narrationSource: "rules" });
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
+  it("preserves the authoritative non-check outcome when its data also has success", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-death-save",
+                type: "function",
+                function: { name: "death_save", arguments: "{}" },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error("provider timeout after death save"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const initial = createInitialCampaign("account-death-fallback", "actor-death-fallback");
+    initial.character.hp = 0;
+    initial.character.lifecycleState = "dying";
+    initial.character.conditions = ["unconscious"];
+    initial.character.deathRecord = {
+      source: "damage",
+      sourceCommandId: randomUUID(),
+      sourceVersion: initial.version,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const state = normalizeCampaignState(initial);
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I make my death save."
+    );
+
+    expect(result.event?.effects?.[0]).toMatchObject({ tool: "death_save" });
+    expect(result.event?.effects?.[0]?.data).toHaveProperty("success");
+    expect(result.narration.text).toContain("Death save: d20");
+    expect(result.narration.text).not.toContain("The attempt succeeds");
+    expect(result.narration.text).not.toContain("The attempt falls short");
+    expect(result.session.log.at(-1)?.text).toBe(result.narration.text);
+    store.close();
+  });
+
+  it("keeps the exact rest result when the provider is unavailable before the tool loop", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-rest-fallback", "actor-rest-fallback");
+    state.worldContext = {
+      id: "roadside-camp",
+      title: "The Roadside Camp",
+      description: "A quiet camp beside the road.",
+      features: ["banked fire"],
+      exits: [],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign(
+      {
+        requestId: randomUUID(),
+        accountId: state.accountId,
+        actorId: state.actorId,
+        capabilities: ["player", "dm"],
+      },
+      state
+    );
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I rest at the camp."
+    );
+
+    expect(result.tool).toBe("rest");
+    expect(result.narration.text).toContain("You complete a long rest. Your wounds close and your resources recover.");
+    expect(result.narration.text).toContain("The Roadside Camp");
+    expect(result.session.log.at(-1)?.text).toBe(result.narration.text);
+    store.close();
+  });
+
+  it("persists a provider-outage reply for a read-only player turn", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-observe-fallback", "actor-observe-fallback");
+    state.worldContext = {
+      id: "lantern-room", title: "The Lantern Room",
+      description: "A quiet room lit by one lantern.", features: ["lit lantern"],
+      exits: [], npcs: [], merchants: [], objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID(), playerText = "I look around the room.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+
+    expect(result).toMatchObject({ tool: "observe", readOnly: true, narrationSource: "rules" });
+    expect(result.session.log.at(-1)?.text).toBe(result.narration.text);
+    expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
+    const replay = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     store.close();
   });
 
