@@ -103,22 +103,40 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           TAG=$(node tools/ci/production-release-evidence.mjs tag --version "$VERSION" --sha "$SHA")
           EVIDENCE_DIR=existing-release-evidence
-          mkdir -p "$EVIDENCE_DIR"
-
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > "$EVIDENCE_DIR/tag-ref.json" 2>/dev/null; then
-            tag_type=$(jq -r '.object.type' "$EVIDENCE_DIR/tag-ref.json")
-            tag_object_sha=$(jq -r '.object.sha' "$EVIDENCE_DIR/tag-ref.json")
-            if [ "$tag_type" = tag ]; then
-              gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" > "$EVIDENCE_DIR/tag-object.json"
+          collect_evidence() {
+            local dir="$1"
+            mkdir -p "$dir"
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > "$dir/tag-ref.json" 2>/dev/null; then
+              local tag_type tag_object_sha
+              tag_type=$(jq -r '.object.type' "$dir/tag-ref.json")
+              tag_object_sha=$(jq -r '.object.sha' "$dir/tag-ref.json")
+              if [ "$tag_type" = tag ]; then
+                gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" > "$dir/tag-object.json"
+              fi
+            else
+              rm -f "$dir/tag-ref.json"
             fi
-          else
-            rm -f "$EVIDENCE_DIR/tag-ref.json"
-          fi
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$EVIDENCE_DIR/release.json" 2>/dev/null; then
-            gh release download "$TAG" --pattern deployment-manifest.json --dir "$EVIDENCE_DIR"
-          else
-            rm -f "$EVIDENCE_DIR/release.json"
-          fi
+
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$dir/release-pages.json"
+            local release_count
+            release_count=$(jq --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)] | length' "$dir/release-pages.json")
+            test "$release_count" -le 1
+            if [ "$release_count" -eq 1 ]; then
+              jq --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)][0]' \
+                "$dir/release-pages.json" > "$dir/release.json"
+              local asset_count asset_id
+              asset_count=$(jq '[.assets[]? | select(.name == "deployment-manifest.json")] | length' "$dir/release.json")
+              test "$asset_count" -le 1
+              if [ "$asset_count" -eq 1 ]; then
+                asset_id=$(jq -r '.assets[] | select(.name == "deployment-manifest.json") | .id' "$dir/release.json")
+                gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+                  -H 'Accept: application/octet-stream' > "$dir/deployment-manifest.json"
+              fi
+            fi
+          }
+
+          collect_evidence "$EVIDENCE_DIR"
 
           plan=$(node tools/ci/production-release-evidence.mjs assess \
             --version "$VERSION" --sha "$SHA" --evidence-dir "$EVIDENCE_DIR")
@@ -126,6 +144,10 @@ jobs:
             cp "$EVIDENCE_DIR/deployment-manifest.json" deployment-manifest.json
             echo "Verified existing release $TAG for $SHA."
           else
+            # A partial run may already have fetched this exact remote tag.
+            # Remove only the local checkout ref so the changelog starts at the
+            # previous published release; the immutable remote tag is untouched.
+            git tag --delete "$TAG" >/dev/null 2>&1 || true
             node tools/ci/generate-changelog.mjs --version "$TAG" --fail-empty > release-body.md
             jq -n \
               --arg ids "$RAILWAY_DEPLOYMENT_IDS" \
@@ -134,12 +156,27 @@ jobs:
               --arg environment "$DEPLOYMENT_ENVIRONMENT" \
               '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,gitSha:$sha,ref:$ref,environment:$environment,engineHealth:"pass",webHealth:"pass",release:"pass"}' \
               > deployment-manifest.json
-            tag_object_sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
-              -f tag="$TAG" -f message="Production release $TAG from $SHA" \
-              -f object="$SHA" -f type=commit --jq '.sha')
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/tags/$TAG" -f sha="$tag_object_sha" >/dev/null
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-body.md deployment-manifest.json
+            if [ "$plan" = create ]; then
+              tag_object_sha=$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+                -f tag="$TAG" -f message="Production release $TAG from $SHA" \
+                -f object="$SHA" -f type=commit --jq '.sha')
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                -f ref="refs/tags/$TAG" -f sha="$tag_object_sha" >/dev/null
+            fi
+            if [ "$plan" = publish-draft ]; then
+              gh release upload "$TAG" deployment-manifest.json --clobber
+              gh release edit "$TAG" --verify-tag --title "$TAG" \
+                --notes-file release-body.md --draft=false
+            else
+              gh release create "$TAG" --verify-tag --title "$TAG" \
+                --notes-file release-body.md deployment-manifest.json
+            fi
+
+            PUBLISHED_DIR=published-release-evidence
+            collect_evidence "$PUBLISHED_DIR"
+            verified=$(node tools/ci/production-release-evidence.mjs assess \
+              --version "$VERSION" --sha "$SHA" --evidence-dir "$PUBLISHED_DIR")
+            test "$verified" = reuse
           fi
 
       - name: Upload production release evidence

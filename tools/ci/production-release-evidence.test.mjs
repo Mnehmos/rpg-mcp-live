@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  assessProductionReleaseEvidence,
-  productionReleaseTag,
-} from "./production-release-evidence.mjs";
+import { assessProductionReleaseEvidence, productionReleaseTag } from "./production-release-evidence.mjs";
 
 const SHA = "1".repeat(40);
 const OTHER_SHA = "2".repeat(40);
@@ -15,7 +12,12 @@ function evidence(overrides = {}) {
     expectedTag: TAG,
     tagRef: { object: { type: "tag", sha: "tag-object-sha" } },
     tagObject: { tag: TAG, object: { type: "commit", sha: SHA } },
-    release: { tag_name: TAG },
+    release: {
+      tag_name: TAG,
+      draft: false,
+      prerelease: false,
+      published_at: "2026-08-09T21:36:23Z",
+    },
     manifest: {
       controller: "railway-native-github-autodeploy",
       environment: "RPG MCP Live / production",
@@ -45,6 +47,43 @@ describe("production release evidence", () => {
     expect(assessProductionReleaseEvidence(evidence())).toBe("reuse");
   });
 
+  it("resumes release creation when the exact tag exists alone", () => {
+    expect(
+      assessProductionReleaseEvidence(
+        evidence({ release: undefined, manifest: undefined })
+      )
+    ).toBe("create-release");
+  });
+
+  it("repairs and publishes an exact-tag draft", () => {
+    expect(
+      assessProductionReleaseEvidence(
+        evidence({
+          release: {
+            tag_name: TAG,
+            draft: true,
+            prerelease: false,
+            published_at: null,
+          },
+          manifest: undefined,
+        })
+      )
+    ).toBe("publish-draft");
+    expect(
+      assessProductionReleaseEvidence(
+        evidence({
+          release: {
+            tag_name: TAG,
+            draft: true,
+            prerelease: false,
+            published_at: null,
+          },
+          manifest: { ...evidence().manifest, sha: OTHER_SHA },
+        })
+      )
+    ).toBe("publish-draft");
+  });
+
   it("allows the same package version to create evidence for another SHA", () => {
     const otherTag = productionReleaseTag(VERSION, OTHER_SHA);
     expect(otherTag).toBe(`v0.1.0-${OTHER_SHA}`);
@@ -66,7 +105,10 @@ describe("production release evidence", () => {
 
   it("fails closed on incomplete or mismatched release evidence", () => {
     expect(() =>
-      assessProductionReleaseEvidence(evidence({ release: undefined }))
+      assessProductionReleaseEvidence(evidence({ tagRef: undefined }))
+    ).toThrow("incomplete");
+    expect(() =>
+      assessProductionReleaseEvidence(evidence({ manifest: undefined }))
     ).toThrow("incomplete");
     expect(() =>
       assessProductionReleaseEvidence(
@@ -81,5 +123,29 @@ describe("production release evidence", () => {
         evidence({ tagRef: { object: { type: "commit", sha: SHA } }, tagObject: undefined })
       )
     ).toBe("reuse");
+  });
+
+  it("rejects draft-like or unpublished evidence as complete", () => {
+    expect(() =>
+      assessProductionReleaseEvidence(
+        evidence({ release: { ...evidence().release, draft: undefined } })
+      )
+    ).toThrow("not a published stable release");
+    expect(() =>
+      assessProductionReleaseEvidence(
+        evidence({ release: { ...evidence().release, published_at: null } })
+      )
+    ).toThrow("no valid publication timestamp");
+    expect(() =>
+      assessProductionReleaseEvidence(
+        evidence({
+          release: {
+            ...evidence().release,
+            draft: true,
+            published_at: "2026-08-09T21:36:23Z",
+          },
+        })
+      )
+    ).toThrow("contradictory");
   });
 });
