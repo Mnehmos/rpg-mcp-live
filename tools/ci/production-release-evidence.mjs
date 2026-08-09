@@ -87,6 +87,28 @@ export function assessProductionReleaseEvidence({
   return "reuse";
 }
 
+export function postPublicationEvidenceAction(plan, attempt, maxAttempts) {
+  if (
+    !Number.isInteger(attempt) ||
+    !Number.isInteger(maxAttempts) ||
+    attempt < 1 ||
+    maxAttempts < 1 ||
+    attempt > maxAttempts
+  ) {
+    throw new Error("Invalid post-publication evidence retry bounds");
+  }
+  if (plan === "reuse") return "complete";
+  if (plan !== "create-release" && plan !== "publish-draft") {
+    throw new Error(`Unexpected post-publication evidence state: ${plan}`);
+  }
+  if (attempt === maxAttempts) {
+    throw new Error(
+      `GitHub release evidence was not visible after ${maxAttempts} attempts`
+    );
+  }
+  return "retry";
+}
+
 function parseArgs(tokens) {
   const args = {};
   for (let index = 0; index < tokens.length; index += 1) {
@@ -111,8 +133,11 @@ function main() {
     process.stdout.write(tag);
     return;
   }
-  if (command !== "assess" || !args["evidence-dir"]) {
-    throw new Error("Usage: production-release-evidence.mjs <tag|assess> --version <version> --sha <sha> [--evidence-dir <dir>]");
+  if (
+    (command !== "assess" && command !== "post-publication") ||
+    !args["evidence-dir"]
+  ) {
+    throw new Error("Usage: production-release-evidence.mjs <tag|assess|post-publication> --version <version> --sha <sha> [--evidence-dir <dir>] [--attempt <n> --max-attempts <n>]");
   }
 
   const dir = args["evidence-dir"];
@@ -124,7 +149,17 @@ function main() {
     release: readOptionalJson(resolve(dir, "release.json")),
     manifest: readOptionalJson(resolve(dir, "deployment-manifest.json")),
   });
-  process.stdout.write(result);
+  if (command === "assess") {
+    process.stdout.write(result);
+    return;
+  }
+  process.stdout.write(
+    postPublicationEvidenceAction(
+      result,
+      Number(args.attempt),
+      Number(args["max-attempts"])
+    )
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

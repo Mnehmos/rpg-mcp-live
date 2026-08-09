@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assessProductionReleaseEvidence, productionReleaseTag } from "./production-release-evidence.mjs";
+import {
+  assessProductionReleaseEvidence,
+  postPublicationEvidenceAction,
+  productionReleaseTag,
+} from "./production-release-evidence.mjs";
 
 const SHA = "1".repeat(40);
 const OTHER_SHA = "2".repeat(40);
@@ -164,5 +168,17 @@ describe("production release evidence", () => {
         })
       )
     ).toThrow("contradictory");
+  });
+
+  it("bounds post-publication retries to stale release-list states", () => {
+    expect(postPublicationEvidenceAction("create-release", 1, 5)).toBe("retry");
+    expect(postPublicationEvidenceAction("publish-draft", 2, 5)).toBe("retry");
+    expect(postPublicationEvidenceAction("reuse", 3, 5)).toBe("complete");
+    expect(() => postPublicationEvidenceAction("create", 1, 5)).toThrow(
+      "Unexpected post-publication evidence state"
+    );
+    expect(() => postPublicationEvidenceAction("create-release", 5, 5)).toThrow(
+      "not visible after 5 attempts"
+    );
   });
 });

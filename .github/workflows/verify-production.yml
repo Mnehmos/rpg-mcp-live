@@ -172,11 +172,19 @@ jobs:
                 --notes-file release-body.md deployment-manifest.json
             fi
 
-            PUBLISHED_DIR=published-release-evidence
-            collect_evidence "$PUBLISHED_DIR"
-            verified=$(node tools/ci/production-release-evidence.mjs assess \
-              --version "$VERSION" --sha "$SHA" --evidence-dir "$PUBLISHED_DIR")
-            test "$verified" = reuse
+            MAX_RELEASE_READ_ATTEMPTS=5
+            for attempt in $(seq 1 "$MAX_RELEASE_READ_ATTEMPTS"); do
+              PUBLISHED_DIR="published-release-evidence-$attempt"
+              collect_evidence "$PUBLISHED_DIR"
+              action=$(node tools/ci/production-release-evidence.mjs post-publication \
+                --version "$VERSION" --sha "$SHA" --evidence-dir "$PUBLISHED_DIR" \
+                --attempt "$attempt" --max-attempts "$MAX_RELEASE_READ_ATTEMPTS")
+              if [ "$action" = complete ]; then
+                break
+              fi
+              echo "GitHub release evidence is not visible yet (attempt $attempt/$MAX_RELEASE_READ_ATTEMPTS); retrying."
+              sleep 2
+            done
           fi
 
       - name: Upload production release evidence
