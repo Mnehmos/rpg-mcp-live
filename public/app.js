@@ -1,3 +1,8 @@
+import {
+  reconcileAbilityScoreAssignments,
+  uniqueAbilityScoreOptions,
+} from "./ability-score-pool.js";
+
 (function () {
   "use strict";
 
@@ -381,26 +386,27 @@
       setText("#character-ability-score-help", "The engine owns the dice. You will assign the resulting six values.", "Roll your scores before assigning them.");
       return;
     }
-    var used = {};
-    var assignments = {};
-    ABILITY_SCORE_FIELDS.forEach(function (ability, index) {
-      var preferred = Number(prior[ability.key]);
-      var preferredKey = String(preferred);
-      if (Number.isFinite(preferred) && pool.some(function (value) { return Number(value) === preferred; }) && (used[preferredKey] || 0) < pool.filter(function (value) { return Number(value) === preferred; }).length) {
-        assignments[ability.key] = preferred;
-      } else {
-        var next = pool.find(function (value) { return (used[String(value)] || 0) < pool.filter(function (candidate) { return Number(candidate) === Number(value); }).length; });
-        assignments[ability.key] = next === undefined ? pool[index] : next;
-      }
-      used[String(assignments[ability.key])] = (used[String(assignments[ability.key])] || 0) + 1;
-    });
+    var assignments = reconcileAbilityScoreAssignments(prior, pool);
+    var scoreOptions = uniqueAbilityScoreOptions(pool);
     optionsNode.innerHTML = ABILITY_SCORE_FIELDS.map(function (ability) {
       var selected = assignments[ability.key];
-      var options = pool.map(function (value) {
+      var options = scoreOptions.map(function (value) {
         return '<option value="' + escapeHtml(value) + '"' + (Number(value) === Number(selected) ? ' selected' : '') + '>' + escapeHtml(value) + '</option>';
       }).join("");
       return '<label class="ability-score-field"><span>' + escapeHtml(ability.short + " · " + ability.label) + '</span><select data-ability-score="' + ability.key + '" aria-label="' + escapeHtml(ability.label) + '">' + options + '</select></label>';
     }).join("");
+    optionsNode.querySelectorAll("select[data-ability-score]").forEach(function (select) {
+      select.addEventListener("change", function () {
+        var current = {};
+        optionsNode.querySelectorAll("select[data-ability-score]").forEach(function (candidate) {
+          current[candidate.dataset.abilityScore] = Number(candidate.value);
+        });
+        var reconciled = reconcileAbilityScoreAssignments(current, pool, select.dataset.abilityScore);
+        optionsNode.querySelectorAll("select[data-ability-score]").forEach(function (candidate) {
+          candidate.value = String(reconciled[candidate.dataset.abilityScore]);
+        });
+      });
+    });
     setText(
       "#character-ability-score-help",
       method === "rolled" ? "Assign each rolled value once. The engine checks the original dice result." : "Assign 15, 14, 13, 12, 10, and 8 once each.",

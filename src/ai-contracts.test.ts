@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { actionIntentSchema, narrationEnvelopeSchema } from "./ai-contracts.js";
+import {
+  actionIntentSchema,
+  narrationEnvelopeJsonSchema,
+  narrationEnvelopeSchema,
+} from "./ai-contracts.js";
 
 describe("DM adapter contracts", () => {
   it("accepts a bounded ability-check proposal", () => {
@@ -23,6 +27,21 @@ describe("DM adapter contracts", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects shorthand narration facts and extra provider-authored fields", () => {
+    const result = narrationEnvelopeSchema.safeParse({
+      text: "The guard drops a key.",
+      proposedFacts: [{
+        kind: "npc",
+        title: "Titus is the nervous guard",
+        description: "Titus dropped the key.",
+        visibility: "public",
+      }],
+      suggestedActions: [],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("accepts a bounded player prompt for a generated move", () => {
     const result = narrationEnvelopeSchema.safeParse({
       text: "The courier watches your hands.",
@@ -35,5 +54,20 @@ describe("DM adapter contracts", () => {
     });
 
     expect(result.success).toBe(true);
+  });
+
+  it("derives a provider-compatible JSON schema from the runtime contract", () => {
+    const serialized = JSON.stringify(narrationEnvelopeJsonSchema);
+    expect(serialized).not.toContain('"$schema"');
+    expect(serialized).not.toContain('"oneOf"');
+    expect(narrationEnvelopeJsonSchema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["text", "proposedFacts", "suggestedActions"],
+      properties: {
+        proposedFacts: { maxItems: 8, items: { anyOf: expect.any(Array) } },
+        suggestedActions: { maxItems: 5 },
+      },
+    });
   });
 });
