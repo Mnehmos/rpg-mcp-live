@@ -47,9 +47,11 @@ Because the repo uses **squash merge** and the PR title **is** the commit messag
 
 1. Checkout exact merged SHA.
 2. `npm ci` → `npm run check` → `npm run build`.
-3. Deploy engine to Railway staging. Wait for `/health`.
+3. Wait for Railway native autodeploy of the engine from the connected GitHub
+   source. Verify the exact SHA, then wait for `/health`.
 4. Verify: SHA, pack hash, pack version, tool count, historical packs.
-5. Deploy web to Railway staging. Wait for `/api/health` (web must reach engine).
+5. Wait for Railway native autodeploy of the web from the same GitHub SHA. Wait
+   for `/api/health` (web must reach engine).
 6. Run two-service HTTP smoke (`npm run smoke:http`).
 7. Run deterministic gauntlet (after #22).
 8. Write deployment manifest.
@@ -65,9 +67,11 @@ release mutation.
 
 1. Verify SHA is reachable from `main`.
 2. Verify SHA was deployed to staging.
-3. Deploy engine to Railway production. Verify health + backward compatibility.
+3. Wait for native engine autodeploy to Railway production. Verify health +
+   backward compatibility.
 4. Run safe read + synthetic safe mutation against a dedicated acceptance campaign.
-5. Deploy web to Railway production. Verify health + engine reachability.
+5. Wait for native web autodeploy to Railway production. Verify health + engine
+   reachability.
 6. Write the deployment manifest with both Railway deployment IDs and returned
    Railway commit SHAs.
 7. Create the annotated tag through the authenticated GitHub API, then publish

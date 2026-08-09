@@ -1,9 +1,11 @@
 # Railway deployment ownership
 
-This runbook records the cutover for issue #67. GitHub Actions is the normal
-deployment controller for the existing Railway project; Railway native
-autodeploy remains disabled. The repository, services, data, domains, private
-networking, and variables are not recreated by this change.
+This runbook records the cutover for issue #67. The existing Railway services
+deploy from their connected GitHub repository through Railway native
+autodeploy. GitHub Actions verifies the exact commit and owns the health,
+smoke, gauntlet, and manifest gates; it does not issue a second deploy
+mutation. The repository, services, data, domains, private networking, and
+variables are not recreated by this change.
 
 ## Existing topology (sanitized baseline)
 
@@ -46,13 +48,13 @@ GitHub Actions staging proof.
 
 1. A squash merge to `main` completes the required CI workflow.
 2. `deploy-staging.yml` checks out that exact CI-proven SHA, runs checks/build,
-   and calls `tools/railway-deploy.ts` for the engine first and web second.
+   and waits for Railway native autodeploy of the engine first and web second.
 3. The helper validates the presented project token's project/environment
    identity, the current service source and repository trigger, the
-   service-specific config path, and disabled native autodeploy. It then calls
-   Railway's exact-commit GraphQL mutation and waits for `SUCCESS`. Failed,
-   cancelled, unknown, missing, mismatched, or timed-out deployments fail
-   closed.
+   service-specific config path, and enabled native autodeploy. It then polls
+   the scoped Railway deployment history for the exact commit and waits for
+   `SUCCESS`. Failed, cancelled, unknown, missing, mismatched, or timed-out
+   deployments fail closed.
 4. Health, pack identity, tool count, web-to-engine reachability, smoke,
    invariants, and the deterministic gauntlet are recorded in a manifest that
    includes both Railway deployment IDs and returned commit metadata.
@@ -61,11 +63,9 @@ GitHub Actions staging proof.
    runtime, and keeps every mutation step blocked unless the value is exactly
    `true`.
 
-Native Railway autodeploy is kept disabled even after the source connection is
-made. Do not use `railway up` for a normal deploy, and do not push to `main`
-from a workflow. Production releases may create an annotated tag and GitHub
-release material only after the explicit promotion guard is enabled by the
-owner.
+Do not use `railway up` for a normal deploy, and do not push to `main` from a
+workflow. Production releases may create an annotated tag and GitHub release
+material only after the explicit promotion guard is enabled by the owner.
 
 ## GitHub scope
 
@@ -85,10 +85,10 @@ both environments. Connecting a source is not permission to recreate a
 service or alter a volume.
 
 If a staging deployment fails, leave production untouched, inspect the
-manifest and deployment ID, and redeploy the last known-good main SHA through
-the same GitHub workflow. If ownership must be temporarily repaired, the
-Railway CLI is a break-glass diagnostic path only; restore the GitHub-owned
-source and disabled native autodeploy before resuming normal operation.
+manifest and deployment ID, and revert the source commit through the normal
+protected GitHub flow. If ownership must be temporarily repaired, the Railway
+CLI is a break-glass diagnostic path only; restore the connected GitHub source
+and native autodeploy before resuming normal operation.
 
 Never reset, copy, migrate, or delete the existing databases or volumes as
 part of this cutover.

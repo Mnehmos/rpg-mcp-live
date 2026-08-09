@@ -31,6 +31,8 @@ export interface RailwayScope {
   expectedRepository?: string;
   expectedBranch?: string;
   expectedRailwayConfigFile?: string;
+  /** Require Railway's connected GitHub source to be the active deploy trigger. */
+  requireNativeAutodeploy?: boolean;
 }
 
 export interface RailwayClientOptions {
@@ -109,14 +111,22 @@ interface ProjectTokenScopeResponse {
 }
 
 interface DeploymentResponse {
-  deployment: {
+  deployment: DeploymentRecord | null;
+}
+
+interface DeploymentRecord {
     id: string;
     status: string;
     projectId: string;
     environmentId: string;
     serviceId: string;
     meta: unknown;
-  } | null;
+}
+
+interface DeploymentListResponse {
+  deployments: {
+    edges: Array<{ node: DeploymentRecord }>;
+  };
 }
 
 interface DeployResponse {
@@ -306,7 +316,15 @@ export class RailwayApiClient {
     if (instance.railwayConfigFile !== expectedRailwayConfigFile) {
       throw new RailwayApiError("CONFIG_PATH_MISMATCH", `The service Railway config path must be ${expectedRailwayConfigFile}.`);
     }
-    if (data.serviceInstanceAutoDeployStatus?.enabled !== false) {
+    const nativeAutodeployEnabled = data.serviceInstanceAutoDeployStatus?.enabled;
+    const requireNativeAutodeploy = scope.requireNativeAutodeploy ?? false;
+    if (nativeAutodeployEnabled === undefined) {
+      throw new RailwayApiError("NATIVE_AUTODEPLOY_STATUS_MISSING", "Railway did not return the service native autodeploy state.");
+    }
+    if (nativeAutodeployEnabled !== requireNativeAutodeploy) {
+      if (requireNativeAutodeploy) {
+        throw new RailwayApiError("NATIVE_AUTODEPLOY_DISABLED", "Railway native autodeploy must be enabled for the connected GitHub source.");
+      }
       throw new RailwayApiError("NATIVE_AUTODEPLOY_ENABLED", "Railway native autodeploy must be disabled before GitHub deploys.");
     }
     const source = currentSource(
@@ -331,7 +349,7 @@ export class RailwayApiClient {
       sourceRepository: source.repository,
       sourceBranch: source.branch,
       railwayConfigFile: instance.railwayConfigFile,
-      nativeAutodeployEnabled: data.serviceInstanceAutoDeployStatus.enabled,
+      nativeAutodeployEnabled,
     };
   }
 
@@ -349,6 +367,74 @@ export class RailwayApiClient {
     );
     if (!deployed.serviceInstanceDeployV2) throw new RailwayApiError("DEPLOYMENT_ID_MISSING", "Railway did not return a deployment ID.");
     return this.pollDeployment(scope, deployed.serviceInstanceDeployV2, commitSha);
+  }
+
+  /**
+   * Wait for Railway's native GitHub integration to build the requested SHA.
+   * This is deliberately read-only: the GitHub push is the deployment trigger,
+   * and this method only observes the scoped deployment history.
+   */
+  public async waitForNativeCommit(scope: RailwayScope, commitSha: string, allowProduction = false): Promise<RailwayDeploymentEvidence> {
+    if (!isFullSha(commitSha)) throw new RailwayApiError("INVALID_COMMIT_SHA", "An exact 40-character commit SHA is required.");
+    if (scope.environmentName === "production" && !allowProduction) {
+      throw new RailwayApiError("PRODUCTION_GUARD", "Production promotion is disabled.");
+    }
+    await this.validateScope({ ...scope, requireNativeAutodeploy: true });
+    return this.pollNativeDeployment(scope, commitSha);
+  }
+
+  private async pollNativeDeployment(scope: RailwayScope, requestedCommitSha: string): Promise<RailwayDeploymentEvidence> {
+    const deadline = Date.now() + this.timeoutMs;
+    while (Date.now() <= deadline) {
+      const data = await this.request<DeploymentListResponse>(
+        `query railwayNativeDeploymentHistory($input: DeploymentListInput!, $first: Int!) {
+          deployments(input: $input, first: $first) {
+            edges { node { id status projectId environmentId serviceId meta } }
+          }
+        }`,
+        {
+          input: {
+            projectId: scope.projectId,
+            environmentId: scope.environmentId,
+            serviceId: scope.serviceId,
+            includeDeleted: true,
+          },
+          first: 20,
+        },
+      );
+      const candidates = data.deployments.edges
+        .map((edge) => edge.node)
+        .filter((deployment) => {
+          const railwayCommitSha = findCommitSha(deployment.meta);
+          return railwayCommitSha?.toLowerCase() === requestedCommitSha.toLowerCase();
+        });
+      const candidate = candidates.find((deployment) => deployment.status === "SUCCESS") ?? candidates[0];
+      if (candidate) {
+        if (candidate.projectId !== scope.projectId || candidate.environmentId !== scope.environmentId || candidate.serviceId !== scope.serviceId) {
+          throw new RailwayApiError("DEPLOYMENT_SCOPE_MISMATCH", "Railway returned a native deployment outside the requested scope.");
+        }
+        if (candidate.status === "SUCCESS") {
+          const railwayCommitSha = findCommitSha(candidate.meta);
+          return {
+            deploymentId: candidate.id,
+            status: "SUCCESS",
+            projectId: candidate.projectId,
+            environmentId: candidate.environmentId,
+            serviceId: candidate.serviceId,
+            requestedCommitSha,
+            railwayCommitSha,
+          };
+        }
+        if (FAILED_STATUSES.has(candidate.status)) {
+          throw new RailwayApiError("DEPLOYMENT_FAILED", `Railway native deployment ended in ${candidate.status}.`);
+        }
+        if (!ACTIVE_STATUSES.has(candidate.status)) {
+          throw new RailwayApiError("DEPLOYMENT_STATUS_UNKNOWN", `Railway returned unsupported native deployment status ${candidate.status}.`);
+        }
+      }
+      await this.sleepImpl(this.pollIntervalMs);
+    }
+    throw new RailwayApiError("DEPLOYMENT_TIMEOUT", "Railway native deployment did not reach SUCCESS before the timeout.");
   }
 
   private async pollDeployment(scope: RailwayScope, deploymentId: string, requestedCommitSha: string): Promise<RailwayDeploymentEvidence> {

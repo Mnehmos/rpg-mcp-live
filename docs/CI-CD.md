@@ -73,26 +73,28 @@ No live provider calls happen nightly.
 ## Staging deployment
 
 `.github/workflows/deploy-staging.yml` triggers when the required CI workflow
-passes on `main`. It is the normal deployment controller; Railway native
-autodeploy is disabled.
+passes on `main`. Railway's connected GitHub source is the deployment
+controller; the workflow observes and verifies the native deployment rather
+than issuing a second Railway deploy mutation.
 
 ```
 checkout exact CI-proven SHA
 → npm ci → check → build
-→ validate project-token scope, current source/config, and disabled autodeploy
-→ deploy exact SHA: engine first, then web
+→ validate project-token scope, current source/config, and enabled native autodeploy
+→ wait for exact native GitHub deployment: engine first, then web
 → wait for health, pack/tool evidence, and web→engine reachability
 → run HTTP smoke, invariants, and deterministic gauntlet
 → write manifest with both Railway deployment IDs and commit metadata
 ```
 
-The deploy helper uses environment-scoped Railway project tokens and first
-queries `projectToken { projectId environmentId }` so a staging token cannot
-touch production (or vice versa). It then reads the current service source,
-repo trigger, Railway config path, and native autodeploy state before calling
-the `serviceInstanceDeployV2` exact-commit mutation. It never logs token values,
-uploads a local archive, or calls `railway up`. Concurrency is
-`group: railway-staging, cancel-in-progress: true`.
+The native-deploy observer uses environment-scoped Railway project tokens and
+first queries `projectToken { projectId environmentId }` so a staging token
+cannot touch production (or vice versa). It then reads the current service
+source, repo trigger, Railway config path, and enabled native autodeploy state
+before polling the scoped deployment history for the exact commit SHA. It
+never logs token values, uploads a local archive, calls `railway up`, or issues
+`serviceInstanceDeployV2`. Concurrency is `group: railway-staging,
+cancel-in-progress: true`.
 
 ## Production deployment
 
@@ -109,7 +111,9 @@ manifest, deploys engine then web through the same exact-SHA helper, binds
 health responses to the expected service/environment and returned Railway
 commit SHA, runs the production health/smoke/gauntlet checks, writes the
 deployment manifest, and finally creates an annotated tag and GitHub release
-through the authenticated GitHub API. It does not push to `main` or commit a
+through the authenticated GitHub API. The Railway steps only wait for the
+native deployment already triggered by the connected GitHub source; they do
+not issue a second deploy mutation. It does not push to `main` or commit a
 generated `CHANGELOG.md` back to the branch.
 
 Concurrency: `group: railway-production, cancel-in-progress: false`.

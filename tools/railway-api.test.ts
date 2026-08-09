@@ -129,6 +129,12 @@ describe("Railway exact-SHA deployment API", () => {
     await expect(autodeploy.instance.validateScope(stagingScope)).rejects.toMatchObject({ code: "NATIVE_AUTODEPLOY_ENABLED" });
   });
 
+  it("accepts native autodeploy when the workflow is observing the GitHub source", async () => {
+    const scope = { ...stagingScope, requireNativeAutodeploy: true };
+    const autodeploy = client([graphqlResponse(tokenData()), graphqlResponse(scopeData({ serviceInstanceAutoDeployStatus: { enabled: true } }))]);
+    await expect(autodeploy.instance.validateScope(scope)).resolves.toMatchObject({ nativeAutodeployEnabled: true });
+  });
+
   it("rejects an unknown or malformed SHA before making an API request", async () => {
     const { instance, fetchImpl } = client([]);
     await expect(instance.deployExactCommit(stagingScope, "unknown-sha")).rejects.toMatchObject({ code: "INVALID_COMMIT_SHA" });
@@ -170,6 +176,21 @@ describe("Railway exact-SHA deployment API", () => {
       graphqlResponse({ deployment: { id: deploymentId, status: "SUCCESS", projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: { commitHash: SHA } } }),
     ]);
     await expect(instance.deployExactCommit(stagingScope, SHA)).resolves.toMatchObject({ deploymentId, requestedCommitSha: SHA, railwayCommitSha: SHA });
+  });
+
+  it("waits for a native GitHub deployment without issuing a deploy mutation", async () => {
+    const deploymentId = "native-deployment-67";
+    const scope = { ...stagingScope, requireNativeAutodeploy: true };
+    const { instance, fetchImpl } = client([
+      graphqlResponse(tokenData()),
+      graphqlResponse(scopeData({ serviceInstanceAutoDeployStatus: { enabled: true } })),
+      graphqlResponse({ deployments: { edges: [{ node: { id: deploymentId, status: "SUCCESS", projectId: PROJECT_ID, environmentId: STAGING_ID, serviceId: ENGINE_ID, meta: { commitHash: SHA } } }] } }),
+    ]);
+    await expect(instance.waitForNativeCommit(scope, SHA)).resolves.toMatchObject({ deploymentId, requestedCommitSha: SHA, railwayCommitSha: SHA });
+    const requests = fetchImpl.mock.calls as unknown as Array<[string | URL, RequestInit]>;
+    expect(requests).toHaveLength(3);
+    expect(String(requests[2]?.[1]?.body)).toContain("railwayNativeDeploymentHistory");
+    expect(String(requests[2]?.[1]?.body)).not.toContain("serviceInstanceDeployV2");
   });
 
   it.each(["FAILED", "CANCELED"])("fails closed on a %s deployment", async (status) => {
@@ -217,9 +238,10 @@ describe("workflow ownership guardrails", () => {
   const production = readFileSync(new URL("../.github/workflows/deploy-production.yml", import.meta.url), "utf8");
   const helper = readFileSync(new URL("./railway-api.ts", import.meta.url), "utf8");
 
-  it("deploys engine before web and never uses a local archive upload", () => {
-    expect(staging.indexOf("Deploy engine to Railway staging")).toBeLessThan(staging.indexOf("Deploy web to Railway staging"));
-    expect(staging).toContain("railway-deploy.ts");
+  it("observes native engine before web and never uses a local archive or manual deploy mutation", () => {
+    expect(staging.indexOf("Wait for native engine deployment")).toBeLessThan(staging.indexOf("Wait for native web deployment"));
+    expect(staging).toContain("railway-native-autodeploy.ts");
+    expect(staging).not.toContain("railway-deploy.ts");
     expect(staging).not.toContain("railway up");
   });
 
@@ -228,7 +250,9 @@ describe("workflow ownership guardrails", () => {
     expect(production).toContain("Evaluate production promotion guard");
     expect(production).toContain("steps.promotion.outputs.enabled == 'true'");
     expect(production).not.toMatch(/if:\s*>[\s\S]*RAILWAY_PRODUCTION_PROMOTION_ENABLED/);
-    expect(production.indexOf("Deploy engine to Railway production")).toBeLessThan(production.indexOf("Deploy web to Railway production"));
+    expect(production.indexOf("Wait for native engine deployment")).toBeLessThan(production.indexOf("Wait for native web deployment"));
+    expect(production).toContain("railway-native-autodeploy.ts");
+    expect(production).not.toContain("railway-deploy.ts");
   });
 
   it("preflights release material before mutating production and uses the GitHub API for tags", () => {
@@ -239,7 +263,7 @@ describe("workflow ownership guardrails", () => {
     expect(production).toContain("fetch-depth: 0");
     expect(production).toContain("git fetch --force --tags origin");
     expect(production).toContain("already exists; refusing to mutate production");
-    expect(production.indexOf("Preflight release tag, changelog, and write capability")).toBeLessThan(production.indexOf("Deploy engine to Railway production"));
+    expect(production.indexOf("Preflight release tag, changelog, and write capability")).toBeLessThan(production.indexOf("Wait for native engine deployment"));
     expect(production.indexOf("Write production deployment manifest before publishing the tag")).toBeLessThan(production.indexOf("Create annotated GitHub tag after deployment evidence is complete"));
     expect(production).toContain("git/tags");
     expect(production).toContain("git/refs");

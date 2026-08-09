@@ -1,9 +1,9 @@
 name: Deploy to production
 
 # Production remains intentionally blocked until the owner enables the
-# production GitHub environment variable. The job attaches that environment
-# before evaluating the guard, so the variable is available at runtime and no
-# Railway mutation can happen while the guard is false.
+# production GitHub environment variable. When enabled, this job only verifies
+# the native deployment already triggered by the connected GitHub source; it
+# never issues a second Railway deploy mutation.
 on:
   workflow_run:
     workflows: ["Deploy to staging"]
@@ -121,7 +121,7 @@ jobs:
           echo "Generated release material for $TAG before production deployment."
 
       # Engine is intentionally first: web health depends on private engine reachability.
-      - name: Deploy engine to Railway production
+      - name: Wait for native engine deployment
         if: steps.promotion.outputs.enabled == 'true'
         id: engine
         env:
@@ -135,7 +135,7 @@ jobs:
           RAILWAY_EXPECTED_BRANCH: main
           RAILWAY_CONFIG_FILE: /railway/engine.json
           RAILWAY_PRODUCTION_PROMOTION_ENABLED: ${{ vars.RAILWAY_PRODUCTION_PROMOTION_ENABLED }}
-        run: npx tsx tools/railway-deploy.ts
+        run: npx tsx tools/railway-native-autodeploy.ts
 
       - name: Verify engine deployment SHA
         if: steps.promotion.outputs.enabled == 'true'
@@ -166,7 +166,7 @@ jobs:
           echo "::error::Engine production did not become healthy in 5 minutes"
           exit 1
 
-      - name: Deploy web to Railway production
+      - name: Wait for native web deployment
         if: steps.promotion.outputs.enabled == 'true'
         id: web
         env:
@@ -180,7 +180,7 @@ jobs:
           RAILWAY_EXPECTED_BRANCH: main
           RAILWAY_CONFIG_FILE: /railway/web.json
           RAILWAY_PRODUCTION_PROMOTION_ENABLED: ${{ vars.RAILWAY_PRODUCTION_PROMOTION_ENABLED }}
-        run: npx tsx tools/railway-deploy.ts
+        run: npx tsx tools/railway-native-autodeploy.ts
 
       - name: Verify web deployment SHA
         if: steps.promotion.outputs.enabled == 'true'

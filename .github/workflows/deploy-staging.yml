@@ -1,8 +1,8 @@
 name: Deploy to staging
 
-# GitHub Actions is the normal deployment controller. Railway native
-# autodeploy remains disabled; this workflow requests the exact CI-proven SHA
-# from the connected GitHub source through the Railway GraphQL API.
+# Railway's connected GitHub source is the deployment controller. This workflow
+# waits for the native deployment of the exact CI-proven SHA and owns only the
+# verification/evidence gates that follow it.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -57,7 +57,7 @@ jobs:
         run: npm run build
 
       # Engine is intentionally first: web health depends on private engine reachability.
-      - name: Deploy engine to Railway staging
+      - name: Wait for native engine deployment
         id: engine
         env:
           RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
@@ -69,7 +69,7 @@ jobs:
           RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
           RAILWAY_EXPECTED_BRANCH: main
           RAILWAY_CONFIG_FILE: /railway/engine.json
-        run: npx tsx tools/railway-deploy.ts
+        run: npx tsx tools/railway-native-autodeploy.ts
 
       - name: Verify engine deployment SHA
         run: test "${{ steps.engine.outputs.railway_commit_sha }}" = "$SHA"
@@ -98,7 +98,7 @@ jobs:
           echo "::error::Engine staging did not become healthy in 5 minutes"
           exit 1
 
-      - name: Deploy web to Railway staging
+      - name: Wait for native web deployment
         id: web
         env:
           RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
@@ -110,7 +110,7 @@ jobs:
           RAILWAY_EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
           RAILWAY_EXPECTED_BRANCH: main
           RAILWAY_CONFIG_FILE: /railway/web.json
-        run: npx tsx tools/railway-deploy.ts
+        run: npx tsx tools/railway-native-autodeploy.ts
 
       - name: Verify web deployment SHA
         run: test "${{ steps.web.outputs.railway_commit_sha }}" = "$SHA"
