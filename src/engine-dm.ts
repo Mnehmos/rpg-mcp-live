@@ -784,32 +784,79 @@ function rulesNarration(text: string, suffix?: string): NarrationEnvelope {
   };
 }
 
+function committedCheckText(data: unknown, scene?: string): string | null {
+  if (data === null || typeof data !== "object" || typeof (data as { success?: unknown }).success !== "boolean") {
+    return null;
+  }
+  const check = data as { success: boolean; goal?: unknown };
+  const goal = typeof check.goal === "string" ? check.goal.trim().replace(/[.!?]+$/, "") : "";
+  const outcome = check.success ? "The attempt succeeds" : "The attempt falls short";
+  const location = scene ? " in " + scene : "";
+  const purpose = goal ? ": " + goal : "";
+  const consequence = check.success
+    ? "The outcome now stands in the scene."
+    : "The setback now stands, and the situation continues from there.";
+  return `${outcome}${location}${purpose}. ${consequence}`;
+}
+
+function committedMoveText(data: unknown): string {
+  const exit = data !== null && typeof data === "object"
+    ? (data as { exit?: unknown }).exit
+    : null;
+  const label = exit !== null && typeof exit === "object" && typeof (exit as { label?: unknown }).label === "string"
+    ? (exit as { label: string }).label.trim().replace(/[.!?]+$/, "")
+    : "";
+  return label ? `You continue along the chosen path: ${label}.` : "You continue along the chosen path.";
+}
+
 function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope {
   const effects = result.event?.effects ?? [];
+  const worldContext = effects.some((effect) => effect.command.kind === "world_context")
+    ? result.state.worldContext
+    : null;
+  if (worldContext) {
+    const title = worldContext.title.trim().replace(/[.!?]+$/, "");
+    const description = worldContext.description.trim();
+    const entersContext = effects.some((effect) =>
+      effect.command.kind === "world_context"
+      && effect.stateChanges.some((change) => change.path === "/worldContext/id" || change.path === "/worldContext/title")
+    );
+    const scene = `${entersContext ? `You reach ${title}.` : `${title}:`} ${description}${/[.!?]$/.test(description) ? "" : "."}`;
+    const paths = worldContext.exits
+      .slice(0, 3)
+      .map((exit) => exit.label.trim().replace(/[.!?]+$/, ""));
+    const lastWorldContextIndex = effects.reduce(
+      (last, effect, index) => effect.command.kind === "world_context" ? index : last,
+      -1
+    );
+    const hasTrailingMove = effects.some(
+      (effect, index) => effect.command.kind === "move" && index > lastWorldContextIndex
+    );
+    const otherOutcomes = effects
+      .map((effect, index) => {
+        if (effect.command.kind === "world_context") return "";
+        if (effect.command.kind === "move") {
+          return index < lastWorldContextIndex ? "" : committedMoveText(effect.data);
+        }
+        return committedCheckText(effect.check ? effect.data : null) ?? effect.outcome.trim();
+      })
+      .filter(Boolean);
+    const nextChoice = !hasTrailingMove && paths.length > 0
+      ? `Paths onward: ${paths.join("; ")}.`
+      : "What do you do next?";
+    return rulesNarration(
+      scene,
+      [...otherOutcomes, nextChoice].join(" ")
+    );
+  }
   const checkData = effects.length === 1 && effects[0]?.check
     ? effects[0].data
     : effects.length === 0 && result.event?.check
       ? result.data
       : null;
-  const check = checkData !== null
-    && typeof checkData === "object"
-    && typeof (checkData as { success?: unknown }).success === "boolean"
-    ? checkData as { success: boolean; goal?: unknown }
-    : null;
   const scene = result.state.worldContext?.title.trim();
-
-  if (check) {
-    const goal = typeof check.goal === "string"
-      ? check.goal.trim().replace(/[.!?]+$/, "")
-      : "";
-    const outcome = check.success ? "The attempt succeeds" : "The attempt falls short";
-    const location = scene ? " in " + scene : "";
-    const purpose = goal ? ": " + goal : "";
-    const consequence = check.success
-      ? "The outcome now stands in the scene."
-      : "The setback now stands, and the situation continues from there.";
-    return rulesNarration(`${outcome}${location}${purpose}. ${consequence}`);
-  }
+  const checkText = committedCheckText(checkData, scene);
+  if (checkText) return rulesNarration(checkText);
 
   const authoritative = result.message.trim() || "The action changes the situation.";
   return rulesNarration(scene ? `${authoritative} The situation in ${scene} now reflects that result.` : authoritative);
