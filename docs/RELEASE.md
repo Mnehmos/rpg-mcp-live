@@ -2,18 +2,15 @@
 
 ## Overview
 
-Production release material is automated only after the owner enables the
-production promotion guard. The issue #67 cutover proves staging while that
-guard remains disabled.
+Production release material is disabled while the promotion policy is settled.
+This correction proves only the native staging path.
 
 ```
 PR merges to main
-     → staging deploys (engine first, then web)
-     → staging smoke + gauntlet pass
-     → (owner enables promotion guard)
-     → production consumes the same staging manifest and SHA
-     → changelog generated (fails if empty)
-     → annotated tag and GitHub release published
+     → GitHub CI passes
+     → Railway waits for CI, then natively deploys the connected repository
+     → deployment_status health/readback evidence
+     → production remains disabled
 ```
 
 ## Automated changelog (release gate)
@@ -45,34 +42,20 @@ Because the repo uses **squash merge** and the PR title **is** the commit messag
 
 ## Staging deployment
 
-1. Checkout exact merged SHA.
-2. `npm ci` → `npm run check` → `npm run build`.
-3. Deploy engine to Railway staging. Wait for `/health`.
-4. Verify: SHA, pack hash, pack version, tool count, historical packs.
-5. Deploy web to Railway staging. Wait for `/api/health` (web must reach engine).
-6. Run two-service HTTP smoke (`npm run smoke:http`).
-7. Run deterministic gauntlet (after #22).
-8. Write deployment manifest.
+1. Merge a harmless change to `main` through the normal protected flow.
+2. GitHub CI runs on the push.
+3. Railway creates a native GitHub deployment in `WAITING` while CI runs.
+4. After CI succeeds, Railway builds/deploys the connected repository for both
+   services and records the exact merge SHA.
+5. `verify-staging.yml` receives `deployment_status`, checks both health
+   endpoints, and uploads readback evidence.
 
-Deploy engine and web from the **same Git SHA**.
+GitHub Actions never uploads source or calls a Railway deployment mutation.
 
-## Production deployment (guarded)
+## Production deployment
 
-Triggered only when staging completes successfully and the production job's
-runtime guard sees `RAILWAY_PRODUCTION_PROMOTION_ENABLED=true` in the
-production environment. A false or missing value exits before any Railway or
-release mutation.
-
-1. Verify SHA is reachable from `main`.
-2. Verify SHA was deployed to staging.
-3. Deploy engine to Railway production. Verify health + backward compatibility.
-4. Run safe read + synthetic safe mutation against a dedicated acceptance campaign.
-5. Deploy web to Railway production. Verify health + engine reachability.
-6. Write the deployment manifest with both Railway deployment IDs and returned
-   Railway commit SHAs.
-7. Create the annotated tag through the authenticated GitHub API, then publish
-   the GitHub release and manifest. Existing tags are rejected before the first
-   production deployment.
+Production remains disabled. No production deployment, tag, release, or data
+migration is performed by this correction.
 
 ## Health evidence
 

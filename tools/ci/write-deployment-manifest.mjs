@@ -4,7 +4,8 @@
  *
  * Writes a JSON manifest recording what was deployed, to which Railway
  * environment, from which Git SHA, with which content pack.  Used by
- * deploy-staging.yml and deploy-production.yml.
+ * Deployment evidence consumers. Native Railway deployment is not initiated
+ * by GitHub Actions; this helper is retained for historical evidence formats.
  *
  *   node tools/ci/write-deployment-manifest.mjs \
  *       --env staging \

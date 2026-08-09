@@ -72,47 +72,27 @@ No live provider calls happen nightly.
 
 ## Staging deployment
 
-`.github/workflows/deploy-staging.yml` triggers when the required CI workflow
-passes on `main`. It is the normal deployment controller; Railway native
-autodeploy is disabled.
+GitHub Actions owns CI. Railway owns staging deployment through the connected
+`Mnehmos/rpg-mcp-live` GitHub source on `main`, with native autodeploy and
+Railway **Wait for CI** enabled on both service instances. Railway waits while
+the push's GitHub check suites run; a failed suite skips the deployment, and a
+successful suite lets Railway build the repository using the service-specific
+`/railway/engine.json` or `/railway/web.json` config.
 
-```
-checkout exact CI-proven SHA
-→ npm ci → check → build
-→ validate project-token scope, current source/config, and disabled autodeploy
-→ deploy exact SHA: engine first, then web
-→ wait for health, pack/tool evidence, and web→engine reachability
-→ run HTTP smoke, invariants, and deterministic gauntlet
-→ write manifest with both Railway deployment IDs and commit metadata
-```
-
-The deploy helper uses environment-scoped Railway project tokens and first
-queries `projectToken { projectId environmentId }` so a staging token cannot
-touch production (or vice versa). It then reads the current service source,
-repo trigger, Railway config path, and native autodeploy state before calling
-the `serviceInstanceDeployV2` exact-commit mutation. It never logs token values,
-uploads a local archive, or calls `railway up`. Concurrency is
-`group: railway-staging, cancel-in-progress: true`.
+`.github/workflows/verify-staging.yml` listens only for Railway's successful
+`deployment_status` event. It checks the event's repository, `main` ref,
+Railway deployment ID, and exact 40-character commit SHA, then reads the
+engine and web health endpoints and uploads the evidence. It has no Railway
+token, does not call GraphQL, does not upload source, and never calls
+`railway up`.
 
 ## Production deployment
 
-`.github/workflows/deploy-production.yml` consumes only the successful staging
-manifest for the same SHA. The job attaches the `production` environment and
-then evaluates `RAILWAY_PRODUCTION_PROMOTION_ENABLED` at runtime. Every
-mutation step is gated by that result, so the environment variable is usable
-without allowing a disabled run to reach Railway.
-
-When explicitly enabled by the owner, it first checks full tag history, rejects
-an existing release tag, verifies GitHub tag-write capability, and generates
-the changelog before any production mutation. It then validates the staging
-manifest, deploys engine then web through the same exact-SHA helper, binds
-health responses to the expected service/environment and returned Railway
-commit SHA, runs the production health/smoke/gauntlet checks, writes the
-deployment manifest, and finally creates an annotated tag and GitHub release
-through the authenticated GitHub API. It does not push to `main` or commit a
-generated `CHANGELOG.md` back to the branch.
-
-Concurrency: `group: railway-production, cancel-in-progress: false`.
+Production is disabled for this correction. The only production workflow is a
+disabled placeholder; no production Railway source, autodeploy, or deployment
+mutation is changed. A future policy may use a protected `production` branch
+with the same native GitHub source plus Wait for CI, promoted from a proven
+staging SHA.
 
 ## Production migration
 

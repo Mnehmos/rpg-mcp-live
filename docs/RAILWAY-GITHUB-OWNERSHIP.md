@@ -1,9 +1,10 @@
 # Railway deployment ownership
 
-This runbook records the cutover for issue #67. GitHub Actions is the normal
-deployment controller for the existing Railway project; Railway native
-autodeploy remains disabled. The repository, services, data, domains, private
-networking, and variables are not recreated by this change.
+This runbook records the cutover for issue #67. Railway's native GitHub
+integration is the deployment controller for the existing services. GitHub
+Actions owns CI and post-deploy health/readback evidence only. The repository,
+services, data, domains, private networking, and variables are not recreated
+by this change.
 
 ## Existing topology (sanitized baseline)
 
@@ -44,37 +45,28 @@ GitHub Actions staging proof.
 
 ## Normal deployment path
 
-1. A squash merge to `main` completes the required CI workflow.
-2. `deploy-staging.yml` checks out that exact CI-proven SHA, runs checks/build,
-   and calls `tools/railway-deploy.ts` for the engine first and web second.
-3. The helper validates the presented project token's project/environment
-   identity, the current service source and repository trigger, the
-   service-specific config path, and disabled native autodeploy. It then calls
-   Railway's exact-commit GraphQL mutation and waits for `SUCCESS`. Failed,
-   cancelled, unknown, missing, mismatched, or timed-out deployments fail
-   closed.
-4. Health, pack identity, tool count, web-to-engine reachability, smoke,
-   invariants, and the deterministic gauntlet are recorded in a manifest that
-   includes both Railway deployment IDs and returned commit metadata.
-5. `deploy-production.yml` consumes only the successful staging manifest. It
-   attaches the production environment, evaluates the promotion variable at
-   runtime, and keeps every mutation step blocked unless the value is exactly
-   `true`.
+1. A squash merge to `main` starts GitHub CI.
+2. Railway's connected GitHub trigger creates a native staging deployment in
+   `WAITING` while CI check suites run (`checkSuites: true`).
+3. After CI succeeds, Railway builds and deploys the repository natively for
+   the engine and web services using `/railway/engine.json` and
+   `/railway/web.json`.
+4. `verify-staging.yml` receives the successful `deployment_status`, verifies
+   the Railway bot, staging environment, `main` ref, exact deployment SHA, and
+   both health endpoints, then uploads readback evidence.
 
-Native Railway autodeploy is kept disabled even after the source connection is
-made. Do not use `railway up` for a normal deploy, and do not push to `main`
-from a workflow. Production releases may create an annotated tag and GitHub
-release material only after the explicit promotion guard is enabled by the
-owner.
+GitHub Actions never calls `serviceInstanceDeployV2`, uploads a local archive,
+or uses `railway up`. Project-token secrets are retained until this corrected
+path has been proven; they are not used by the ordinary path.
 
 ## GitHub scope
 
-Create `staging` and `production` GitHub environments. Each environment holds
-its own `RAILWAY_STAGING_TOKEN` or `RAILWAY_PRODUCTION_TOKEN` project token;
-token values are never copied into files, logs, artifacts, or issue comments.
-Non-secret environment variables contain only the existing Railway project,
-environment, service, and public health URL IDs/values. The production guard
-is set to `false` until the owner separately approves promotion.
+The `staging` GitHub environment holds only the existing public health URL
+variables used by the post-deploy evidence workflow. Railway project-token
+secrets are retained during this cutover so they can be removed only after the
+native path is proven; the ordinary CI or verification path does not read them.
+The `production` environment remains disabled and its promotion policy is
+unset.
 
 ## Cutover and rollback
 
@@ -84,11 +76,10 @@ set the service config paths to `/railway/engine.json` and
 both environments. Connecting a source is not permission to recreate a
 service or alter a volume.
 
-If a staging deployment fails, leave production untouched, inspect the
-manifest and deployment ID, and redeploy the last known-good main SHA through
-the same GitHub workflow. If ownership must be temporarily repaired, the
-Railway CLI is a break-glass diagnostic path only; restore the GitHub-owned
-source and disabled native autodeploy before resuming normal operation.
+If a staging deployment fails, leave production untouched and inspect the
+Railway deployment status and evidence artifact. Correct the repository through
+the normal protected GitHub flow. The Railway CLI is a break-glass diagnostic
+path only; do not use it for normal deployment.
 
 Never reset, copy, migrate, or delete the existing databases or volumes as
 part of this cutover.
