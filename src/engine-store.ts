@@ -438,18 +438,20 @@ export class LanternEngineStore {
   ): EngineCommandResult | null {
     const row = this.db
       .prepare(
-        "SELECT result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
+        "SELECT request_json, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
       )
-      .get(context.accountId, clientCommandId) as { result_json: string | null } | undefined;
+      .get(context.accountId, clientCommandId) as { request_json: string; result_json: string | null } | undefined;
     if (!row?.result_json) return null;
 
     const stored = JSON.parse(row.result_json) as EngineCommandResult;
     if (stored.narrationSource === "llm") return stored;
-    const state = stored.readOnly ? stored.state : this.getCampaign(context);
+    const request = JSON.parse(row.request_json) as { playerText?: unknown };
+    const persistNarration = !stored.readOnly || typeof request.playerText === "string";
+    const state = persistNarration ? this.getCampaign(context) : stored.state;
     const createdAt = new Date().toISOString();
     const nextState = cloneCampaign(state);
     nextState.suggestedActions = narration.suggestedActions;
-    if (!stored.readOnly) {
+    if (persistNarration) {
       const narrationMessage: EngineMessage = {
         id: randomUUID(),
         kind: "narration",

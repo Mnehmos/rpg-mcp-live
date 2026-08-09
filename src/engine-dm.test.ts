@@ -394,6 +394,38 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it("persists a provider-outage reply for a read-only player turn", async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createStore();
+    const state = createInitialCampaign("account-observe-fallback", "actor-observe-fallback");
+    state.worldContext = {
+      id: "lantern-room", title: "The Lantern Room",
+      description: "A quiet room lit by one lantern.", features: ["lit lantern"],
+      exits: [], npcs: [], merchants: [], objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID(), playerText = "I look around the room.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+
+    expect(result).toMatchObject({ tool: "observe", readOnly: true, narrationSource: "rules" });
+    expect(result.session.log.at(-1)?.text).toBe(result.narration.text);
+    expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
+    const replay = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    store.close();
+  });
+
   it("authors and persists a proactive opening before the first player turn", async () => {
     const fetchMock = vi
       .fn()
