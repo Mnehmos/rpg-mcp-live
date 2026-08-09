@@ -619,7 +619,7 @@ function hasIdenticalRetry(state: LanternCampaignState, decision: EngineAdjudica
       && attempt.challengeId === decision.challengeId
       && attempt.sceneId === decision.sceneId
       && attempt.approachHash === decision.approachHash
-      && attempt.attemptVersion === state.version
+      && (attempt.attemptVersion === state.version || attempt.attemptVersion === state.version + 1)
     );
 }
 
@@ -5485,6 +5485,27 @@ function resolveWorldObjectAffordance(
     if (states.includes(object.state)) return null;
     return rejection(state, tool, code, message, { objectId: object.id, state: object.state });
   };
+  const establishedHolder = world.npcs.find((npc) => npc.id === object.locationRef);
+  const heldObjectTransferRejection = (): EngineResolution | null => {
+    if (!establishedHolder) return null;
+    if (!object.definition.criticalPolicy.canLose) {
+      return rejection(state, tool, "critical_object_protected", "This critical object cannot be lost through that interaction.", { objectId: object.id });
+    }
+    const contest = state.adjudicationHistory.at(-1);
+    if (
+      !contest
+      || contest.challengeId !== "seize-held-object-v1"
+      || contest.opponentId !== establishedHolder.id
+      || contest.sceneId !== `${world.id}:${object.id}`
+      || contest.attemptVersion !== state.version + 1
+    ) {
+      return rejection(state, tool, "contest_required", "Seizing an object from its established holder requires a current target-bound contest.", { objectId: object.id, holderId: establishedHolder.id });
+    }
+    if (contest.outcome !== "success") {
+      return rejection(state, tool, "contest_failed", "The current contest did not transfer the held object.", { objectId: object.id, holderId: establishedHolder.id });
+    }
+    return null;
+  };
   let message = "";
   let outcome = "world_object_interacted";
   switch (command.affordance) {
@@ -5529,6 +5550,8 @@ function resolveWorldObjectAffordance(
       if ((command.affordance === "carry" || command.affordance === "throw") && object.ownerRef.kind === "actor" && object.ownerRef.id !== context.actorId) {
         return rejection(state, tool, "ownership_required", "Only the owning actor can carry or throw this object.", { objectId: object.id });
       }
+      const heldObjectRejection = heldObjectTransferRejection();
+      if (heldObjectRejection) return heldObjectRejection;
       setObject(object.id, {
         locationRef: command.destinationId,
         ...(command.affordance === "carry" ? { ownerRef: { kind: "actor", id: context.actorId }, state: "carried" as const } : {}),
@@ -5542,25 +5565,11 @@ function resolveWorldObjectAffordance(
       if (object.ownerRef.kind === "actor" && object.ownerRef.id === context.actorId) {
         return rejection(state, tool, "already_owned", "The acting character already owns that object.", { objectId: object.id });
       }
-      const establishedHolder = world.npcs.find((npc) => npc.id === object.locationRef);
-      if (!object.definition.criticalPolicy.canLose && (command.affordance === "steal" || establishedHolder)) {
+      if (!object.definition.criticalPolicy.canLose && command.affordance === "steal" && !establishedHolder) {
         return rejection(state, tool, "critical_object_protected", "This critical object cannot be lost through that interaction.", { objectId: object.id });
       }
-      if (establishedHolder) {
-        const contest = state.adjudicationHistory.at(-1);
-        if (
-          !contest
-          || contest.challengeId !== "seize-held-object-v1"
-          || contest.opponentId !== establishedHolder.id
-          || contest.sceneId !== `${world.id}:${object.id}`
-          || contest.attemptVersion !== state.version + 1
-        ) {
-          return rejection(state, tool, "contest_required", "Seizing an object from its established holder requires a current target-bound contest.", { objectId: object.id, holderId: establishedHolder.id });
-        }
-        if (contest.outcome !== "success") {
-          return rejection(state, tool, "contest_failed", "The current contest did not transfer the held object.", { objectId: object.id, holderId: establishedHolder.id });
-        }
-      }
+      const heldObjectRejection = heldObjectTransferRejection();
+      if (heldObjectRejection) return heldObjectRejection;
       setObject(object.id, { ownerRef: { kind: "actor", id: context.actorId }, locationRef: null, state: "carried" });
       message = "The engine records " + object.definition.name + " as carried by the acting character.";
       outcome = command.affordance === "take" ? "world_object_taken" : "world_object_stolen";

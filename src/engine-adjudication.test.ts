@@ -97,7 +97,7 @@ function heldKeyRingState(accountId: string, actorId: string): LanternCampaignSt
   return state;
 }
 
-function keyRingMaterializationCommand(includeSecondHeldObject = false): EngineCommand {
+function keyRingMaterializationCommand(includeSecondHeldObject = false, canLose = true): EngineCommand {
   const keyRing = {
     id: "titus-key-ring",
     definition: {
@@ -107,14 +107,14 @@ function keyRingMaterializationCommand(includeSecondHeldObject = false): EngineC
       description: "A mundane ring of iron keys established in released narration.",
       material: "metal",
       tags: ["key-ring", "keys", "mundane"],
-      affordances: ["inspect", "take", "steal", "carry", "drop"],
+      affordances: ["inspect", "move", "carry", "throw", "take", "steal", "drop"],
       prerequisites: [],
       effectInteractions: [],
       weight: 0.25,
       criticalPolicy: {
         kind: "ordinary_consequence",
         canDestroy: true,
-        canLose: true,
+        canLose,
         canSell: false,
         canConsume: false,
         canHide: true,
@@ -249,18 +249,23 @@ describe("server-owned challenge adjudication", () => {
     });
     const contested = resolveEngineCommand(provisionalState(materialized, state.version), context, "failed-key:1", contest, "challenge_attempt");
     expect(contested.state.adjudicationHistory.at(-1)?.outcome).toBe("failure-with-complication");
+    const randomCallsAfterFailure = deterministicRandomInt.mock.calls.length;
 
-    const steal = command({ kind: "interact", targetId: "titus-key-ring", affordance: "steal", goal: "Take the key ring from Titus" });
-    const rejected = resolveEngineCommand(provisionalState(contested, state.version), context, "failed-key:2", steal, "interact");
-    expect(rejected).toMatchObject({ accepted: false, code: "contest_failed" });
-    const rejectedTake = resolveEngineCommand(
-      provisionalState(contested, state.version),
-      context,
-      "failed-key:3",
-      command({ kind: "interact", targetId: "titus-key-ring", affordance: "take", goal: "Take the key ring from Titus" }),
-      "interact",
-    );
-    expect(rejectedTake).toMatchObject({ accepted: false, code: "contest_failed" });
+    const retry = resolveEngineCommand(provisionalState(contested, state.version), context, "failed-key:retry", contest, "challenge_attempt");
+    expect(retry).toMatchObject({ accepted: false, code: "retry_blocked" });
+    expect(deterministicRandomInt.mock.calls.length).toBe(randomCallsAfterFailure);
+
+    for (const affordance of ["move", "carry", "throw", "take", "steal"] as const) {
+      const transfer = command({
+        kind: "interact",
+        targetId: "titus-key-ring",
+        affordance,
+        goal: "Take the key ring from Titus",
+        ...(["move", "carry", "throw"].includes(affordance) ? { destinationId: "ludus-vault" } : {}),
+      });
+      const rejected = resolveEngineCommand(provisionalState(contested, state.version), context, `failed-key:${affordance}`, transfer, "interact");
+      expect(rejected).toMatchObject({ accepted: false, code: "contest_failed" });
+    }
 
     const plan = compileAtomicTurnResolution(state, context, randomUUID(), [
       { tool: "world_context", command: materialize, resolution: materialized },
@@ -268,6 +273,26 @@ describe("server-owned challenge adjudication", () => {
     ]);
     expect(plan.state.worldContext?.objects).toHaveLength(1);
     expect(plan.state.worldContext?.objects[0]).toMatchObject({
+      ownerRef: { kind: "world", id: "ludus-vault" },
+      locationRef: "titus",
+    });
+  });
+
+  it("preserves a protected held object when carry is requested", () => {
+    const state = heldKeyRingState("account-key-protected", "actor-key-protected");
+    const context = contextFor(state);
+    const materialized = resolveEngineCommand(state, context, "protected-key:0", keyRingMaterializationCommand(false, false), "world_context");
+    const carry = command({
+      kind: "interact",
+      targetId: "titus-key-ring",
+      affordance: "carry",
+      destinationId: "ludus-vault",
+      goal: "Carry Titus's key ring away",
+    });
+    const rejected = resolveEngineCommand(provisionalState(materialized, state.version), context, "protected-key:1", carry, "interact");
+
+    expect(rejected).toMatchObject({ accepted: false, code: "critical_object_protected" });
+    expect(rejected.state.worldContext?.objects[0]).toMatchObject({
       ownerRef: { kind: "world", id: "ludus-vault" },
       locationRef: "titus",
     });
