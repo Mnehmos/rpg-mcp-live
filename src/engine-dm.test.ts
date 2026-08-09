@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInitialCampaign, normalizeCampaignState } from "./engine-domain.js";
+import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "./engine-domain.js";
 import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
@@ -317,11 +317,28 @@ describe("Lantern OpenRouter tool loop", () => {
                     description: "Cold lamplight catches on damp stone while Titus listens for Ledrus behind you.",
                     features: ["damp stone", "cold lamplight"],
                     exits: [
-                      { id: "drain-stairs", label: "Descend the drain stairs" },
+                      { id: "watchtower-yard", label: "Cross into the watchtower yard" },
                       { id: "storage-niche", label: "Search the storage niche" },
                     ],
                   }),
                 },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-watchtower-yard-move",
+                type: "function",
+                function: { name: "move", arguments: JSON.stringify({ destinationId: "watchtower-yard" }) },
               }],
             },
           }],
@@ -360,6 +377,12 @@ describe("Lantern OpenRouter tool loop", () => {
     state.character.created = true;
     state.character.abilities.wis = 20;
     state.phase = "sandbox";
+    const situation = resolveEngineCommand(state, {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    }, randomUUID(), { kind: "situation_create", templateId: "watchtower-relic-v1" }, "situation_create");
+    expect(situation.accepted).toBe(true);
+    state.situation = situation.state.situation;
     state.worldContext = {
       id: "ludus-vault",
       title: "The Ludus Holding Vault",
@@ -383,22 +406,25 @@ describe("Lantern OpenRouter tool loop", () => {
     const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
 
     expect(result).toMatchObject({ narrationSource: "rules", state: { version: 1 } });
-    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context", "roll_check"]);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context", "move", "roll_check"]);
     expect(result.narration.text).toContain("You reach The Ludus Service Passage.");
     expect(result.narration.text).toContain("Cold lamplight catches on damp stone");
+    expect(result.narration.text).toContain("You continue along the chosen path: Cross into the watchtower yard.");
     expect(result.narration.text).toContain("The attempt succeeds");
     expect(result.narration.text).not.toContain("against DC");
-    expect(result.narration.text).toContain("Paths onward: Descend the drain stairs; Search the storage niche.");
+    expect(result.narration.text).not.toContain("Paths onward:");
+    expect(result.state.situation?.currentLocationId).toBe("watchtower-yard");
+    expect(result.event?.effects?.[2]?.stateChanges.some((change) => change.path === "/situation")).toBe(true);
     const playerFacing = JSON.stringify({
       narration: result.narration,
       log: result.session.log,
       replayNarration: replay.narration,
       replayLog: replay.session.log,
     });
-    expect(playerFacing).not.toMatch(/The DM must establish|The DM establishes|toward Slip/i);
+    expect(playerFacing).not.toMatch(/The DM must establish|The DM establishes|toward Slip|Slip through a side arch/i);
     expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules", state: { version: 1 } });
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     store.close();
   });
 
