@@ -2,22 +2,19 @@ export type DeploymentService = "web" | "engine";
 
 export interface DeploymentIdentity {
   service: DeploymentService;
-  environment: string;
+  environment: string | null;
   commitSha: string | null;
   deploymentId: string | null;
 }
 
-function railwayValue(name: string): string | null {
-  return process.env[name]?.trim() || null;
-}
-
 export function deploymentIdentity(
   service: DeploymentService,
-  fallbackEnvironment: string
+  environment: NodeJS.ProcessEnv = process.env
 ): DeploymentIdentity {
+  const railwayValue = (name: string): string | null => environment[name]?.trim() || null;
   return {
     service,
-    environment: railwayValue("RAILWAY_ENVIRONMENT_NAME") ?? fallbackEnvironment,
+    environment: railwayValue("RAILWAY_ENVIRONMENT_NAME"),
     commitSha: railwayValue("RAILWAY_GIT_COMMIT_SHA"),
     deploymentId: railwayValue("RAILWAY_DEPLOYMENT_ID"),
   };

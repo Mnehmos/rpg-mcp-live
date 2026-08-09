@@ -47,7 +47,7 @@ import {
 
 const contentRegistry = await loadInstalledOpen5ePackRegistry();
 const contentPack = contentRegistry.activePack;
-const deployment = deploymentIdentity("engine", engineConfig.nodeEnv);
+const deployment = deploymentIdentity("engine");
 const deploymentContentPolicy: DeploymentContentPolicy = {
   defaultGamesystem: engineConfig.contentGamesystem,
   defaultBaseDocument: engineConfig.contentDefaultBaseDocument,

@@ -16,7 +16,7 @@ import { GameStore } from "./store.js";
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
 const publicDirectory = path.join(projectRoot, "public");
-const deployment = deploymentIdentity("web", config.nodeEnv);
+const deployment = deploymentIdentity("web");
 const store = new GameStore(config.databasePath);
 const stripe = createStripeClient();
 const engineClient = new LanternEngineClient({

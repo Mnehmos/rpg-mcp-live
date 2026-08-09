@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deploymentIdentity } from "../src/deployment-identity.js";
 
 const repositoryRoot = process.cwd();
 const probeRoot = await mkdtemp(join(tmpdir(), "rpg-mcp-s9-http-"));
@@ -16,6 +17,8 @@ type DeploymentIdentity = {
   commitSha?: string | null;
   deploymentId?: string | null;
 };
+const unverifiedIdentity = deploymentIdentity("web", {});
+assert(unverifiedIdentity.environment === null && unverifiedIdentity.commitSha === null && unverifiedIdentity.deploymentId === null, "Missing Railway metadata must remain unverified.");
 const commonEnvironment = {
   ...process.env,
   NODE_ENV: "development",
