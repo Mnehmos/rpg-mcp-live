@@ -1341,6 +1341,21 @@ export type EngineAdjudicationStake = z.infer<typeof engineAdjudicationStakeSche
 export const engineAdjudicationDifficultyBandSchema = z.enum(["gentle", "standard", "challenging"]);
 export type EngineAdjudicationDifficultyBand = z.infer<typeof engineAdjudicationDifficultyBandSchema>;
 
+export const engineFailurePressureStatusSchema = z.enum(["rising", "compromised"]);
+export type EngineFailurePressureStatus = z.infer<typeof engineFailurePressureStatusSchema>;
+
+export const engineFailurePressureSchema = z.object({
+  id: z.string().trim().min(1).max(160),
+  actorId: z.string().trim().min(1).max(120),
+  challengeId: z.string().trim().min(1).max(120),
+  sceneId: z.string().trim().min(1).max(120),
+  failureCount: z.number().int().positive().max(10),
+  threshold: z.number().int().positive().max(10),
+  status: engineFailurePressureStatusSchema,
+  lastFailureVersion: z.number().int().nonnegative(),
+}).strict();
+export type EngineFailurePressure = z.infer<typeof engineFailurePressureSchema>;
+
 export interface EngineAdjudicationCosts {
   timeMinutes: number;
   noise: number;
@@ -3097,6 +3112,8 @@ export interface LanternCampaignState {
   campaign: EngineCampaignProfile;
   experienceProfile: EngineExperienceProfile;
   adjudicationHistory: EngineAdjudicationAttempt[];
+  /** Bounded pressure records prevent repeated failed approaches from stalling a scene. */
+  failurePressures: EngineFailurePressure[];
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;
@@ -3164,6 +3181,7 @@ export interface EngineSessionView {
   contentPolicy: EngineContentPolicy;
   campaign: EngineCampaignProfile;
   experienceProfile: EngineExperienceProfile;
+  failurePressures: EngineFailurePressure[];
   phase: EngineCampaignPhase;
   tutorialStep: number;
   characterCreation: EngineCharacterCreationState;

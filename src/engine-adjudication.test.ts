@@ -441,6 +441,56 @@ describe("server-owned challenge adjudication", () => {
     closeHarness(harness);
   });
 
+  it("turns repeated changed failures into a compromised approach instead of another roll", () => {
+    deterministicRandomInt.mockClear();
+    deterministicRandomInt.mockReturnValue(1);
+    const state = createInitialCampaign("account-pressure", "actor-pressure");
+    const harness = createHarness(state);
+    const attempts = ["Shoulder it", "Brace a timber and ram it", "Wedge the door with a fallen beam"];
+    let current = state;
+    for (const approach of attempts) {
+      const result = execute(
+        harness,
+        current,
+        randomUUID(),
+        command({ kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force the barred door", approach }),
+        current.version,
+      );
+      expect(result.accepted).toBe(true);
+      current = result.state;
+    }
+
+    expect(current.failurePressures).toMatchObject([{
+      challengeId: "barred-door-v1",
+      sceneId: "campaign-scene",
+      failureCount: 3,
+      threshold: 3,
+      status: "compromised",
+    }]);
+    const callsAfterThreshold = deterministicRandomInt.mock.calls.length;
+    const blocked = execute(
+      harness,
+      current,
+      randomUUID(),
+      command({ kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force the barred door", approach: "Kick the hinges" }),
+      current.version,
+    );
+    expect(blocked).toMatchObject({ accepted: false, code: "challenge_pressure_compromised", state: { version: 3 } });
+    expect(blocked.data).toMatchObject({ failurePressure: { status: "compromised", failureCount: 3 } });
+    expect(deterministicRandomInt.mock.calls.length).toBe(callsAfterThreshold);
+
+    const changedScene = execute(
+      harness,
+      current,
+      randomUUID(),
+      command({ kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force the barred door", approach: "Kick the hinges", sceneId: "new-scene" }),
+      current.version,
+    );
+    expect(changedScene.accepted).toBe(true);
+    expect(changedScene.state.failurePressures).toHaveLength(1);
+    closeHarness(harness);
+  });
+
   it("rejects stale attempts immutably and replays a resolved attempt after restart without rerolling", () => {
     deterministicRandomInt.mockClear();
     deterministicRandomInt.mockReturnValue(20);

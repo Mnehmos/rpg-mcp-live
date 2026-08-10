@@ -1,6 +1,7 @@
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import type { NarrationEnvelope } from "./ai-contracts.js";
 import {
+  engineFailurePressureSchema,
   engineExperienceProfileInputSchema,
   engineExperienceProfileSchema,
   engineProceduralNoticeSchema,
@@ -112,6 +113,7 @@ import type {
   EngineEvent,
   EngineFeatureReference,
   EngineEffectInstance,
+  EngineFailurePressure,
   EngineEffectDuration,
   EngineEffectOperation,
   EngineEquipmentSlot,
@@ -552,6 +554,99 @@ function challengeApproachHash(
     .digest("hex");
 }
 
+const FAILURE_PRESSURE_THRESHOLD = 3;
+
+function failurePressureId(actorId: string, challengeId: string, sceneId: string): string {
+  return "failure-pressure:" + createHash("sha256")
+    .update([actorId, challengeId, sceneId].join("\n"))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function failurePressureFor(
+  state: LanternCampaignState,
+  actorId: string,
+  challengeId: string,
+  sceneId: string,
+): EngineFailurePressure | null {
+  return (state.failurePressures ?? []).find((pressure) =>
+    pressure.actorId === actorId
+    && pressure.challengeId === challengeId
+    && pressure.sceneId === sceneId
+  ) ?? null;
+}
+
+function applyFailurePressure(
+  next: LanternCampaignState,
+  state: LanternCampaignState,
+  actorId: string,
+  challengeId: string,
+  sceneId: string,
+  failed: boolean,
+): { pressure: EngineFailurePressure | null; changes: Array<{ path: string; before: unknown; after: unknown }> } {
+  const existing = failurePressureFor(state, actorId, challengeId, sceneId);
+  if (!failed) {
+    if (!existing) return { pressure: null, changes: [] };
+    next.failurePressures = (state.failurePressures ?? []).filter((pressure) => pressure.id !== existing.id);
+    return {
+      pressure: null,
+      changes: [{ path: `/failurePressures/${existing.id}`, before: existing, after: null }],
+    };
+  }
+  const failureCount = Math.min(FAILURE_PRESSURE_THRESHOLD, (existing?.failureCount ?? 0) + 1);
+  const pressure: EngineFailurePressure = {
+    id: existing?.id ?? failurePressureId(actorId, challengeId, sceneId),
+    actorId,
+    challengeId,
+    sceneId,
+    failureCount,
+    threshold: FAILURE_PRESSURE_THRESHOLD,
+    status: failureCount >= FAILURE_PRESSURE_THRESHOLD ? "compromised" : "rising",
+    lastFailureVersion: state.version + 1,
+  };
+  const superseded = (state.failurePressures ?? []).filter((candidate) =>
+    candidate.id !== pressure.id
+    && candidate.actorId === actorId
+    && candidate.challengeId === challengeId
+  );
+  next.failurePressures = [
+    ...(state.failurePressures ?? []).filter((candidate) => !superseded.some((old) => old.id === candidate.id) && candidate.id !== pressure.id),
+    pressure,
+  ].slice(-40);
+  return {
+    pressure,
+    changes: [
+      ...superseded.map((old) => ({ path: `/failurePressures/${old.id}`, before: old, after: null })),
+      { path: `/failurePressures/${pressure.id}`, before: existing, after: pressure },
+    ],
+  };
+}
+
+function failurePressureRejection(
+  state: LanternCampaignState,
+  tool: EngineToolName | "declare" | "listen",
+  pressure: EngineFailurePressure,
+  decision?: EngineAdjudicationDecision,
+): EngineResolution {
+  return rejection(
+    state,
+    tool,
+    "challenge_pressure_compromised",
+    "Repeated failures have compromised this approach; change the situation before attempting it again.",
+    {
+      ...(decision ? { adjudication: decision } : {}),
+      failurePressure: pressure,
+    },
+  );
+}
+
+function failurePressureMessage(pressure: EngineFailurePressure | null): string | null {
+  if (!pressure) return null;
+  return pressure.status === "compromised"
+    ? " The repeated failures have compromised this approach; the situation now requires a materially different response."
+    : ` Pressure is rising (${pressure.failureCount}/${pressure.threshold}); another failure will compromise this approach.`;
+}
+
 function buildAdjudicationDecision(
   state: LanternCampaignState,
   context: RequestContext,
@@ -722,14 +817,16 @@ function resolveOpposedCheck(
   const next = cloneCampaign(state);
   next.lastRoll = roll;
   const attemptChange = appendAdjudicationAttempt(next, state, decision, outcome, roll, total).change;
-  const fullData = { ability: actorCheck.ability, skill: actorCheck.skill, goal: command.goal, roll, modifier: derived.modifier, total, opponentId, opponentRoll, opponentModifier, opponentTotal, success, adjudication: decision, costs: decision.costs, outcome };
+  const pressureResult = applyFailurePressure(next, state, context.actorId, decision.challengeId, decision.sceneId, !success);
+  const fullData = { ability: actorCheck.ability, skill: actorCheck.skill, goal: command.goal, roll, modifier: derived.modifier, total, opponentId, opponentRoll, opponentModifier, opponentTotal, success, adjudication: decision, costs: decision.costs, outcome, failurePressure: pressureResult.pressure };
+  const resolvedText = text + (success ? "" : (failurePressureMessage(pressureResult.pressure) ?? ""));
   return commit(
     next,
     context,
     clientCommandId,
     command,
     tool,
-    text,
+    resolvedText,
     withheld ? { informationPolicy: "withheld", outcome } : fullData,
     outcome,
     [
@@ -742,7 +839,7 @@ function resolveOpposedCheck(
       { name: "opponent_modifier", value: opponentModifier },
       { name: "opponent_total", value: opponentTotal },
     ],
-    [{ path: "/lastRoll", before: state.lastRoll, after: roll }, attemptChange],
+    [{ path: "/lastRoll", before: state.lastRoll, after: roll }, attemptChange, ...pressureResult.changes],
     [],
     decision,
     check
@@ -774,6 +871,10 @@ function resolveChallengeAttempt(
       decision,
       { alternatives: definition.alternatives ?? [] }
     );
+  }
+  const existingPressure = failurePressureFor(state, decision.actorId, decision.challengeId, decision.sceneId);
+  if (existingPressure?.status === "compromised") {
+    return failurePressureRejection(state, tool, existingPressure, decision);
   }
   if (hasIdenticalRetry(state, decision)) {
     return adjudicationRejection(
@@ -1511,6 +1612,7 @@ export function createInitialCampaign(
     campaign,
     experienceProfile: buildExperienceProfile(normalizedExperienceProfile, now),
     adjudicationHistory: [],
+    failurePressures: [],
     phase: "character_creation",
     tutorialStep: 0,
     characterCreation: { abilityScoreDraft: null },
@@ -1578,6 +1680,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     contentPolicy?: EngineContentPolicy;
     experienceProfile?: unknown;
     adjudicationHistory?: unknown;
+    failurePressures?: unknown;
     worldFacts?: unknown;
     worldObjects?: unknown;
     actorKnowledge?: unknown;
@@ -1605,6 +1708,12 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   next.experienceProfile = normalizeExperienceProfile(next.experienceProfile, next.updatedAt);
   next.adjudicationHistory = Array.isArray(next.adjudicationHistory)
     ? next.adjudicationHistory.slice(-100) as EngineAdjudicationAttempt[]
+    : [];
+  next.failurePressures = Array.isArray(next.failurePressures)
+    ? next.failurePressures.flatMap((pressure) => {
+      const parsed = engineFailurePressureSchema.safeParse(pressure);
+      return parsed.success ? [parsed.data] : [];
+    }).slice(-40)
     : [];
   next.worldFacts = normalizeWorldFacts(next.worldFacts);
   next.proceduralNotices = normalizeProceduralNotices((next as LanternCampaignState & { proceduralNotices?: unknown }).proceduralNotices);
@@ -2374,6 +2483,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     contentPolicy: state.contentPolicy,
     campaign: state.campaign,
     experienceProfile: normalizeExperienceProfile(state.experienceProfile, state.updatedAt),
+    failurePressures: state.failurePressures ?? [],
     phase: state.phase,
     tutorialStep: state.tutorialStep,
     characterCreation: state.characterCreation,
@@ -6366,6 +6476,15 @@ function resolveCheck(
 ): EngineResolution {
   const derived = deriveCheck(state, ability, skill, adjudication?.tool ?? null, tool);
   if ("accepted" in derived) return derived;
+  const pressureChallengeId = adjudication?.challengeId
+    ?? (command.kind === "roll_check" && skill?.toLocaleLowerCase("en-US") === "stealth" ? "ability-check:stealth" : null);
+  const pressureSceneId = adjudication?.sceneId ?? state.worldContext?.id ?? "campaign-scene";
+  const existingPressure = pressureChallengeId
+    ? failurePressureFor(state, context.actorId, pressureChallengeId, pressureSceneId)
+    : null;
+  if (existingPressure?.status === "compromised") {
+    return failurePressureRejection(state, tool, existingPressure, adjudication);
+  }
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
   const advantageSources = [...modifierQuery.effectIds];
   if (adjudication?.helperId) advantageSources.push("helper:" + adjudication.helperId);
@@ -6416,15 +6535,19 @@ function resolveCheck(
   const attemptChange = adjudication && adjudicationOutcome
     ? appendAdjudicationAttempt(next, state, adjudication, adjudicationOutcome, roll, total).change
     : null;
-  const fullData = { ability, skill, goal, dc, roll, modifier: derived.modifier, total, success, ...(adjudication ? { adjudication, costs: adjudication.costs, outcome } : {}) };
+  const pressureResult = pressureChallengeId
+    ? applyFailurePressure(next, state, context.actorId, pressureChallengeId, pressureSceneId, !success)
+    : { pressure: null, changes: [] };
+  const fullData = { ability, skill, goal, dc, roll, modifier: derived.modifier, total, success, ...(adjudication ? { adjudication, costs: adjudication.costs, outcome } : {}), failurePressure: pressureResult.pressure };
   const data = withheld ? { informationPolicy: "withheld", outcome } : fullData;
+  const resolvedText = text + (success ? "" : (failurePressureMessage(pressureResult.pressure) ?? ""));
   return commit(
     next,
     context,
     clientCommandId,
     persistedCommand ?? command,
     tool,
-    text,
+    resolvedText,
     data,
     outcome,
     [
@@ -6435,6 +6558,7 @@ function resolveCheck(
     [
       { path: "/lastRoll", before: state.lastRoll, after: roll },
       ...(attemptChange ? [attemptChange] : []),
+      ...pressureResult.changes,
     ],
     [],
     adjudication,
