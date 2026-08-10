@@ -29,6 +29,7 @@ import { createInitialCampaign, projectEventForActor, projectExperienceProfile, 
 import { parseProductionRoomState, productionRoomNarrationReleaseRequestSchema, projectNarrationSequenceForActor, projectSceneForActor } from "./engine-production-room.js";
 import { buildResumeProjection, emptyOrchestrationState, orchestrationDecisionRequestSchema, refreshSceneFromEvents } from "./engine-orchestration.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
+import type { OpenRouterCompletionTelemetry } from "./openrouter.js";
 import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js";
 import {
   commandForTool,
@@ -88,10 +89,16 @@ const modelOptions = {
   apiKey: engineConfig.openRouterApiKey,
   baseUrl: engineConfig.openRouterBaseUrl,
   model: engineConfig.openRouterModel,
+  fallbackBaseUrl: engineConfig.openRouterFallbackBaseUrl,
+  fallbackModel: engineConfig.openRouterFallbackModel,
+  firstTokenTimeoutMs: engineConfig.openRouterFirstTokenTimeoutMs,
   reasoningEffort: engineConfig.openRouterReasoningEffort,
   maxTokens: engineConfig.openRouterMaxTokens,
   siteUrl: engineConfig.openRouterSiteUrl,
   appName: engineConfig.openRouterAppName,
+  onCompletionTelemetry: (event: OpenRouterCompletionTelemetry) => {
+    console.info("lantern.model_completion " + JSON.stringify(event));
+  },
 };
 const dungeonMaster = new LanternDungeonMaster(store, modelOptions, contentResolverFor);
 const app = express();

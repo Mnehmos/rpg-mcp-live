@@ -176,7 +176,8 @@ export class LanternEngineClient {
     accountId: string,
     actorId: string,
     campaignId: string,
-    command: Omit<EngineCommandRequest, "clientCommandId"> & { clientCommandId?: string }
+    command: Omit<EngineCommandRequest, "clientCommandId"> & { clientCommandId?: string },
+    signal?: AbortSignal
   ): Promise<EngineCommandResult> {
     const body = {
       ...command,
@@ -185,7 +186,9 @@ export class LanternEngineClient {
     const result = await this.request<EngineCommandResult>(
       "/v1/campaigns/" + encodeURIComponent(campaignId) + "/commands",
       { method: "POST", body: JSON.stringify(body) },
-      { accountId, actorId }
+      { accountId, actorId },
+      0,
+      signal
     );
     return result.data;
   }
@@ -212,7 +215,8 @@ export class LanternEngineClient {
     accountId: string,
     actorId: string,
     campaignId: string,
-    request: Omit<EngineOpeningRequest, "clientCommandId"> & { clientCommandId?: string }
+    request: Omit<EngineOpeningRequest, "clientCommandId"> & { clientCommandId?: string },
+    signal?: AbortSignal
   ): Promise<EngineCommandResult> {
     const body = {
       ...request,
@@ -221,7 +225,9 @@ export class LanternEngineClient {
     const result = await this.request<EngineCommandResult>(
       "/v1/campaigns/" + encodeURIComponent(campaignId) + "/opening",
       { method: "POST", body: JSON.stringify(body) },
-      { accountId, actorId }
+      { accountId, actorId },
+      0,
+      signal
     );
     return result.data;
   }
@@ -298,7 +304,9 @@ export class LanternEngineClient {
   private async request<T>(
     path: string,
     init: RequestInit,
-    identity: { accountId: string; actorId: string } | null
+    identity: { accountId: string; actorId: string } | null,
+    timeoutMs = this.options.timeoutMs,
+    signal?: AbortSignal
   ): Promise<EngineHttpResponse<T>> {
     const headers = new Headers(init.headers);
     headers.set("Content-Type", "application/json");
@@ -313,7 +321,7 @@ export class LanternEngineClient {
     const response = await fetch(this.baseUrl + path, {
       ...init,
       headers,
-      signal: AbortSignal.timeout(this.options.timeoutMs),
+      signal: signal ?? (timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined),
     });
     const data = (await response.json().catch(() => ({}))) as T & Record<string, unknown>;
     if (!response.ok) throw new EngineHttpError(response.status, data);

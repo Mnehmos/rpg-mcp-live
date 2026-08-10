@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { RequestContext } from "./engine-contracts.js";
+import { openAiSdkFetch as sdkFetch } from "./test-openai-stream.js";
 
 const options = {
   apiKey: "test-key",
@@ -124,7 +125,7 @@ describe("Lantern OpenRouter tool loop", () => {
           ],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-a", "actor-a");
@@ -227,7 +228,7 @@ describe("Lantern OpenRouter tool loop", () => {
         }),
       })
       .mockRejectedValueOnce(new Error("provider timeout after commit"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign(`account-${wisdom}`, `actor-${wisdom}`);
@@ -371,7 +372,7 @@ describe("Lantern OpenRouter tool loop", () => {
         }),
       })
       .mockRejectedValueOnce(new Error("provider timeout after context commit"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-context-fallback", "actor-context-fallback");
@@ -450,7 +451,7 @@ describe("Lantern OpenRouter tool loop", () => {
         }),
       })
       .mockRejectedValueOnce(new Error("provider timeout after death save"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const initial = createInitialCampaign("account-death-fallback", "actor-death-fallback");
@@ -499,7 +500,7 @@ describe("Lantern OpenRouter tool loop", () => {
 
   it("persists player-facing no-check fallback narration without internal declare text", async () => {
     const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-declare-fallback", "actor-declare-fallback");
@@ -555,7 +556,7 @@ describe("Lantern OpenRouter tool loop", () => {
 
   it("keeps the exact rest result when the provider is unavailable before the tool loop", async () => {
     const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-rest-fallback", "actor-rest-fallback");
@@ -602,7 +603,7 @@ describe("Lantern OpenRouter tool loop", () => {
 
   it("persists a provider-outage reply for a read-only player turn", async () => {
     const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-observe-fallback", "actor-observe-fallback");
@@ -674,7 +675,7 @@ describe("Lantern OpenRouter tool loop", () => {
           }) } }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-opening", "actor-opening");
@@ -769,7 +770,7 @@ describe("Lantern OpenRouter tool loop", () => {
           }) } }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-opening-repair", "actor-opening-repair");
@@ -844,7 +845,7 @@ describe("Lantern OpenRouter tool loop", () => {
           choices: [{ message: { role: "assistant", content: malformed("The invalid repair should not replace safe text.") } }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-repair-fallback", "actor-repair-fallback");
@@ -899,7 +900,7 @@ describe("Lantern OpenRouter tool loop", () => {
           choices: [{ message: { role: "assistant", content: JSON.stringify("The repair is still only a string.") } }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-scalar-fallback", "actor-scalar-fallback");
@@ -991,7 +992,7 @@ describe("Lantern OpenRouter tool loop", () => {
           }) } }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-plan", "actor-plan");
@@ -1112,7 +1113,7 @@ describe("Lantern OpenRouter tool loop", () => {
           }) } }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-corrected-world", "actor-corrected-world");
@@ -1215,7 +1216,7 @@ describe("Lantern OpenRouter tool loop", () => {
           }],
         }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-profile-dm", "actor-profile-dm");

@@ -590,11 +590,29 @@ async function runModelTimeoutAfterCommit(): Promise<GauntletTrace> {
     globalThis.fetch = (async () => {
       calls += 1;
       if (calls === 1) {
-        return {
-          ok: true,
+        const chunk = {
+          id: "gauntlet-stream",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "fixture/model",
+          choices: [{
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [{
+                index: 0,
+                id: "gauntlet-world-context",
+                type: "function",
+                function: { name: "world_context", arguments: JSON.stringify(command) },
+              }],
+            },
+            finish_reason: "tool_calls",
+          }],
+        };
+        return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
           status: 200,
-          json: async () => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "gauntlet-world-context", type: "function", function: { name: "world_context", arguments: JSON.stringify(command) } }] } }] }),
-        } as Response;
+          headers: { "content-type": "text/event-stream" },
+        });
       }
       throw new Error("gauntlet-timeout-after-commit");
     }) as typeof fetch;

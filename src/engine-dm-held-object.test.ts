@@ -11,6 +11,7 @@ import { createInitialCampaign, normalizeCampaignState } from "./engine-domain.j
 import { LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
 import type { EngineWorldObjectInstance, LanternCampaignState, RequestContext } from "./engine-contracts.js";
+import { openAiSdkFetch } from "./test-openai-stream.js";
 
 const options = { apiKey: "test-key", baseUrl: "https://openrouter.example/v1", model: "openai/gpt-5.6-luna", reasoningEffort: "medium", maxTokens: 2_500, siteUrl: "https://lantern.example", appName: "Lantern Table Engine" };
 
@@ -86,7 +87,7 @@ describe("DM held-object reconciliation", () => {
       .mockResolvedValueOnce(narration("The hatch remains shut for the moment."))
       .mockResolvedValueOnce(toolResponse(call("unlock-hatch", "interact", { targetId: "service-hatch", sourceId: "ledrus-key-ring", affordance: "unlock", goal: "Use the key ring to unlock the service hatch." })))
       .mockResolvedValueOnce(narration("The key ring turns the lock, and the service hatch clicks open."));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     const dm = new LanternDungeonMaster(store, options);
     const transfer = await dm.resolveTurn(context, state, randomUUID(), state.version, "I wrench Ledrus's key ring from his belt and seize it.");
