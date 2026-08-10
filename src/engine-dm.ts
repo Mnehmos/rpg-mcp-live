@@ -1286,7 +1286,6 @@ function mediatedCheckAttributions(result: EngineCommandResult): EngineSocialChe
 function narrationContradictsMediatedCheck(text: string, attribution: EngineSocialCheckAttribution): boolean {
   const actor = attribution.actingActorName.trim().toLocaleLowerCase("en-US").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const actorBoundary = `(?<![\\p{L}\\p{N}_])${actor}(?![\\p{L}\\p{N}_])`;
-  const source = attribution.modifierSourceActorName.trim().toLocaleLowerCase("en-US");
   const normalized = text.toLocaleLowerCase("en-US");
   const actorClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs|got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,60}\\b(?:check|roll|score|result|total)\\b`, "iu");
   const numericScoreClaim = new RegExp(`${actorBoundary}[^.!?]{0,40}\\b(?:got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,20}\\b\\d+(?:\\.\\d+)?\\b`, "iu");
@@ -1295,9 +1294,7 @@ function narrationContradictsMediatedCheck(text: string, attribution: EngineSoci
   return actorClaim.test(normalized)
     || numericScoreClaim.test(normalized)
     || possessiveClaim.test(normalized)
-    || pronounModifierClaim.test(normalized)
-    || (source !== attribution.actingActorName.trim().toLocaleLowerCase("en-US")
-      && new RegExp(`${actorBoundary}(?:['’]s)?[^.!?]{0,40}\\bmodifiers?\\b`, "iu").test(normalized));
+    || pronounModifierClaim.test(normalized);
 }
 
 function appendMissingMediatedAttributions(

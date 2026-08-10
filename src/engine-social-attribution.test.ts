@@ -297,10 +297,10 @@ describe("social check actor attribution", () => {
   });
 
   it("appends authoritative mediated attribution to successful model narration", async () => {
-    const result = await resolveWithModelNarration("Titus steps forward and addresses the sentries.");
+    const result = await resolveWithModelNarration("Titus speaks using Mnehmos's modifiers.");
 
     expect(result.narrationSource).toBe("llm");
-    expect(result.narration.text).toContain("Titus steps forward");
+    expect(result.narration.text).toContain("Titus speaks using Mnehmos's modifiers");
     expect(result.narration.text).toContain(
       "Authoritative check record: Titus acts for Mnehmos toward Arena Sentries; the check uses Mnehmos's modifiers.",
     );
