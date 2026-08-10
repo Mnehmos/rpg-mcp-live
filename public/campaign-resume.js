@@ -15,6 +15,21 @@ export function isPendingCommandForCampaign(record, campaignId) {
   return Boolean(normalizedCampaignId && normalizedRecordCampaignId === normalizedCampaignId && normalizedCommandId);
 }
 
+export function isPendingCommandForRequest(record, campaignId, clientCommandId) {
+  const normalizedCommandId = String(clientCommandId || "").trim();
+  return Boolean(normalizedCommandId && isPendingCommandForCampaign(record, campaignId)
+    && String(record.clientCommandId).trim() === normalizedCommandId);
+}
+
+export function isPendingCommandConflict(record, campaignId, clientCommandId) {
+  if (!record || !record.campaignId || !record.clientCommandId) return false;
+  return !isPendingCommandForRequest(record, campaignId, clientCommandId);
+}
+
+export function isPendingCommandResponseCurrent(record, campaignId, clientCommandId) {
+  return !record || isPendingCommandForRequest(record, campaignId, clientCommandId);
+}
+
 export function campaignSessionUrl(campaignId) {
   const normalizedCampaignId = String(campaignId || "").trim();
   return normalizedCampaignId

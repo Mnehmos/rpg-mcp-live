@@ -3,6 +3,9 @@ import {
   activeCampaignStorageKey,
   campaignSessionUrl,
   isPendingCommandForCampaign,
+  isPendingCommandConflict,
+  isPendingCommandForRequest,
+  isPendingCommandResponseCurrent,
   isCurrentCampaignSelection,
   isConfirmedMissingCommand,
   isCurrentRequest,
@@ -30,6 +33,14 @@ describe("authenticated campaign resume", () => {
     expect(isPendingCommandForCampaign(pending, "campaign-b")).toBe(false);
     expect(isPendingCommandForCampaign({ campaignId: "campaign-a" }, "campaign-a")).toBe(false);
     expect(isPendingCommandForCampaign(null, "campaign-a")).toBe(false);
+  });
+
+  it("keeps an older pending response from being treated as the newer command", () => {
+    const older = { campaignId: "campaign-a", clientCommandId: "command-a", playerText: "Wait." };
+    expect(isPendingCommandForRequest(older, "campaign-a", "command-a")).toBe(true);
+    expect(isPendingCommandConflict(older, "campaign-a", "command-b")).toBe(true);
+    expect(isPendingCommandResponseCurrent(older, "campaign-a", "command-b")).toBe(false);
+    expect(isPendingCommandResponseCurrent(null, "campaign-a", "command-a")).toBe(true);
   });
 
   it("retries transient campaign-load failures but not permanent selection errors", () => {
