@@ -3,6 +3,7 @@ import {
   narrationEnvelopeSchema,
   type NarrationEnvelope,
 } from "./ai-contracts.js";
+import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type { Open5eContentResolver } from "./content/resolve.js";
 import {
@@ -44,6 +45,7 @@ import {
   LanternEngineStore,
 } from "./engine-store.js";
 import type { OpenRouterCompletionTelemetry, OpenRouterOptions } from "./openrouter.js";
+import type { ModelUsagePurpose, ModelUsageStatus } from "./usage-ledger.js";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -72,11 +74,33 @@ interface ToolLoopResult {
 
 type DmLoopMode = "player_turn" | "opening";
 
+interface CompletionTelemetryContext {
+  accountId: string;
+  campaignId: string;
+  actorId: string;
+  requestId: string;
+  clientCommandId: string;
+  dmRunId: string;
+  purpose: ModelUsagePurpose;
+  toolsEnabled: boolean;
+  nextRequestSequence: () => number;
+  telemetryEvents?: OpenRouterCompletionTelemetry[];
+}
+
 class FirstTokenTimeoutError extends Error {
   public constructor(timeoutMs: number) {
     super(`The primary model produced no output within ${timeoutMs}ms.`);
     this.name = "FirstTokenTimeoutError";
   }
+}
+
+interface NormalizedCompletionUsage {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  reasoningTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  costMicrousd: number | null;
 }
 
 const NARRATION_CONTRACT_INSTRUCTION = [
@@ -341,6 +365,8 @@ export class LanternDungeonMaster {
 
     let currentState = cloneCampaign(initialState);
     const stagedEffects: StagedEngineTurnEffect[] = [];
+    const dmRunId = `dm-run:${randomUUID()}`;
+    let requestSequence = 0;
     const messages: ChatMessage[] = [
       {
         role: "system",
@@ -412,9 +438,22 @@ export class LanternDungeonMaster {
     while (toolLoopTurns < 8 || repairPending) {
       if (!repairPending) toolLoopTurns += 1;
       let assistant: CompletionMessage;
+      const telemetryEvents: OpenRouterCompletionTelemetry[] = [];
       try {
-        assistant = await this.requestCompletion(messages, !repairPending);
+        assistant = await this.requestCompletion(messages, !repairPending, {
+          accountId: context.accountId,
+          campaignId: context.campaignId,
+          actorId: context.actorId,
+          requestId: context.requestId,
+          clientCommandId,
+          dmRunId,
+          purpose: repairPending ? "narration_repair" : mode,
+          toolsEnabled: !repairPending,
+          nextRequestSequence: () => ++requestSequence,
+          telemetryEvents,
+        });
       } catch (error) {
+        this.flushCompletionTelemetry(telemetryEvents, repairPending ? "narration_repair" : mode);
         if (repairPending) {
           console.warn(
             "DM narration contract repair request failed; using safe text-only fallback: "
@@ -429,6 +468,10 @@ export class LanternDungeonMaster {
         throw error;
       }
       const toolCalls = assistant.tool_calls ?? [];
+      this.flushCompletionTelemetry(
+        telemetryEvents,
+        repairPending ? "narration_repair" : toolCalls.length > 0 ? mode : "narration"
+      );
       if (!toolCalls.length) {
         const content = typeof assistant.content === "string" ? assistant.content.trim() : "";
         if (objectIntent) {
@@ -699,14 +742,22 @@ export class LanternDungeonMaster {
     };
   }
 
-  private async requestCompletion(messages: ChatMessage[], allowTools: boolean): Promise<CompletionMessage> {
+  private async requestCompletion(
+    messages: ChatMessage[],
+    allowTools: boolean,
+    telemetryContext?: CompletionTelemetryContext
+  ): Promise<CompletionMessage> {
     try {
       return await this.requestStreamingCompletion(
         messages,
         allowTools,
         this.options.baseUrl,
         this.options.model,
-        "primary"
+        "primary",
+        telemetryContext ? {
+          ...telemetryContext,
+          requestSequence: telemetryContext.nextRequestSequence(),
+        } : undefined
       );
     } catch (error) {
       if (!(error instanceof FirstTokenTimeoutError) || !this.options.fallbackModel) throw error;
@@ -716,7 +767,33 @@ export class LanternDungeonMaster {
         allowTools,
         this.options.fallbackBaseUrl || this.options.baseUrl,
         this.options.fallbackModel,
-        "fallback"
+        "fallback",
+        telemetryContext ? {
+          ...telemetryContext,
+          requestSequence: telemetryContext.nextRequestSequence(),
+        } : undefined
+      );
+    }
+  }
+
+  private flushCompletionTelemetry(
+    events: OpenRouterCompletionTelemetry[],
+    purpose: ModelUsagePurpose
+  ): void {
+    for (const event of events) {
+      event.purpose = purpose;
+      this.emitCompletionTelemetry(event);
+    }
+    events.length = 0;
+  }
+
+  private emitCompletionTelemetry(event: OpenRouterCompletionTelemetry): void {
+    try {
+      this.options.onCompletionTelemetry?.(event);
+    } catch (error) {
+      console.error(
+        "lantern.model_usage_callback_failed "
+        + (error instanceof Error ? error.message : "unknown error")
       );
     }
   }
@@ -726,12 +803,17 @@ export class LanternDungeonMaster {
     allowTools: boolean,
     baseUrl: string,
     model: string,
-    selection: "primary" | "fallback"
+    selection: "primary" | "fallback",
+    telemetryContext?: Omit<CompletionTelemetryContext, "nextRequestSequence"> & { requestSequence: number }
   ): Promise<CompletionMessage> {
     const startedAt = Date.now();
     let firstOutputAt: number | null = null;
     let failureReason: OpenRouterCompletionTelemetry["failureReason"] = null;
-    let completionUsage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
+    let completionUsage: NormalizedCompletionUsage | undefined;
+    let providerRequestId: string | null = null;
+    let resolvedModel: string | null = null;
+    let finishReason: string | null = null;
+    let toolCallCount: number | null = null;
     const client = new OpenAI({
       apiKey: this.options.apiKey,
       baseURL: baseUrl,
@@ -776,8 +858,15 @@ export class LanternDungeonMaster {
         messages,
       } as never);
       stream.on("chunk", (chunk) => {
+        const chunkRecord = chunk as unknown as Record<string, unknown>;
+        if (typeof chunkRecord.id === "string") providerRequestId ??= chunkRecord.id;
+        if (typeof chunkRecord.model === "string") resolvedModel ??= chunkRecord.model;
+        if (chunkRecord.usage) completionUsage = normalizeCompletionUsage(chunkRecord.usage);
         const delta = chunk.choices[0]?.delta;
         if (delta?.content || delta?.tool_calls?.length) markFirstOutput();
+        if (delta?.tool_calls?.length) toolCallCount = Math.max(toolCallCount ?? 0, delta.tool_calls.length);
+        const chunkFinishReason = chunk.choices[0]?.finish_reason;
+        if (typeof chunkFinishReason === "string") finishReason = chunkFinishReason;
       });
       stream.on("content", (delta) => {
         if (delta) markFirstOutput();
@@ -795,12 +884,19 @@ export class LanternDungeonMaster {
         : undefined;
 
       const completion = await stream.finalChatCompletion();
-      completionUsage = completion.usage;
+      const completionRecord = completion as unknown as Record<string, unknown>;
+      if (typeof completionRecord.id === "string") providerRequestId = completionRecord.id;
+      if (typeof completionRecord.model === "string") resolvedModel = completionRecord.model;
+      if (completionRecord.usage) completionUsage = normalizeCompletionUsage(completionRecord.usage);
       const message = completion.choices[0]?.message;
       if (!message) {
         failureReason = "invalid_response";
         throw new Error("OpenRouter returned no message.");
       }
+      if (typeof completion.choices[0]?.finish_reason === "string") {
+        finishReason = completion.choices[0].finish_reason;
+      }
+      if (Array.isArray(message.tool_calls)) toolCallCount = message.tool_calls.length;
       return {
         role: "assistant",
         content: typeof message.content === "string" ? message.content : null,
@@ -824,7 +920,7 @@ export class LanternDungeonMaster {
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
-      this.options.onCompletionTelemetry?.({
+      const telemetry: OpenRouterCompletionTelemetry = {
         provider: "openrouter",
         selection,
         model,
@@ -832,12 +928,95 @@ export class LanternDungeonMaster {
         durationMs: Math.max(0, Date.now() - startedAt),
         outcome: failureReason ? "failed" : "completed",
         failureReason,
-        inputTokens: completionUsage?.prompt_tokens ?? null,
-        outputTokens: completionUsage?.completion_tokens ?? null,
-        totalTokens: completionUsage?.total_tokens ?? null,
-      });
+        inputTokens: completionUsage?.inputTokens ?? null,
+        cachedInputTokens: completionUsage?.cachedInputTokens ?? null,
+        reasoningTokens: completionUsage?.reasoningTokens ?? null,
+        outputTokens: completionUsage?.outputTokens ?? null,
+        totalTokens: completionUsage?.totalTokens ?? null,
+        providerRequestId,
+        resolvedModel,
+        providerRoute: providerRouteFor(baseUrl),
+        costMicrousd: completionUsage?.costMicrousd ?? null,
+        costSource: completionUsage?.costMicrousd === null || completionUsage?.costMicrousd === undefined
+          ? "unavailable"
+          : "provider_reported",
+        status: completionStatus(failureReason),
+        finishReason,
+        toolCallCount,
+        ...(telemetryContext ? {
+          accountId: telemetryContext.accountId,
+          campaignId: telemetryContext.campaignId,
+          actorId: telemetryContext.actorId,
+          requestId: telemetryContext.requestId,
+          clientCommandId: telemetryContext.clientCommandId,
+          dmRunId: telemetryContext.dmRunId,
+          requestSequence: telemetryContext.requestSequence,
+          purpose: telemetryContext.purpose,
+          toolsEnabled: telemetryContext.toolsEnabled,
+        } : {}),
+        createdAt: new Date(startedAt).toISOString(),
+        completedAt: new Date().toISOString(),
+      };
+      if (telemetryContext?.telemetryEvents) {
+        telemetryContext.telemetryEvents.push(telemetry);
+      } else {
+        this.emitCompletionTelemetry(telemetry);
+      }
     }
   }
+}
+
+function normalizeCompletionUsage(value: unknown): NormalizedCompletionUsage {
+  const usage = asRecord(value);
+  const inputTokens = nonnegativeIntegerOrNull(usage?.prompt_tokens);
+  const outputTokens = nonnegativeIntegerOrNull(usage?.completion_tokens);
+  const totalTokens = nonnegativeIntegerOrNull(usage?.total_tokens)
+    ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null);
+  const promptDetails = asRecord(usage?.prompt_tokens_details);
+  const completionDetails = asRecord(usage?.completion_tokens_details);
+  const directCostMicrousd = numberOrNull(usage?.cost_microusd ?? usage?.costMicroUsd);
+  const costUsd = numberOrNull(usage?.cost);
+  return {
+    inputTokens,
+    cachedInputTokens: nonnegativeIntegerOrNull(promptDetails?.cached_tokens),
+    reasoningTokens: nonnegativeIntegerOrNull(completionDetails?.reasoning_tokens),
+    outputTokens,
+    totalTokens,
+    costMicrousd: directCostMicrousd !== null
+      ? Math.max(0, Math.trunc(directCostMicrousd))
+      : costUsd === null ? null : Math.round(Math.max(0, costUsd) * 1_000_000),
+  };
+}
+
+function completionStatus(failureReason: OpenRouterCompletionTelemetry["failureReason"]): ModelUsageStatus {
+  if (!failureReason) return "success";
+  if (failureReason === "ttft_timeout") return "timeout_before_output";
+  if (failureReason === "stream_error_after_output") return "interrupted_after_output";
+  if (failureReason === "invalid_response") return "invalid_response";
+  return "provider_error";
+}
+
+function providerRouteFor(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).hostname || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+function nonnegativeIntegerOrNull(value: unknown): number | null {
+  const number = numberOrNull(value);
+  return number === null ? null : Math.max(0, Math.trunc(number));
 }
 
 type NarrationValidation =

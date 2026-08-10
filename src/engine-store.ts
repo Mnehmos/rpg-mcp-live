@@ -16,6 +16,15 @@ import type {
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
+import {
+  ensureModelUsageTable,
+  insertModelUsage,
+  queryModelUsageSummary,
+  type ModelUsageRecord,
+  type ModelUsageSummary,
+  type ModelUsageSummaryFilters,
+  type ModelUsageTelemetry,
+} from "./usage-ledger.js";
 
 interface CampaignRow {
   account_id: string;
@@ -205,6 +214,21 @@ export class LanternEngineStore {
         ");",
       ].join("\n")
     );
+    ensureModelUsageTable(this.db);
+  }
+
+  /**
+   * Record provider usage independently from campaign mutation. The caller
+   * must swallow persistence errors so accounting can never make a committed
+   * gameplay result fail; INSERT OR IGNORE also makes recovery/replay writes
+   * idempotent by request sequence.
+   */
+  public recordModelUsage(telemetry: ModelUsageTelemetry): ModelUsageRecord | null {
+    return insertModelUsage(this.db, telemetry);
+  }
+
+  public getModelUsageSummary(filters: ModelUsageSummaryFilters = {}): ModelUsageSummary {
+    return queryModelUsageSummary(this.db, filters);
   }
 
   public installContentPack(descriptor: Open5ePackDescriptor): InstalledEngineContentPack {
@@ -291,6 +315,8 @@ export class LanternEngineStore {
     context: RequestContext,
     expectedCampaignVersion: number
   ): EngineCampaignDeletionResult {
+    // Financial evidence is retained by policy: campaign deletion removes
+    // gameplay state, events, and command payloads, but never model usage rows.
     const transaction = this.db.transaction((): EngineCampaignDeletionResult => {
       const current = this.getCampaign(context);
       if (current.version !== expectedCampaignVersion) {

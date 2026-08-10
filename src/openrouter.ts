@@ -5,6 +5,12 @@ import {
   type NarrationEnvelope,
 } from "./ai-contracts.js";
 import type { AbilityCheckOutcome } from "./game.js";
+import type {
+  ModelUsageCostSource,
+  ModelUsagePurpose,
+  ModelUsageSelection,
+  ModelUsageStatus,
+} from "./usage-ledger.js";
 
 export interface OpenRouterOptions {
   apiKey: string;
@@ -22,15 +28,36 @@ export interface OpenRouterOptions {
 
 export interface OpenRouterCompletionTelemetry {
   provider: "openrouter";
-  selection: "primary" | "fallback";
+  selection: ModelUsageSelection;
   model: string;
   ttftMs: number | null;
   durationMs: number;
   outcome: "completed" | "failed";
   failureReason: "ttft_timeout" | "provider_error_before_output" | "stream_error_after_output" | "invalid_response" | null;
   inputTokens: number | null;
+  cachedInputTokens?: number | null;
+  reasoningTokens?: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
+  accountId?: string;
+  campaignId?: string;
+  actorId?: string;
+  requestId?: string;
+  clientCommandId?: string;
+  dmRunId?: string;
+  requestSequence?: number;
+  purpose?: ModelUsagePurpose;
+  toolsEnabled?: boolean;
+  providerRequestId?: string | null;
+  resolvedModel?: string | null;
+  providerRoute?: string | null;
+  costMicrousd?: number | null;
+  costSource?: ModelUsageCostSource;
+  status?: ModelUsageStatus;
+  finishReason?: string | null;
+  toolCallCount?: number | null;
+  createdAt?: string;
+  completedAt?: string;
 }
 
 export interface NarrationRequest {

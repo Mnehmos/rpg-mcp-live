@@ -230,4 +230,73 @@ describe("Lantern model first-output streaming policy", () => {
     await expect(requestCompletion(dm)).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   }, 5_000);
+
+  it("attaches tenant, turn, purpose, and normalized provider usage without content", async () => {
+    const telemetry: OpenRouterCompletionTelemetry[] = [];
+    const fetchMock = vi.fn().mockResolvedValueOnce(responseFor([
+      chunk({ role: "assistant", content: "done" }, "stop"),
+      {
+        data: {
+          id: "provider-generation-1",
+          object: "chat.completion.chunk",
+          created: 0,
+          model: "resolved-model",
+          choices: [],
+          usage: {
+            prompt_tokens: 10_000,
+            prompt_tokens_details: { cached_tokens: 2_000 },
+            completion_tokens: 500,
+            completion_tokens_details: { reasoning_tokens: 50 },
+            total_tokens: 10_500,
+            cost: 0.005,
+          },
+        },
+      },
+      { data: "[DONE]" },
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const dm = new LanternDungeonMaster(null as never, {
+      ...baseOptions,
+      firstTokenTimeoutMs: 25,
+      onCompletionTelemetry: (event) => telemetry.push(event),
+    });
+    await (dm as unknown as {
+      requestCompletion(
+        messages: Array<{ role: "user"; content: string }>,
+        allowTools: boolean,
+        context: Record<string, unknown>,
+      ): Promise<unknown>;
+    }).requestCompletion([{ role: "user", content: "Return the response." }], false, {
+      accountId: "account-a",
+      campaignId: "campaign-a",
+      actorId: "actor-a",
+      requestId: "request-a",
+      clientCommandId: "command-a",
+      dmRunId: "run-a",
+      purpose: "player_turn",
+      toolsEnabled: false,
+      nextRequestSequence: () => 1,
+    });
+
+    expect(telemetry[0]).toMatchObject({
+      accountId: "account-a",
+      campaignId: "campaign-a",
+      clientCommandId: "command-a",
+      dmRunId: "run-a",
+      requestSequence: 1,
+      purpose: "player_turn",
+      toolsEnabled: false,
+      providerRequestId: "provider-generation-1",
+      resolvedModel: "resolved-model",
+      inputTokens: 10_000,
+      cachedInputTokens: 2_000,
+      reasoningTokens: 50,
+      outputTokens: 500,
+      totalTokens: 10_500,
+      costMicrousd: 5_000,
+      status: "success",
+    });
+    expect(JSON.stringify(telemetry[0])).not.toContain("Return the response.");
+  }, 5_000);
 });

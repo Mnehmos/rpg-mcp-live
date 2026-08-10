@@ -30,6 +30,7 @@ import { parseProductionRoomState, productionRoomNarrationReleaseRequestSchema, 
 import { buildResumeProjection, emptyOrchestrationState, orchestrationDecisionRequestSchema, refreshSceneFromEvents } from "./engine-orchestration.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
 import type { OpenRouterCompletionTelemetry } from "./openrouter.js";
+import type { ModelUsageSummaryFilters, ModelUsageTelemetry } from "./usage-ledger.js";
 import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js";
 import {
   commandForTool,
@@ -97,7 +98,40 @@ const modelOptions = {
   siteUrl: engineConfig.openRouterSiteUrl,
   appName: engineConfig.openRouterAppName,
   onCompletionTelemetry: (event: OpenRouterCompletionTelemetry) => {
-    console.info("lantern.model_completion " + JSON.stringify(event));
+    let usageRecorded = false;
+    try {
+      usageRecorded = store.recordModelUsage({
+        ...event,
+        requestedModel: event.model,
+        latencyMs: event.durationMs,
+      } as ModelUsageTelemetry) !== null;
+    } catch (error) {
+      // Accounting is observational: a ledger write must never turn a usable
+      // provider response into a failed gameplay command.
+      console.error("lantern.model_usage_persist_failed " + JSON.stringify({
+        message: error instanceof Error ? error.message : "unknown error",
+      }));
+    }
+    console.info("lantern.model_completion " + JSON.stringify({
+      provider: event.provider,
+      selection: event.selection,
+      model: event.model,
+      ttftMs: event.ttftMs,
+      durationMs: event.durationMs,
+      outcome: event.outcome,
+      failureReason: event.failureReason,
+      inputTokens: event.inputTokens,
+      cachedInputTokens: event.cachedInputTokens ?? null,
+      reasoningTokens: event.reasoningTokens ?? null,
+      outputTokens: event.outputTokens,
+      totalTokens: event.totalTokens,
+      costMicrousd: event.costMicrousd ?? null,
+      costSource: event.costSource ?? "unavailable",
+      status: event.status ?? null,
+      finishReason: event.finishReason ?? null,
+      toolCallCount: event.toolCallCount ?? null,
+      usageRecorded,
+    }));
   },
 };
 const dungeonMaster = new LanternDungeonMaster(store, modelOptions, contentResolverFor);
@@ -150,6 +184,18 @@ app.get("/v1/tools", (_request, response) => {
 
 app.get("/v1/content-catalog", (_request, response) => {
   response.json({ catalog: contentCatalog });
+});
+
+app.get("/v1/usage/summary", (request, response) => {
+  if (!operatorAuthorized(request)) {
+    response.status(403).json({ code: "usage_operator_only", error: "Usage summaries require the operator capability." });
+    return;
+  }
+  try {
+    response.json(store.getModelUsageSummary(usageSummaryFilters(request)));
+  } catch (error) {
+    sendError(response, error);
+  }
 });
 
 app.get("/v1/character-options", (request, response) => {
@@ -570,6 +616,29 @@ function authorized(request: Request): boolean {
   const expected = Buffer.from(engineConfig.internalToken);
   const actual = Buffer.from(supplied);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function operatorAuthorized(request: Request): boolean {
+  return (request.header("x-lantern-capabilities") ?? "")
+    .split(",")
+    .map((capability) => capability.trim().toLowerCase())
+    .includes("operator");
+}
+
+function usageSummaryFilters(request: Request): ModelUsageSummaryFilters {
+  const value = (name: string): string | undefined => {
+    const raw = request.query[name];
+    return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+  };
+  return {
+    accountId: value("accountId"),
+    campaignId: value("campaignId"),
+    clientCommandId: value("clientCommandId"),
+    from: value("from"),
+    to: value("to"),
+    provider: value("provider"),
+    model: value("model"),
+  };
 }
 
 function createRequestContext(request: Request, campaignId = request.params.campaignId as string): RequestContext {
