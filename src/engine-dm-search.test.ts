@@ -126,8 +126,8 @@ describe("DM broad-search provenance", () => {
           goal: playerText,
         }),
       ))
-      .mockResolvedValueOnce(narration("You find a red-striped cloak, a canvas bundle, and a low wooden hatch."))
-      .mockResolvedValueOnce(narration("You find a red-striped cloak, a canvas bundle, and a low wooden hatch."));
+      .mockResolvedValueOnce(narration("You find a red-striped cloak, but no way out."))
+      .mockResolvedValueOnce(narration("You find a red-striped cloak, but no way out."));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     const state = searchState("account-search-absent", "actor-search-absent");
@@ -171,7 +171,8 @@ describe("DM broad-search provenance", () => {
           objects: { upsert: [proposal] },
         }),
       ))
-      .mockResolvedValueOnce(narration("The search turns up the authored arena-worker cloak, a bounded table opportunity recorded for this scene."));
+      .mockResolvedValueOnce(narration("The search turns up the authored arena-worker cloak, and a low wooden hatch lies beside it."))
+      .mockResolvedValueOnce(narration("You find the authored arena-worker cloak."));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     const state = searchState("account-search-present", "actor-search-present");
@@ -186,7 +187,7 @@ describe("DM broad-search provenance", () => {
       playerText,
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check", "world_context"]);
     const found = result.state.worldContext?.objects.find((object) => object.id === proposal.id);
     expect(found).toMatchObject({
@@ -215,7 +216,7 @@ describe("DM broad-search provenance", () => {
     );
     expect(replay.replayed).toBe(true);
     expect(replay.narration.text).toBe(result.narration.text);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     store.close();
   });
 

@@ -546,7 +546,7 @@ export class LanternDungeonMaster {
         const validation = validateNarration(content);
         if (validation.success) {
           if (searchIntent) {
-            const searchRepair = searchTurnRepair(searchIntent, validation.data.text, currentState, stagedEffects);
+            const searchRepair = searchTurnRepair(searchIntent, initialState, validation.data.text, currentState, stagedEffects);
             if (searchRepair) {
               if (!searchRepairAttempted) {
                 searchRepairAttempted = true;
@@ -1292,52 +1292,115 @@ function detectSearchTurnIntent(playerText: string): SearchTurnIntent | null {
   return null;
 }
 
-function searchNarrationClaimsDiscovery(text: string): boolean {
-  const normalized = text.toLocaleLowerCase();
-  if (
-    /\b(?:nothing|none|empty|without\s+(?:finding|a\s+(?:usable|specific))|no\s+(?:specific|usable|clear|new|item|object|reward|supplies|disguise|weapon|way\s+out))\b/i.test(normalized)
-  ) {
-    return false;
+const SEARCH_DISCOVERY_VERB = /\b(?:finds?|found|discovers?|uncover(?:s|ed)?|locate(?:s|d)?|spots?|reveals?|turns?\s+up|there\s+(?:is|are)|lies|rests|holds|sits|stands|waits)\b/i;
+const SEARCH_NEGATION = /\b(?:no|nothing|none|without|empty|not)\b/i;
+const SEARCH_ENTITY_CLAUSE_START = /^(?:(?:with|including|alongside|beside|near|plus)\s+)?(?:a|an|the|some|another|one|two|three|any)\b/i;
+
+function searchNarrationDiscoveryClauses(text: string): string[] {
+  const claims: string[] = [];
+  for (const sentence of text.split(/[.!?]+/)) {
+    let discoveryContext = false;
+    const parts = sentence.split(/\s*(?:,|;|:|\b(?:but|however|though|yet|and|or)\b)\s*/i);
+    for (const rawPart of parts) {
+      const part = rawPart.trim();
+      if (!part) continue;
+      const hasDiscoveryVerb = SEARCH_DISCOVERY_VERB.test(part);
+      const negative = SEARCH_NEGATION.test(part);
+      if (hasDiscoveryVerb && !negative) {
+        claims.push(part);
+        discoveryContext = true;
+        continue;
+      }
+      if (hasDiscoveryVerb && negative) {
+        discoveryContext = false;
+        continue;
+      }
+      if (discoveryContext && !negative && SEARCH_ENTITY_CLAUSE_START.test(part)) {
+        claims.push(part);
+      }
+    }
   }
-  return /\b(?:finds?|found|discovers?|uncover(?:s|ed)?|locate(?:s|d)?|spots?|reveals?|turns?\s+up|there\s+(?:is|are)|lies|rests|holds)\b/i.test(normalized);
+  return claims;
+}
+
+function searchAliasMatches(value: string, aliases: string[]): boolean {
+  const normalized = value.toLocaleLowerCase().replace(/[-_]+/g, " ");
+  return aliases.some((alias) => {
+    const phrase = alias.toLocaleLowerCase().replace(/[-_]+/g, " ").trim();
+    return phrase.length >= 3 && normalized.includes(phrase);
+  });
+}
+
+function searchTurnAuthorizedAliases(
+  initialState: LanternCampaignState,
+  state: LanternCampaignState,
+  effects: StagedEngineTurnEffect[],
+): string[] {
+  const initialWorld = initialState.worldContext;
+  const currentWorld = state.worldContext;
+  const aliases = [
+    ...(initialWorld?.features ?? []),
+    ...(initialWorld?.exits ?? []).flatMap((exit) => [exit.id, exit.label]),
+    ...(initialWorld?.npcs ?? []).flatMap((npc) => [npc.id, npc.name]),
+    ...(initialState.worldFacts ?? []).filter((fact) => fact.active && fact.visibility === "public").flatMap((fact) => [fact.id, fact.title]),
+    ...(initialWorld?.objects ?? []).flatMap((object) => [object.id, object.definition.name, ...object.definition.tags]),
+  ];
+  const initialObjectIds = new Set((initialWorld?.objects ?? []).map((object) => object.id));
+  for (const object of currentWorld?.objects ?? []) {
+    if (initialObjectIds.has(object.id) || effects.some((effect) =>
+      effect.command.kind === "world_context" && (effect.command.objects?.upsert ?? []).some((input) => input.id === object.id)
+    )) {
+      aliases.push(object.id, object.definition.name, ...object.definition.tags);
+    }
+  }
+  for (const effect of effects) {
+    if (effect.command.kind === "challenge_attempt") {
+      const data = effect.resolution.data;
+      if (data && typeof data === "object" && !Array.isArray(data) && "discovery" in data) {
+        const discovery = (data as { discovery?: Record<string, unknown> }).discovery;
+        if (discovery) {
+          for (const key of ["factId", "title", "description"]) {
+            if (typeof discovery[key] === "string") aliases.push(discovery[key]);
+          }
+        }
+      }
+    }
+    if (effect.command.kind === "loot") {
+      for (const item of effect.command.items) {
+        const record = item as unknown as Record<string, unknown>;
+        for (const key of ["id", "name"]) {
+          if (typeof record[key] === "string") aliases.push(record[key]);
+        }
+        const definition = record.authoredDefinition;
+        if (definition && typeof definition === "object" && !Array.isArray(definition)) {
+          if (typeof (definition as Record<string, unknown>).name === "string") aliases.push((definition as Record<string, unknown>).name as string);
+        }
+      }
+    }
+  }
+  return aliases;
 }
 
 function searchTurnHasTypedDiscovery(
+  initialState: LanternCampaignState,
   state: LanternCampaignState,
   effects: StagedEngineTurnEffect[],
   narration: string,
 ): boolean {
-  const typedDiscovery = effects.some((effect) => {
-    if (effect.command.kind === "world_context") {
-      return (effect.command.objects?.upsert?.length ?? 0) > 0
-        || (effect.command.facts?.upsert?.length ?? 0) > 0;
-    }
-    if (effect.command.kind === "loot") return true;
-    if (effect.command.kind !== "challenge_attempt") return false;
-    const data = effect.resolution.data;
-    return Boolean(data && typeof data === "object" && !Array.isArray(data) && "discovery" in data);
-  });
-  if (typedDiscovery || !searchNarrationClaimsDiscovery(narration)) return true;
-
-  const world = state.worldContext;
-  if (!world) return false;
-  const aliases = [
-    ...world.objects.flatMap((object) => [object.id, object.definition.name, ...object.definition.tags]),
-    ...world.features,
-    ...world.exits.flatMap((exit) => [exit.id, exit.label]),
-    ...world.npcs.flatMap((npc) => [npc.id, npc.name]),
-    ...state.worldFacts.filter((fact) => fact.active && fact.visibility === "public").flatMap((fact) => [fact.id, fact.title]),
-  ];
-  return objectReferenceMatches(narration, aliases);
+  const claims = searchNarrationDiscoveryClauses(narration);
+  if (claims.length === 0) return true;
+  const aliases = searchTurnAuthorizedAliases(initialState, state, effects);
+  return claims.every((claim) => searchAliasMatches(claim, aliases));
 }
 
 function searchTurnRepair(
   intent: SearchTurnIntent,
+  initialState: LanternCampaignState,
   narration: string,
   state: LanternCampaignState,
   effects: StagedEngineTurnEffect[],
 ): string | null {
-  if (intent.kind !== "broad-search" || searchTurnHasTypedDiscovery(state, effects, narration)) return null;
+  if (intent.kind !== "broad-search" || searchTurnHasTypedDiscovery(initialState, state, effects, narration)) return null;
   return [
     "The previous broad-search narration claimed a specific discovery without an accepted typed discovery.",
     "Do not guarantee an item merely because the player named a category.",
