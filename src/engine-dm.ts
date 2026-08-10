@@ -31,6 +31,7 @@ import type {
   EngineSocialCheckAttribution,
   EngineToolName,
   EngineToolResult,
+  EngineTurnEffectEvidence,
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
@@ -460,6 +461,141 @@ interface ProvisionalToolResult extends EngineToolResult {
   loadedCapabilityFamily?: EngineCapabilityFamilyId;
 }
 
+const narrativeCheckKinds = new Set<EngineCommand["kind"]>([
+  "roll_check",
+  "challenge_attempt",
+  "social_check",
+  "situation_clue_attempt",
+]);
+
+function isNarrativeCheckEffect(effect: StagedEngineTurnEffect): boolean {
+  return narrativeCheckKinds.has(effect.command.kind) && Boolean(effect.resolution.event?.check);
+}
+
+function stagedCheckOutcome(effect: StagedEngineTurnEffect): "success" | "failure" | null {
+  if (!isNarrativeCheckEffect(effect)) return null;
+  const data = effect.resolution.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const success = (data as { success?: unknown }).success;
+    if (typeof success === "boolean") return success ? "success" : "failure";
+    const outcome = (data as { outcome?: unknown }).outcome;
+    if (outcome === "success" || outcome === "automatic-success") return "success";
+    if (outcome === "failure" || outcome === "failure-with-complication") return "failure";
+  }
+  const outcome = effect.resolution.event?.outcome ?? "";
+  if (outcome === "success" || outcome.endsWith("_success") || outcome.includes("_found")) return "success";
+  if (outcome === "failure" || outcome.includes("failure") || outcome.includes("failed")) return "failure";
+  return null;
+}
+
+function checkGoal(effect: StagedEngineTurnEffect): string {
+  const command = effect.command;
+  if ("goal" in command && typeof command.goal === "string") return command.goal;
+  if (command.kind === "situation_clue_attempt") return command.approach;
+  return command.kind.replaceAll("_", " ");
+}
+
+function checkOutcomeEnvelope(effect: StagedEngineTurnEffect, sourceEffectIndex: number): Record<string, unknown> | null {
+  const outcome = stagedCheckOutcome(effect);
+  if (!outcome) return null;
+  return {
+    sourceEffectIndex,
+    outcome,
+    goal: checkGoal(effect),
+    allowedSceneMoveCategories: ["reaction", "cost", "pressure", "choice", "closure"],
+    hardRealityRule: "Do not invent or move pre-existing actors, objects, exits, hazards, loot, locks, or hidden facts.",
+  };
+}
+
+function checkHasCommittedDiscovery(effect: StagedEngineTurnEffect): boolean {
+  return Boolean(effect.resolution.event?.stateChanges.some((change) =>
+    change.path.startsWith("/actorKnowledge/")
+  ));
+}
+
+function hasConcreteLaterConsequence(
+  effects: readonly StagedEngineTurnEffect[],
+  sourceEffectIndex: number,
+): boolean {
+  for (let index = sourceEffectIndex + 1; index < effects.length; index += 1) {
+    const effect = effects[index]!;
+    if (isNarrativeCheckEffect(effect)) continue;
+    if (effect.command.kind === "improvise") {
+      const sceneMove = effect.command.sceneMove;
+      if (sceneMove?.sourceEffectIndex === sourceEffectIndex) return true;
+      if (effect.command.effectType === "fictional") continue;
+    }
+    if (effect.resolution.event?.stateChanges.some((change) =>
+      change.path !== "/lastRoll"
+      && !change.path.startsWith("/adjudicationHistory/")
+      && !change.path.startsWith("/failurePressures/")
+    )) return true;
+  }
+  return false;
+}
+
+function unresolvedNarrativeCheckIndices(effects: readonly StagedEngineTurnEffect[]): number[] {
+  const unresolved: number[] = [];
+  effects.forEach((effect, index) => {
+    if (!isNarrativeCheckEffect(effect)) return;
+    if (checkHasCommittedDiscovery(effect)) return;
+    if (hasConcreteLaterConsequence(effects, index)) return;
+    unresolved.push(index);
+  });
+  return unresolved;
+}
+
+function discardUnresolvedChecks(effects: readonly StagedEngineTurnEffect[]): StagedEngineTurnEffect[] {
+  const firstUnresolved = unresolvedNarrativeCheckIndices(effects)[0];
+  return firstUnresolved === undefined ? [...effects] : effects.slice(0, firstUnresolved);
+}
+
+function validateSceneMoveBinding(
+  command: EngineCommand,
+  priorEffects: readonly StagedEngineTurnEffect[],
+  assistantVisibleEffectCount: number,
+): { code: string; message: string } | null {
+  if (command.kind !== "improvise" || !command.sceneMove) return null;
+  const sceneMove = command.sceneMove;
+  if (sceneMove.sourceEffectIndex >= assistantVisibleEffectCount) {
+    return {
+      code: "scene_move_wrong_order",
+      message: "A scene move must bind a check result returned in an earlier tool round; it cannot guess the result of a same-round check.",
+    };
+  }
+  const source = priorEffects[sceneMove.sourceEffectIndex];
+  const outcome = source ? stagedCheckOutcome(source) : null;
+  if (!source || !outcome) {
+    return {
+      code: "scene_move_source_not_check",
+      message: "The selected sourceEffectIndex is not an earlier resolved narrative check.",
+    };
+  }
+  if (sceneMove.outcome !== outcome) {
+    return {
+      code: "scene_move_outcome_mismatch",
+      message: `The scene move says ${sceneMove.outcome}, but source effect ${sceneMove.sourceEffectIndex} resolved as ${outcome}.`,
+    };
+  }
+  return null;
+}
+
+function consequenceRepairInstruction(
+  effects: readonly StagedEngineTurnEffect[],
+  unresolvedIndices: readonly number[],
+): string {
+  const envelopes = unresolvedIndices
+    .map((index) => checkOutcomeEnvelope(effects[index]!, index))
+    .filter((value): value is Record<string, unknown> => Boolean(value));
+  return [
+    "The previous plan ended with an orphaned check. The roll is private and provisional; it is not a completed player turn.",
+    `OutcomeEnvelope: ${JSON.stringify(envelopes)}`,
+    "Now call an existing authoritative tool for the concrete result, or call improvise with effectType fictional and sceneMove bound to the exact sourceEffectIndex and outcome above.",
+    "A fictional sceneMove may only record a caused reaction, cost, pressure, choice, or closure. Use situation clues for revelations, move/world_context for position, and typed tools for mechanics or durable state.",
+    "Do not repeat the roll. Do not expose tools, schemas, or this repair to the player.",
+  ].join(" ");
+}
+
 export class LanternDungeonMaster {
   public constructor(
     private readonly store: LanternEngineStore,
@@ -878,10 +1014,12 @@ export class LanternDungeonMaster {
     let objectRepairAttempted = false;
     const searchIntent = detectSearchTurnIntent(playerText);
     let searchRepairAttempted = false;
+    let consequenceRepairAttempted = false;
 
     let toolLoopTurns = 0;
     while (toolLoopTurns < 8 || repairPending) {
       if (!repairPending) toolLoopTurns += 1;
+      const assistantVisibleEffectCount = stagedEffects.length;
       let assistant: CompletionMessage;
       const telemetryEvents: OpenRouterCompletionTelemetry[] = [];
       try {
@@ -907,7 +1045,12 @@ export class LanternDungeonMaster {
           );
           return finishPlanner(safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null);
         }
-        if (stagedEffects.length > 0) return finishPlanner(null);
+        if (stagedEffects.length > 0) {
+          if (mode === "player_turn" && unresolvedNarrativeCheckIndices(stagedEffects).length > 0) {
+            return finishPlanner(null, discardUnresolvedChecks(stagedEffects));
+          }
+          return finishPlanner(null);
+        }
         throw error;
       }
       const toolCalls = assistant.tool_calls ?? [];
@@ -931,6 +1074,21 @@ export class LanternDungeonMaster {
               null,
               stagedEffects.filter((effect) => objectIntent.kind !== "held-transfer" || heldContest(effect)?.outcome !== "success"),
             );
+          }
+        }
+        if (mode === "player_turn") {
+          const unresolvedChecks = unresolvedNarrativeCheckIndices(stagedEffects);
+          if (unresolvedChecks.length > 0) {
+            if (!consequenceRepairAttempted) {
+              consequenceRepairAttempted = true;
+              messages.push({ role: "assistant", content: content || null });
+              messages.push({
+                role: "user",
+                content: consequenceRepairInstruction(stagedEffects, unresolvedChecks),
+              });
+              continue;
+            }
+            return finishPlanner(null, discardUnresolvedChecks(stagedEffects));
           }
         }
         const validation = validateNarration(content);
@@ -996,7 +1154,8 @@ export class LanternDungeonMaster {
           currentState,
           clientCommandId,
           toolCall,
-          stagedEffects.length,
+          stagedEffects,
+          assistantVisibleEffectCount,
           loadedCapabilityFamilies,
         );
         if (
@@ -1016,6 +1175,10 @@ export class LanternDungeonMaster {
           };
         }
         if (toolOutput.loadedCapabilityFamily) loadedCapabilityFamilies.add(toolOutput.loadedCapabilityFamily);
+        const provisionalEffectIndex = toolOutput.stagedEffect ? stagedEffects.length : null;
+        const outcomeEnvelope = toolOutput.stagedEffect && provisionalEffectIndex !== null
+          ? checkOutcomeEnvelope(toolOutput.stagedEffect, provisionalEffectIndex)
+          : null;
         if (toolOutput.stagedEffect) {
           stagedEffects.push(toolOutput.stagedEffect);
           currentState = provisionalState(toolOutput.stagedEffect.resolution, expectedCampaignVersion);
@@ -1031,6 +1194,8 @@ export class LanternDungeonMaster {
             data: toolOutput.data,
             campaignVersion: toolOutput.campaignVersion,
             provisional: toolOutput.provisional ?? false,
+            provisionalEffectIndex,
+            outcomeEnvelope,
           }),
           tool_call_id: toolCall.id,
         });
@@ -1058,7 +1223,12 @@ export class LanternDungeonMaster {
       }
     }
 
-    if (stagedEffects.length > 0) return finishPlanner(null);
+    if (stagedEffects.length > 0) {
+      if (mode === "player_turn" && unresolvedNarrativeCheckIndices(stagedEffects).length > 0) {
+        return finishPlanner(null, discardUnresolvedChecks(stagedEffects));
+      }
+      return finishPlanner(null);
+    }
     throw new Error("The DM exceeded the tool-call turn budget.");
   }
 
@@ -1067,9 +1237,11 @@ export class LanternDungeonMaster {
     currentState: LanternCampaignState,
     clientCommandId: string,
     toolCall: ToolCall,
-    stagedEffectCount: number,
+    stagedEffects: readonly StagedEngineTurnEffect[],
+    assistantVisibleEffectCount: number,
     loadedCapabilityFamilies: Set<EngineCapabilityFamilyId>,
   ): ProvisionalToolResult {
+    const stagedEffectCount = stagedEffects.length;
     const toolName = toolCall.function.name;
     if (!isEngineToolName(toolName)) {
       return {
@@ -1190,6 +1362,20 @@ export class LanternDungeonMaster {
     );
     if (!command) return executeReadTool(currentState, toolName, args, this.resolverFor(currentState));
 
+    const bindingError = validateSceneMoveBinding(command, stagedEffects, assistantVisibleEffectCount);
+    if (bindingError) {
+      return {
+        tool: toolName,
+        readOnly: false,
+        accepted: false,
+        code: bindingError.code,
+        message: bindingError.message,
+        data: null,
+        campaignVersion: currentState.version,
+        provisional: false,
+      };
+    }
+
     if (stagedEffectCount >= 16) {
       return {
         tool: toolName,
@@ -1208,7 +1394,9 @@ export class LanternDungeonMaster {
         context,
         `${clientCommandId}:${stagedEffectCount}`,
         command,
-        toolName
+        toolName,
+        undefined,
+        { sceneMoveBindingValidated: command.kind === "improvise" && Boolean(command.sceneMove) },
       );
       const publicResolution = projectResolutionForActor(resolution, context.actorId);
       return {
@@ -2008,10 +2196,7 @@ function committedCheckText(data: unknown, scene?: string): string | null {
   const attribution = check.attribution?.mode === "npc-mediated"
     ? mediatedCheckAttributionText(check.attribution) + " "
     : "";
-  const consequence = check.success
-    ? "The outcome now stands in the scene."
-    : "The setback now stands, and the situation continues from there.";
-  return `${attribution}${outcome}${location}${purpose}. ${consequence}`;
+  return `${attribution}${outcome}${location}${purpose}.`;
 }
 
 function mediatedCheckAttributionText(attribution: EngineSocialCheckAttribution): string {
@@ -2151,6 +2336,34 @@ function committedMoveText(data: unknown): string {
   return label ? `You continue along the chosen path: ${label}.` : "You continue along the chosen path.";
 }
 
+function sentence(value: string): string {
+  const trimmed = value.trim();
+  return trimmed && !/[.!?]$/.test(trimmed) ? `${trimmed}.` : trimmed;
+}
+
+function committedSceneMoveText(effect: EngineTurnEffectEvidence | undefined): string | null {
+  if (!effect || effect.command.kind !== "improvise" || !effect.command.sceneMove) return null;
+  return [sentence(effect.command.description), sentence(effect.command.sceneMove.nextDecision)]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function committedSituationClueText(effect: EngineTurnEffectEvidence | undefined): string | null {
+  if (!effect || effect.command.kind !== "situation_clue_attempt") return null;
+  const data = effect.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const record = data as { success?: unknown; clueId?: unknown; situation?: unknown };
+  if (record.success !== true || typeof record.clueId !== "string" || !record.situation || typeof record.situation !== "object") return null;
+  const clues = (record.situation as { clues?: unknown }).clues;
+  if (!Array.isArray(clues)) return null;
+  const clue = clues.find((candidate) =>
+    candidate && typeof candidate === "object" && (candidate as { id?: unknown }).id === record.clueId
+  ) as { title?: unknown; finding?: unknown } | undefined;
+  if (!clue || typeof clue.finding !== "string" || !clue.finding.trim()) return null;
+  const title = typeof clue.title === "string" && clue.title.trim() ? `${clue.title.trim()}: ` : "";
+  return `${title}${sentence(clue.finding)} What do you do with that discovery?`;
+}
+
 function committedDeclarationText(result: EngineCommandResult): string {
   const worldContext = result.state.worldContext;
   if (!worldContext) return "You put your plan into motion. What do you do next?";
@@ -2196,6 +2409,10 @@ function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope
         if (effect.command.kind === "move") {
           return index < lastWorldContextIndex ? "" : committedMoveText(effect.data);
         }
+        const sceneMove = committedSceneMoveText(effect);
+        if (sceneMove) return sceneMove;
+        const clue = committedSituationClueText(effect);
+        if (clue) return clue;
         return committedCheckText(effect.check ? effect.data : null) ?? effect.outcome.trim();
       })
       .filter(Boolean);
@@ -2206,6 +2423,14 @@ function committedRulesNarration(result: EngineCommandResult): NarrationEnvelope
       scene,
       [...otherOutcomes, nextChoice].join(" ")
     );
+  }
+  const sceneMove = [...effects].reverse().map(committedSceneMoveText).find(Boolean);
+  if (sceneMove) return rulesNarration(sceneMove);
+  const clue = effects.map(committedSituationClueText).find(Boolean);
+  if (clue) return rulesNarration(clue);
+  const moves = effects.filter((effect) => effect.command.kind === "move");
+  if (moves.length > 0) {
+    return rulesNarration(committedMoveText(moves.at(-1)?.data));
   }
   const checkData = effects.length === 1 && effects[0]?.check
     ? effects[0].data
@@ -2243,10 +2468,7 @@ function fallbackCommand(
   }
   if (/\b(rest|sleep|camp)\b/.test(text)) return { command: { kind: "rest", restType: "long" }, tool: "rest" };
   if (/\b(search|scour|rummage|investigate)\b/.test(text) || /\blook\s+(?:for|through)\b/.test(text)) {
-    return {
-      command: { kind: "roll_check", ability: /\b(mind|rune|book|mechanism)\b/.test(text) ? "int" : "wis", goal: playerText },
-      tool: "roll_check",
-    };
+    return { command: { kind: "declare", goal: playerText }, tool: "declare" };
   }
   if (/\b(loot|take|claim)\b/.test(text)) return { command: { kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }, tool: "loot" };
   if (/\b(use|drink|consume)\b.*\b(potion|draught|ration)\b/.test(text)) {
@@ -2263,10 +2485,7 @@ function fallbackCommand(
   if (/\b(listen|hear)\b/.test(text)) return { command: { kind: "listen" }, tool: "listen" };
   if (/\b(look|observe|describe|room|surroundings|see)\b/.test(text)) return { command: { kind: "observe" }, tool: "observe" };
   if (/\b(inspect|study|check)\b/.test(text)) {
-    return {
-      command: { kind: "roll_check", ability: /\b(mind|rune|book|mechanism)\b/.test(text) ? "int" : "wis", goal: playerText },
-      tool: "roll_check",
-    };
+    return { command: { kind: "declare", goal: playerText }, tool: "declare" };
   }
   return { command: { kind: "declare", goal: playerText }, tool: "declare" };
 }

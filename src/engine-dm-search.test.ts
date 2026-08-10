@@ -134,7 +134,7 @@ describe("DM broad-search provenance", () => {
     vi.unstubAllGlobals();
   });
 
-  it("does not turn a prose-only search success into an uncommitted reward", async () => {
+  it("discards an orphaned search roll instead of turning prose into an uncommitted reward", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(toolResponse(
         call("search-check", "roll_check", {
@@ -160,7 +160,9 @@ describe("DM broad-search provenance", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check"]);
+    expect(result).toMatchObject({ tool: "declare", readOnly: false });
+    expect(result.event?.effects).toBeUndefined();
+    expect(result.state.lastRoll).toBeNull();
     expect(result.narrationSource).toBe("rules");
     expect(result.narration.text).not.toMatch(/cloak|bundle|hatch/i);
     expect(result.state.worldContext?.objects).toEqual([]);
@@ -246,7 +248,7 @@ describe("DM broad-search provenance", () => {
     store.close();
   });
 
-  it("uses a check fallback for search instead of claiming encounter loot", async () => {
+  it("uses a no-roll declaration fallback for search instead of claiming encounter loot", async () => {
     const fetchMock = vi.fn().mockRejectedValueOnce(new Error("provider unavailable"));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
@@ -261,8 +263,9 @@ describe("DM broad-search provenance", () => {
       playerText,
     );
 
-    expect(result).toMatchObject({ tool: "roll_check", readOnly: false });
-    expect(result.event?.tool).toBe("roll_check");
+    expect(result).toMatchObject({ tool: "declare", readOnly: false });
+    expect(result.event?.tool).toBe("declare");
+    expect(result.state.lastRoll).toBeNull();
     expect(result.state.combat.lootClaimed).toBe(false);
     expect(result.state.worldContext?.objects).toEqual([]);
     store.close();

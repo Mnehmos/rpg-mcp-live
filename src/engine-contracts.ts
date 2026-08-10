@@ -1349,6 +1349,7 @@ export const engineSituationClueAttemptCommandSchema = z.object({
   kind: z.literal("situation_clue_attempt"),
   clueId: worldContextEntityIdSchema,
   approach: z.string().trim().min(1).max(2_000),
+  sourceActorId: worldContextEntityIdSchema.optional(),
 }).strict();
 export type EngineSituationClueAttemptCommand = z.infer<typeof engineSituationClueAttemptCommandSchema>;
 
@@ -1823,6 +1824,20 @@ export const engineSpellKeySchema = z.string().trim().max(300).refine(
   "Spell keys must reference installed Open5e content or a persisted runtime spell.",
 );
 
+/**
+ * A bounded fictional consequence authored after an engine-owned check.
+ * Reveals, movement, progress, and mechanics continue to use their existing
+ * authoritative tools; this metadata only binds caused fiction to the exact
+ * result the DM already saw.
+ */
+export const engineSceneMoveSchema = z.object({
+  category: z.enum(["reaction", "cost", "pressure", "choice", "closure"]),
+  sourceEffectIndex: z.number().int().min(0).max(15),
+  outcome: z.enum(["success", "failure"]),
+  nextDecision: z.string().trim().min(1).max(1_000),
+}).strict();
+export type EngineSceneMove = z.infer<typeof engineSceneMoveSchema>;
+
 export const engineCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("observe") }).strict(),
   z.object({ kind: z.literal("listen") }).strict(),
@@ -1922,6 +1937,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       durationRounds: z.number().int().min(1).max(1_000).optional(),
       condition: z.string().trim().min(1).max(80).optional(),
       checkCategory: z.enum(["attack-roll", "ability-check", "saving-throw"]).optional(),
+      sceneMove: engineSceneMoveSchema.optional(),
     })
     .strict(),
   z

@@ -3281,7 +3281,8 @@ export function resolveEngineCommand(
   clientCommandId: string,
   command: EngineCommand,
   tool: EngineToolName | "declare" | "listen",
-  playerText?: string
+  playerText?: string,
+  internalAuthority?: { sceneMoveBindingValidated?: boolean },
 ): EngineResolution {
   if (
     state.character.lifecycleState === "dead"
@@ -3394,7 +3395,14 @@ export function resolveEngineCommand(
     case "quest_update":
       return resolveQuestUpdate(state, context, clientCommandId, command, tool);
     case "improvise":
-      return resolveImprovise(state, context, clientCommandId, command, tool);
+      return resolveImprovise(
+        state,
+        context,
+        clientCommandId,
+        command,
+        tool,
+        internalAuthority?.sceneMoveBindingValidated === true,
+      );
     case "campaign_beat":
       return resolveCampaignBeat(state, context, clientCommandId, command, tool);
     case "character_roll_stats":
@@ -3593,7 +3601,7 @@ function resolveMove(
     clientCommandId,
     command,
     tool,
-    "You move toward " + exit.label + ". The DM must establish the next context.",
+    "You follow the established route: " + exit.label + ".",
     { exit, worldContext: state.worldContext, situation: next.situation ? projectSituationForActor(next.situation, next, context.actorId) : null },
     "moved",
     [],
@@ -3850,7 +3858,7 @@ function resolveWorldContext(
     clientCommandId,
     command,
     tool,
-    "The DM establishes the current context: " + worldContext.title + ".",
+    "The current context is now " + worldContext.title + ".",
     { worldContext: actorKnowledgeProjection(context.actorId, next).worldContext, situation: next.situation ? projectSituationForActor(next.situation, next, context.actorId) : null },
     "world_context_updated",
     [],
@@ -6660,8 +6668,25 @@ function resolveImprovise(
   context: RequestContext,
   clientCommandId: string,
   command: Extract<EngineCommand, { kind: "improvise" }>,
-  tool: EngineToolName | "declare" | "listen"
+  tool: EngineToolName | "declare" | "listen",
+  sceneMoveBindingValidated = false,
 ): EngineResolution {
+  if (command.sceneMove && command.effectType !== "fictional") {
+    return rejection(
+      state,
+      tool,
+      "scene_move_must_be_fictional",
+      "A post-check scene move is a non-mechanical fictional consequence; use an authoritative typed tool for mechanics.",
+    );
+  }
+  if (command.sceneMove && !sceneMoveBindingValidated) {
+    return rejection(
+      state,
+      tool,
+      "scene_move_binding_required",
+      "A post-check scene move must be validated against an earlier provisional check in the private DM turn plan.",
+    );
+  }
   if (command.effectType === "movement" || command.effectType === "summoning") {
     return rejection(
       state,
@@ -6698,6 +6723,24 @@ function resolveImprovise(
     createdAt: new Date().toISOString(),
   };
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  if (
+    command.sceneMove?.outcome === "failure"
+    && next.situation?.lastComplication === "pending-dm-consequence"
+  ) {
+    const beforeSituation = projectSituationForActor(state.situation!, state, context.actorId);
+    const concreteComplication = `${command.sceneMove.category}: ${command.description}`;
+    next.situation.lastComplication = concreteComplication;
+    const pendingClue = [...next.situation.clues]
+      .reverse()
+      .find((clue) => clue.lastComplication === "pending-dm-consequence");
+    if (pendingClue) pendingClue.lastComplication = concreteComplication;
+    next.situation.revision += 1;
+    changes.push({
+      path: "/situation",
+      before: beforeSituation,
+      after: projectSituationForActor(next.situation, next, context.actorId),
+    });
+  }
   if (command.effectType === "advantage" || command.effectType === "disadvantage") {
     const operation: EngineEffectOperation = { kind: command.effectType, category: command.checkCategory ?? "attack-roll" };
     applyRuntimeEffect(
@@ -6748,7 +6791,9 @@ function resolveImprovise(
   next.improvEffects = [...state.improvEffects, effect].slice(-100);
   const fictional = command.effectType === "fictional";
   return commit(next, context, clientCommandId, command, tool, fictional
-    ? "The fiction advances; no mechanical effect was applied: " + command.title + "."
+    ? command.sceneMove
+      ? "The caused consequence is committed: " + command.title + ". Next decision: " + command.sceneMove.nextDecision
+      : "The fiction advances; no mechanical effect was applied: " + command.title + "."
     : "Improv effect applied: " + command.title + ".", { effect, mechanical: !fictional, effects: next.effects.filter((candidate) => candidate.status === "active"), character: characterData(next.character) }, fictional ? "improvise_fictional" : "improv_effect_applied", [], [], [
     { path: "/improvEffects", before: state.improvEffects, after: next.improvEffects },
     { path: "/character", before: state.character, after: next.character },
@@ -6922,6 +6967,21 @@ function resolveSituationClueAttempt(
   if (!clue) return rejection(state, tool, "clue_not_found", "That clue is not part of the reviewed situation.");
   if (!situation.visitedLocationIds.includes(clue.locationId)) return rejection(state, tool, "clue_location_unvisited", "Visit the clue's location before attempting to investigate it.");
   if (clue.foundBy.includes(context.actorId)) return rejection(state, tool, "clue_already_found", "That clue has already been found by this actor.");
+  const revelation = situation.revelations.find((candidate) => candidate.id === clue.revelationId);
+  const sourceActor = command.sourceActorId
+    ? state.worldContext?.npcs.find((candidate) => candidate.id === command.sourceActorId)
+    : null;
+  if (command.sourceActorId && (!sourceActor || !situation.actors.some((actor) => actor.actorRef === sourceActor.id))) {
+    return rejection(state, tool, "clue_source_actor_not_found", "That source is not an established present actor in this situation.");
+  }
+  if (sourceActor && (!revelation || !state.actorKnowledge.some((record) =>
+    record.actorId === sourceActor.id
+    && record.factId === revelation.truthId
+    && !record.stale
+    && record.tier === "known"
+  ))) {
+    return rejection(state, tool, "clue_source_actor_uninformed", "That actor does not canonically know the linked truth and cannot supply this answer.");
+  }
   const challenge: EngineChallengeAttemptCommand = {
     kind: "challenge_attempt",
     challengeId: clue.challengeId,
@@ -6931,13 +6991,27 @@ function resolveSituationClueAttempt(
     difficultyBand: clue.difficultyBand,
     informationPolicy: "public",
   };
-  const checked = resolveChallengeAttempt(state, context, clientCommandId, challenge, tool);
+  const checked = sourceActor
+    ? commit(
+        cloneCampaign(state),
+        context,
+        clientCommandId,
+        command,
+        tool,
+        `${sourceActor.name} can answer from canonical knowledge; no uncertain social check is required.`,
+        { sourceActorId: sourceActor.id, automatic: true },
+        "automatic-success",
+        [],
+        [],
+        [],
+      )
+    : resolveChallengeAttempt(state, context, clientCommandId, challenge, tool);
   if (!checked.accepted || !checked.event) return rejection(state, tool, checked.code ?? "clue_attempt_rejected", checked.message);
   const next = checked.state;
   const nextSituation = next.situation!;
   const nextClue = nextSituation.clues.find((candidate) => candidate.id === clue.id)!;
-  const success = checked.event.outcome === "success";
-  nextClue.attempts += 1;
+  const success = Boolean(sourceActor) || checked.event.outcome === "success";
+  if (!sourceActor) nextClue.attempts += 1;
   if (success) {
     nextClue.foundBy = [...new Set([...nextClue.foundBy, context.actorId])];
     nextClue.lastComplication = null;
@@ -6947,7 +7021,15 @@ function resolveSituationClueAttempt(
       const fact = next.worldFacts.find((candidate) => candidate.id === factId && candidate.active);
       if (!fact) continue;
       if (!fact.id || next.actorKnowledge.some((record) => record.actorId === context.actorId && record.factId === fact.id && !record.stale && record.factRevision === fact.revision)) continue;
-      const record = appendKnowledgeRecord(next, context.actorId, fact, "known", "active-search", `situation:${nextSituation.id}:${nextClue.id}`, next.version);
+      const record = appendKnowledgeRecord(
+        next,
+        context.actorId,
+        fact,
+        "known",
+        sourceActor ? "dm" : "active-search",
+        sourceActor ? `situation:${nextSituation.id}:actor:${sourceActor.id}` : `situation:${nextSituation.id}:${nextClue.id}`,
+        next.version,
+      );
       nextSituation.truths = nextSituation.truths.map((truth) => truth.id === fact.id ? { ...truth, discoveredBy: [...new Set([...truth.discoveredBy, context.actorId])] } : truth);
       checked.event.stateChanges.push({ path: `/actorKnowledge/${record.id}`, before: null, after: { actorId: record.actorId, tier: record.tier, source: record.source, confidence: record.confidence } });
     }
@@ -6960,12 +7042,14 @@ function resolveSituationClueAttempt(
   nextSituation.revision += 1;
   const beforeProjection = projectSituationForActor(situation, state, context.actorId);
   const afterProjection = projectSituationForActor(nextSituation, next, context.actorId);
-  const message = success
-    ? "The authorized clue and linked revelation are committed; the DM must now portray the concrete discovery."
-    : "The clue attempt failed without revealing the hidden truth; the DM must now commit and portray a concrete consequence.";
+  const message = sourceActor
+    ? `${sourceActor.name}'s authorized answer and the linked revelation are committed without a roll.`
+    : success
+      ? "The authorized clue and linked revelation are committed as a concrete discovery."
+      : "The clue attempt failed without revealing the hidden truth; a concrete caused consequence is required before this turn can commit.";
   checked.event.tool = tool;
   checked.event.command = command;
-  checked.event.outcome = success ? "situation_clue_found" : "situation_clue_failed_forward";
+  checked.event.outcome = sourceActor ? "situation_clue_shared" : success ? "situation_clue_found" : "situation_clue_failed_forward";
   checked.event.stateChanges.push({ path: "/situation", before: beforeProjection, after: afterProjection });
   checked.tool = tool;
   checked.message = message;
@@ -6973,6 +7057,7 @@ function resolveSituationClueAttempt(
     situation: afterProjection,
     clueId: nextClue.id,
     success,
+    sourceActorId: sourceActor?.id ?? null,
     complication: success ? null : nextClue.lastComplication,
     check: checked.event.check,
   };
@@ -7040,7 +7125,7 @@ function resolveSituationChoice(
     clientCommandId,
     command,
     tool,
-    "The selected situation outcome is committed; the DM must portray its concrete fictional consequences.",
+    "The situation reaches its selected outcome: " + allowed.outcome.title + ".",
     { situation: afterProjection, outcome: next.situation.outcome },
     "situation_outcome_committed",
     [],
@@ -14233,6 +14318,15 @@ function redactRuntimeContentValue(value: unknown): unknown {
   const source = value as Record<string, unknown>;
   const projected: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(source)) {
+    if (key === "sceneMove" && child && typeof child === "object" && !Array.isArray(child)) {
+      const sceneMove = child as Record<string, unknown>;
+      projected[key] = {
+        category: sceneMove.category,
+        outcome: sceneMove.outcome,
+        nextDecision: sceneMove.nextDecision,
+      };
+      continue;
+    }
     if (key === "exit" && isUndiscoveredHiddenExit(child)) continue;
     if (key === "exits" && Array.isArray(child)) {
       projected[key] = child

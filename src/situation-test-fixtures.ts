@@ -211,3 +211,76 @@ export function ashmereSituationDefinition(): EngineSituationDefinitionProposal 
     ],
   };
 }
+
+/** Deterministic production-play regression fixture for issue #179. */
+export function prepareSiltedBellWorld(state: LanternCampaignState): LanternCampaignState {
+  const next = structuredClone(state);
+  next.worldContext = {
+    id: "silted-bell-wharf",
+    title: "Silted Bell Wharf",
+    description: "Black water laps below a sealed stair while old tide marks stripe the portcullis.",
+    features: ["sealed-stair", "lower-portcullis", "tide-marks"],
+    exits: [{ id: "pump-house", label: "Cross the wet boards to the pump house" }],
+    npcs: [{
+      id: "mara-wharfkeeper",
+      name: "Mara",
+      description: "The wharfkeeper watches the tide and the sealed stair.",
+      disposition: "neutral",
+      goals: ["keep the wharf open", "keep people away from the stair at high tide"],
+      socialDc: 12,
+      relationshipScore: 0,
+      memories: [],
+    }],
+    merchants: [],
+    objects: [],
+  };
+  return next;
+}
+
+export function siltedBellSituationDefinition(): EngineSituationDefinitionProposal {
+  return {
+    key: "silted-bell-wharf",
+    title: "Silted Bell Wharf",
+    summary: "The sealed stair, the changing tide, and Mara's account support several independent routes to the bell below.",
+    initialNodeKey: "wharf",
+    centralRevelationKey: "stair-source",
+    nodes: [
+      { key: "wharf", title: "Silted Bell Wharf", description: "Tide marks stripe the sealed lower stair.", visibility: "public", exitKeys: ["pump-house"] },
+      { key: "pump-house", title: "Old Pump House", description: "Corroded controls overlook the wharf channel.", visibility: "public", exitKeys: ["wharf"] },
+    ],
+    truths: [
+      { key: "stair-source", title: "The tide breathes through the sealed stair", description: "A submerged conduit beyond the lower portcullis draws air inward as the tide falls.", visibility: "hidden" },
+      { key: "mara-witness", title: "Mara heard the lower bell", description: "Mara heard the bell answer from below during the last low tide.", visibility: "hidden" },
+    ],
+    revelations: [
+      { key: "stair-source", title: "What lies beyond the sealed stair", truthKey: "stair-source" },
+      { key: "mara-witness", title: "What Mara heard", truthKey: "mara-witness" },
+    ],
+    clues: [
+      { key: "draft", title: "The inward draft", finding: "A faint inward draft pulses through the lower portcullis seam in time with the falling tide.", visibility: "public", nodeKey: "wharf", revelationKey: "stair-source", difficultyBand: "gentle" },
+      { key: "silt-line", title: "The broken silt line", finding: "Fresh water has cut a narrow channel through the old silt below the sealed stair.", visibility: "public", nodeKey: "wharf", revelationKey: "stair-source", difficultyBand: "standard" },
+      { key: "pump-gauge", title: "The reversed pump gauge", finding: "The dead pump gauge twitches backward whenever the tide drains past the lower stair.", visibility: "public", nodeKey: "pump-house", revelationKey: "stair-source", difficultyBand: "challenging" },
+      { key: "mara", title: "Mara's account", finding: "Mara heard the lower bell answer during the last low tide.", visibility: "public", nodeKey: "wharf", revelationKey: "mara-witness", difficultyBand: "gentle" },
+    ],
+    actors: [{ actorRef: "mara-wharfkeeper", goals: ["protect the wharf", "keep the sealed stair closed at high tide"], knowsTruthKeys: ["mara-witness"] }],
+    roles: [{
+      key: "witness",
+      capability: "testify",
+      preferred: { kind: "actor", ref: "mara-wharfkeeper" },
+      alternates: [{ kind: "feature", ref: "tide-marks" }],
+      fallback: { kind: "clue", ref: "mara" },
+    }],
+    pressure: {
+      key: "tide",
+      title: "The tide turns",
+      max: 4,
+      intervalMinutes: 30,
+      defaultDevelopment: { key: "stair-submerged", title: "The lower seam submerges", description: "The rising tide covers the seam and changes which approaches remain possible." },
+    },
+    outcomes: [
+      { key: "open-route", title: "Act on the verified lower route", terminalStatus: "resolved", reactivityTier: "contextual", requirements: [{ kind: "revelation_revealed", revelationKey: "stair-source" }] },
+      { key: "wait", title: "Wait for the next tide", terminalStatus: "resolved", reactivityTier: "systemic", requirements: [{ kind: "pressure_at_least", value: 2 }] },
+      { key: "leave", title: "Leave the wharf", terminalStatus: "walked-away", reactivityTier: "contextual", requirements: [] },
+    ],
+  };
+}
