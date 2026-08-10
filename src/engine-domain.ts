@@ -8541,6 +8541,14 @@ function resolveCastSpell(
   }
   const spell = resolveSpellRecord(state, command.spellKey);
   if (!spell) return rejection(state, tool, "content_not_installed", `Spell content is not installed: ${command.spellKey}.`);
+  const runtimeDefinition = command.spellKey.startsWith("runtime:spell:")
+    ? state.runtimeContent.definitions.find((candidate): candidate is RuntimeSpellDefinition =>
+      candidate.kind === "spell" && candidate.id === command.spellKey
+    )
+    : null;
+  const synthesisEvidenceContentKeys = runtimeDefinition?.execution?.primitiveContentKey
+    ? [runtimeDefinition.execution.primitiveContentKey]
+    : [];
   const availableReferences = spell.definition.level === 0 || progression.selectionMode === "known"
     ? spellcasting.knownSpells
     : spellcasting.preparedSpells;
@@ -8773,7 +8781,8 @@ function resolveCastSpell(
     defeatedAll ? "spell_encounter_ended" : "spell_cast",
     rolls,
     modifiers,
-    changes
+    changes,
+    synthesisEvidenceContentKeys,
   );
 }
 
@@ -12247,13 +12256,13 @@ function collectContentKeys(value: unknown): string[] {
     for (const [key, child] of Object.entries(candidate as Record<string, unknown>)) {
       if (
         typeof child === "string"
-        && child.startsWith("open5e:")
+        && (child.startsWith("open5e:") || child.startsWith("runtime:"))
         && (key === "contentKey" || key.endsWith("Key"))
       ) {
         keys.add(child);
       } else if (Array.isArray(child) && key.endsWith("Keys")) {
         for (const contentKey of child) {
-          if (typeof contentKey === "string" && contentKey.startsWith("open5e:")) keys.add(contentKey);
+          if (typeof contentKey === "string" && (contentKey.startsWith("open5e:") || contentKey.startsWith("runtime:"))) keys.add(contentKey);
         }
       } else visit(child);
     }

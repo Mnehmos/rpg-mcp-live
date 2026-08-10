@@ -145,6 +145,7 @@ describe("runtime arcane synthesis", () => {
     const cast = apply(started.state, { kind: "cast_spell", spellKey, targetIds: [targetId] });
     expect(cast.accepted).toBe(true);
     expect(["spell_cast", "spell_encounter_ended"]).toContain(cast.event?.outcome);
+    expect(cast.event?.contentKeys).toEqual(expect.arrayContaining([spellKey, RAY_OF_FROST]));
 
     const reloaded = normalizeCampaignState(JSON.parse(JSON.stringify(cast.state)));
     expect(reloaded.runtimeContent.definitions).toEqual(cast.state.runtimeContent.definitions);
