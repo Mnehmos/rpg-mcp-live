@@ -99,6 +99,19 @@ export const engineItemProvenanceSchema = z.object({
 }).strict();
 export type EngineItemProvenance = z.infer<typeof engineItemProvenanceSchema>;
 
+export const engineItemTheftProvenanceSchema = z.object({
+  theftEventId: z.string().trim().min(1).max(160),
+  sourceCommandId: z.string().trim().min(1).max(160),
+  sourceOwnerRef: engineItemOwnerRefSchema,
+  locationRef: z.string().trim().min(1).max(120).nullable(),
+  gameTimeMinutes: z.number().int().nonnegative(),
+  campaignRevision: z.number().int().nonnegative(),
+  occurredAt: z.string().trim().min(1).max(80),
+  witnessIds: z.array(z.string().trim().min(1).max(120)).max(10),
+  evidenceIds: z.array(z.string().trim().min(1).max(160)).max(20),
+}).strict();
+export type EngineItemTheftProvenance = z.infer<typeof engineItemTheftProvenanceSchema>;
+
 export const engineLifecycleStateSchema = z.enum(["conscious", "dying", "stable", "dead"]);
 export type EngineLifecycleState = z.infer<typeof engineLifecycleStateSchema>;
 
@@ -553,6 +566,14 @@ export interface EngineSocialReputation {
   provenance: EngineSocialProvenance;
 }
 
+export interface EngineSocialHeat {
+  id: string;
+  actorId: string;
+  communityId: string;
+  score: number;
+  provenance: EngineSocialProvenance;
+}
+
 export interface EngineSocialObligation {
   id: string;
   kind: "promise" | "debt" | "favor";
@@ -599,6 +620,7 @@ export interface EngineSocialState {
   relationships: EngineSocialRelationship[];
   factions: EngineSocialFaction[];
   reputations: EngineSocialReputation[];
+  heat?: EngineSocialHeat[];
   obligations: EngineSocialObligation[];
   crimes: EngineSocialCrimeEvidence[];
   rumors: EngineSocialRumor[];
@@ -608,6 +630,7 @@ export interface EngineSocialProjection {
   relationships: Array<Pick<EngineSocialRelationship, "id" | "actorA" | "actorB" | "trust" | "fear" | "loyalty" | "hostility" | "updatedAt">>;
   factions: Array<{ id: string; name: string; communityId: string; standing: number }>;
   reputations: EngineSocialReputation[];
+  heat: EngineSocialHeat[];
   obligations: EngineSocialObligation[];
   rumors: EngineSocialRumor[];
 }
@@ -680,6 +703,7 @@ export const engineMerchantPatchSchema = z.object({
   name: z.string().trim().min(1).max(160).optional(),
   description: z.string().trim().max(2_000).optional(),
   disposition: worldContextDispositionSchema.optional(),
+  stolenGoodsPolicy: z.enum(["refuse-known", "fence"]).optional(),
   items: z.array(engineMerchantListingInputSchema).max(100).optional(),
 }).strict();
 export type EngineMerchantPatch = z.infer<typeof engineMerchantPatchSchema>;
@@ -2129,7 +2153,10 @@ export interface EngineMerchant {
   name: string;
   description: string;
   disposition: EngineNpc["disposition"];
+  stolenGoodsPolicy?: "refuse-known" | "fence";
   items: EngineMerchantItem[];
+  /** Server-owned item instances received through trade; never model-authored. */
+  acquiredItems?: EngineInventoryItem[];
 }
 
 export interface EngineNote {
@@ -2201,6 +2228,8 @@ export interface EngineInventoryItem {
   containerRef?: string;
   charges?: EngineItemChargeState;
   provenance?: EngineItemProvenance;
+  /** Append-only legal provenance; ownership transfers never erase this history. */
+  theftProvenance?: EngineItemTheftProvenance[];
 }
 
 export interface EngineInventoryItemView extends EngineInventoryItem, EngineItemDefinition {
@@ -2212,7 +2241,7 @@ export interface EngineMerchantItemView extends Omit<EngineMerchantItem, "item">
   item: EngineInventoryItemView;
 }
 
-export interface EngineMerchantView extends Omit<EngineMerchant, "items"> {
+export interface EngineMerchantView extends Omit<EngineMerchant, "items" | "acquiredItems"> {
   items: EngineMerchantItemView[];
 }
 

@@ -491,6 +491,7 @@ const merchantPatchJsonSchema = {
     name: { type: "string" },
     description: { type: "string" },
     disposition: { type: "string", enum: ["hostile", "unfriendly", "neutral", "friendly", "helpful"] },
+    stolenGoodsPolicy: { type: "string", enum: ["refuse-known", "fence"], description: "Reviewed merchant role. The engine still owns recognition, price adjustment, risk, and the transaction outcome." },
     items: {
       type: "array",
       maxItems: 100,
@@ -805,7 +806,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "merchant_trade",
-    "Resolve an immediate purchase, sale, or explicit offer against a DM-authored merchant catalog. No pending merchant deliberation is stored: use the tool only when the deal is ready to resolve.",
+    "Resolve an immediate purchase, sale, or explicit offer against a DM-authored merchant catalog. Stolen-property recognition, fence pricing, heat, ownership, and the final outcome are server-owned. No pending merchant deliberation is stored: use the tool only when the deal is ready to resolve.",
     {
       type: "object",
       properties: { merchantId: { type: "string" }, itemId: { type: "string" }, side: { type: "string", enum: ["buy", "sell", "offer"] }, quantity: { type: "integer", minimum: 1 }, offerUnitPriceCopper: { type: "integer", minimum: 0 } },
@@ -815,7 +816,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "social_action",
-    "Record one authoritative social consequence: make or resolve a promise, record witnessed or unwitnessed theft evidence, or pass a bounded rumor. The engine owns trust, reputation, evidence status, and delayed propagation; never provide a truth update as a substitute for corroboration.",
+    "Record one authoritative social consequence: make or resolve a promise, steal one established marked item while recording witnessed or unwitnessed evidence, or pass a bounded rumor. The engine owns ownership, theft provenance, heat, trust, reputation, evidence status, and delayed propagation; never provide those outcomes directly.",
     {
       type: "object",
       properties: {

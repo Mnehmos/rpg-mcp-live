@@ -123,6 +123,7 @@ import type {
   EngineInventoryItemView,
   EngineItemDefinition,
   EngineItemProvenance,
+  EngineItemTheftProvenance,
   EngineWeaponAttack,
   EngineMerchant,
   EngineMerchantPatch,
@@ -162,6 +163,7 @@ import type {
   EngineSocialActionCommand,
   EngineSocialCrimeEvidence,
   EngineSocialFaction,
+  EngineSocialHeat,
   EngineSocialObligation,
   EngineSocialProjection,
   EngineSocialRelationship,
@@ -1148,6 +1150,9 @@ const SOCIAL_MAX = 100;
 const SOCIAL_COMMUNITY_ID = "local-community";
 const SOCIAL_RUMOR_DELAY_MINUTES = 60;
 const SOCIAL_CHECK_DC = 12;
+const WITNESSED_THEFT_HEAT = 20;
+const FENCE_TRADE_HEAT = 5;
+const FENCE_PRICE_MULTIPLIER = 0.5;
 
 export const NPC_AGENCY_CONFIG = Object.freeze({
   maxInputTokens: 8_000,
@@ -1349,7 +1354,7 @@ function socialProvenance(value: unknown, fallbackCommandId = "legacy-social", f
 }
 
 function defaultSocialState(): EngineSocialState {
-  return { relationships: [], factions: [], reputations: [], obligations: [], crimes: [], rumors: [] };
+  return { relationships: [], factions: [], reputations: [], heat: [], obligations: [], crimes: [], rumors: [] };
 }
 
 function normalizeSocialState(value: unknown): EngineSocialState {
@@ -1407,6 +1412,20 @@ function normalizeSocialState(value: unknown): EngineSocialState {
           provenance: socialProvenance(reputation.provenance),
         }];
       })
+    : [];
+  const heat = Array.isArray(raw.heat)
+    ? raw.heat.flatMap((candidate) => {
+        if (!candidate || typeof candidate !== "object") return [];
+        const record = candidate as Partial<EngineSocialHeat>;
+        if (typeof record.id !== "string" || typeof record.actorId !== "string") return [];
+        return [{
+          id: record.id,
+          actorId: record.actorId,
+          communityId: typeof record.communityId === "string" ? record.communityId : SOCIAL_COMMUNITY_ID,
+          score: Math.max(0, Math.min(100, typeof record.score === "number" && Number.isFinite(record.score) ? Math.trunc(record.score) : 0)),
+          provenance: socialProvenance(record.provenance),
+        }];
+      }).slice(-200)
     : [];
   const obligations = Array.isArray(raw.obligations)
     ? raw.obligations.flatMap((candidate) => {
@@ -1468,7 +1487,7 @@ function normalizeSocialState(value: unknown): EngineSocialState {
         }];
       }).slice(-200)
     : [];
-  return { relationships: relationships.slice(-200), factions: factions.slice(-100), reputations: reputations.slice(-200), obligations, crimes, rumors };
+  return { relationships: relationships.slice(-200), factions: factions.slice(-100), reputations: reputations.slice(-200), heat, obligations, crimes, rumors };
 }
 
 function ensureSocialState(state: LanternCampaignState): EngineSocialState {
@@ -1565,6 +1584,30 @@ function adjustSocialReputation(
   return { before, after: { ...reputation, provenance: { ...reputation.provenance } } };
 }
 
+function adjustSocialHeat(
+  state: LanternCampaignState,
+  actorId: string,
+  communityId: string,
+  delta: number,
+  sourceCommandId: string,
+  sourceVersion: number,
+): EngineSocialHeat {
+  const social = ensureSocialState(state);
+  const now = new Date().toISOString();
+  const existing = social.heat!.find((candidate) => candidate.actorId === actorId && candidate.communityId === communityId);
+  const record = existing ?? {
+    id: `heat:${actorId}:${communityId}`,
+    actorId,
+    communityId,
+    score: 0,
+    provenance: { sourceCommandId, sourceVersion, occurredAt: now },
+  };
+  if (!existing) social.heat!.push(record);
+  record.score = Math.max(0, Math.min(100, record.score + Math.trunc(delta)));
+  record.provenance = { sourceCommandId, sourceVersion, occurredAt: now };
+  return record;
+}
+
 function projectSocialForActor(actorId: string, state: LanternCampaignState): EngineSocialProjection {
   const social = normalizeSocialState(state.social);
   return {
@@ -1576,6 +1619,7 @@ function projectSocialForActor(actorId: string, state: LanternCampaignState): En
       return member ? [{ id: faction.id, name: faction.name, communityId: faction.communityId, standing: member.standing }] : [];
     }),
     reputations: social.reputations.filter((reputation) => reputation.actorId === actorId).map((reputation) => ({ ...reputation, provenance: { ...reputation.provenance } })),
+    heat: social.heat!.filter((record) => record.actorId === actorId).map((record) => ({ ...record, provenance: { ...record.provenance } })),
     obligations: social.obligations
       .filter((obligation) => obligation.status === "open" && (obligation.actorId === actorId || obligation.counterpartyId === actorId))
       .map((obligation) => ({ ...obligation, provenance: { ...obligation.provenance } })),
@@ -4823,6 +4867,8 @@ function mergeMerchantPatch(existing: EngineMerchant | undefined, patch: EngineM
     name: patch.name ?? existing?.name ?? "",
     description: patch.description ?? existing?.description ?? "",
     disposition: patch.disposition ?? existing?.disposition ?? "neutral",
+    stolenGoodsPolicy: patch.stolenGoodsPolicy ?? existing?.stolenGoodsPolicy ?? "refuse-known",
+    acquiredItems: existing?.acquiredItems ?? [],
     items: patch.items === undefined ? (existing?.items ?? []) : patch.items.map((listing) => ({
       item: normalizeInventoryItem(listing.item),
       stock: listing.stock,
@@ -4932,6 +4978,7 @@ function socialStateChanges(before: EngineSocialState, after: EngineSocialState)
     ["relationships", "relationships"],
     ["factions", "factions"],
     ["reputations", "reputations"],
+    ["heat", "heat"],
     ["obligations", "obligations"],
     ["crimes", "crimes"],
     ["rumors", "rumors"],
@@ -5078,6 +5125,17 @@ function resolveSocialAction(
     if (!command.targetId || !socialTargetExists(state, command.targetId) || command.targetId === context.actorId) return rejection(state, tool, "victim_not_found", "A theft record needs an established victim.");
     if (!command.itemId) return rejection(state, tool, "item_id_required", "A theft record needs an item identifier.");
     if (command.witnessId && !socialTargetExists(state, command.witnessId)) return rejection(state, tool, "witness_not_found", "The claimed witness is not established in the current context.");
+    const sourceMerchant = state.worldContext?.merchants.find((merchant) => merchant.id === command.targetId);
+    const sourceListing = sourceMerchant?.items.find((listing) => listing.item.id === command.itemId);
+    const sourceNpc = state.worldContext?.npcs.find((npc) => npc.id === command.targetId);
+    const sourceNpcItem = sourceNpc?.agency?.resources.inventory.find((item) => item.id === command.itemId);
+    if (sourceListing && sourceListing.stock !== 1) return rejection(state, tool, "theft_item_not_unique", "The first stolen-property slice requires one finite marked merchant item.");
+    if (sourceNpcItem && sourceNpcItem.quantity !== 1) return rejection(state, tool, "theft_item_not_unique", "The first stolen-property slice requires one marked NPC item instance.");
+    const markedItem = sourceListing?.item ?? sourceNpcItem ?? null;
+    if (markedItem && state.character.inventory.some((item) => item.id === markedItem.id)) {
+      return rejection(state, tool, "item_instance_conflict", "That item instance already exists in your inventory.");
+    }
+    const evidenceIds = [`evidence:${clientCommandId}`];
     const crime: EngineSocialCrimeEvidence = {
       id: `crime:${clientCommandId}`,
       kind: "theft",
@@ -5086,13 +5144,72 @@ function resolveSocialAction(
       itemId: command.itemId,
       status: command.witnessId ? "proven" : "allegation",
       witnessIds: command.witnessId ? [command.witnessId] : [],
-      evidenceIds: [`evidence:${clientCommandId}`],
+      evidenceIds,
       createdAt: now,
       provenance: { sourceCommandId: clientCommandId, sourceVersion: state.version, occurredAt: now },
     };
     social.crimes.push(crime);
+    let stolenItem: EngineInventoryItem | null = null;
+    const sourceStateChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+    if (markedItem) {
+      const sourceOwnerRef = sourceListing
+        ? { kind: "merchant" as const, id: command.targetId }
+        : { kind: "actor" as const, id: command.targetId };
+      const theftRecord: EngineItemTheftProvenance = {
+        theftEventId: crime.id,
+        sourceCommandId: clientCommandId,
+        sourceOwnerRef,
+        locationRef: state.worldContext?.id ?? null,
+        gameTimeMinutes: state.time.gameTime.totalMinutes,
+        campaignRevision: state.version,
+        occurredAt: now,
+        witnessIds: command.witnessId ? [command.witnessId] : [],
+        evidenceIds,
+      };
+      const normalized = normalizeInventoryItem(markedItem);
+      stolenItem = {
+        ...normalized,
+        quantity: 1,
+        ownerRef: { kind: "actor", id: next.character.id },
+        containerRef: undefined,
+        equipped: false,
+        slot: undefined,
+        theftProvenance: [...(normalized.theftProvenance ?? []), theftRecord],
+      };
+      next.character.inventory.push(stolenItem);
+      const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+      if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+      if (sourceListing) {
+        const nextSourceMerchant = next.worldContext?.merchants.find((merchant) => merchant.id === command.targetId);
+        const nextSourceListing = nextSourceMerchant?.items.find((listing) => listing.item.id === command.itemId);
+        if (!nextSourceListing) return rejection(state, tool, "theft_item_unavailable", "That marked item changed before the theft could commit.");
+        if (nextSourceListing.stock >= 0) nextSourceListing.stock -= 1;
+        sourceStateChanges.push({
+          path: `/worldContext/merchants/${escapeJsonPointerSegment(command.targetId)}/items/${escapeJsonPointerSegment(command.itemId)}`,
+          before: sourceListing,
+          after: nextSourceListing,
+        });
+      } else if (sourceNpcItem) {
+        const nextSourceNpc = next.worldContext?.npcs.find((npc) => npc.id === command.targetId);
+        const nextSourceItem = nextSourceNpc?.agency?.resources.inventory.find((item) => item.id === command.itemId);
+        if (!nextSourceNpc?.agency || !nextSourceItem) return rejection(state, tool, "theft_item_unavailable", "That marked item changed before the theft could commit.");
+        nextSourceItem.quantity -= 1;
+        if (nextSourceItem.quantity <= 0) {
+          nextSourceNpc.agency.resources.inventory = nextSourceNpc.agency.resources.inventory.filter((item) => item.id !== command.itemId);
+        }
+        sourceStateChanges.push({
+          path: `/worldContext/npcs/${escapeJsonPointerSegment(command.targetId)}/agency/resources/inventory/${escapeJsonPointerSegment(command.itemId)}`,
+          before: sourceNpcItem,
+          after: nextSourceNpc.agency.resources.inventory.find((item) => item.id === command.itemId) ?? null,
+        });
+      }
+      sourceStateChanges.push({ path: "/character/inventory", before: state.character.inventory, after: next.character.inventory });
+    }
     adjustSocialRelationship(next, context.actorId, command.targetId, command.witnessId ? -25 : -10, clientCommandId, state.version);
-    if (command.witnessId) adjustSocialReputation(next, context.actorId, SOCIAL_COMMUNITY_ID, -20, clientCommandId, state.version);
+    if (command.witnessId) {
+      adjustSocialReputation(next, context.actorId, SOCIAL_COMMUNITY_ID, -20, clientCommandId, state.version);
+      adjustSocialHeat(next, context.actorId, SOCIAL_COMMUNITY_ID, WITNESSED_THEFT_HEAT, clientCommandId, state.version);
+    }
     const guardId = command.witnessId ? socialGuardId(state) : null;
     if (guardId) {
       scheduleSocialRumor(next, {
@@ -5111,9 +5228,10 @@ function resolveSocialAction(
       }, clientCommandId, state.version);
     }
     const afterSocial = ensureSocialState(next);
-    return commit(next, context, clientCommandId, command, tool, command.witnessId ? "Witnessed theft evidence is recorded and a delayed guard rumor is scheduled." : "The alleged theft is recorded privately; without a witness it does not become proven reputation.", { social: projectSocialForActor(context.actorId, next), crime }, command.witnessId ? "theft_proven" : "theft_alleged", [], [], [
+    return commit(next, context, clientCommandId, command, tool, command.witnessId ? "Witnessed theft evidence, bounded local heat, and durable item provenance are recorded." : "The alleged theft is recorded privately; any marked item keeps durable provenance without becoming proven reputation.", { social: projectSocialForActor(context.actorId, next), crime, stolenItem }, command.witnessId ? "theft_proven" : "theft_alleged", [], [], [
       ...socialStateChanges(beforeSocial, afterSocial),
       ...(JSON.stringify(state.time.scheduledEvents) !== JSON.stringify(next.time.scheduledEvents) ? [{ path: "/time/scheduledEvents", before: state.time.scheduledEvents, after: next.time.scheduledEvents }] : []),
+      ...sourceStateChanges,
     ]);
   }
 
@@ -5499,6 +5617,40 @@ function resolveSocialCheck(
   );
 }
 
+function latestTheftProvenance(item: EngineInventoryItem): EngineItemTheftProvenance | null {
+  return item.theftProvenance?.at(-1) ?? null;
+}
+
+function merchantTheftRecognition(
+  state: LanternCampaignState,
+  merchantId: string,
+  provenance: EngineItemTheftProvenance,
+): { recognized: boolean; knowledgeSource: "victim" | "witness" | "rumor" | null } {
+  if (provenance.sourceOwnerRef.kind === "merchant" && provenance.sourceOwnerRef.id === merchantId) {
+    return { recognized: true, knowledgeSource: "victim" };
+  }
+  if (provenance.witnessIds.includes(merchantId)) return { recognized: true, knowledgeSource: "witness" };
+  const social = normalizeSocialState(state.social);
+  const crime = social.crimes.find((candidate) =>
+    candidate.id === provenance.theftEventId
+    || candidate.provenance.sourceCommandId === provenance.sourceCommandId
+    || candidate.evidenceIds.some((evidenceId) => provenance.evidenceIds.includes(evidenceId))
+  );
+  if (crime?.witnessIds.includes(merchantId)) return { recognized: true, knowledgeSource: "witness" };
+  const informed = social.rumors.some((rumor) =>
+    rumor.targetId === merchantId
+    && rumor.status !== "pending"
+    && rumor.truthRelation === "true"
+    && (rumor.sourceRef === crime?.id || rumor.sourceRef === provenance.theftEventId)
+  );
+  return informed ? { recognized: true, knowledgeSource: "rumor" } : { recognized: false, knowledgeSource: null };
+}
+
+function localLawHeat(state: LanternCampaignState, actorId: string): number {
+  return normalizeSocialState(state.social).heat!
+    .find((record) => record.actorId === actorId && record.communityId === SOCIAL_COMMUNITY_ID)?.score ?? 0;
+}
+
 function resolveMerchantTrade(
   state: LanternCampaignState,
   context: RequestContext,
@@ -5511,6 +5663,39 @@ function resolveMerchantTrade(
   const listing = merchant.items.find((candidate) => candidate.item.id === command.itemId);
   if (!listing) return rejection(state, tool, "item_not_for_sale", "That merchant has not established that item for trade.");
   const isBuying = command.side === "buy" || command.side === "offer";
+  const heldForSale = isBuying ? null : state.character.inventory.find((candidate) => candidate.id === command.itemId) ?? null;
+  if (!isBuying) {
+    if (!heldForSale || heldForSale.quantity < command.quantity) return rejection(state, tool, "item_not_owned", "You do not have that quantity to sell.");
+    if (!isActorOwnedItem(heldForSale, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
+    if (heldForSale.equipped) return rejection(state, tool, "item_equipped", "Unequip the item before selling it.");
+    const heldView = materializeInventoryItem(heldForSale);
+    if (isContainerItem(heldView) && inventoryHasChildren(state.character.inventory, heldForSale.id)) {
+      return rejection(state, tool, "container_not_empty", "Empty a container before selling it.");
+    }
+  }
+  const theftProvenance = heldForSale ? latestTheftProvenance(heldForSale) : null;
+  if (theftProvenance && heldForSale!.quantity !== command.quantity) {
+    return rejection(state, tool, "stolen_property_stack_split_unsupported", "Transfer this stolen-property stack as one preserved instance.");
+  }
+  const stolenGoodsPolicy = merchant.stolenGoodsPolicy === "fence" ? "fence" : "refuse-known";
+  const recognition = theftProvenance
+    ? merchantTheftRecognition(state, merchant.id, theftProvenance)
+    : { recognized: false, knowledgeSource: null };
+  if (theftProvenance && stolenGoodsPolicy === "refuse-known" && recognition.recognized) {
+    return rejection(state, tool, "stolen_property_recognized", "The merchant recognizes the stolen property and refuses the sale.", {
+      merchantId: merchant.id,
+      itemId: command.itemId,
+      policyKey: "stolen-recognition-v1",
+      knowledgeSource: recognition.knowledgeSource,
+    });
+  }
+  if (theftProvenance && (merchant.acquiredItems ?? []).some((item) => item.id === command.itemId)) {
+    return rejection(state, tool, "item_instance_conflict", "That merchant already holds this item instance.");
+  }
+  if (theftProvenance && (merchant.acquiredItems?.length ?? 0) >= 100) {
+    return rejection(state, tool, "merchant_inventory_full", "That merchant cannot accept another preserved item instance.");
+  }
+  const fenceSale = Boolean(theftProvenance && stolenGoodsPolicy === "fence");
   const unitPrice = command.side === "offer" ? command.offerUnitPriceCopper : isBuying ? listing.buyPriceCopper : listing.sellPriceCopper;
   if (unitPrice === undefined) return rejection(state, tool, "offer_price_required", "An offer needs an explicit unit price.");
   const social = normalizeSocialState(state.social);
@@ -5522,7 +5707,9 @@ function resolveMerchantTrade(
   const socialScore = clampSocial((relationship?.trust ?? 0) + Math.trunc((reputation?.score ?? 0) / 2));
   if (socialScore <= -75) return rejection(state, tool, "merchant_access_denied", "The merchant refuses service while your local reputation remains severely negative.");
   const adjustment = Math.max(-10, Math.min(10, Math.trunc(socialScore / 10)));
-  const priceMultiplier = isBuying ? 1 - adjustment / 100 : 1 + adjustment / 100;
+  const socialPriceMultiplier = isBuying ? 1 - adjustment / 100 : 1 + adjustment / 100;
+  const stolenGoodsPriceMultiplier = fenceSale ? FENCE_PRICE_MULTIPLIER : 1;
+  const priceMultiplier = socialPriceMultiplier * stolenGoodsPriceMultiplier;
   const finalUnitPrice = Math.max(0, Math.round(unitPrice * priceMultiplier));
   const total = finalUnitPrice * command.quantity;
   if (!Number.isSafeInteger(total)) return rejection(state, tool, "price_out_of_range", "That transaction is too large to resolve safely.");
@@ -5535,35 +5722,49 @@ function resolveMerchantTrade(
   const nextListing = nextMerchant?.items.find((candidate) => candidate.item.id === command.itemId);
   if (!nextMerchant || !nextListing) return rejection(state, tool, "merchant_not_found", "That merchant is no longer available.");
   const beforeCharacter = cloneCampaign(state).character;
+  const beforeSocial = normalizeSocialState(state.social);
+  const beforeAcquiredItems = cloneCampaign(state).worldContext?.merchants.find((candidate) => candidate.id === command.merchantId)?.acquiredItems ?? [];
+  nextMerchant.acquiredItems ??= [];
   if (isBuying) {
     if (state.character.currency.copper < total) return rejection(state, tool, "insufficient_funds", "You cannot afford that purchase.");
     if (state.character.inventory.some((candidate) => candidate.id === nextListing.item.id)) {
       return rejection(state, tool, "item_instance_conflict", "That merchant instance already exists in your inventory.");
     }
+    const acquiredIndex = nextMerchant.acquiredItems.findIndex((item) => item.id === command.itemId);
+    const acquiredItem = acquiredIndex >= 0 ? nextMerchant.acquiredItems[acquiredIndex]! : null;
+    if (acquiredItem && acquiredItem.quantity !== command.quantity) {
+      return rejection(state, tool, "acquired_item_quantity_mismatch", "Buy that preserved merchant instance as one stack.");
+    }
     next.character.currency.copper -= total;
     syncCurrencyProjection(next.character);
     addInventory(next.character.inventory, withActorOwnership(
-      { ...normalizeInventoryItem(nextListing.item), quantity: command.quantity, equipped: false },
+      { ...normalizeInventoryItem(acquiredItem ?? nextListing.item), quantity: command.quantity, equipped: false },
       next.character.id,
       { kind: "merchant", sourceId: merchant.id },
     ));
     const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
     if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+    if (acquiredIndex >= 0) nextMerchant.acquiredItems.splice(acquiredIndex, 1);
     if (nextListing.stock >= 0) nextListing.stock -= command.quantity;
   } else {
     const held = next.character.inventory.find((candidate) => candidate.id === command.itemId);
-    if (!held || held.quantity < command.quantity) return rejection(state, tool, "item_not_owned", "You do not have that quantity to sell.");
-    if (!isActorOwnedItem(held, next.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
-    if (held.equipped) return rejection(state, tool, "item_equipped", "Unequip the item before selling it.");
-    const heldView = materializeInventoryItem(held);
-    if (isContainerItem(heldView) && inventoryHasChildren(next.character.inventory, held.id)) {
-      return rejection(state, tool, "container_not_empty", "Empty a container before selling it.");
+    if (!held) return rejection(state, tool, "item_not_owned", "That item changed before the sale could commit.");
+    if (theftProvenance) {
+      nextMerchant.acquiredItems.push({
+        ...normalizeInventoryItem(held),
+        quantity: command.quantity,
+        ownerRef: { kind: "merchant", id: nextMerchant.id },
+        containerRef: undefined,
+        equipped: false,
+        slot: undefined,
+      });
     }
     held.quantity -= command.quantity;
     if (held.quantity <= 0) next.character.inventory = next.character.inventory.filter((candidate) => candidate.id !== held.id);
     next.character.currency.copper += total;
     syncCurrencyProjection(next.character);
     if (nextListing.stock >= 0) nextListing.stock += command.quantity;
+    if (fenceSale) adjustSocialHeat(next, context.actorId, SOCIAL_COMMUNITY_ID, FENCE_TRADE_HEAT, clientCommandId, state.version);
   }
 
   const verb = isBuying ? (command.side === "offer" ? "offer accepted" : "purchase complete") : "sale complete";
@@ -5585,7 +5786,13 @@ function resolveMerchantTrade(
       totalCopper: total,
       socialScore,
       priceMultiplier,
-      ruleKey: "merchant-social-v1",
+      socialPriceMultiplier,
+      stolenGoodsPriceMultiplier,
+      ruleKey: fenceSale ? "merchant-fence-v1" : "merchant-social-v1",
+      recognitionPolicyKey: theftProvenance ? "stolen-recognition-v1" : null,
+      recognition,
+      fenceRiskPolicyKey: fenceSale ? "fence-heat-v1" : null,
+      localHeat: localLawHeat(next, context.actorId),
       currency: next.character.currency,
       currencyBreakdown: currencyBreakdown(next.character.currency.copper),
       inventory: materializeInventory(next.character.inventory),
@@ -5596,6 +5803,10 @@ function resolveMerchantTrade(
     [
       { path: "/character", before: beforeCharacter, after: next.character },
       { path: "/worldContext/merchants/" + merchant.id + "/items/" + listing.item.id, before: listing, after: nextListing },
+      ...(JSON.stringify(beforeAcquiredItems) !== JSON.stringify(nextMerchant.acquiredItems)
+        ? [{ path: "/worldContext/merchants/" + merchant.id + "/acquiredItems", before: beforeAcquiredItems, after: nextMerchant.acquiredItems }]
+        : []),
+      ...socialStateChanges(beforeSocial, normalizeSocialState(next.social)),
     ]
   );
 }
@@ -13489,6 +13700,14 @@ function normalizeMerchant(merchant: EngineMerchant): EngineMerchant {
     name: merchant.name,
     description: merchant.description ?? "",
     disposition: merchant.disposition ?? "neutral",
+    stolenGoodsPolicy: merchant.stolenGoodsPolicy === "fence" ? "fence" : "refuse-known",
+    acquiredItems: (merchant.acquiredItems ?? []).map((item) => ({
+      ...normalizeInventoryItem(item),
+      ownerRef: { kind: "merchant", id: merchant.id },
+      containerRef: undefined,
+      equipped: false,
+      slot: undefined,
+    })),
     items: (merchant.items ?? []).map((listing) => {
       const item = normalizeInventoryItem(listing.item);
       const definition = materializeInventoryItem(item);
@@ -13503,13 +13722,16 @@ function normalizeMerchant(merchant: EngineMerchant): EngineMerchant {
 }
 
 function projectMerchants(merchants: EngineMerchant[]): EngineMerchantView[] {
-  return merchants.map((merchant) => ({
-    ...merchant,
-    items: merchant.items.map((listing) => ({
-      ...listing,
-      item: materializeInventoryItem(listing.item),
-    })),
-  }));
+  return merchants.map((merchant) => {
+    const { acquiredItems: _privateAcquiredItems, ...publicMerchant } = merchant;
+    return {
+      ...publicMerchant,
+      items: merchant.items.map((listing) => ({
+        ...listing,
+        item: materializeInventoryItem(listing.item),
+      })),
+    };
+  });
 }
 
 function projectWorldContext(world: LanternCampaignState["worldContext"]): EngineWorldContextView | null {
