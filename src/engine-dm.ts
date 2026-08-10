@@ -249,11 +249,21 @@ export class LanternDungeonMaster {
           narrationSource: "rules",
         };
       }
-      const narration = sanitizeNarrationForProfile(
+      const preservedNarration = preserveMediatedCheckAttribution(
+        committed,
         toolLoop.narration,
-        committed.state.experienceProfile
+        committed.state.experienceProfile,
       );
-      return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
+      return this.store.updateCommandNarration(
+        context,
+        clientCommandId,
+        preservedNarration.narration,
+        preservedNarration.source,
+      ) ?? {
+        ...committed,
+        narration: preservedNarration.narration,
+        narrationSource: preservedNarration.source,
+      };
     } catch (error) {
       if (committed) {
         return {
@@ -338,11 +348,21 @@ export class LanternDungeonMaster {
           narrationSource: "rules",
         };
       }
-      const narration = sanitizeNarrationForProfile(
+      const preservedNarration = preserveMediatedCheckAttribution(
+        committed,
         toolLoop.narration,
-        committed.state.experienceProfile
+        committed.state.experienceProfile,
       );
-      return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
+      return this.store.updateCommandNarration(
+        context,
+        clientCommandId,
+        preservedNarration.narration,
+        preservedNarration.source,
+      ) ?? {
+        ...committed,
+        narration: preservedNarration.narration,
+        narrationSource: preservedNarration.source,
+      };
     } catch (error) {
       if (committed) {
         const fallback = committedRulesNarration(committed);
@@ -1223,12 +1243,50 @@ function committedCheckText(data: unknown, scene?: string): string | null {
   const location = scene ? " in " + scene : "";
   const purpose = goal ? ": " + goal : "";
   const attribution = check.attribution?.mode === "npc-mediated"
-    ? `${check.attribution.actingActorName} speaks for ${check.attribution.rollingActorName} to ${check.attribution.targetName}; the check uses ${check.attribution.modifierSourceActorName}'s modifiers. `
+    ? mediatedCheckAttributionText(check.attribution) + " "
     : "";
   const consequence = check.success
     ? "The outcome now stands in the scene."
     : "The setback now stands, and the situation continues from there.";
   return `${attribution}${outcome}${location}${purpose}. ${consequence}`;
+}
+
+function mediatedCheckAttributionText(attribution: EngineSocialCheckAttribution): string {
+  return `${attribution.actingActorName} speaks for ${attribution.rollingActorName} to ${attribution.targetName}; the check uses ${attribution.modifierSourceActorName}'s modifiers.`;
+}
+
+function mediatedCheckAttribution(result: EngineCommandResult): EngineSocialCheckAttribution | null {
+  const effectAttribution = result.event?.effects
+    ?.map((effect) => effect.check?.attribution)
+    .find((attribution): attribution is EngineSocialCheckAttribution => attribution?.mode === "npc-mediated");
+  return effectAttribution
+    ?? (result.event?.check?.attribution?.mode === "npc-mediated" ? result.event.check.attribution : null);
+}
+
+function narrationContradictsMediatedCheck(text: string, attribution: EngineSocialCheckAttribution): boolean {
+  const actor = attribution.actingActorName.trim().toLocaleLowerCase("en-US").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const source = attribution.modifierSourceActorName.trim().toLocaleLowerCase("en-US");
+  const normalized = text.toLocaleLowerCase("en-US");
+  const actorClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:rolled|rolls|is rolling|made|makes|attempts|performs)\\b[^.!?]{0,40}\\b(?:check|roll)\\b`, "i");
+  return actorClaim.test(normalized)
+    || (source !== attribution.actingActorName.trim().toLocaleLowerCase("en-US")
+      && normalized.includes(`${attribution.actingActorName.trim().toLocaleLowerCase("en-US")}'s modifier`));
+}
+
+function preserveMediatedCheckAttribution(
+  result: EngineCommandResult,
+  narration: NarrationEnvelope,
+  experienceProfile: LanternCampaignState["experienceProfile"],
+): { narration: NarrationEnvelope; source: "llm" | "rules" } {
+  const attribution = mediatedCheckAttribution(result);
+  const sanitized = sanitizeNarrationForProfile(narration, experienceProfile);
+  if (!attribution) return { narration: sanitized, source: "llm" };
+  if (narrationContradictsMediatedCheck(sanitized.text, attribution)) {
+    return { narration: committedRulesNarration(result), source: "rules" };
+  }
+  const authoritative = "Authoritative check record: " + mediatedCheckAttributionText(attribution);
+  if (sanitized.text.includes(authoritative)) return { narration: sanitized, source: "llm" };
+  return { narration: { ...sanitized, text: `${sanitized.text.trim()}\n\n${authoritative}` }, source: "llm" };
 }
 
 function committedMoveText(data: unknown): string {

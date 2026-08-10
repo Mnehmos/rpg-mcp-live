@@ -86,6 +86,53 @@ function legacyResponse(message: Record<string, unknown>): Response {
   return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) } as Response;
 }
 
+async function resolveWithModelNarration(modelText: string) {
+  const state = socialState();
+  const context = contextFor(state);
+  const directory = mkdtempSync(join(tmpdir(), "lantern-social-attribution-model-"));
+  const store = new LanternEngineStore(join(directory, "engine.db"));
+  store.createCampaign(context, state);
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(legacyResponse({
+      role: "assistant",
+      content: null,
+      tool_calls: [{
+        id: "social-tool",
+        type: "function",
+        function: {
+          name: "social_check",
+          arguments: JSON.stringify({
+            npcId: "arena-sentries",
+            actingNpcId: "titus",
+            ability: "cha",
+            goal: "Tell Titus to explain what happened and turn the sentries against Ledrus.",
+          }),
+        },
+      }],
+    }))
+    .mockResolvedValueOnce(legacyResponse({
+      role: "assistant",
+      content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions: [] }),
+    }));
+  vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
+
+  try {
+    const dm = new LanternDungeonMaster(store, dmOptions);
+    const result = await dm.resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I tell Titus to explain what happened and turn the sentries against Ledrus.",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    return result;
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 describe("social check actor attribution", () => {
   it("records an NPC speaker while keeping the player as roller, modifier source, and action owner", () => {
     deterministicRandomInt.mockClear().mockReturnValue(15);
@@ -227,5 +274,23 @@ describe("social check actor attribution", () => {
       store.close();
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("appends authoritative mediated attribution to successful model narration", async () => {
+    const result = await resolveWithModelNarration("Titus steps forward and addresses the sentries.");
+
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.text).toContain("Titus steps forward");
+    expect(result.narration.text).toContain(
+      "Authoritative check record: Titus speaks for Mnehmos to Arena Sentries; the check uses Mnehmos's modifiers.",
+    );
+  });
+
+  it("falls back to the committed result when model narration claims the NPC rolled", async () => {
+    const result = await resolveWithModelNarration("Titus rolled the check using his modifiers.");
+
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).toContain("Titus speaks for Mnehmos to Arena Sentries");
+    expect(result.narration.text).not.toContain("Titus rolled");
   });
 });
