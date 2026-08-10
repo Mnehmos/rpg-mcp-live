@@ -143,7 +143,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "magic",
     "Reviewed spell learning, preparation, casting, and reactions.",
-    "MAGIC CAPABILITY (rev 2). Use exact installed spell keys for learning, preparation, casting, and reactions. The spell engine owns eligibility, slots, action economy, concentration, range, targets, attacks, saves, damage, and defenses. Never guess an effect after a fidelity rejection. New executable spells use content_compile synthesis from one reviewed damage primitive; omit caller-authored mechanics.",
+    "MAGIC CAPABILITY (rev 2). Use exact installed spell keys for learning, preparation, casting, and reactions. The spell engine owns eligibility, slots, action economy, concentration, range, targets, attacks, saves, damage, healing, modifiers, and defenses. Never guess an effect after a fidelity rejection. New executable spells use content_compile with one exact reviewed primitive and the matching damage-only, healing-only, or bounded-modifier-only category; omit every caller-authored mechanical number.",
     ["sandbox"],
     "resolve",
     ["learn_spell", "prepare_spell", "cast_spell", "reaction_response"],

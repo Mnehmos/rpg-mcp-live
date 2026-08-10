@@ -154,7 +154,10 @@ export const runtimeSpellProposalSchema = z.object({
   intent: z.string().trim().min(1).max(1_000),
   synthesis: z.object({
     primitiveContentKey: z.string().trim().startsWith("open5e:spell:").max(300),
-    modification: z.literal("damage-only"),
+    // This discriminator is a category assertion, not mechanical authority.
+    // The engine rejects mismatches and copies every executable value from the
+    // exact reviewed primitive.
+    modification: z.enum(["damage-only", "healing-only", "bounded-modifier-only"]),
   }).strict().optional(),
 }).strict();
 export type RuntimeSpellProposal = z.infer<typeof runtimeSpellProposalSchema>;
@@ -168,12 +171,7 @@ const runtimeSpellDamageEffectSchema = compiledSpellEffectSchema.superRefine((ef
   }
 });
 
-/**
- * The executable portion of a runtime spell is persisted only after the
- * engine has copied it from a reviewed Open5e primitive and applied the
- * synthesis budget. None of these values are proposal-authored.
- */
-export const runtimeSpellExecutionSchema = z.object({
+const runtimeSpellExecutionV1Schema = z.object({
   primitiveContentKey: z.string().trim().startsWith("open5e:spell:").max(300),
   policyRevision: z.literal("runtime-arcane-synthesis-v1"),
   castingTime: z.enum(["action", "bonus-action"]),
@@ -182,6 +180,65 @@ export const runtimeSpellExecutionSchema = z.object({
   targetCount: z.literal(1),
   effect: runtimeSpellDamageEffectSchema,
 }).strict();
+
+const runtimeSpellExecutionV2Schema = z.object({
+  primitiveContentKey: z.string().trim().startsWith("open5e:spell:").max(300),
+  policyRevision: z.literal("runtime-arcane-synthesis-v2"),
+  castingTime: z.enum(["action", "bonus-action", "reaction"]),
+  rangeKind: z.enum(["self", "touch", "distance"]),
+  rangeFeet: z.number().int().nonnegative().max(120),
+  targetType: z.literal("creature"),
+  targetCount: z.literal(1),
+  savingThrowAbility: z.enum(["str", "dex", "con", "int", "wis", "cha"]).nullable(),
+  reactionCondition: z.string().trim().min(1).max(500).nullable(),
+  duration: z.string().trim().min(1).max(160),
+  effect: compiledSpellEffectSchema,
+}).strict();
+
+/**
+ * The executable portion of a runtime spell is persisted only after the
+ * engine has copied it from a reviewed Open5e primitive and applied the
+ * synthesis budget. None of these values are proposal-authored. V1 remains a
+ * readable migration branch for already-persisted damage-only spells.
+ */
+export const runtimeSpellExecutionSchema = z.discriminatedUnion("policyRevision", [
+  runtimeSpellExecutionV1Schema,
+  runtimeSpellExecutionV2Schema,
+]).superRefine((execution, context) => {
+  if (execution.effect.sourceContentKey !== execution.primitiveContentKey) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["effect", "sourceContentKey"],
+      message: "The persisted effect must come from the declared reviewed primitive.",
+    });
+  }
+  if (execution.policyRevision !== "runtime-arcane-synthesis-v2") return;
+  if (execution.effect.effectKind === "stat-modifier" && execution.castingTime !== "reaction") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["castingTime"],
+      message: "A bounded incoming-hit modifier must retain reaction delivery.",
+    });
+  }
+  if (execution.effect.effectKind !== "stat-modifier" && execution.castingTime === "reaction") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["castingTime"],
+      message: "This synthesis slice does not admit triggerless reaction damage or healing.",
+    });
+  }
+  if (
+    execution.effect.effectKind === "damage"
+    && execution.effect.resolution === "saving-throw"
+    && execution.savingThrowAbility === null
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["savingThrowAbility"],
+      message: "A saving-throw effect must retain its reviewed save ability.",
+    });
+  }
+});
 export type RuntimeSpellExecution = z.infer<typeof runtimeSpellExecutionSchema>;
 
 export const contentProposalSchema = z.discriminatedUnion("kind", [
