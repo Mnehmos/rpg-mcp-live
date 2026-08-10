@@ -1586,6 +1586,11 @@ export const engineProjectCommandSchema = z.object({
 }).strict();
 export type EngineProjectCommand = z.infer<typeof engineProjectCommandSchema>;
 
+export const engineSpellKeySchema = z.string().trim().max(300).refine(
+  (value) => value.startsWith("open5e:spell:") || value.startsWith("runtime:spell:"),
+  "Spell keys must reference installed Open5e content or a persisted runtime spell.",
+);
+
 export const engineCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("observe") }).strict(),
   z.object({ kind: z.literal("listen") }).strict(),
@@ -1798,20 +1803,20 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("learn_spell"),
-      spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
+      spellKey: engineSpellKeySchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("prepare_spell"),
-      spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
+      spellKey: engineSpellKeySchema,
       prepared: z.boolean().default(true),
     })
     .strict(),
   z
     .object({
       kind: z.literal("cast_spell"),
-      spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
+      spellKey: engineSpellKeySchema,
       slotLevel: z.number().int().min(1).max(9).optional(),
       targetIds: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
       reactionId: z.string().trim().min(1).max(120).optional(),
@@ -1822,7 +1827,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       kind: z.literal("reaction_response"),
       reactionId: z.string().trim().min(1).max(120),
       decision: z.enum(["accept", "decline"]),
-      spellKey: z.string().trim().startsWith("open5e:spell:").max(300).optional(),
+      spellKey: engineSpellKeySchema.optional(),
       slotLevel: z.number().int().min(1).max(9).optional(),
     })
     .strict(),

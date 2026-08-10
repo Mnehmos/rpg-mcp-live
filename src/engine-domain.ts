@@ -214,8 +214,12 @@ import {
   emptyRuntimeContentState,
   normalizeRuntimeContentState,
   projectRuntimeContentForActor,
+  runtimeSpellDefinitionSchema,
+  runtimeSpellExecutionSchema,
   type RuntimeContentInstance,
+  type RuntimeContentState,
   type RuntimeItemDefinition,
+  type RuntimeSpellDefinition,
 } from "./content/runtime-compiler.js";
 import {
   activeConditionNames,
@@ -2525,7 +2529,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     availableActions: actionOffers.filter((offer) => offer.reasonUnavailable === null).map((offer) => offer.actionId),
     actionOffers,
     lastRoll: state.lastRoll,
-    character: characterData(state.character) as EngineSessionView["character"],
+    character: characterData(state.character, state.runtimeContent) as EngineSessionView["character"],
     combat: combatData(state.combat),
     controlledActors,
     party: partyProjection(state),
@@ -2642,7 +2646,7 @@ export function readToolData(
         situation: state.situation ? projectSituationForActor(state.situation, state, viewpointActorId) : null,
         scene: state.orchestration?.activeScene ?? null,
         resume: buildResumeProjection(state.orchestration ?? emptyOrchestrationState(), projectExperienceProfile(state.experienceProfile)),
-        character: characterData(state.character),
+        character: characterData(state.character, state.runtimeContent),
         combat: combatData(state.combat),
         controlledActors: projectControlledActors(state),
         party: partyStateData(state),
@@ -2667,7 +2671,7 @@ export function readToolData(
     case "merchant_catalog":
       return projectMerchants(state.worldContext?.merchants ?? []);
     case "character_sheet":
-      return characterData(state.character);
+      return characterData(state.character, state.runtimeContent);
     case "inventory":
       return {
         items: materializeInventory(state.character.inventory),
@@ -3805,6 +3809,229 @@ function runtimeItemKind(category: RuntimeItemDefinition["category"]): EngineIte
   }
 }
 
+const RUNTIME_ARCANE_SYNTHESIS_POLICY_REVISION = "runtime-arcane-synthesis-v1" as const;
+type EngineSpellRecord = NonNullable<ReturnType<typeof getOpen5eSpell>>;
+type RuntimeSpellDamageEffect = Extract<CompiledSpellEffect, { effectKind: "damage" }>;
+
+function titleCaseRuntimeSpellSchool(value: string): string {
+  return value.length === 0 ? value : `${value[0]!.toLocaleUpperCase("en-US")}${value.slice(1)}`;
+}
+
+/**
+ * Runtime spells are reconstructed from their persisted typed execution
+ * record. They deliberately use the same record shape as the Open5e kernel so
+ * ordinary learn/prepare/cast resolution remains the only spell engine.
+ */
+function runtimeSpellRecord(
+  state: LanternCampaignState,
+  contentKey: string,
+  packHash?: string,
+): EngineSpellRecord | null {
+  return runtimeSpellRecordFromContent(state.runtimeContent, contentKey, packHash);
+}
+
+function runtimeSpellRecordFromContent(
+  runtimeContent: RuntimeContentState,
+  contentKey: string,
+  packHash?: string,
+): EngineSpellRecord | null {
+  const definition = runtimeContent.definitions.find((candidate): candidate is RuntimeSpellDefinition =>
+    candidate.kind === "spell" && candidate.id === contentKey
+  );
+  const execution = definition?.execution;
+  if (!definition || !execution || execution.effect.effectKind !== "damage") return null;
+  if (packHash !== undefined && packHash !== execution.policyRevision) return null;
+  const effect = execution.effect as RuntimeSpellDamageEffect;
+  const school = definition.school;
+  const normalized: NormalizedSpell = {
+    kind: "spell",
+    fidelityTier: 1,
+    key: definition.key ?? definition.id,
+    contentKey: definition.id,
+    sourceKey: definition.id,
+    documentKey: "lantern-runtime",
+    gamesystem: "5e-2014",
+    publisher: { key: "lantern", name: "Lantern" },
+    licenseKeys: ["lantern-runtime"],
+    permalink: "https://github.com/Mnehmos/rpg-mcp-live/issues/134",
+    sourceApiVersion: "v1",
+    sourceFetchedAt: definition.provenance.createdAt,
+    name: definition.name,
+    description: definition.description,
+    level: definition.level,
+    school: {
+      sourceKey: school,
+      contentKey: `runtime:spell-school:${school}`,
+      name: titleCaseRuntimeSpellSchool(school),
+    },
+    higherLevel: "",
+    targetType: execution.targetType,
+    targetCount: execution.targetCount,
+    range: { text: `${execution.rangeFeet} feet`, distance: execution.rangeFeet, unit: "feet" },
+    ritual: false,
+    castingTime: execution.castingTime,
+    reactionCondition: null,
+    components: {
+      verbal: true,
+      somatic: true,
+      material: false,
+      materialSpecified: "",
+      materialCostGp: null,
+      materialConsumed: false,
+    },
+    savingThrowAbility: null,
+    attackRoll: effect.resolution === "spell-attack",
+    damageRoll: null,
+    damageTypes: [effect.damageType],
+    duration: "instantaneous",
+    area: { shape: null, size: null, unit: "feet" },
+    concentration: false,
+    classes: [],
+    castingOptions: [],
+  };
+  return {
+    contentKey: definition.id,
+    sourceKey: definition.id,
+    packHash: execution.policyRevision,
+    definition: normalized,
+    effect,
+    effects: [],
+  };
+}
+
+function resolveSpellRecord(
+  state: LanternCampaignState,
+  contentKey: string,
+  packHash?: string,
+): EngineSpellRecord | null {
+  return getOpen5eSpell(contentKey, packHash) ?? runtimeSpellRecord(state, contentKey, packHash);
+}
+
+function damageExpressionAverage(
+  expression: RuntimeSpellDamageEffect["baseDamage"]
+): number {
+  return expression.kind === "flat"
+    ? expression.amount
+    : Math.floor(expression.diceCount * (expression.dieSides + 1) / 2) + expression.bonus;
+}
+
+function runtimeSpellSynthesisError(
+  code: string,
+  message: string,
+  data?: Record<string, unknown>,
+): { code: string; message: string; data?: Record<string, unknown> } {
+  return { code, message, ...(data ? { data } : {}) };
+}
+
+/**
+ * Admit one deliberately small vertical slice: a single reviewed, single-
+ * target spell-attack damage primitive. All level/range/target/damage values
+ * are copied from that primitive and checked against the synthesis budget.
+ */
+function compileRuntimeArcaneSpell(
+  state: LanternCampaignState,
+  proposal: Extract<EngineCommand, { kind: "content_compile" }> ["proposal"],
+  definition: Extract<ReturnType<typeof compileRuntimeContent>, { ok: true }>["definition"],
+): { ok: true; definition: Extract<ReturnType<typeof compileRuntimeContent>, { ok: true }>["definition"] }
+  | { ok: false; error: { code: string; message: string; data?: Record<string, unknown> } } {
+  if (definition.kind !== "spell" || proposal?.kind !== "spell" || !proposal.synthesis) {
+    return { ok: true, definition };
+  }
+  const campaignPackHash = state.rulesVersion.startsWith("open5e-pack@")
+    ? state.rulesVersion.slice("open5e-pack@".length)
+    : undefined;
+  const primitive = getOpen5eSpell(proposal.synthesis.primitiveContentKey, campaignPackHash);
+  if (!primitive) {
+    return {
+      ok: false,
+      error: runtimeSpellSynthesisError(
+        "synthesis_primitive_not_found",
+        "Arcane synthesis must reference an installed reviewed spell primitive.",
+        { primitiveContentKey: proposal.synthesis.primitiveContentKey },
+      ),
+    };
+  }
+  const effect = primitive.effect;
+  if (!effect || effect.effectKind !== "damage") {
+    return {
+      ok: false,
+      error: runtimeSpellSynthesisError(
+        "synthesis_primitive_not_executable",
+        "That primitive has no reviewed executable damage effect.",
+        { primitiveContentKey: primitive.contentKey },
+      ),
+    };
+  }
+  if (
+    effect.resolution !== "spell-attack"
+    || primitive.definition.targetType !== "creature"
+    || primitive.definition.targetCount !== 1
+    || !["action", "bonus-action"].includes(primitive.definition.castingTime)
+    || primitive.definition.concentration
+    || primitive.definition.range.distance <= 0
+    || primitive.definition.range.distance > 120
+  ) {
+    return {
+      ok: false,
+      error: runtimeSpellSynthesisError(
+        "synthesis_primitive_out_of_scope",
+        "This first synthesis slice admits only one non-concentration, single-creature spell attack within 120 feet.",
+        { primitiveContentKey: primitive.contentKey },
+      ),
+    };
+  }
+  const expressions = [
+    effect.baseDamage,
+    ...Object.values(effect.slotLevelVariants),
+    ...Object.values(effect.playerLevelVariants),
+  ];
+  const overBudget = expressions.some((expression) =>
+    (expression.kind === "dice" && (expression.diceCount > 4 || expression.dieSides > 10))
+    || damageExpressionAverage(expression) > 20
+  );
+  if (overBudget || primitive.definition.level > 1) {
+    return {
+      ok: false,
+      error: runtimeSpellSynthesisError(
+        "synthesis_power_budget_exceeded",
+        "The reviewed primitive exceeds the first arcane-synthesis power budget.",
+        { primitiveContentKey: primitive.contentKey, maxSpellLevel: 1, maxAverageDamage: 20 },
+      ),
+    };
+  }
+  const execution = runtimeSpellExecutionSchema.parse({
+    primitiveContentKey: primitive.contentKey,
+    policyRevision: RUNTIME_ARCANE_SYNTHESIS_POLICY_REVISION,
+    castingTime: primitive.definition.castingTime,
+    rangeFeet: primitive.definition.range.distance,
+    targetType: "creature",
+    targetCount: 1,
+    effect,
+  });
+  const authoritativeSchool = primitive.definition.school.sourceKey;
+  if (!runtimeSpellDefinitionSchema.shape.school.safeParse(authoritativeSchool).success) {
+    return {
+      ok: false,
+      error: runtimeSpellSynthesisError(
+        "synthesis_school_unsupported",
+        "The reviewed primitive uses a school outside the runtime spell vocabulary.",
+        { primitiveContentKey: primitive.contentKey, school: authoritativeSchool },
+      ),
+    };
+  }
+  return {
+    ok: true,
+    definition: runtimeSpellDefinitionSchema.parse({
+      ...definition,
+      school: authoritativeSchool,
+      level: primitive.definition.level,
+      executionTier: 2,
+      capabilities: ["spell", "damage", "runtime-synthesis"],
+      execution,
+    }),
+  };
+}
+
 /**
  * Runtime item instances enter the ordinary inventory kernel. The runtime
  * content record remains the canonical definition/identity; owner and
@@ -3903,6 +4130,9 @@ function resolveContentCompile(
               ...command.proposal.derivation.sourceInstanceIds,
             ]
           : []),
+        ...(command.proposal.kind === "spell" && command.proposal.synthesis
+          ? [command.proposal.synthesis.primitiveContentKey]
+          : []),
       ],
       createdAt: new Date().toISOString(),
     },
@@ -3920,7 +4150,12 @@ function resolveContentCompile(
   if (!resolvedTopology.ok) {
     return rejection(state, tool, resolvedTopology.code, resolvedTopology.message, resolvedTopology.data);
   }
-  const compiledForCommit = resolvedTopology.compiled;
+  let compiledForCommit = resolvedTopology.compiled;
+  const runtimeSpell = compileRuntimeArcaneSpell(state, command.proposal, compiledForCommit.definition);
+  if (!runtimeSpell.ok) {
+    return rejection(state, tool, runtimeSpell.error.code, runtimeSpell.error.message, runtimeSpell.error.data);
+  }
+  compiledForCommit = { ...compiledForCommit, definition: runtimeSpell.definition };
   const topologyValidation = validateCompiledLocationTopology(state, command.proposal, compiledForCommit);
   if (topologyValidation) return rejection(state, tool, topologyValidation.code, topologyValidation.message, topologyValidation.data);
 
@@ -8136,14 +8371,15 @@ function resolveLearnSpell(
   if (!state.character.created || !spellcasting || !progression) {
     return rejection(state, tool, "spellcasting_unavailable", "This character does not have an installed spellcasting progression.");
   }
-  const spell = getOpen5eSpell(command.spellKey);
+  const spell = resolveSpellRecord(state, command.spellKey);
   if (!spell) return rejection(state, tool, "content_not_installed", `Spell content is not installed: ${command.spellKey}.`);
-  const classList = getOpen5eSpellList(state.character.className);
-  if (!classList) {
+  const runtime = command.spellKey.startsWith("runtime:spell:");
+  const classList = runtime ? null : getOpen5eSpellList(state.character.className);
+  if (!runtime && !classList) {
     return rejection(state, tool, "class_spell_list_unavailable", `No reviewed spell list is installed for ${state.character.className}.`);
   }
-  if (!classList.spells.some((candidate) => candidate.contentKey === spell.contentKey)) {
-    return rejection(state, tool, "spell_not_on_class_list", `${spell.definition.name} is not on the installed ${classList.className} spell list.`);
+  if (!runtime && !classList!.spells.some((candidate) => candidate.contentKey === spell.contentKey)) {
+    return rejection(state, tool, "spell_not_on_class_list", `${spell.definition.name} is not on the installed ${classList!.className} spell list.`);
   }
   const existing = spellcasting.knownSpells.find((candidate) => candidate.contentKey === spell.contentKey);
   if (existing) {
@@ -8159,7 +8395,9 @@ function resolveLearnSpell(
     if (limit === null || limit <= 0) {
       return rejection(state, tool, "cantrips_unavailable", `${progression.className} does not learn cantrips at this level.`);
     }
-    const knownCantrips = spellcasting.knownSpells.filter((reference) => getOpen5eSpell(reference.contentKey)?.definition.level === 0).length;
+    const knownCantrips = spellcasting.knownSpells.filter((reference) =>
+      resolveSpellRecord(state, reference.contentKey, reference.packHash)?.definition.level === 0
+    ).length;
     if (knownCantrips >= limit) {
       return rejection(state, tool, "cantrip_limit_reached", `This character already knows the level-${state.character.level} limit of ${limit} cantrips.`);
     }
@@ -8181,7 +8419,9 @@ function resolveLearnSpell(
         `${progression.className} prepares leveled spells directly from its class list; use prepare_spell.`
       );
     }
-    const knownLeveled = spellcasting.knownSpells.filter((reference) => (getOpen5eSpell(reference.contentKey)?.definition.level ?? 0) > 0).length;
+    const knownLeveled = spellcasting.knownSpells.filter((reference) =>
+      (resolveSpellRecord(state, reference.contentKey, reference.packHash)?.definition.level ?? 0) > 0
+    ).length;
     if (limit === null || knownLeveled >= limit) {
       return rejection(state, tool, "known_spell_limit_reached", `This character already has the level-${state.character.level} limit of ${limit ?? 0} leveled spells.`);
     }
@@ -8220,17 +8460,18 @@ function resolvePrepareSpell(
   if (progression.selectionMode === "known") {
     return rejection(state, tool, "preparation_not_used", `${progression.className} casts known spells and does not prepare them.`);
   }
-  const spell = getOpen5eSpell(command.spellKey);
+  const spell = resolveSpellRecord(state, command.spellKey);
   if (!spell) return rejection(state, tool, "content_not_installed", `Spell content is not installed: ${command.spellKey}.`);
   if (spell.definition.level === 0) {
     return rejection(state, tool, "cantrip_preparation_not_used", "Cantrips are cast from known cantrips and are not prepared.");
   }
-  const classList = getOpen5eSpellList(state.character.className);
-  if (!classList) {
+  const runtime = command.spellKey.startsWith("runtime:spell:");
+  const classList = runtime ? null : getOpen5eSpellList(state.character.className);
+  if (!runtime && !classList) {
     return rejection(state, tool, "class_spell_list_unavailable", `No reviewed spell list is installed for ${state.character.className}.`);
   }
-  if (!classList.spells.some((candidate) => candidate.contentKey === spell.contentKey)) {
-    return rejection(state, tool, "spell_not_on_class_list", `${spell.definition.name} is not on the installed ${classList.className} spell list.`);
+  if (!runtime && !classList!.spells.some((candidate) => candidate.contentKey === spell.contentKey)) {
+    return rejection(state, tool, "spell_not_on_class_list", `${spell.definition.name} is not on the installed ${classList!.className} spell list.`);
   }
   if (spell.definition.level > highestAvailableSlotLevel(spellcasting.slotMaximums)) {
     return rejection(state, tool, "spell_level_unavailable", `${spell.definition.name} is above this character's available spell levels.`);
@@ -8298,8 +8539,16 @@ function resolveCastSpell(
   if (!state.character.created || !spellcasting || !progression) {
     return rejection(state, tool, "spellcasting_unavailable", "This character does not have an installed spellcasting progression.");
   }
-  const spell = getOpen5eSpell(command.spellKey);
+  const spell = resolveSpellRecord(state, command.spellKey);
   if (!spell) return rejection(state, tool, "content_not_installed", `Spell content is not installed: ${command.spellKey}.`);
+  const runtimeDefinition = command.spellKey.startsWith("runtime:spell:")
+    ? state.runtimeContent.definitions.find((candidate): candidate is RuntimeSpellDefinition =>
+      candidate.kind === "spell" && candidate.id === command.spellKey
+    )
+    : null;
+  const synthesisEvidenceContentKeys = runtimeDefinition?.execution?.primitiveContentKey
+    ? [runtimeDefinition.execution.primitiveContentKey]
+    : [];
   const availableReferences = spell.definition.level === 0 || progression.selectionMode === "known"
     ? spellcasting.knownSpells
     : spellcasting.preparedSpells;
@@ -8527,12 +8776,13 @@ function resolveCastSpell(
       deferredProseEffects: spell.effect.hasDeferredProseEffects,
       range: { source: spell.definition.range, executableFeet: rangeFeet },
       combat: combatData(next.combat),
-      character: characterData(next.character),
+      character: characterData(next.character, next.runtimeContent),
     },
     defeatedAll ? "spell_encounter_ended" : "spell_cast",
     rolls,
     modifiers,
-    changes
+    changes,
+    synthesisEvidenceContentKeys,
   );
 }
 
@@ -8616,7 +8866,7 @@ function resolveHealingSpell(
       healing,
       range: { source: spell.definition.range, executableFeet: executableSpellRangeFeet(spell.definition) },
       combat: combatData(next.combat),
-      character: characterData(next.character),
+      character: characterData(next.character, next.runtimeContent),
       deferredProseEffects: effect.hasDeferredProseEffects,
     },
     "spell_healing",
@@ -8697,7 +8947,7 @@ function resolveReactionResponse(
         armorClass: pending.originalArmorClass,
         damage: { rolled: damage, applied: damage, type: pending.damageType },
         combat: combatData(next.combat),
-        character: characterData(next.character),
+        character: characterData(next.character, next.runtimeContent),
       },
       next.character.hp === 0 ? "downed" : "reaction_declined",
       rolls,
@@ -8800,7 +9050,7 @@ function resolveReactionResponse(
       hitAfter,
       damage: { rolled: damage, applied: damage, type: pending.damageType },
       combat: combatData(next.combat),
-      character: characterData(next.character),
+      character: characterData(next.character, next.runtimeContent),
     },
     next.character.hp === 0 ? "downed" : hitAfter ? "reaction_resolved_hit" : "reaction_resolved_miss",
     rolls,
@@ -12006,13 +12256,13 @@ function collectContentKeys(value: unknown): string[] {
     for (const [key, child] of Object.entries(candidate as Record<string, unknown>)) {
       if (
         typeof child === "string"
-        && child.startsWith("open5e:")
+        && (child.startsWith("open5e:") || child.startsWith("runtime:"))
         && (key === "contentKey" || key.endsWith("Key"))
       ) {
         keys.add(child);
       } else if (Array.isArray(child) && key.endsWith("Keys")) {
         for (const contentKey of child) {
-          if (typeof contentKey === "string" && contentKey.startsWith("open5e:")) keys.add(contentKey);
+          if (typeof contentKey === "string" && (contentKey.startsWith("open5e:") || contentKey.startsWith("runtime:"))) keys.add(contentKey);
         }
       } else visit(child);
     }
@@ -13159,7 +13409,10 @@ function normalizeSpellReferences(value: unknown): EngineSpellReference[] {
     if (!candidate || typeof candidate !== "object") continue;
     const reference = candidate as Partial<EngineSpellReference>;
     if (typeof reference.contentKey !== "string" || typeof reference.packHash !== "string") continue;
-    if (!reference.contentKey.startsWith("open5e:spell:") || seen.has(reference.contentKey)) continue;
+    if (
+      (!reference.contentKey.startsWith("open5e:spell:") && !reference.contentKey.startsWith("runtime:spell:"))
+      || seen.has(reference.contentKey)
+    ) continue;
     seen.add(reference.contentKey);
     references.push({ contentKey: reference.contentKey, packHash: reference.packHash });
   }
@@ -13171,7 +13424,7 @@ function normalizeConcentration(value: unknown): NonNullable<EngineCharacter["sp
   const candidate = value as { contentKey?: unknown; packHash?: unknown; startedRound?: unknown };
   if (
     typeof candidate.contentKey !== "string"
-    || !candidate.contentKey.startsWith("open5e:spell:")
+    || (!candidate.contentKey.startsWith("open5e:spell:") && !candidate.contentKey.startsWith("runtime:spell:"))
     || typeof candidate.packHash !== "string"
   ) return null;
   return {
@@ -14584,7 +14837,10 @@ function describeCombatants(combatants: EngineCombatant[]): string {
     .join(", ");
 }
 
-function materializeSpellcasting(character: EngineCharacter): EngineSpellcastingView | null {
+function materializeSpellcasting(
+  character: EngineCharacter,
+  runtimeContent: RuntimeContentState | null = null,
+): EngineSpellcastingView | null {
   const spellcasting = character.spellcasting;
   if (!spellcasting) return null;
   const progression = getOpen5eSpellProgression(character.className, character.classRef?.packHash);
@@ -14595,8 +14851,8 @@ function materializeSpellcasting(character: EngineCharacter): EngineSpellcasting
       ? progression.spellbook.initialSpellCount
         + progression.spellbook.spellsGainedPerLevel * Math.max(0, character.level - 1)
       : null;
-  const knownSpells = spellcasting.knownSpells.map(materializeSpellReference).sort(compareSpellViews);
-  const preparedSpells = spellcasting.preparedSpells.map(materializeSpellReference).sort(compareSpellViews);
+  const knownSpells = spellcasting.knownSpells.map((reference) => materializeSpellReference(reference, runtimeContent)).sort(compareSpellViews);
+  const preparedSpells = spellcasting.preparedSpells.map((reference) => materializeSpellReference(reference, runtimeContent)).sort(compareSpellViews);
   return {
     ability: spellcasting.ability,
     spellSaveDc: spellcasting.spellSaveDc,
@@ -14611,13 +14867,17 @@ function materializeSpellcasting(character: EngineCharacter): EngineSpellcasting
     knownSpells,
     preparedSpells,
     concentration: spellcasting.concentration
-      ? { ...materializeSpellReference(spellcasting.concentration), startedRound: spellcasting.concentration.startedRound }
+      ? { ...materializeSpellReference(spellcasting.concentration, runtimeContent), startedRound: spellcasting.concentration.startedRound }
       : null,
   };
 }
 
-function materializeSpellReference(reference: EngineSpellReference): EngineSpellcastingView["knownSpells"][number] {
-  const source = getOpen5eSpell(reference.contentKey, reference.packHash);
+function materializeSpellReference(
+  reference: EngineSpellReference,
+  runtimeContent: RuntimeContentState | null = null,
+): EngineSpellcastingView["knownSpells"][number] {
+  const source = getOpen5eSpell(reference.contentKey, reference.packHash)
+    ?? (runtimeContent ? runtimeSpellRecordFromContent(runtimeContent, reference.contentKey, reference.packHash) : null);
   if (!source || source.packHash !== reference.packHash) {
     return {
       ...reference,
@@ -14781,7 +15041,10 @@ function unresolvedFeatureView(
   };
 }
 
-function characterData(character: EngineCharacter): EngineCharacterView {
+function characterData(
+  character: EngineCharacter,
+  runtimeContent: RuntimeContentState | null = null,
+): EngineCharacterView {
   const carryWeight = inventoryWeight(character.inventory);
   const carryLimit = carryCapacity(character.abilities.str);
   const referencedClass = character.classRef
@@ -14819,7 +15082,7 @@ function characterData(character: EngineCharacter): EngineCharacterView {
     proficiencies: character.proficiencies,
     features: character.features,
     featureUses: character.featureUses,
-    spellcasting: materializeSpellcasting(character),
+    spellcasting: materializeSpellcasting(character, runtimeContent),
     hp: character.hp,
     maxHp: character.maxHp,
     lifecycleState: character.lifecycleState,
