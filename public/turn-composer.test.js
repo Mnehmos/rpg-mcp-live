@@ -31,6 +31,18 @@ describe("turn composer", () => {
     expect(createCommandId).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the pending text and command id after an uncertain send", () => {
+    const createCommandId = vi.fn().mockReturnValue("late-command");
+    const pending = composerSubmission(null, "campaign-a", "I wait for the DM.", createCommandId);
+    const input = { value: "I wait for the DM.", maxLength: 2000 };
+    const counter = { textContent: "19 / 2000" };
+
+    expect(settleComposer(input, counter, false)).toBe(false);
+    expect(input.value).toBe("I wait for the DM.");
+    expect(composerSubmission(pending, "campaign-a", input.value, createCommandId)).toBe(pending);
+    expect(createCommandId).toHaveBeenCalledTimes(1);
+  });
+
   it("replaces the command id when the active campaign changes", () => {
     const createCommandId = vi.fn()
       .mockReturnValueOnce("command-a")
