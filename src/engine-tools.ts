@@ -7,6 +7,7 @@ import {
   engineAbilitySchema,
   engineAdjudicationDifficultyBandSchema,
   engineAdjudicationStakeSchema,
+  engineCapabilityFamilyIdSchema,
   engineCharacterDetailsSchema,
   engineCommandSchema,
   engineExperienceProfileInputSchema,
@@ -49,6 +50,7 @@ const lootItemSchema = inventoryItemSchema.refine((item) => item.quantity > 0, {
 });
 const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   campaign_context: noArguments,
+  capability_load: z.object({ familyId: engineCapabilityFamilyIdSchema }).strict(),
   experience_profile_update: z.object({ profile: engineExperienceProfileInputSchema }).strict(),
   experience_feedback_add: z.object({ rating: z.number().int().min(1).max(5), note: z.string().trim().min(1).max(500).optional() }).strict(),
   experience_boundary: z.object({ theme: z.string().trim().min(1).max(120), action: z.enum(["redirect", "fade_to_black", "skip"]) }).strict(),
@@ -380,6 +382,7 @@ const playerOnlyTools = new Set<EngineToolName>(enginePlayerOnlyToolNames);
 
 export const engineReadOnlyToolNames = [
   "campaign_context",
+  "capability_load",
   "content_search",
   "content_get",
   "rules_reference",
@@ -540,6 +543,21 @@ const worldObjectPatchOperationsJsonSchema = (() => {
 
 export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("campaign_context", "Read the campaign profile, emergent world context if one exists, character, notes, combat, quest, and recent log. Read-only.", {}),
+  tool(
+    "capability_load",
+    "Load one reviewed capability family's detailed tool schemas. Loading changes visibility only; it never grants authority or mutates campaign state.",
+    {
+      type: "object",
+      properties: {
+        familyId: {
+          type: "string",
+          enum: [...engineCapabilityFamilyIdSchema.options],
+        },
+      },
+      required: ["familyId"],
+      additionalProperties: false,
+    },
+  ),
   tool(
     "content_search",
     "Search the campaign's pinned Open5e content pack. Results are game-system, document, and license gated and include their actual fidelity tier. Read-only.",

@@ -27,6 +27,7 @@ import { materializeInventoryItem } from "./open5e-rules.js";
 import type {
   EngineCommand,
   EngineCommandResult,
+  EngineCapabilityFamilyId,
   EngineSocialCheckAttribution,
   EngineToolName,
   EngineToolResult,
@@ -37,9 +38,19 @@ import {
   commandForTool,
   executeReadTool,
   isEngineToolName,
-  lanternToolDefinitions,
   parseToolArguments,
+  type EngineToolDefinition,
 } from "./engine-tools.js";
+import {
+  capabilityLoadResult,
+  capabilityFamilyForToolName,
+  engineCapabilityDescriptors,
+  engineCoreToolDefinitions,
+  engineToolDefinitionsForLoadedCapabilities,
+  isCapabilityFamilyAllowed,
+  isToolVisibleForLoadedCapabilities,
+  parseCapabilityFamilyId,
+} from "./engine-capabilities.js";
 import {
   EngineCommandIdReuseError,
   EngineCommandInProgressError,
@@ -167,6 +178,7 @@ export function buildDmContext(
 
 interface ProvisionalToolResult extends EngineToolResult {
   stagedEffect?: StagedEngineTurnEffect;
+  loadedCapabilityFamily?: EngineCapabilityFamilyId;
 }
 
 export class LanternDungeonMaster {
@@ -395,6 +407,12 @@ export class LanternDungeonMaster {
     const stagedEffects: StagedEngineTurnEffect[] = [];
     const dmRunId = `dm-run:${randomUUID()}`;
     let requestSequence = 0;
+    const loadedCapabilityFamilies = new Set<EngineCapabilityFamilyId>();
+    const availableToolDefinitions = (): readonly EngineToolDefinition[] =>
+      engineToolDefinitionsForLoadedCapabilities([...loadedCapabilityFamilies]);
+    const capabilityPrompt = engineCapabilityDescriptors()
+      .map((descriptor) => `${descriptor.id} (rev ${descriptor.revision}; ${descriptor.authority}; ${descriptor.toolCount} tools; ~${descriptor.estimatedSchemaTokens} schema tokens): ${descriptor.description}`)
+      .join(" | ");
     const messages: ChatMessage[] = [
       {
         role: "system",
@@ -446,6 +464,7 @@ export class LanternDungeonMaster {
           "Never use prose to imply that a rejected action succeeded.",
           "After a tool result, narrate only the committed result and keep the response concise and immersive.",
           "If a tool rejects an action, explain the constraint and offer a legal next choice.",
+          `Detailed tool schemas are loaded on demand. The always-available core surface is ${engineCoreToolDefinitions().length} tools. Use capability_load with exactly one authorized family id when the current turn needs a family; loading changes visibility only, not authority. Available reviewed families: ${capabilityPrompt}`,
           NARRATION_CONTRACT_INSTRUCTION,
         ].join(" "),
       },
@@ -479,7 +498,7 @@ export class LanternDungeonMaster {
           toolsEnabled: !repairPending,
           nextRequestSequence: () => ++requestSequence,
           telemetryEvents,
-        });
+        }, availableToolDefinitions());
       } catch (error) {
         this.flushCompletionTelemetry(telemetryEvents, repairPending ? "narration_repair" : mode);
         if (repairPending) {
@@ -574,8 +593,10 @@ export class LanternDungeonMaster {
           currentState,
           clientCommandId,
           toolCall,
-          stagedEffects.length
+          stagedEffects.length,
+          loadedCapabilityFamilies,
         );
+        if (toolOutput.loadedCapabilityFamily) loadedCapabilityFamilies.add(toolOutput.loadedCapabilityFamily);
         if (toolOutput.stagedEffect) {
           stagedEffects.push(toolOutput.stagedEffect);
           currentState = provisionalState(toolOutput.stagedEffect.resolution, expectedCampaignVersion);
@@ -595,6 +616,13 @@ export class LanternDungeonMaster {
           tool_call_id: toolCall.id,
         });
       }
+      // Loading a reviewed schema family is orchestration, not a gameplay
+      // action. It should not consume one of the eight authoritative tool
+      // rounds; otherwise a late family load could force an unnecessary
+      // fallback before the requested tool is even visible.
+      if (!repairPending && toolCalls.length > 0 && toolCalls.every((toolCall) => toolCall.function.name === "capability_load")) {
+        toolLoopTurns -= 1;
+      }
     }
 
     if (stagedEffects.length > 0) return { narration: null, stagedEffects };
@@ -606,7 +634,8 @@ export class LanternDungeonMaster {
     currentState: LanternCampaignState,
     clientCommandId: string,
     toolCall: ToolCall,
-    stagedEffectCount: number
+    stagedEffectCount: number,
+    loadedCapabilityFamilies: Set<EngineCapabilityFamilyId>,
   ): ProvisionalToolResult {
     const toolName = toolCall.function.name;
     if (!isEngineToolName(toolName)) {
@@ -619,6 +648,25 @@ export class LanternDungeonMaster {
         data: { requestedTool: toolName },
         campaignVersion: currentState.version,
       };
+    }
+
+    if (!isToolVisibleForLoadedCapabilities(toolName, [...loadedCapabilityFamilies])) {
+      const familyId = capabilityFamilyForToolName(toolName);
+      if (!familyId || !isCapabilityFamilyAllowed(familyId, currentState, context.capabilities)) {
+        return {
+          tool: toolName,
+          readOnly: true,
+          accepted: false,
+          code: "capability_not_authorized",
+          message: "That capability family is not authorized for the current server-assigned phase and role.",
+          data: { availableFamilies: engineCapabilityDescriptors().map((descriptor) => descriptor.id) },
+          campaignVersion: currentState.version,
+        };
+      }
+      // A provider can still name a reviewed tool from a prior prompt. Treat
+      // that as a deterministic server-side load, then keep the family loaded
+      // for subsequent requests. No authority is granted by this fallback.
+      loadedCapabilityFamilies.add(familyId);
     }
 
     if (
@@ -664,6 +712,42 @@ export class LanternDungeonMaster {
         message: error instanceof Error ? error.message : "The tool arguments were invalid.",
         data: null,
         campaignVersion: currentState.version,
+      };
+    }
+
+    if (toolName === "capability_load") {
+      const familyId = parseCapabilityFamilyId(args.familyId);
+      if (!familyId) {
+        return {
+          tool: toolName,
+          readOnly: true,
+          accepted: false,
+          code: "invalid_capability_family",
+          message: "That capability family is not recognized.",
+          data: null,
+          campaignVersion: currentState.version,
+        };
+      }
+      if (!isCapabilityFamilyAllowed(familyId, currentState, context.capabilities)) {
+        return {
+          tool: toolName,
+          readOnly: true,
+          accepted: false,
+          code: "capability_not_authorized",
+          message: "That capability family is not authorized for the current server-assigned phase and role.",
+          data: { familyId },
+          campaignVersion: currentState.version,
+        };
+      }
+      return {
+        tool: toolName,
+        readOnly: true,
+        accepted: true,
+        code: null,
+        message: `Loaded the ${familyId} capability family.`,
+        data: capabilityLoadResult(familyId),
+        campaignVersion: currentState.version,
+        loadedCapabilityFamily: familyId,
       };
     }
 
@@ -776,7 +860,8 @@ export class LanternDungeonMaster {
   private async requestCompletion(
     messages: ChatMessage[],
     allowTools: boolean,
-    telemetryContext?: CompletionTelemetryContext
+    telemetryContext?: CompletionTelemetryContext,
+    tools?: readonly EngineToolDefinition[],
   ): Promise<CompletionMessage> {
     try {
       return await this.requestStreamingCompletion(
@@ -788,7 +873,8 @@ export class LanternDungeonMaster {
         telemetryContext ? {
           ...telemetryContext,
           requestSequence: telemetryContext.nextRequestSequence(),
-        } : undefined
+        } : undefined,
+        tools,
       );
     } catch (error) {
       if (!(error instanceof FirstTokenTimeoutError) || !this.options.fallbackModel) throw error;
@@ -802,7 +888,8 @@ export class LanternDungeonMaster {
         telemetryContext ? {
           ...telemetryContext,
           requestSequence: telemetryContext.nextRequestSequence(),
-        } : undefined
+        } : undefined,
+        tools,
       );
     }
   }
@@ -835,7 +922,8 @@ export class LanternDungeonMaster {
     baseUrl: string,
     model: string,
     selection: "primary" | "fallback",
-    telemetryContext?: Omit<CompletionTelemetryContext, "nextRequestSequence"> & { requestSequence: number }
+    telemetryContext?: Omit<CompletionTelemetryContext, "nextRequestSequence"> & { requestSequence: number },
+    tools?: readonly EngineToolDefinition[],
   ): Promise<CompletionMessage> {
     const startedAt = Date.now();
     let firstOutputAt: number | null = null;
@@ -883,7 +971,7 @@ export class LanternDungeonMaster {
         ...(allowTools
           ? {
               tool_choice: "auto",
-              tools: lanternToolDefinitions,
+              tools,
             }
           : { tool_choice: "none" }),
         messages,

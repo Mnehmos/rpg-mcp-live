@@ -184,6 +184,7 @@ describe("Lantern engine boundary", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "campaign_context",
+        "capability_load",
         "content_search",
         "content_get",
         "rules_reference",
@@ -234,7 +235,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(73);
+    expect(names).toHaveLength(lanternToolDefinitions.length);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");
