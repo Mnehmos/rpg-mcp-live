@@ -60,6 +60,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     challengeId: z.string().trim().min(1).max(120),
     goal: z.string().trim().min(1).max(2_000),
     approach: z.string().trim().min(1).max(2_000),
+    targetId: z.string().trim().min(1).max(120).optional(),
     sceneId: z.string().trim().min(1).max(120).optional(),
     difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
     requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),
@@ -691,13 +692,14 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "challenge_attempt",
-    "Adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; no caller-authored DC or consequence is accepted. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, seize-held-object-v1, stealth-perception-v1, and search-hidden-fact-v1.",
+    "Adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; no caller-authored DC or consequence is accepted. For a locked typed object, use barred-door-v1 to force it with Athletics or pick-lock-v1 to pick it with Thieves' Tools, and always provide that exact worldContext object targetId. A generic roll_check cannot change object state.",
     {
       type: "object",
       properties: {
         challengeId: { type: "string", description: "Reviewed challenge id or supported alias." },
         goal: { type: "string", description: "The concrete outcome the actor is pursuing." },
         approach: { type: "string", description: "The actor's current approach; retrying it without a changed approach or situation is blocked." },
+        targetId: { type: "string", description: "Exact established world-object id. Required when barred-door-v1 or pick-lock-v1 acts on a typed locked object." },
         sceneId: { type: "string", description: "Optional stable scene/situation id used for retry identity." },
         difficultyBand: { type: "string", enum: ["gentle", "standard", "challenging"], description: "Optional model proposal recorded as evidence; the active player profile selects the final band." },
         requestedStakes: { type: "array", items: { type: "string", enum: ["time", "noise", "exposure", "opportunity"] }, maxItems: 4, description: "Optional model-proposed stakes; the reviewed challenge definition controls the final stakes." },
@@ -1419,6 +1421,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         challengeId: args.challengeId,
         goal: args.goal,
         approach: args.approach,
+        targetId: args.targetId,
         sceneId: args.sceneId,
         difficultyBand: args.difficultyBand,
         requestedStakes: args.requestedStakes,

@@ -7,7 +7,7 @@ Status: Accepted
 Issue #21 owns the server decision about whether an open-ended action is
 automatic, impossible, or uncertain, and records why that decision was made.
 The first bounded contract is `challenge_attempt`. Its decision evidence stores
-the actor, challenge, scene, goal, normalized approach and hash, feasibility,
+the actor, challenge, scene, optional bound target, goal, normalized approach and hash, feasibility,
 rule family, DC source/provenance, selected difficulty policy, stakes, bounded
 outcomes, retry policy, costs, information policy, policy revision, and rules
 version. Attempts are retained in a bounded campaign history and are included in
@@ -20,7 +20,12 @@ The reviewed first-slice definitions are:
   alternative approach categories, without mutation;
 - `barred-door-v1`: uncertain Athletics check with reviewed DC bands of 10, 14,
   and 18, bounded success or failure-with-complication, and inert time/noise/
-  exposure costs.
+  exposure costs. When a qualifying typed locked object exists, its exact
+  `targetId` is mandatory and success atomically changes it to `open`;
+- `pick-lock-v1`: uncertain Dexterity check with the same reviewed
+  DC bands and server-selected Thieves' Tools proficiency. Its exact locked,
+  unlockable target is mandatory and success atomically changes it to
+  `unlocked`.
 
 The active player experience profile selects the final difficulty band and
 policy key. A model-proposed band or stakes list is retained as a request only;
@@ -32,6 +37,11 @@ execution and dice semantics.
 
 Unknown definitions, impossible actions, identical retries, invalid requests,
 and stale versions reject without state, version, log, event, or RNG mutation.
+Target-bound challenges also reject a missing, unknown, wrong-state, or
+affordance-ineligible target before RNG. A failed target-bound check records
+only its reviewed failure evidence and leaves the object unchanged. A success
+persists the check and target transition in the same command/turn event; the
+caller cannot supply a different consequence.
 An identical retry of a challenge is blocked until the approach or scene state
 changes. A changed approach may be adjudicated again. Replaying a resolved
 command returns the stored result and does not reroll or append a second

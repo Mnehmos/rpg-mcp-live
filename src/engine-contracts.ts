@@ -1670,6 +1670,7 @@ export interface EngineAdjudicationDecision {
   actorId: string;
   challengeId: string;
   sceneId: string;
+  targetId?: string;
   goal: string;
   approach: string;
   approachHash: string;
@@ -1744,6 +1745,7 @@ export const engineChallengeAttemptCommandSchema = z.object({
   challengeId: z.string().trim().min(1).max(120),
   goal: z.string().trim().min(1).max(2_000),
   approach: z.string().trim().min(1).max(2_000),
+  targetId: z.string().trim().min(1).max(120).optional(),
   sceneId: z.string().trim().min(1).max(120).optional(),
   difficultyBand: engineAdjudicationDifficultyBandSchema.optional(),
   requestedStakes: z.array(engineAdjudicationStakeSchema).max(4).optional(),

@@ -452,8 +452,17 @@ type ChallengeDefinition = {
   allowedOutcomes: EngineAdjudicationOutcome[];
   retryPolicy: EngineAdjudicationDecision["retryPolicy"];
   costs: EngineAdjudicationCosts;
-  actorCheck?: { ability: EngineAbility; skill: string };
+  actorCheck?: { ability: EngineAbility; skill: string | null };
   opposed?: { ability: EngineAbility; skill: string };
+  requiredTool?: string;
+  forbidProposedTool?: boolean;
+  objectTransition?: {
+    requiredState: EngineWorldObjectState;
+    requiredAffordance: EngineWorldObjectAffordance;
+    successState: EngineWorldObjectState;
+    kind: "force-open" | "pick-lock";
+    alwaysRequiresTarget: boolean;
+  };
   reason?: string;
   alternatives?: string[];
 };
@@ -497,6 +506,36 @@ const REVIEWED_CHALLENGE_DEFINITIONS: ChallengeDefinition[] = [
     allowedOutcomes: ["success", "failure-with-complication"],
     retryPolicy: "new_approach_or_state_change",
     costs: { timeMinutes: 5, noise: 2, exposure: 1 },
+    forbidProposedTool: true,
+    objectTransition: {
+      requiredState: "locked",
+      requiredAffordance: "open",
+      successState: "open",
+      kind: "force-open",
+      alwaysRequiresTarget: false,
+    },
+  },
+  {
+    id: "pick-lock-v1",
+    aliases: ["pick-lock", "lockpick", "thieves-tools-lock"],
+    feasibility: "uncertain",
+    selectedRuleFamily: "thieves-tools",
+    dcSource: "reviewed_challenge",
+    dcByDifficulty: { gentle: 10, standard: 14, challenging: 18 },
+    dcProvenance: "reviewed-challenge:pick-lock-v1:dc-band-v1",
+    stakes: ["time", "noise", "exposure"],
+    allowedOutcomes: ["success", "failure-with-complication"],
+    retryPolicy: "new_approach_or_state_change",
+    costs: { timeMinutes: 5, noise: 1, exposure: 1 },
+    actorCheck: { ability: "dex", skill: null },
+    requiredTool: "Thieves' Tools",
+    objectTransition: {
+      requiredState: "locked",
+      requiredAffordance: "unlock",
+      successState: "unlocked",
+      kind: "pick-lock",
+      alwaysRequiresTarget: true,
+    },
   },
   {
     id: "seize-held-object-v1",
@@ -683,17 +722,21 @@ function buildAdjudicationDecision(
   command: EngineChallengeAttemptCommand,
   definition: ChallengeDefinition
 ): EngineAdjudicationDecision {
-  const sceneId = command.sceneId?.trim() || state.worldContext?.id || "campaign-scene";
+  const sceneId = command.targetId && state.worldContext
+    ? state.worldContext.id + ":" + command.targetId
+    : command.sceneId?.trim() || state.worldContext?.id || "campaign-scene";
   const selectedDifficultyBand = state.experienceProfile.difficulty;
   const requestedStakes = [...new Set(command.requestedStakes ?? [])];
+  const selectedTool = definition.requiredTool ?? command.tool;
   return {
     id: clientCommandId,
     actorId: context.actorId,
     challengeId: definition.id,
     sceneId,
+    ...(command.targetId ? { targetId: command.targetId } : {}),
     goal: command.goal.trim(),
     approach: normalizeApproach(command.approach),
-    approachHash: challengeApproachHash(context.actorId, definition.id, sceneId, command.approach, command.factId),
+    approachHash: challengeApproachHash(context.actorId, definition.id, sceneId, command.approach, command.targetId ?? command.factId),
     clarificationStatus: "not_needed",
     feasibility: definition.feasibility,
     selectedRuleFamily: definition.selectedRuleFamily,
@@ -711,7 +754,7 @@ function buildAdjudicationDecision(
     informationPolicy: definition.id === "search-hidden-fact-v1" ? "withheld" : command.informationPolicy ?? "public",
     ...(command.helperId ? { helperId: command.helperId } : {}),
     ...(command.opponentId ? { opponentId: command.opponentId } : {}),
-    ...(command.tool ? { tool: command.tool } : {}),
+    ...(selectedTool ? { tool: selectedTool } : {}),
     policyRevision: ADJUDICATION_POLICY_REVISION,
     rulesVersion: state.rulesVersion,
   };
@@ -875,6 +918,149 @@ function resolveOpposedCheck(
   );
 }
 
+type ChallengeObjectTarget = {
+  object: EngineWorldObjectInstance;
+  transition: NonNullable<ChallengeDefinition["objectTransition"]>;
+};
+
+function validateChallengeObjectTarget(
+  state: LanternCampaignState,
+  command: EngineChallengeAttemptCommand,
+  definition: ChallengeDefinition,
+  decision: EngineAdjudicationDecision,
+  tool: EngineToolName | "declare" | "listen",
+): ChallengeObjectTarget | EngineResolution | null {
+  const transition = definition.objectTransition;
+  if (!transition) {
+    return command.targetId
+      ? adjudicationRejection(state, tool, "challenge_target_not_supported", "That reviewed challenge does not accept a world-object target.", decision)
+      : null;
+  }
+
+  const world = state.worldContext;
+  const eligibleTargets = world?.objects.filter((object) =>
+    object.state === transition.requiredState
+    && object.definition.affordances.includes(transition.requiredAffordance)
+  ) ?? [];
+  if (!command.targetId) {
+    if (transition.alwaysRequiresTarget || eligibleTargets.length > 0) {
+      return adjudicationRejection(
+        state,
+        tool,
+        "challenge_target_required",
+        "That reviewed object challenge needs the exact established targetId before any roll.",
+        decision,
+      );
+    }
+    // Preserve abstract barred-door adjudication when no typed object exists.
+    // Once a qualifying object is authoritative, the target becomes mandatory.
+    return null;
+  }
+  if (!world) {
+    return adjudicationRejection(state, tool, "world_context_required", "There is no authoritative world context for that object challenge.", decision);
+  }
+  const topology = worldObjectTopologyValidation(world.objects, world.id, state.actorId);
+  if (topology) return adjudicationRejection(state, tool, topology.code, topology.message, decision);
+  const object = world.objects.find((candidate) => candidate.id === command.targetId);
+  if (!object) {
+    return adjudicationRejection(state, tool, "challenge_target_not_found", "That challenge target is not an established world object in the current context.", decision);
+  }
+  if (object.state !== transition.requiredState) {
+    return adjudicationRejection(
+      state,
+      tool,
+      "challenge_target_state_invalid",
+      "That object is not in the required " + transition.requiredState + " state.",
+      decision,
+      { objectId: object.id, state: object.state, requiredState: transition.requiredState },
+    );
+  }
+  if (!object.definition.affordances.includes(transition.requiredAffordance)) {
+    return adjudicationRejection(
+      state,
+      tool,
+      "challenge_target_affordance_unavailable",
+      "That object does not declare the required " + transition.requiredAffordance + " affordance.",
+      decision,
+      { objectId: object.id, requiredAffordance: transition.requiredAffordance },
+    );
+  }
+  return { object, transition };
+}
+
+function applyObjectChallengeResolution(
+  resolution: EngineResolution,
+  context: RequestContext,
+  clientCommandId: string,
+  target: ChallengeObjectTarget,
+): EngineResolution {
+  if (!resolution.accepted || !resolution.event || resolution.event.outcome !== "success") return resolution;
+  const next = cloneCampaign(resolution.state);
+  const world = next.worldContext;
+  const objectIndex = world?.objects.findIndex((object) => object.id === target.object.id) ?? -1;
+  if (!world || objectIndex < 0) {
+    throw new Error("A validated object challenge lost its target before the atomic transition.");
+  }
+  const before = world.objects[objectIndex]!;
+  if (before.state !== target.transition.requiredState) {
+    throw new Error("A validated object challenge target changed state before the atomic transition.");
+  }
+  const after: EngineWorldObjectInstance = {
+    ...before,
+    state: target.transition.successState,
+    revision: before.revision + 1,
+    provenance: {
+      sourceCommandId: clientCommandId,
+      sourceVersion: resolution.state.version,
+      occurredAt: resolution.event.createdAt,
+    },
+  };
+  world.objects[objectIndex] = after;
+  const stateChanges: Array<{ path: string; before: unknown; after: unknown }> = [{
+    path: "/worldContext/objects/" + escapeJsonPointerSegment(after.id),
+    before,
+    after,
+  }];
+  if (next.situation) {
+    const beforeSituation = next.situation;
+    next.situation = reconcileSituation(next.situation, next);
+    if (JSON.stringify(beforeSituation) !== JSON.stringify(next.situation)) {
+      next.situation.revision += 1;
+      stateChanges.push({
+        path: "/situation",
+        before: projectSituationForActor(beforeSituation, resolution.state, context.actorId),
+        after: projectSituationForActor(next.situation, next, context.actorId),
+      });
+    }
+  }
+  const message = target.transition.kind === "force-open"
+    ? "You force " + after.definition.name + " open."
+    : "You pick the lock on " + after.definition.name + "; it is now unlocked.";
+  const lastLogIndex = next.log.length - 1;
+  if (lastLogIndex >= 0) next.log[lastLogIndex] = { ...next.log[lastLogIndex]!, text: message };
+  const objectTransition = {
+    objectId: after.id,
+    objectName: after.definition.name,
+    beforeState: before.state,
+    afterState: after.state,
+    affordance: target.transition.requiredAffordance,
+  };
+  const baseData = resolution.data && typeof resolution.data === "object"
+    ? resolution.data as Record<string, unknown>
+    : {};
+  return {
+    ...resolution,
+    state: next,
+    message,
+    data: { ...baseData, objectTransition },
+    event: {
+      ...resolution.event,
+      stateChanges: [...resolution.event.stateChanges, ...stateChanges],
+    },
+    narration: rulesNarration(message),
+  };
+}
+
 function resolveChallengeAttempt(
   state: LanternCampaignState,
   context: RequestContext,
@@ -885,6 +1071,31 @@ function resolveChallengeAttempt(
   const definition = reviewedChallengeDefinition(command.challengeId);
   if (!definition) return rejection(state, tool, "unknown_challenge_definition", "That challenge has no reviewed adjudication definition.");
   const decision = buildAdjudicationDecision(state, context, clientCommandId, command, definition);
+  if (definition.forbidProposedTool && command.tool) {
+    return adjudicationRejection(
+      state,
+      tool,
+      "challenge_tool_not_applicable",
+      "That reviewed challenge does not accept a caller-selected tool; use the matching reviewed challenge instead.",
+      decision,
+    );
+  }
+  if (
+    definition.requiredTool
+    && command.tool
+    && command.tool.trim().toLocaleLowerCase("en-US") !== definition.requiredTool.toLocaleLowerCase("en-US")
+  ) {
+    return adjudicationRejection(
+      state,
+      tool,
+      "challenge_tool_mismatch",
+      "That reviewed challenge uses " + definition.requiredTool + ", not a caller-selected substitute.",
+      decision,
+    );
+  }
+  const targetValidation = validateChallengeObjectTarget(state, command, definition, decision, tool);
+  if (targetValidation && "accepted" in targetValidation) return targetValidation;
+  const objectTarget = targetValidation;
   if (definition.id === "seize-held-object-v1") {
     if (!command.opponentId) return adjudicationRejection(state, tool, "opponent_required", "Seizing a held object needs its established holder.", decision);
     if (!state.worldContext?.npcs.some((npc) => npc.id === command.opponentId)) {
@@ -949,10 +1160,12 @@ function resolveChallengeAttempt(
     return resolveOpposedCheck(state, context, clientCommandId, command, tool, decision, definition);
   }
 
-  const checkCommand = {
+  const actorCheckAbility = definition.actorCheck?.ability ?? "str";
+  const actorCheckSkill = definition.actorCheck ? definition.actorCheck.skill : "athletics";
+  const checkCommand: Extract<EngineCommand, { kind: "roll_check" }> = {
     kind: "roll_check" as const,
-    ability: (definition.actorCheck?.ability ?? "str") as EngineAbility,
-    skill: definition.actorCheck?.skill ?? "athletics",
+    ability: actorCheckAbility,
+    ...(actorCheckSkill ? { skill: actorCheckSkill } : {}),
     goal: command.goal,
   };
   const result = resolveCheck(
@@ -961,14 +1174,17 @@ function resolveChallengeAttempt(
     clientCommandId,
     checkCommand,
     tool,
-    definition.actorCheck?.ability ?? "str",
-    definition.actorCheck?.skill ?? "athletics",
+    actorCheckAbility,
+    actorCheckSkill,
     command.goal,
     decision,
     command
   );
-  return definition.id === "search-hidden-fact-v1" && searchFact
-    ? applySearchDiscoveryResolution(result, context.actorId, searchFact)
+  if (definition.id === "search-hidden-fact-v1" && searchFact) {
+    return applySearchDiscoveryResolution(result, context.actorId, searchFact);
+  }
+  return objectTarget
+    ? applyObjectChallengeResolution(result, context, clientCommandId, objectTarget)
     : result;
 }
 

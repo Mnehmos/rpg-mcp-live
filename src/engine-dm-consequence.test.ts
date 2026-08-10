@@ -13,6 +13,7 @@ import {
   situationFixtureId,
 } from "./situation-test-fixtures.js";
 import { openAiSdkFetch as sdkFetch } from "./test-openai-stream.js";
+import { ruinedGatehouseWorldContextCommand } from "./world-object-fixture.js";
 
 const deterministicRandomInt = vi.hoisted(() => vi.fn((min: number, _max: number) => min));
 
@@ -119,6 +120,24 @@ function siltedBellState(wisdom: number): LanternCampaignState {
   return created.state;
 }
 
+function lockedGatehouseState(): LanternCampaignState {
+  const state = createInitialCampaign("gatehouse-account", "gatehouse-actor");
+  state.character.created = true;
+  state.character.name = "Gatebreaker";
+  state.character.abilities.str = 20;
+  state.character.skills.athletics = { ability: "str", proficient: true, expertise: false, bonus: 0 };
+  state.phase = "sandbox";
+  const created = resolveEngineCommand(
+    state,
+    context(state),
+    randomUUID(),
+    ruinedGatehouseWorldContextCommand(),
+    "world_context",
+  );
+  if (!created.accepted) throw new Error(created.code + ": " + created.message);
+  return created.state;
+}
+
 function sceneMove(outcome: "success" | "failure") {
   return {
     title: outcome === "success" ? "The wharf reacts" : "Mara hears the scrape",
@@ -147,6 +166,49 @@ afterEach(() => {
 });
 
 describe("DM consequence binding", () => {
+  it("accepts a target-bound object transition as the check consequence without an extra scene move", async () => {
+    deterministicRandomInt.mockImplementation((_min: number, max: number) => max - 1);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(toolResponse("force-door", "challenge_attempt", {
+        challengeId: "barred-door-v1",
+        targetId: "gatehouse-door",
+        goal: "Force the locked gatehouse door open",
+        approach: "Drive a shoulder into the swollen boards",
+      }))
+      .mockResolvedValueOnce(narrationResponse("The gatehouse door gives way under the committed result."))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = lockedGatehouseState();
+    const requestContext = context(state);
+    store.createCampaign(requestContext, state);
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(
+      requestContext,
+      state,
+      randomUUID(),
+      state.version,
+      "I shoulder the Wooden gatehouse door and force it open.",
+    );
+
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["challenge_attempt"]);
+    expect(result.event?.effects?.[0]).toMatchObject({
+      command: { kind: "challenge_attempt", targetId: "gatehouse-door" },
+      data: {
+        success: true,
+        objectTransition: { objectId: "gatehouse-door", beforeState: "locked", afterState: "open" },
+      },
+    });
+    expect(result.state.worldContext?.objects.find((object) => object.id === "gatehouse-door")?.state).toBe("open");
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).toContain("Wooden gatehouse door is now open.");
+    expect(result.narration.text).not.toMatch(/DM must establish|pending-dm-consequence|sourceEffectIndex/i);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    store.close();
+  });
+
   it("commits an authorized Silted Bell clue before narrating the concrete successful discovery", async () => {
     deterministicRandomInt.mockImplementation((_min: number, max: number) => max - 1);
     const clueId = situationFixtureId("silted-bell-wharf", "clue", "draft");
