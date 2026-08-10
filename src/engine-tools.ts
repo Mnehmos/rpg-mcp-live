@@ -127,6 +127,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   social_check: z
     .object({
       npcId: z.string().trim().min(1).max(120),
+      actingNpcId: z.string().trim().min(1).max(120).optional(),
       ability: engineAbilitySchema,
       skill: z.string().trim().min(1).max(80).optional(),
       goal: z.string().trim().min(1).max(2_000),
@@ -739,10 +740,10 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "social_check",
-    "Resolve a social ability or skill check against an NPC established in the current context. The DM authors the NPC and goal; the engine owns the d20, modifier, DC, and relationship update.",
+    "Resolve a social ability or skill check against an NPC established in the current context. The DM authors the NPC and goal; the engine owns the d20, modifier, DC, and relationship update. If another established NPC speaks or acts for the player, set actingNpcId; the player remains the roller and modifier source until reviewed NPC actor mechanics exist.",
     {
       type: "object",
-      properties: { npcId: { type: "string" }, ability: { type: "string", enum: ["str", "dex", "con", "int", "wis", "cha"] }, skill: { type: "string" }, goal: { type: "string" } },
+      properties: { npcId: { type: "string" }, actingNpcId: { type: "string", description: "Optional established NPC who speaks or acts for the player; this does not replace the player as roller." }, ability: { type: "string", enum: ["str", "dex", "con", "int", "wis", "cha"] }, skill: { type: "string" }, goal: { type: "string" } },
       required: ["npcId", "ability", "goal"],
       additionalProperties: false,
     }
@@ -1357,7 +1358,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "interact":
       return engineCommandSchema.parse({ kind: "interact", targetId: args.targetId, goal: args.goal, affordance: args.affordance, sourceId: args.sourceId, destinationId: args.destinationId });
     case "social_check":
-      return engineCommandSchema.parse({ kind: "social_check", npcId: args.npcId, ability: args.ability, skill: args.skill, goal: args.goal });
+      return engineCommandSchema.parse({ kind: "social_check", npcId: args.npcId, actingNpcId: args.actingNpcId, ability: args.ability, skill: args.skill, goal: args.goal });
     case "npc_tick":
       return engineCommandSchema.parse({ kind: "npc_tick", trigger: args.trigger, triggerId: args.triggerId, npcId: args.npcId, offerId: args.offerId, provider: args.provider });
     case "merchant_trade":

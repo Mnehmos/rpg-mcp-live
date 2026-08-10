@@ -48,6 +48,7 @@ import type {
   EngineCombat,
   EngineCombatView,
   EngineCheckEvidence,
+  EngineSocialCheckAttribution,
   EngineKnowledgeRecord,
   EngineProceduralNotice,
   EngineProceduralNoticeAttempt,
@@ -4529,6 +4530,15 @@ function resolveSocialCheck(
 ): EngineResolution {
   const npc = state.worldContext?.npcs.find((candidate) => candidate.id === command.npcId);
   if (!npc) return rejection(state, tool, "npc_not_found", "That NPC is not established in the current context.");
+  const actingNpc = command.actingNpcId
+    ? state.worldContext?.npcs.find((candidate) => candidate.id === command.actingNpcId)
+    : null;
+  if (command.actingNpcId && !actingNpc) {
+    return rejection(state, tool, "acting_npc_not_found", "The speaking or acting NPC is not established in the current context.");
+  }
+  if (actingNpc?.id === npc.id) {
+    return rejection(state, tool, "acting_npc_is_target", "The speaking or acting NPC must be distinct from the social-check target.");
+  }
   const derived = deriveCheck(state, command.ability, command.skill ?? null, null, tool);
   if ("accepted" in derived) return derived;
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
@@ -4544,14 +4554,29 @@ function resolveSocialCheck(
   const modifier = derived.modifier;
   const total = roll + modifier;
   const success = total >= SOCIAL_CHECK_DC;
+  const rollingActorName = state.character.name.trim() || context.actorId;
+  const attribution: EngineSocialCheckAttribution = {
+    actionOwnerActorId: context.actorId,
+    rollingActorId: context.actorId,
+    rollingActorName,
+    actingActorId: actingNpc?.id ?? context.actorId,
+    actingActorName: actingNpc?.name ?? rollingActorName,
+    targetId: npc.id,
+    targetName: npc.name,
+    modifierSourceActorId: context.actorId,
+    modifierSourceActorName: rollingActorName,
+    mode: actingNpc ? "npc-mediated" : "direct",
+  };
   const beforeSocial = normalizeSocialState(state.social);
   const next = cloneCampaign(state);
   const nextNpc = next.worldContext?.npcs.find((candidate) => candidate.id === command.npcId);
   adjustSocialRelationship(next, context.actorId, command.npcId, success ? 5 : -2, clientCommandId, state.version);
   const afterSocial = ensureSocialState(next);
-  const message =
-    "You make a social check with " + npc.name + ": d20 " + roll + " " + signed(modifier) + " = " + total +
-    " against reviewed social challenge DC " + SOCIAL_CHECK_DC + ". " + (success ? "Success." : "Failure.");
+  const message = actingNpc
+    ? actingNpc.name + " speaks for you to " + npc.name + "; the check uses " + rollingActorName + "'s modifiers: d20 " + roll + " " + signed(modifier) + " = " + total +
+      " against reviewed social challenge DC " + SOCIAL_CHECK_DC + ". " + (success ? "Success." : "Failure.")
+    : "You make a social check with " + npc.name + ": d20 " + roll + " " + signed(modifier) + " = " + total +
+      " against reviewed social challenge DC " + SOCIAL_CHECK_DC + ". " + (success ? "Success." : "Failure.");
   return commit(
     next,
     context,
@@ -4559,7 +4584,7 @@ function resolveSocialCheck(
     command,
     tool,
     message,
-    { npc: nextNpc ?? npc, goal: command.goal, roll, modifier, dc: SOCIAL_CHECK_DC, dcProvenance: "reviewed-challenge:social-check-v1:dc-band-v1", total, success, social: projectSocialForActor(context.actorId, next) },
+    { npc: nextNpc ?? npc, goal: command.goal, roll, modifier, dc: SOCIAL_CHECK_DC, dcProvenance: "reviewed-challenge:social-check-v1:dc-band-v1", total, success, attribution, social: projectSocialForActor(context.actorId, next) },
     success ? "social_success" : "social_failure",
     [
       { kind: "social_d20", value: roll, sides: 20 },
@@ -4585,6 +4610,7 @@ function resolveSocialCheck(
       advantageSources: [...modifierQuery.effectIds],
       disadvantageSources: modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [],
       mode: modifierQuery.mode,
+      attribution,
       informationPolicy: "public",
       formulaRevision: "checks-v1",
     }
