@@ -1270,10 +1270,12 @@ function narrationContradictsMediatedCheck(text: string, attribution: EngineSoci
   const actor = attribution.actingActorName.trim().toLocaleLowerCase("en-US").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const source = attribution.modifierSourceActorName.trim().toLocaleLowerCase("en-US");
   const normalized = text.toLocaleLowerCase("en-US");
-  const actorClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs)\\b[^.!?]{0,60}\\b(?:check|roll)\\b`, "i");
+  const actorClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs|got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,60}\\b(?:check|roll|score|result|total)\\b`, "i");
+  const numericScoreClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,40}\\b(?:got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,20}\\b\\d+(?:\\.\\d+)?\\b`, "i");
   const possessiveClaim = new RegExp(`\\b${actor}(?:['’]s)\\b[^.!?]{0,80}\\b(?:check|roll|modifier)\\b`, "i");
   const pronounModifierClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:uses?|used|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "i");
   return actorClaim.test(normalized)
+    || numericScoreClaim.test(normalized)
     || possessiveClaim.test(normalized)
     || pronounModifierClaim.test(normalized)
     || (source !== attribution.actingActorName.trim().toLocaleLowerCase("en-US")

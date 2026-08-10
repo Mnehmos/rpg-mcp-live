@@ -321,6 +321,14 @@ describe("social check actor attribution", () => {
     expect(result.narration.text).not.toContain("Titus's Persuasion roll");
   });
 
+  it("rejects NPC score claims even without an explicit roll verb", async () => {
+    const result = await resolveWithModelNarration("Titus got a 19 on his Persuasion check.");
+
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
+    expect(result.narration.text).not.toContain("Titus got a 19");
+  });
+
   it("keeps the authoritative suffix inside the narration contract limit", async () => {
     const result = await resolveWithModelNarration("A".repeat(6_000));
 
