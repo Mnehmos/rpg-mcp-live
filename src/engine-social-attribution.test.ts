@@ -146,7 +146,7 @@ describe("social check actor attribution", () => {
     });
 
     expect(result.accepted).toBe(true);
-    expect(result.message).toContain("Titus speaks for you to Arena Sentries");
+    expect(result.message).toContain("Titus acts for you toward Arena Sentries");
     expect(result.message).toContain("Mnehmos's modifiers");
     expect(result.event?.actorId).toBe(state.actorId);
     expect(result.event?.command).toMatchObject({ kind: "social_check", npcId: "arena-sentries", actingNpcId: "titus" });
@@ -266,7 +266,7 @@ describe("social check actor attribution", () => {
         "I tell Titus to explain what happened and turn the sentries against Ledrus.",
       );
       expect(result.narrationSource).toBe("rules");
-      expect(result.narration.text).toContain("Titus speaks for Mnehmos to Arena Sentries");
+      expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
       expect(result.narration.text).toContain("Mnehmos's modifiers");
       expect(result.event?.effects?.[0]?.check?.attribution).toMatchObject({ mode: "npc-mediated", actingActorId: "titus" });
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -282,7 +282,7 @@ describe("social check actor attribution", () => {
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.text).toContain("Titus steps forward");
     expect(result.narration.text).toContain(
-      "Authoritative check record: Titus speaks for Mnehmos to Arena Sentries; the check uses Mnehmos's modifiers.",
+      "Authoritative check record: Titus acts for Mnehmos toward Arena Sentries; the check uses Mnehmos's modifiers.",
     );
   });
 
@@ -290,7 +290,7 @@ describe("social check actor attribution", () => {
     const result = await resolveWithModelNarration("Titus rolled the check using his modifiers.");
 
     expect(result.narrationSource).toBe("rules");
-    expect(result.narration.text).toContain("Titus speaks for Mnehmos to Arena Sentries");
+    expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
     expect(result.narration.text).not.toContain("Titus rolled");
   });
 });

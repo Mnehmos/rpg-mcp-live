@@ -1252,7 +1252,7 @@ function committedCheckText(data: unknown, scene?: string): string | null {
 }
 
 function mediatedCheckAttributionText(attribution: EngineSocialCheckAttribution): string {
-  return `${attribution.actingActorName} speaks for ${attribution.rollingActorName} to ${attribution.targetName}; the check uses ${attribution.modifierSourceActorName}'s modifiers.`;
+  return `${attribution.actingActorName} acts for ${attribution.rollingActorName} toward ${attribution.targetName}; the check uses ${attribution.modifierSourceActorName}'s modifiers.`;
 }
 
 function mediatedCheckAttribution(result: EngineCommandResult): EngineSocialCheckAttribution | null {

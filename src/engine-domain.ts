@@ -4573,7 +4573,7 @@ function resolveSocialCheck(
   adjustSocialRelationship(next, context.actorId, command.npcId, success ? 5 : -2, clientCommandId, state.version);
   const afterSocial = ensureSocialState(next);
   const message = actingNpc
-    ? actingNpc.name + " speaks for you to " + npc.name + "; the check uses " + rollingActorName + "'s modifiers: d20 " + roll + " " + signed(modifier) + " = " + total +
+    ? actingNpc.name + " acts for you toward " + npc.name + "; the check uses " + rollingActorName + "'s modifiers: d20 " + roll + " " + signed(modifier) + " = " + total +
       " against reviewed social challenge DC " + SOCIAL_CHECK_DC + ". " + (success ? "Success." : "Failure.")
     : "You make a social check with " + npc.name + ": d20 " + roll + " " + signed(modifier) + " = " + total +
       " against reviewed social challenge DC " + SOCIAL_CHECK_DC + ". " + (success ? "Success." : "Failure.");
