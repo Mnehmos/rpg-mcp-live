@@ -10,7 +10,7 @@ import {
   engineCapabilityFamilyIdSchema,
   engineCharacterDetailsSchema,
   engineCommandSchema,
-  engineContentCompileCommandSchema,
+  engineContentCompileArgsSchema,
   engineExperienceProfileInputSchema,
   engineEncounterDecisionSchema,
   engineEncounterLifecycleProfileSchema,
@@ -76,7 +76,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   content_get: z.object({
     contentKey: z.string().trim().min(1).max(300),
   }).strict(),
-  content_compile: engineContentCompileCommandSchema.omit({ kind: true }),
+  content_compile: engineContentCompileArgsSchema,
   rules_reference: z.discriminatedUnion("action", [
     z.object({
       action: z.literal("search"),
@@ -111,7 +111,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   npc_context: noArguments,
   merchant_catalog: noArguments,
   observe: noArguments,
-  move: z.object({ destinationId: z.string().trim().min(1).max(80) }).strict(),
+  move: z.object({ destinationId: z.string().trim().min(1).max(120) }).strict(),
   travel: z.object({
     routeId: z.string().trim().min(1).max(120),
     destinationId: z.string().trim().min(1).max(120),
@@ -550,7 +550,7 @@ const worldObjectPatchOperationsJsonSchema = (() => {
 
 const runtimeContentCompileJsonSchema = (() => {
   const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(
-    engineContentCompileCommandSchema.omit({ kind: true }),
+    engineContentCompileArgsSchema,
     { unrepresentable: "any" },
   ) as Record<string, unknown>;
   return jsonSchema;
@@ -598,7 +598,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "content_compile",
-    "Compile a strict campaign-scoped item, location, or spell proposal into inert runtime content. Definitions and instances are persisted separately; unknown fields and unreviewed mechanics are rejected.",
+    "Compile a strict campaign-scoped item, location, or spell proposal into inert runtime content, or update one canonical location exit through exitPatch. Definitions, instances, typed exits, and containment relationships are persisted separately; unknown fields and unreviewed mechanics are rejected.",
     runtimeContentCompileJsonSchema,
   ),
   tool(
@@ -1380,6 +1380,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         proposal: args.proposal,
         createInstance: args.createInstance,
         instanceKey: args.instanceKey,
+        exitPatch: args.exitPatch,
       });
     case "procedural_notice":
       return engineCommandSchema.parse({

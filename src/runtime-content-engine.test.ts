@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   createInitialCampaign,
   normalizeCampaignState,
+  projectResolutionForActor,
+  projectStateForActor,
   resolveEngineCommand,
   toSessionView,
 } from "./engine-domain.js";
@@ -37,6 +39,19 @@ function itemProposal() {
     material: "bronze",
     weight: 0.1,
     affordances: ["inspect", "take"] as const,
+  };
+}
+
+function locationProposal(key: string, extra: Record<string, unknown> = {}) {
+  return {
+    kind: "location" as const,
+    key,
+    name: key.replaceAll("-", " "),
+    description: `The canonical ${key} location.`,
+    tags: [],
+    locationKind: "room" as const,
+    exits: [],
+    ...extra,
   };
 }
 
@@ -131,5 +146,203 @@ describe("runtime content engine boundary", () => {
     expect(duplicate.state.version).toBe(1);
     expect(restarted.getCampaign(requestContext).runtimeContent.definitions).toHaveLength(1);
     restarted.close();
+  });
+
+  it("persists typed topology, moves only through canonical exits, and patches exit state exactly once", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = { ...context(initial.id), accountId: initial.accountId, actorId: initial.actorId };
+    const parent = engineCommandSchema.parse({ kind: "content_compile", proposal: locationProposal("guard-room") });
+    const parentResult = resolveEngineCommand(initial, requestContext, randomUUID(), parent, "content_compile");
+    expect(parentResult.accepted).toBe(true);
+    const parentInstance = parentResult.state.runtimeContent.instances.find((instance) => instance.kind === "location");
+    expect(parentInstance).toBeDefined();
+
+    const child = engineCommandSchema.parse({
+      kind: "content_compile",
+      proposal: locationProposal("holding-vault", {
+        parentKey: "guard-room",
+        occupants: [{ kind: "actor", id: initial.actorId }],
+        exits: [{
+          key: "west-door",
+          label: "West door",
+          kind: "door",
+          targetKey: "guard-room",
+          open: false,
+          locked: true,
+          hidden: true,
+          discovered: false,
+          requirements: [],
+        }],
+      }),
+    });
+    const childResult = resolveEngineCommand(parentResult.state, requestContext, randomUUID(), child, "content_compile");
+    expect(childResult.accepted).toBe(true);
+    const childInstance = childResult.state.runtimeContent.instances.find((instance) => instance.definitionId.includes("holding-vault"));
+    expect(childInstance).toBeDefined();
+    expect(childResult.state.runtimeContent.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: "located_in", fromKind: "actor", fromId: initial.actorId, toId: childInstance?.id }),
+      expect.objectContaining({ relation: "located_in", fromId: childInstance?.id, toId: parentInstance?.id }),
+      expect.objectContaining({ relation: "connects_to", exit: expect.objectContaining({ key: "west-door", hidden: true, discovered: false }) }),
+    ]));
+    expect(toSessionView(childResult.state).runtimeContent.relationships).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: "connects_to", exit: expect.objectContaining({ key: "west-door" }) }),
+    ]));
+
+    const blockedMove = resolveEngineCommand(
+      childResult.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "move", destinationId: "west-door" }),
+      "move",
+    );
+    expect(blockedMove.accepted).toBe(false);
+    expect(blockedMove.code).toBe("location_exit_undiscovered");
+    expect(blockedMove.state.version).toBe(childResult.state.version);
+
+    const location = childResult.state.runtimeContent.instances.find((instance) => instance.id === childInstance?.id);
+    const reveal = engineCommandSchema.parse({
+      kind: "content_compile",
+      exitPatch: {
+        locationInstanceId: location?.id,
+        exitKey: "west-door",
+        patch: { discovered: true, open: true, locked: false },
+      },
+    });
+    const revealed = resolveEngineCommand(childResult.state, requestContext, randomUUID(), reveal, "content_compile");
+    expect(revealed.accepted).toBe(true);
+    const moved = resolveEngineCommand(
+      revealed.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "move", destinationId: "west-door" }),
+      "move",
+    );
+    expect(moved.accepted).toBe(true);
+    expect(moved.event?.outcome).toBe("location_moved");
+    expect(moved.state.runtimeContent.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: "located_in", fromKind: "actor", fromId: initial.actorId, toId: parentInstance?.id }),
+    ]));
+  });
+
+  it("rejects an exit whose target location has not been compiled", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const command = engineCommandSchema.parse({
+      kind: "content_compile",
+      proposal: locationProposal("holding-vault", {
+        exits: [{ key: "missing", label: "Missing", kind: "passage", targetKey: "not-yet-authored" }],
+      }),
+    });
+    const result = resolveEngineCommand(initial, context(initial.id), randomUUID(), command, "content_compile");
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe("location_exit_target_not_found");
+    expect(result.state.runtimeContent).toEqual({ definitions: [], instances: [], relationships: [] });
+  });
+
+  it("resolves exits to the one canonical non-default target instance", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = context(initial.id);
+    const target = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "content_compile", proposal: locationProposal("tower", {}), instanceKey: "upper" }),
+      "content_compile",
+    );
+    expect(target.accepted).toBe(true);
+    const targetInstance = target.state.runtimeContent.instances.find((instance) => instance.instanceKey === "upper");
+    expect(targetInstance).toBeDefined();
+    const source = resolveEngineCommand(
+      target.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("courtyard", {
+          exits: [{ key: "tower-stairs", label: "Stairs", kind: "stairs", targetKey: "tower" }],
+        }),
+      }),
+      "content_compile",
+    );
+    expect(source.accepted).toBe(true);
+    expect(source.state.runtimeContent.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: "connects_to", toId: targetInstance?.id, exit: expect.objectContaining({ targetKey: "tower" }) }),
+    ]));
+  });
+
+  it("rejects duplicate actor containment and createInstance false without mutation", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = context(initial.id);
+    const first = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("first-room", { occupants: [{ kind: "actor", id: initial.actorId }] }),
+      }),
+      "content_compile",
+    );
+    expect(first.accepted).toBe(true);
+    const before = JSON.stringify(first.state);
+    const duplicate = resolveEngineCommand(
+      first.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("second-room", { occupants: [{ kind: "actor", id: initial.actorId }] }),
+      }),
+      "content_compile",
+    );
+    expect(duplicate.accepted).toBe(false);
+    expect(duplicate.code).toBe("location_actor_already_located");
+    expect(JSON.stringify(duplicate.state)).toBe(before);
+
+    const noInstance = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        createInstance: false,
+        proposal: locationProposal("orphan-room", { exits: [{ key: "door", label: "Door", kind: "door", targetKey: "first-room" }] }),
+      }),
+      "content_compile",
+    );
+    expect(noInstance.accepted).toBe(false);
+    expect(noInstance.code).toBe("location_instance_required");
+    expect(noInstance.state.runtimeContent).toEqual({ definitions: [], instances: [], relationships: [] });
+  });
+
+  it("redacts undiscovered exits from state, command, resolution data, and event evidence", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = context(initial.id);
+    const target = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "content_compile", proposal: locationProposal("target-room") }),
+      "content_compile",
+    );
+    const result = resolveEngineCommand(
+      target.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("secret-room", {
+          exits: [{ key: "hidden-door", label: "Hidden door", kind: "door", targetKey: "target-room", hidden: true, discovered: false }],
+        }),
+      }),
+      "content_compile",
+    );
+    expect(result.accepted).toBe(true);
+    const publicState = projectStateForActor(initial.actorId, result.state);
+    expect(JSON.stringify(publicState)).not.toContain("hidden-door");
+    const publicResult = projectResolutionForActor(result, initial.actorId);
+    expect(JSON.stringify(publicResult.event?.command)).not.toContain("hidden-door");
+    expect(JSON.stringify(publicResult.event?.command)).not.toContain("target-room");
+    expect(JSON.stringify(publicResult.data)).not.toContain("hidden-door");
+    expect(JSON.stringify(publicResult.data)).not.toContain("target-room");
   });
 });

@@ -874,12 +874,48 @@ export const engineWorldContextCommandSchema = engineWorldContextArgsSchema.exte
 }).strict();
 export type EngineWorldContextCommand = z.infer<typeof engineWorldContextCommandSchema>;
 
-export const engineContentCompileCommandSchema = z.object({
-  kind: z.literal("content_compile"),
-  proposal: contentProposalSchema,
+const engineLocationExitStatePatchSchema = z.object({
+  open: z.boolean().optional(),
+  locked: z.boolean().optional(),
+  blocked: z.boolean().optional(),
+  discovered: z.boolean().optional(),
+  requirements: z.array(runtimeContentKeySchema).max(8).optional(),
+}).strict().refine(
+  (patch) => Object.keys(patch).length > 0,
+  "A location exit patch needs at least one state change.",
+);
+
+export const engineLocationExitPatchSchema = z.object({
+  locationInstanceId: z.string().trim().min(1).max(220),
+  exitKey: runtimeContentKeySchema,
+  patch: engineLocationExitStatePatchSchema,
+}).strict();
+export type EngineLocationExitPatch = z.infer<typeof engineLocationExitPatchSchema>;
+
+export const engineContentCompileArgsSchema = z.object({
+  proposal: contentProposalSchema.optional(),
   createInstance: z.boolean().default(true),
   instanceKey: runtimeContentKeySchema.optional(),
+  exitPatch: engineLocationExitPatchSchema.optional(),
 }).strict();
+
+export const engineContentCompileCommandSchema = engineContentCompileArgsSchema.extend({
+  kind: z.literal("content_compile"),
+}).strict().superRefine((command, context) => {
+  if (!command.proposal && !command.exitPatch) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["proposal"], message: "Provide a content proposal or a canonical location exit patch." });
+  }
+  if (command.proposal && command.exitPatch) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["exitPatch"], message: "A content compile command cannot compile and patch an exit at the same time." });
+  }
+  if (command.exitPatch && (command.createInstance !== true || command.instanceKey !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["exitPatch"], message: "Exit patches do not accept instance creation options." });
+  }
+  const patch = command.exitPatch?.patch;
+  if (patch?.discovered === false) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["exitPatch", "patch", "discovered"], message: "An established exit cannot be undiscovered." });
+  }
+});
 export type EngineContentCompileCommand = z.infer<typeof engineContentCompileCommandSchema>;
 
 export const engineToolNameSchema = z.enum([
@@ -1572,7 +1608,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     abilityScores: z.record(engineAbilitySchema, z.number().int().min(3).max(20)).optional(),
     details: engineCharacterDetailsSchema.optional(),
   }).strict(),
-  z.object({ kind: z.literal("move"), destinationId: z.string().trim().min(1).max(80) }).strict(),
+  z.object({ kind: z.literal("move"), destinationId: z.string().trim().min(1).max(120) }).strict(),
   engineTravelCommandSchema,
   z
     .object({
