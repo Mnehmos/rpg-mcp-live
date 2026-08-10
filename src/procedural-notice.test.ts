@@ -13,6 +13,7 @@ import {
 } from "./engine-domain.js";
 import { engineCommandSchema, type EngineCommand, type LanternCampaignState, type RequestContext } from "./engine-contracts.js";
 import { LanternEngineStore } from "./engine-store.js";
+import { openAiSdkFetch } from "./test-openai-stream.js";
 
 const contextFor = (state: LanternCampaignState): RequestContext => ({
   requestId: randomUUID(),
@@ -199,7 +200,7 @@ describe("procedural notice delivery", () => {
         status: 200,
         json: async () => ({ choices: [{ message: { role: "assistant", content: JSON.stringify({ text: "The sealed notice is recorded for the prescribed delivery step.", proposedFacts: [], suggestedActions: [] }) } }] }),
       });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
     const directory = mkdtempSync(join(tmpdir(), "lantern-notice-dm-"));
     const store = new LanternEngineStore(join(directory, "engine.db"));
     const state = createInitialCampaign("notice-dm-account", "notice-dm-actor");

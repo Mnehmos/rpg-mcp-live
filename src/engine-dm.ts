@@ -3,6 +3,7 @@ import {
   narrationEnvelopeSchema,
   type NarrationEnvelope,
 } from "./ai-contracts.js";
+import OpenAI from "openai";
 import type { Open5eContentResolver } from "./content/resolve.js";
 import {
   cloneCampaign,
@@ -42,7 +43,7 @@ import {
   EngineCommandInProgressError,
   LanternEngineStore,
 } from "./engine-store.js";
-import type { OpenRouterOptions } from "./openrouter.js";
+import type { OpenRouterCompletionTelemetry, OpenRouterOptions } from "./openrouter.js";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -64,19 +65,19 @@ interface CompletionMessage {
   [key: string]: unknown;
 }
 
-interface CompletionPayload {
-  choices?: Array<{
-    finish_reason?: string;
-    message?: CompletionMessage;
-  }>;
-}
-
 interface ToolLoopResult {
   narration: NarrationEnvelope | null;
   stagedEffects: StagedEngineTurnEffect[];
 }
 
 type DmLoopMode = "player_turn" | "opening";
+
+class FirstTokenTimeoutError extends Error {
+  public constructor(timeoutMs: number) {
+    super(`The primary model produced no output within ${timeoutMs}ms.`);
+    this.name = "FirstTokenTimeoutError";
+  }
+}
 
 const NARRATION_CONTRACT_INSTRUCTION = [
   "Return the final response as one valid JSON object with exactly three keys: text, proposedFacts, and suggestedActions.",
@@ -699,18 +700,64 @@ export class LanternDungeonMaster {
   }
 
   private async requestCompletion(messages: ChatMessage[], allowTools: boolean): Promise<CompletionMessage> {
-    const response = await fetch(this.options.baseUrl + "/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer " + this.options.apiKey,
-        "Content-Type": "application/json",
+    try {
+      return await this.requestStreamingCompletion(
+        messages,
+        allowTools,
+        this.options.baseUrl,
+        this.options.model,
+        "primary"
+      );
+    } catch (error) {
+      if (!(error instanceof FirstTokenTimeoutError) || !this.options.fallbackModel) throw error;
+      console.warn(`Primary model produced no first output; retrying once with ${this.options.fallbackModel}.`);
+      return this.requestStreamingCompletion(
+        messages,
+        allowTools,
+        this.options.fallbackBaseUrl || this.options.baseUrl,
+        this.options.fallbackModel,
+        "fallback"
+      );
+    }
+  }
+
+  private async requestStreamingCompletion(
+    messages: ChatMessage[],
+    allowTools: boolean,
+    baseUrl: string,
+    model: string,
+    selection: "primary" | "fallback"
+  ): Promise<CompletionMessage> {
+    const startedAt = Date.now();
+    let firstOutputAt: number | null = null;
+    let failureReason: OpenRouterCompletionTelemetry["failureReason"] = null;
+    let completionUsage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
+    const client = new OpenAI({
+      apiKey: this.options.apiKey,
+      baseURL: baseUrl,
+      maxRetries: 0,
+      defaultHeaders: {
         ...(this.options.siteUrl ? { "HTTP-Referer": this.options.siteUrl } : {}),
         "X-OpenRouter-Title": this.options.appName,
       },
-      body: JSON.stringify({
-        model: this.options.model,
+    });
+    let firstOutput = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stream: ReturnType<typeof client.chat.completions.stream> | undefined;
+    const markFirstOutput = (): void => {
+      if (firstOutput) return;
+      firstOutput = true;
+      firstOutputAt = Date.now() - startedAt;
+      if (timer) clearTimeout(timer);
+    };
+
+    try {
+      stream = client.chat.completions.stream({
+        model,
         reasoning_effort: this.options.reasoningEffort,
         max_tokens: this.options.maxTokens,
+        stream_options: { include_usage: true },
         provider: { require_parameters: true },
         response_format: {
           type: "json_schema",
@@ -727,14 +774,69 @@ export class LanternDungeonMaster {
             }
           : { tool_choice: "none" }),
         messages,
-      }),
-      signal: AbortSignal.timeout(25_000),
-    });
-    if (!response.ok) throw new Error("OpenRouter returned HTTP " + response.status + ".");
-    const payload = (await response.json()) as CompletionPayload;
-    const message = payload.choices?.[0]?.message;
-    if (!message) throw new Error("OpenRouter returned no message.");
-    return message;
+      } as never);
+      stream.on("chunk", (chunk) => {
+        const delta = chunk.choices[0]?.delta;
+        if (delta?.content || delta?.tool_calls?.length) markFirstOutput();
+      });
+      stream.on("content", (delta) => {
+        if (delta) markFirstOutput();
+      });
+      stream.on("tool_calls.function.arguments.delta", (delta) => {
+        if (delta.arguments_delta || delta.name) markFirstOutput();
+      });
+      const timeoutMs = Math.max(0, Math.trunc(this.options.firstTokenTimeoutMs ?? 8_000));
+      timer = timeoutMs > 0
+        ? setTimeout(() => {
+            if (firstOutput || !stream) return;
+            timedOut = true;
+            stream.abort();
+          }, timeoutMs)
+        : undefined;
+
+      const completion = await stream.finalChatCompletion();
+      completionUsage = completion.usage;
+      const message = completion.choices[0]?.message;
+      if (!message) {
+        failureReason = "invalid_response";
+        throw new Error("OpenRouter returned no message.");
+      }
+      return {
+        role: "assistant",
+        content: typeof message.content === "string" ? message.content : null,
+        tool_calls: message.tool_calls
+          ?.filter((toolCall) => toolCall.type === "function")
+          .map((toolCall) => ({
+            id: toolCall.id,
+            type: "function" as const,
+            function: {
+              name: toolCall.function.name,
+              arguments: toolCall.function.arguments,
+            },
+          })),
+      };
+    } catch (error) {
+      if (timedOut) {
+        failureReason = "ttft_timeout";
+        throw new FirstTokenTimeoutError(Math.max(0, Math.trunc(this.options.firstTokenTimeoutMs ?? 8_000)));
+      }
+      failureReason ??= firstOutput ? "stream_error_after_output" : "provider_error_before_output";
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.options.onCompletionTelemetry?.({
+        provider: "openrouter",
+        selection,
+        model,
+        ttftMs: firstOutputAt,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outcome: failureReason ? "failed" : "completed",
+        failureReason,
+        inputTokens: completionUsage?.prompt_tokens ?? null,
+        outputTokens: completionUsage?.completion_tokens ?? null,
+        totalTokens: completionUsage?.total_tokens ?? null,
+      });
+    }
   }
 }
 

@@ -10,10 +10,27 @@ export interface OpenRouterOptions {
   apiKey: string;
   baseUrl: string;
   model: string;
+  fallbackBaseUrl?: string;
+  fallbackModel?: string;
+  firstTokenTimeoutMs?: number;
+  onCompletionTelemetry?: (event: OpenRouterCompletionTelemetry) => void;
   reasoningEffort: string;
   maxTokens: number;
   siteUrl: string;
   appName: string;
+}
+
+export interface OpenRouterCompletionTelemetry {
+  provider: "openrouter";
+  selection: "primary" | "fallback";
+  model: string;
+  ttftMs: number | null;
+  durationMs: number;
+  outcome: "completed" | "failed";
+  failureReason: "ttft_timeout" | "provider_error_before_output" | "stream_error_after_output" | "invalid_response" | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
 }
 
 export interface NarrationRequest {
@@ -105,7 +122,6 @@ async function requestJsonCompletion(
         { role: "user", content: JSON.stringify(request) },
       ],
     }),
-    signal: AbortSignal.timeout(15_000),
   });
 
   if (!response.ok) {

@@ -156,6 +156,7 @@ function sendAppPage(_request: Request, response: Response): void {
 }
 
 async function sendCampaignCommand(
+  request: Request,
   userId: string,
   campaignId: string,
   body: unknown,
@@ -171,7 +172,9 @@ async function sendCampaignCommand(
   }
 
   try {
-    const result = await engineClient.executeCommand(userId, userId, campaignId, parsed.data);
+    const abortController = new AbortController();
+    request.once("aborted", () => abortController.abort());
+    const result = await engineClient.executeCommand(userId, userId, campaignId, parsed.data, abortController.signal);
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
     if (error instanceof EngineHttpError) {
@@ -393,7 +396,7 @@ app.get("/api/campaigns/:campaignId/events", async (request, response) => {
 app.post("/api/campaigns/:campaignId/commands", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  await sendCampaignCommand(userId, request.params.campaignId, request.body, response);
+  await sendCampaignCommand(request, userId, request.params.campaignId, request.body, response);
 });
 
 app.post("/api/campaigns/:campaignId/character", async (request, response) => {
@@ -480,7 +483,9 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
     return;
   }
   try {
-    const result = await engineClient.startOpening(userId, userId, request.params.campaignId, parsed.data);
+    const abortController = new AbortController();
+    request.once("aborted", () => abortController.abort());
+    const result = await engineClient.startOpening(userId, userId, request.params.campaignId, parsed.data, abortController.signal);
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
     sendWebEngineError(response, error);
@@ -675,7 +680,7 @@ app.post("/api/session/action", async (request, response) => {
       response.status(409).json({ code: "setup_required", error: "Create a campaign before taking an action." });
       return;
     }
-    await sendCampaignCommand(userId, result.campaign.id, request.body, response);
+    await sendCampaignCommand(request, userId, result.campaign.id, request.body, response);
   } catch (error) {
     sendWebEngineError(response, error);
   }
