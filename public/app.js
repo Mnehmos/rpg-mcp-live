@@ -7,6 +7,7 @@ import {
   settleComposer,
   updateComposerCounter,
 } from "./turn-composer.js";
+import { isStaleCommandStatus } from "./command-status.js";
 
 (function () {
   "use strict";
@@ -1632,10 +1633,12 @@ import {
       if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
+      return result.data;
     }).catch(function (error) {
       if (!state.session) renderSession({ session: null, campaigns: state.campaigns, setupRequired: false });
       setStatus("The table needs a moment", "error");
       showToast(error.message);
+      return null;
     });
   }
 
@@ -1645,6 +1648,69 @@ import {
       var random = Math.random() * 16 | 0;
       var value = character === "x" ? random : random & 3 | 8;
       return value.toString(16);
+    });
+  }
+
+  function reconcilePendingCommand(campaignId, clientCommandId) {
+    var attempts = 0;
+    var maxAttempts = 80;
+    var pollDelayMs = 1500;
+
+    function waitForNextPoll() {
+      return new Promise(function (resolve) {
+        window.setTimeout(resolve, pollDelayMs);
+      });
+    }
+
+    function poll() {
+      attempts += 1;
+      return requestJson(
+        "/api/campaigns/" + encodeURIComponent(campaignId) + "/commands/" + encodeURIComponent(clientCommandId)
+      ).then(function (result) {
+        if (result.response.ok && result.data.status === "resolved" && result.data.result) {
+          if (isStaleCommandStatus(result.data)) {
+            return refreshSession().then(function (current) {
+              var currentVersion = Number(result.data.campaignVersion);
+              if (current && current.session && Number(current.session.version) >= currentVersion) {
+                return { resolved: true, result: current };
+              }
+              if (attempts >= maxAttempts) return { resolved: false, pending: true };
+              return waitForNextPoll().then(poll);
+            });
+          }
+          return { resolved: true, result: result.data.result };
+        }
+        if (attempts >= maxAttempts) return { resolved: false, pending: true };
+        setStatus("Reconnecting to the committed turn", "thinking");
+        return waitForNextPoll().then(poll);
+      }).catch(function () {
+        if (attempts >= maxAttempts) return { resolved: false, pending: true };
+        return waitForNextPoll().then(poll);
+      });
+    }
+
+    setStatus("Reconnecting to the committed turn", "thinking");
+    return poll().then(function (outcome) {
+      if (outcome.resolved) {
+        state.pendingPlayerText = null;
+        renderSession(outcome.result);
+        setStatus("The world answers", "ready");
+        return true;
+      }
+      return refreshSession().then(function () {
+        setStatus(
+          outcome.pending
+            ? "This turn is still reconciling; keep this tab open."
+            : "The table is current; confirm this turn before retrying.",
+          "thinking"
+        );
+        showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+        return false;
+      });
+    }).catch(function () {
+      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+      return false;
     });
   }
 
@@ -1664,12 +1730,15 @@ import {
     state.pendingPlayerText = command.playerText || actionLabel(command.action);
     renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
     setStatus("The DM is thinking", "thinking");
-    var campaignId = encodeURIComponent(state.session.id);
-    return requestJson("/api/campaigns/" + campaignId + "/commands", {
+    var campaignId = state.session.id;
+    var campaignPath = encodeURIComponent(campaignId);
+    var commandId = clientCommandId || newCommandId();
+    var expectedCampaignVersion = state.session.version;
+    return requestJson("/api/campaigns/" + campaignPath + "/commands", {
       method: "POST",
       body: JSON.stringify(Object.assign({
-        clientCommandId: clientCommandId || newCommandId(),
-        expectedCampaignVersion: state.session.version
+        clientCommandId: commandId,
+        expectedCampaignVersion: expectedCampaignVersion
       }, command))
     }).then(function (result) {
       if (result.response.status === 401) {
@@ -1683,11 +1752,30 @@ import {
         setStatus("The table moved; your view is current", "ready");
         return false;
       }
-      if (!result.response.ok) throw new Error(result.data.error || "That action could not be resolved.");
+      if (result.response.status === 409 && result.data.code === "command_conflict") {
+        return reconcilePendingCommand(campaignId, commandId);
+      }
+      if (result.response.status >= 500 || result.response.status === 408 || result.response.status === 429) {
+        return reconcilePendingCommand(campaignId, commandId);
+      }
+      if (!result.response.ok) {
+        var commandError = new Error(result.data.error || "That action could not be resolved.");
+        commandError.reconcile = false;
+        throw commandError;
+      }
       state.pendingPlayerText = null;
       renderSession(result.data);
       setStatus("The world answers", "ready");
       return true;
+    }).catch(function (error) {
+      if (error && error.reconcile === false) {
+        state.pendingPlayerText = null;
+        renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        setStatus("The table needs a moment", "error");
+        showToast(error.message);
+        return false;
+      }
+      return reconcilePendingCommand(campaignId, commandId);
     }).catch(function (error) {
       state.pendingPlayerText = null;
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
