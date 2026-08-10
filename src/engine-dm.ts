@@ -431,6 +431,7 @@ export class LanternDungeonMaster {
             : "There is no fixed location, room, scene number, or shared map. When the fiction needs a current context, author it from the campaign and persist it with world_context.",
           "When the fiction establishes a meaningful place or situation, use world_context so the current context persists. It may be a town, ship, wilderness, battlefield, or anything else the story calls for.",
           "When the player travels or the current place changes, update world_context; do not force the campaign through a preset route.",
+          "For a broad search or investigation, a successful check does not create a reward. Only an existing world object/fact, a reviewed hidden-fact discovery, a defeated-encounter loot result, or a bounded mundane proposal committed through world_context.objects.upsert may be narrated as found. A new proposal must use a stable id and an explicit definition.sourceRef such as authored, derived, or dm-proposal evidence. If no typed discovery was accepted, say that no specific authorized item was found; never turn the requested category into a guaranteed cloak, bundle, weapon, disguise, supplies, hatch, or escape route.",
           "Formal notices are typed state, not prose. When the fiction introduces a sealed letter, warrant, order, docket, clerk notice, or similar procedure, call procedural_notice with player-safe operative terms before narrating it. Keep restricted records out of every notice field. Use authorize then deliver for the prescribed clerk step; after delivery, call request_copy or request_clarification when asked. A denied request must still expose the minimum operative projection and a concrete next event; never leave the player in a wait/return loop or claim a read-back without the typed tool result.",
           "If public recentLog or the current features already establish a mundane object that is absent from worldContext.objects, do not refuse the player's action. In the same atomic turn, preserve the current context and upsert one stable object through world_context, using definition.sourceRef for the public evidence and definition.tags for ordinary aliases, then continue the original action. Never materialize from private or rejected text, and never add unsupported magic or mechanics.",
           "Use player_note_add only for durable facts, goals, preferences, promises, or other information the player explicitly states or clearly confirms.",
@@ -484,6 +485,8 @@ export class LanternDungeonMaster {
     let safeNarrationCandidate: string | null = null;
     const objectIntent = detectObjectTurnIntent(initialState, playerText);
     let objectRepairAttempted = false;
+    const searchIntent = detectSearchTurnIntent(playerText);
+    let searchRepairAttempted = false;
 
     let toolLoopTurns = 0;
     while (toolLoopTurns < 8 || repairPending) {
@@ -542,6 +545,18 @@ export class LanternDungeonMaster {
         }
         const validation = validateNarration(content);
         if (validation.success) {
+          if (searchIntent) {
+            const searchRepair = searchTurnRepair(searchIntent, validation.data.text, currentState, stagedEffects);
+            if (searchRepair) {
+              if (!searchRepairAttempted) {
+                searchRepairAttempted = true;
+                messages.push({ role: "assistant", content: content || null });
+                messages.push({ role: "user", content: searchRepair });
+                continue;
+              }
+              return { narration: null, stagedEffects };
+            }
+          }
           const noticeRepair = proceduralNoticeRepair(playerText, content, currentState, stagedEffects);
           if (noticeRepair) {
             if (!noticeRepairAttempted) {
@@ -1262,6 +1277,75 @@ type ObjectTurnIntent = {
   objectId?: string;
 };
 
+type SearchTurnIntent = {
+  kind: "broad-search";
+};
+
+function detectSearchTurnIntent(playerText: string): SearchTurnIntent | null {
+  if (
+    /\b(?:search|scour|rummage|investigate)\b/i.test(playerText)
+    || /\blook\s+(?:for|through)\b/i.test(playerText)
+    || /\b(?:find|seek)\s+(?:a|any|some|another|something|way)\b/i.test(playerText)
+  ) {
+    return { kind: "broad-search" };
+  }
+  return null;
+}
+
+function searchNarrationClaimsDiscovery(text: string): boolean {
+  const normalized = text.toLocaleLowerCase();
+  if (
+    /\b(?:nothing|none|empty|without\s+(?:finding|a\s+(?:usable|specific))|no\s+(?:specific|usable|clear|new|item|object|reward|supplies|disguise|weapon|way\s+out))\b/i.test(normalized)
+  ) {
+    return false;
+  }
+  return /\b(?:finds?|found|discovers?|uncover(?:s|ed)?|locate(?:s|d)?|spots?|reveals?|turns?\s+up|there\s+(?:is|are)|lies|rests|holds)\b/i.test(normalized);
+}
+
+function searchTurnHasTypedDiscovery(
+  state: LanternCampaignState,
+  effects: StagedEngineTurnEffect[],
+  narration: string,
+): boolean {
+  const typedDiscovery = effects.some((effect) => {
+    if (effect.command.kind === "world_context") {
+      return (effect.command.objects?.upsert?.length ?? 0) > 0
+        || (effect.command.facts?.upsert?.length ?? 0) > 0;
+    }
+    if (effect.command.kind === "loot") return true;
+    if (effect.command.kind !== "challenge_attempt") return false;
+    const data = effect.resolution.data;
+    return Boolean(data && typeof data === "object" && !Array.isArray(data) && "discovery" in data);
+  });
+  if (typedDiscovery || !searchNarrationClaimsDiscovery(narration)) return true;
+
+  const world = state.worldContext;
+  if (!world) return false;
+  const aliases = [
+    ...world.objects.flatMap((object) => [object.id, object.definition.name, ...object.definition.tags]),
+    ...world.features,
+    ...world.exits.flatMap((exit) => [exit.id, exit.label]),
+    ...world.npcs.flatMap((npc) => [npc.id, npc.name]),
+    ...state.worldFacts.filter((fact) => fact.active && fact.visibility === "public").flatMap((fact) => [fact.id, fact.title]),
+  ];
+  return objectReferenceMatches(narration, aliases);
+}
+
+function searchTurnRepair(
+  intent: SearchTurnIntent,
+  narration: string,
+  state: LanternCampaignState,
+  effects: StagedEngineTurnEffect[],
+): string | null {
+  if (intent.kind !== "broad-search" || searchTurnHasTypedDiscovery(state, effects, narration)) return null;
+  return [
+    "The previous broad-search narration claimed a specific discovery without an accepted typed discovery.",
+    "Do not guarantee an item merely because the player named a category.",
+    "If a bounded mundane proposal is actually present, call world_context with objects.upsert, a stable id, and an explicit definition.sourceRef such as authored:, derived:, or dm-proposal: before narrating it.",
+    "Otherwise return valid narration saying that the search did not reveal a specific authorized item. Do not name a new cloak, bundle, weapon, disguise, supplies, hatch, escape route, or other reward.",
+  ].join(" ");
+}
+
 function objectReferenceMatches(value: string, aliases: string[]): boolean {
   const normalized = value.toLocaleLowerCase();
   return aliases.some((alias) => {
@@ -1630,7 +1714,13 @@ function fallbackCommand(
     return { command: { kind: "combat_action", action: "attack" }, tool: "combat_action" };
   }
   if (/\b(rest|sleep|camp)\b/.test(text)) return { command: { kind: "rest", restType: "long" }, tool: "rest" };
-  if (/\b(loot|take|claim|search)\b/.test(text)) return { command: { kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }, tool: "loot" };
+  if (/\b(search|scour|rummage|investigate)\b/.test(text) || /\blook\s+(?:for|through)\b/.test(text)) {
+    return {
+      command: { kind: "roll_check", ability: /\b(mind|rune|book|mechanism)\b/.test(text) ? "int" : "wis", goal: playerText },
+      tool: "roll_check",
+    };
+  }
+  if (/\b(loot|take|claim)\b/.test(text)) return { command: { kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }, tool: "loot" };
   if (/\b(use|drink|consume)\b.*\b(potion|draught|ration)\b/.test(text)) {
     const itemId = state.character.inventory.find((item) => {
       const view = materializeInventoryItem(item);
@@ -1644,7 +1734,7 @@ function fallbackCommand(
   }
   if (/\b(listen|hear)\b/.test(text)) return { command: { kind: "listen" }, tool: "listen" };
   if (/\b(look|observe|describe|room|surroundings|see)\b/.test(text)) return { command: { kind: "observe" }, tool: "observe" };
-  if (/\b(search|inspect|study|check|investigate)\b/.test(text)) {
+  if (/\b(inspect|study|check)\b/.test(text)) {
     return {
       command: { kind: "roll_check", ability: /\b(mind|rune|book|mechanism)\b/.test(text) ? "int" : "wis", goal: playerText },
       tool: "roll_check",
