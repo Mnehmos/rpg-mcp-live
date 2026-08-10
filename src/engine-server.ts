@@ -216,6 +216,31 @@ app.get("/v1/campaigns/:campaignId", (request, response) => {
   }
 });
 
+app.get("/v1/campaigns/:campaignId/commands/:clientCommandId", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const state = store.getCampaign(context);
+    const stored = store.getStoredCommand(context.accountId, request.params.clientCommandId);
+    if (!stored) {
+      response.status(404).json({ code: "command_not_found", error: "That client command is not recorded." });
+      return;
+    }
+    const requestBody = JSON.parse(stored.requestJson) as { campaignId?: unknown };
+    if (requestBody.campaignId !== request.params.campaignId) {
+      response.status(404).json({ code: "command_not_found", error: "That client command is not recorded for this campaign." });
+      return;
+    }
+    if (stored.status === "processing" || !stored.result) {
+      response.status(202).json({ status: "processing", campaignVersion: state.version });
+      return;
+    }
+    const result = projectResolutionForActor(stored.result, context.actorId);
+    response.json({ status: "resolved", campaignVersion: result.session.version, result });
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
 app.delete("/v1/campaigns/:campaignId", (request, response) => {
   try {
     const context = createRequestContext(request, request.params.campaignId);

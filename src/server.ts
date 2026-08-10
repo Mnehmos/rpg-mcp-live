@@ -337,6 +337,25 @@ app.get("/api/campaigns/:campaignId", async (request, response) => {
   }
 });
 
+app.get("/api/campaigns/:campaignId/commands/:clientCommandId", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  try {
+    const result = await engineClient.getCommandStatus(
+      userId,
+      userId,
+      request.params.campaignId,
+      request.params.clientCommandId
+    );
+    response.status(result.status === "processing" ? 202 : 200).json({
+      ...result,
+      subscription: store.getSubscription(userId),
+    });
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
 app.delete("/api/campaigns/:campaignId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;

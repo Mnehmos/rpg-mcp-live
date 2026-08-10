@@ -43,6 +43,12 @@ export interface EngineCampaignResponse {
   state?: unknown;
 }
 
+export interface EngineCommandStatusResponse {
+  status: "processing" | "resolved";
+  campaignVersion: number;
+  result?: EngineCommandResult;
+}
+
 export class LanternEngineClient {
   private readonly baseUrl: string;
 
@@ -119,6 +125,20 @@ export class LanternEngineClient {
   ): Promise<EngineCampaignResponse> {
     const result = await this.request<EngineCampaignResponse>(
       "/v1/campaigns/" + encodeURIComponent(campaignId),
+      { method: "GET" },
+      { accountId, actorId }
+    );
+    return result.data;
+  }
+
+  public async getCommandStatus(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    clientCommandId: string
+  ): Promise<EngineCommandStatusResponse> {
+    const result = await this.request<EngineCommandStatusResponse>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/commands/" + encodeURIComponent(clientCommandId),
       { method: "GET" },
       { accountId, actorId }
     );
