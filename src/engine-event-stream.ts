@@ -1,4 +1,5 @@
 import type { ResolvedEngineEventEvidence } from "./content/registry.js";
+import { LEGACY_LANTERN_RULES_VERSION } from "./content/legacy-repin.js";
 import type { EngineEvent } from "./engine-contracts.js";
 import { z } from "zod";
 
@@ -129,6 +130,20 @@ export function toEngineEventStreamRecord(
   projectedEvent: EngineEvent,
   projectionActorId: string,
 ): EngineEventStreamRecord {
+  const persisted = event as EngineEvent & {
+    contentKeys?: unknown;
+    requestId?: unknown;
+    rulesVersion?: unknown;
+  };
+  const contentKeys = Array.isArray(persisted.contentKeys)
+    ? persisted.contentKeys.filter((value): value is string => typeof value === "string")
+    : [];
+  const rulesVersion = typeof persisted.rulesVersion === "string"
+    ? persisted.rulesVersion
+    : LEGACY_LANTERN_RULES_VERSION;
+  const requestId = typeof persisted.requestId === "string"
+    ? persisted.requestId
+    : `legacy-event:${event.id}`;
   return {
     id: event.id,
     kind: event.kind,
@@ -141,9 +156,9 @@ export function toEngineEventStreamRecord(
     revision: event.version,
     createdAt: event.createdAt,
     provenance: {
-      requestId: event.requestId,
-      rulesVersion: event.rulesVersion,
-      contentKeys: [...event.contentKeys],
+      requestId,
+      rulesVersion,
+      contentKeys,
     },
     projection: {
       audience: "actor",

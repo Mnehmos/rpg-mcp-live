@@ -14,6 +14,7 @@ import {
 import { createInitialCampaign, resolveEngineCommand } from "./engine-domain.js";
 import { LanternEngineStore } from "./engine-store.js";
 import type { CreateCampaignContext, EngineEvent, RequestContext } from "./engine-contracts.js";
+import { LEGACY_LANTERN_RULES_VERSION } from "./content/legacy-repin.js";
 
 function context(accountId: string, campaignId: string, actorId = accountId): RequestContext {
   return {
@@ -118,6 +119,19 @@ describe("canonical event stream", () => {
         contentKeys: source.contentKeys,
       },
       event: projected,
+    });
+  });
+
+  it("normalizes legacy event provenance instead of failing the stream projection", () => {
+    const legacy = syntheticEvent();
+    delete (legacy as Partial<EngineEvent> & Record<string, unknown>).rulesVersion;
+    delete (legacy as Partial<EngineEvent> & Record<string, unknown>).contentKeys;
+    delete (legacy as Partial<EngineEvent> & Record<string, unknown>).requestId;
+    const record = toEngineEventStreamRecord(legacy, legacy, "actor-a");
+    expect(record.provenance).toEqual({
+      requestId: `legacy-event:${legacy.id}`,
+      rulesVersion: LEGACY_LANTERN_RULES_VERSION,
+      contentKeys: [],
     });
   });
 
