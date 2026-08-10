@@ -419,6 +419,9 @@ export function normalizeInventoryItem(
   const quantity = Math.max(0, Math.trunc(typeof raw.quantity === "number" ? raw.quantity : 1));
   const instance: EngineInventoryItem = {
     id,
+    runtimeContentInstanceId: typeof raw.runtimeContentInstanceId === "string" && raw.runtimeContentInstanceId.trim()
+      ? raw.runtimeContentInstanceId.trim()
+      : undefined,
     quantity,
     slot: isEquipmentSlot(raw.slot) ? raw.slot : undefined,
     equipped: raw.equipped === true,

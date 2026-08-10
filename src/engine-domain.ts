@@ -214,6 +214,8 @@ import {
   emptyRuntimeContentState,
   normalizeRuntimeContentState,
   projectRuntimeContentForActor,
+  type RuntimeContentInstance,
+  type RuntimeItemDefinition,
 } from "./content/runtime-compiler.js";
 import {
   activeConditionNames,
@@ -3793,6 +3795,80 @@ function resolveWorldContext(
   );
 }
 
+function runtimeItemKind(category: RuntimeItemDefinition["category"]): EngineItemDefinition["kind"] {
+  switch (category) {
+    case "tool": return "tool";
+    case "consumable": return "consumable";
+    case "quest": return "quest";
+    case "treasure": return "treasure";
+    default: return "misc";
+  }
+}
+
+/**
+ * Runtime item instances enter the ordinary inventory kernel. The runtime
+ * content record remains the canonical definition/identity; owner and
+ * container changes are handled by the existing inventory commands.
+ */
+function runtimeItemInventoryItem(
+  definition: RuntimeItemDefinition,
+  instance: RuntimeContentInstance,
+  actorId: string,
+): EngineInventoryItem {
+  return normalizeInventoryItem({
+    id: instance.id,
+    runtimeContentInstanceId: instance.id,
+    quantity: instance.state.quantity ?? 1,
+    authoredDefinition: {
+      name: definition.name,
+      kind: runtimeItemKind(definition.category),
+      weight: definition.weight,
+      description: definition.description,
+      valueCopper: definition.valueCopper ?? undefined,
+      properties: [definition.material, ...definition.tags].filter((value, index, values) => values.indexOf(value) === index),
+      mechanicsTier: 0,
+    },
+    ownerRef: { kind: "actor", id: actorId },
+    provenance: { kind: "authored", sourceId: definition.id },
+  });
+}
+
+function validateRuntimeItemDerivation(
+  state: LanternCampaignState,
+  proposal: Extract<EngineCommand, { kind: "content_compile" }>["proposal"],
+  definition: RuntimeItemDefinition,
+): { code: string; message: string; data?: Record<string, unknown> } | null {
+  if (!proposal || proposal.kind !== "item" || !proposal.derivation) return null;
+  const sourceDefinitions = new Map(state.runtimeContent.definitions.map((candidate) => [candidate.id, candidate]));
+  const missingDefinitions = proposal.derivation.sourceDefinitionIds.filter((id) => {
+    const candidate = sourceDefinitions.get(id);
+    return !candidate || candidate.kind !== "item";
+  });
+  if (missingDefinitions.length > 0) {
+    return {
+      code: "derived_source_definition_not_found",
+      message: "A derived item must reference existing canonical item definitions.",
+      data: { sourceDefinitionIds: missingDefinitions },
+    };
+  }
+  const sourceInstances = new Map(state.runtimeContent.instances.map((candidate) => [candidate.id, candidate]));
+  const missingInstances = proposal.derivation.sourceInstanceIds.filter((id) => {
+    const candidate = sourceInstances.get(id);
+    return !candidate || candidate.kind !== "item" || !proposal.derivation!.sourceDefinitionIds.includes(candidate.definitionId);
+  });
+  if (missingInstances.length > 0) {
+    return {
+      code: "derived_source_instance_not_found",
+      message: "A derived item must reference existing instances of its source definitions.",
+      data: { sourceInstanceIds: missingInstances },
+    };
+  }
+  if (!definition.derivation) {
+    return { code: "derived_provenance_missing", message: "A derived item must retain its recipe provenance." };
+  }
+  return null;
+}
+
 function resolveContentCompile(
   state: LanternCampaignState,
   context: RequestContext,
@@ -3818,14 +3894,27 @@ function resolveContentCompile(
     {
       campaignId: state.id,
       authorId: context.actorId,
-      source: "dm",
-      sourceRefs: [clientCommandId],
+      source: command.proposal.kind === "item" && command.proposal.derivation ? "derived" : "dm",
+      sourceRefs: [
+        clientCommandId,
+        ...(command.proposal.kind === "item" && command.proposal.derivation
+          ? [
+              ...command.proposal.derivation.sourceDefinitionIds,
+              ...command.proposal.derivation.sourceInstanceIds,
+            ]
+          : []),
+      ],
       createdAt: new Date().toISOString(),
     },
     command.createInstance,
     command.instanceKey ?? "default",
   );
   if (!compiled.ok) return rejection(state, tool, compiled.code, compiled.message, { proposalKind: command.proposal.kind });
+
+  if (compiled.definition.kind === "item") {
+    const derivationError = validateRuntimeItemDerivation(state, command.proposal, compiled.definition);
+    if (derivationError) return rejection(state, tool, derivationError.code, derivationError.message, derivationError.data);
+  }
 
   const resolvedTopology = resolveCompiledLocationTargets(state, command.proposal, compiled);
   if (!resolvedTopology.ok) {
@@ -3872,6 +3961,19 @@ function resolveContentCompile(
   }
 
   const next = cloneCampaign(state);
+  let runtimeInventoryItem: EngineInventoryItem | null = null;
+  if (compiledForCommit.definition.kind === "item" && compiledForCommit.instance) {
+    runtimeInventoryItem = runtimeItemInventoryItem(compiledForCommit.definition, compiledForCommit.instance, next.character.id);
+    const inventoryConflict = next.character.inventory.some((item) => item.id === runtimeInventoryItem!.id);
+    if (inventoryConflict) {
+      return rejection(state, tool, "content_inventory_instance_conflict", "That runtime item instance already exists in the normal inventory.");
+    }
+    next.character.inventory = [...next.character.inventory, runtimeInventoryItem];
+    const topologyIssue = inventoryTopologyIssue(next.character.inventory, next.character.id);
+    if (topologyIssue) return rejection(state, tool, topologyIssue.code, topologyIssue.message);
+    const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+    if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+  }
   next.runtimeContent = {
     definitions: [...state.runtimeContent.definitions, compiledForCommit.definition],
     instances: compiledForCommit.instance
@@ -3890,6 +3992,11 @@ function resolveContentCompile(
       before: null,
       after: compiledForCommit.instance,
     }] : []),
+    ...(runtimeInventoryItem ? [{
+      path: "/character/inventory",
+      before: state.character.inventory,
+      after: next.character.inventory,
+    }] : []),
     ...compiledForCommit.relationships.map((relationship) => ({
       path: `/runtimeContent/relationships/${escapeJsonPointerSegment(relationship.id)}`,
       before: null,
@@ -3902,11 +4009,12 @@ function resolveContentCompile(
     clientCommandId,
     command,
     tool,
-    `Compiled inert ${compiledForCommit.definition.kind} content: ${compiledForCommit.definition.name}.`,
+    `Compiled canonical ${compiledForCommit.definition.kind} content: ${compiledForCommit.definition.name}.`,
     {
       definition: compiledForCommit.definition,
       instance: compiledForCommit.instance,
       relationships: compiledForCommit.relationships,
+      inventoryItem: runtimeInventoryItem ? materializeInventoryItem(runtimeInventoryItem) : null,
     },
     "content_compiled",
     [],
@@ -6596,6 +6704,9 @@ function resolveInventoryTransfer(
   if (!isActorOwnedItem(item, state.character.id)) return rejection(state, tool, "item_not_owned", "You do not own that item.");
   if (item.equipped) return rejection(state, tool, "item_equipped", "Unequip the item before moving it.");
   if (item.quantity < quantity) return rejection(state, tool, "quantity_unavailable", "You do not have that quantity.");
+  if (item.runtimeContentInstanceId && quantity < item.quantity) {
+    return rejection(state, tool, "runtime_item_stack_split_unsupported", "Move a runtime-created item stack as one canonical instance; partial splitting is not supported yet.");
+  }
 
   const target = command.targetContainerId
     ? state.character.inventory.find((candidate) => candidate.id === command.targetContainerId)
@@ -11783,6 +11894,49 @@ function resolveUseItem(
   );
 }
 
+function syncRuntimeItemInventoryState(
+  next: LanternCampaignState,
+  stateChanges: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  const linkedInventory = new Map<string, EngineInventoryItem>();
+  const previouslyLinked = new Set<string>();
+  const inventoryChange = stateChanges.find((change) => change.path === "/character/inventory");
+  const previousInventory = Array.isArray(inventoryChange?.before)
+    ? inventoryChange.before as EngineInventoryItem[]
+    : next.character.inventory;
+  for (const item of previousInventory) {
+    if (item.runtimeContentInstanceId) previouslyLinked.add(item.runtimeContentInstanceId);
+  }
+  for (const item of next.character.inventory) {
+    if (item.runtimeContentInstanceId && !linkedInventory.has(item.runtimeContentInstanceId)) {
+      linkedInventory.set(item.runtimeContentInstanceId, item);
+    }
+  }
+  next.runtimeContent.instances = next.runtimeContent.instances.map((instance) => {
+    if (instance.kind !== "item") return instance;
+    const inventoryItem = linkedInventory.get(instance.id);
+    if (!inventoryItem && !previouslyLinked.has(instance.id)) return instance;
+    const afterState = inventoryItem
+      ? {
+          ...instance.state,
+          status: inventoryItem.quantity > 0 ? "available" as const : "known" as const,
+          quantity: inventoryItem.quantity,
+        }
+      : {
+          ...instance.state,
+          status: "known" as const,
+          quantity: 0,
+        };
+    if (JSON.stringify(instance.state) === JSON.stringify(afterState)) return instance;
+    stateChanges.push({
+      path: `/runtimeContent/instances/${escapeJsonPointerSegment(instance.id)}/state`,
+      before: instance.state,
+      after: afterState,
+    });
+    return { ...instance, state: afterState };
+  });
+}
+
 function commit(
   state: LanternCampaignState,
   context: RequestContext,
@@ -11800,6 +11954,7 @@ function commit(
   check?: EngineCheckEvidence
 ): EngineResolution {
   const next = cloneCampaign(state);
+  syncRuntimeItemInventoryState(next, stateChanges);
   const createdAt = new Date().toISOString();
   next.version = state.version + 1;
   next.updatedAt = createdAt;

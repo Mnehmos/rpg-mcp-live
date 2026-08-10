@@ -150,6 +150,8 @@ const engineAuthoredItemDefinitionSchema = z.object({
 
 const engineInventoryInstanceFields = {
   id: z.string().trim().min(1).max(120),
+  /** Links a normal inventory instance to its campaign-scoped runtime item. */
+  runtimeContentInstanceId: z.string().trim().min(1).max(220).optional(),
   quantity: z.number().int().nonnegative(),
   slot: engineEquipmentSlotSchema.optional(),
   equipped: z.boolean().optional(),
@@ -2182,6 +2184,8 @@ export interface EngineItemDefinition {
 export interface EngineInventoryItem {
   id: string;
   quantity: number;
+  /** Optional link for authored runtime items; inventory remains authoritative for ownership/location. */
+  runtimeContentInstanceId?: string;
   contentKey?: string;
   packHash?: string;
   authoredDefinition?: EngineItemDefinition;

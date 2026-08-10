@@ -74,8 +74,143 @@ describe("runtime content engine boundary", () => {
     expect(result.event?.stateChanges.map((change) => change.path)).toEqual([
       expect.stringMatching(/^\/runtimeContent\/definitions\//),
       expect.stringMatching(/^\/runtimeContent\/instances\//),
+      "/character/inventory",
     ]);
+    const runtimeInstance = result.state.runtimeContent.instances[0];
+    expect(result.state.character.inventory).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: runtimeInstance.id,
+        runtimeContentInstanceId: runtimeInstance.id,
+        ownerRef: { kind: "actor", id: initial.character.id },
+      }),
+    ]));
     expect(toSessionView(result.state).runtimeContent).toEqual(result.state.runtimeContent);
+  });
+
+  it("creates a new derived definition with explicit provenance and normal inventory placement", () => {
+    const initial = createInitialCampaign("account-133", "actor-133", randomUUID());
+    const requestContext = context(initial.id);
+    const base = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "content_compile", proposal: itemProposal() }),
+      "content_compile",
+    );
+    expect(base.accepted).toBe(true);
+    const baseDefinition = base.state.runtimeContent.definitions.find((definition) => definition.kind === "item");
+    const baseInstance = base.state.runtimeContent.instances.find((instance) => instance.kind === "item");
+    expect(baseDefinition).toBeDefined();
+    expect(baseInstance).toBeDefined();
+
+    const derived = resolveEngineCommand(
+      base.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: {
+          ...itemProposal(),
+          key: "silver-bronze-key",
+          name: "Silver-coated bronze key",
+          description: "The same key with a plainly recorded silver coating.",
+          derivation: {
+            sourceDefinitionIds: [baseDefinition!.id],
+            sourceInstanceIds: [baseInstance!.id],
+            recipeKey: "silver-coating",
+            modification: "Apply a reviewed silver coating without changing the base key definition.",
+          },
+        },
+      }),
+      "content_compile",
+    );
+
+    expect(derived.accepted).toBe(true);
+    const derivedDefinition = derived.state.runtimeContent.definitions.find((definition) => definition.key === "silver-bronze-key");
+    expect(derivedDefinition).toMatchObject({
+      kind: "item",
+      provenance: { source: "derived", sourceRefs: expect.arrayContaining([baseDefinition!.id, baseInstance!.id]) },
+      derivation: {
+        sourceDefinitionIds: [baseDefinition!.id],
+        sourceInstanceIds: [baseInstance!.id],
+        recipeKey: "silver-coating",
+      },
+    });
+    expect(derived.state.runtimeContent.definitions).toHaveLength(2);
+    expect(derived.state.runtimeContent.instances).toHaveLength(2);
+    expect(derived.state.character.inventory).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runtimeContentInstanceId: derived.state.runtimeContent.instances.find((instance) => instance.definitionId === derivedDefinition?.id)?.id,
+        ownerRef: { kind: "actor", id: initial.character.id },
+      }),
+    ]));
+    expect(derived.state.runtimeContent.definitions.find((definition) => definition.id === baseDefinition!.id)).toEqual(baseDefinition);
+  });
+
+  it("rejects derived references that are not canonical without mutating state", () => {
+    const initial = createInitialCampaign("account-133", "actor-133", randomUUID());
+    const requestContext = context(initial.id);
+    const command = engineCommandSchema.parse({
+      kind: "content_compile",
+      proposal: {
+        ...itemProposal(),
+        key: "derived-without-source",
+        derivation: {
+          sourceDefinitionIds: ["runtime:item:missing-definition"],
+          recipeKey: "missing-recipe",
+          modification: "A source that was never compiled.",
+        },
+      },
+    });
+    const result = resolveEngineCommand(initial, requestContext, randomUUID(), command, "content_compile");
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe("derived_source_definition_not_found");
+    expect(result.state.version).toBe(initial.version);
+    expect(result.state.runtimeContent).toEqual({ definitions: [], instances: [], relationships: [] });
+    expect(result.state.character.inventory).toEqual(initial.character.inventory);
+  });
+
+  it("moves a runtime item through the ordinary container relationship", () => {
+    const initial = createInitialCampaign("account-133", "actor-133", randomUUID());
+    const requestContext = context(initial.id);
+    const base = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "content_compile", proposal: itemProposal() }),
+      "content_compile",
+    );
+    const runtimeItem = base.state.runtimeContent.instances.find((instance) => instance.kind === "item");
+    expect(runtimeItem).toBeDefined();
+    base.state.character.inventory.push({
+      id: "runtime-test-pack",
+      quantity: 1,
+      authoredDefinition: { name: "Test pack", kind: "tool", weight: 1, containerCapacity: 10, mechanicsTier: 0 },
+      ownerRef: { kind: "actor", id: initial.character.id },
+    });
+    const moved = resolveEngineCommand(
+      base.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "inventory_transfer", itemId: runtimeItem!.id, targetContainerId: "runtime-test-pack", quantity: 1 }),
+      "inventory_transfer",
+    );
+    expect(moved.accepted).toBe(true);
+    expect(moved.state.character.inventory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: runtimeItem!.id, runtimeContentInstanceId: runtimeItem!.id, containerRef: "runtime-test-pack" }),
+    ]));
+    expect(moved.state.runtimeContent.instances.find((instance) => instance.id === runtimeItem!.id)?.state).toMatchObject({ status: "available", quantity: 1 });
+
+    const dropped = resolveEngineCommand(
+      moved.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "drop_item", itemId: runtimeItem!.id, quantity: 1 }),
+      "drop_item",
+    );
+    expect(dropped.accepted).toBe(true);
+    expect(dropped.state.character.inventory.some((item) => item.runtimeContentInstanceId === runtimeItem!.id)).toBe(false);
+    expect(dropped.state.runtimeContent.instances.find((instance) => instance.id === runtimeItem!.id)?.state).toMatchObject({ status: "known", quantity: 0 });
   });
 
   it("fails closed on unknown mechanical fields without changing campaign state", () => {
@@ -131,7 +266,17 @@ describe("runtime content engine boundary", () => {
     firstStore.close();
 
     const restarted = new LanternEngineStore(databasePath);
-    expect(restarted.getCampaign(requestContext).runtimeContent.definitions).toHaveLength(1);
+    const reloaded = restarted.getCampaign(requestContext);
+    expect(reloaded.runtimeContent.definitions).toHaveLength(1);
+    const reloadedInstance = reloaded.runtimeContent.instances.find((instance) => instance.kind === "item");
+    expect(reloadedInstance).toBeDefined();
+    expect(reloaded.character.inventory).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: reloadedInstance!.id,
+        runtimeContentInstanceId: reloadedInstance!.id,
+        ownerRef: { kind: "actor", id: reloaded.character.id },
+      }),
+    ]));
     const duplicateId = randomUUID();
     const duplicate = restarted.executeCommand({
       context: requestContext,
