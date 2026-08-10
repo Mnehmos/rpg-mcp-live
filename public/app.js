@@ -8,7 +8,9 @@ import {
   isCurrentCampaignSelection,
   isConfirmedMissingCommand,
   isCurrentRequest,
+  isPendingCommandConflict,
   isPendingCommandForCampaign,
+  isPendingCommandResponseCurrent,
   nextRequestSequence,
   pendingCommandStorageKey,
   retryDelayMs,
@@ -122,6 +124,11 @@ import { isStaleCommandStatus } from "./command-status.js";
     if (!isPendingCommandForCampaign(pendingCommand, campaignId)) return;
     clearPendingCommand(pendingCommand.clientCommandId);
     state.pendingPlayerText = null;
+  }
+
+  function isCurrentPendingCommand(campaignId, clientCommandId) {
+    return Boolean(state.session && state.session.id === campaignId
+      && isPendingCommandResponseCurrent(readPendingCommand(), campaignId, clientCommandId));
   }
 
   function waitForCampaignRetry(attempt) {
@@ -1851,6 +1858,9 @@ import { isStaleCommandStatus } from "./command-status.js";
 
     setStatus("Reconnecting to the committed turn", "thinking");
     return poll().then(function (outcome) {
+      if ((outcome.resolved || outcome.confirmedMissing) && !isCurrentPendingCommand(campaignId, clientCommandId)) {
+        return refreshSession().then(function () { return false; });
+      }
       if (outcome.resolved) {
         clearPendingCommand(clientCommandId);
         state.pendingPlayerText = null;
@@ -1899,6 +1909,15 @@ import { isStaleCommandStatus } from "./command-status.js";
     var campaignId = state.session.id;
     var campaignPath = encodeURIComponent(campaignId);
     var commandId = clientCommandId || newCommandId();
+    var pendingCommand = readPendingCommand();
+    if (isPendingCommandConflict(pendingCommand, campaignId, commandId)) {
+      state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
+      renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      showToast("Your earlier turn is still reconciling. Wait for it to settle before submitting another action.");
+      reconcilePendingCommand(pendingCommand.campaignId, pendingCommand.clientCommandId);
+      return Promise.resolve(false);
+    }
     var expectedCampaignVersion = state.session.version;
     state.pendingPlayerText = command.playerText || actionLabel(command.action);
     writePendingCommand({ campaignId: campaignId, clientCommandId: commandId, playerText: state.pendingPlayerText });
@@ -1935,6 +1954,9 @@ import { isStaleCommandStatus } from "./command-status.js";
         commandError.reconcile = false;
         throw commandError;
       }
+      if (!isCurrentPendingCommand(campaignId, commandId)) {
+        return refreshSession().then(function () { return false; });
+      }
       clearPendingCommand(commandId);
       state.pendingPlayerText = null;
       renderSession(result.data);
@@ -1952,6 +1974,9 @@ import { isStaleCommandStatus } from "./command-status.js";
       return reconcilePendingCommand(campaignId, commandId);
     }).catch(function (error) {
       var pending = readPendingCommand();
+      if (!isPendingCommandResponseCurrent(pending, campaignId, commandId)) {
+        return refreshSession().then(function () { return false; });
+      }
       state.pendingPlayerText = pending && pending.clientCommandId === commandId ? pending.playerText : null;
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
       setStatus("This turn is still reconciling; keep this tab open.", "thinking");
