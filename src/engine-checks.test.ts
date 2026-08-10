@@ -69,6 +69,26 @@ describe("canonical check execution", () => {
     expect(deterministicRandomInt).not.toHaveBeenCalled();
   });
 
+  it("compromises a repeated stealth pressure instead of allowing an endless fourth check", () => {
+    deterministicRandomInt.mockClear().mockReturnValue(1);
+    let state = createInitialCampaign("check-stealth-pressure", "actor-stealth-pressure");
+    const goals = [
+      "Slip through the passage toward the rear yard.",
+      "Abandon the decoy and move toward the rear yard.",
+      "Climb the side stair without being seen.",
+    ];
+    for (const goal of goals) {
+      const result = resolve(state, { kind: "roll_check", ability: "dex", skill: "stealth", goal });
+      expect(result.accepted).toBe(true);
+      state = result.state;
+    }
+    expect(state.failurePressures).toMatchObject([{ challengeId: "ability-check:stealth", failureCount: 3, status: "compromised" }]);
+    const calls = deterministicRandomInt.mock.calls.length;
+    const blocked = resolve(state, { kind: "roll_check", ability: "dex", skill: "stealth", goal: "Try the same passage from the other side." });
+    expect(blocked).toMatchObject({ accepted: false, code: "challenge_pressure_compromised", state: { version: 3 } });
+    expect(deterministicRandomInt.mock.calls.length).toBe(calls);
+  });
+
   it("requires a tool proficiency and preserves full evidence for withheld checks", () => {
     deterministicRandomInt.mockClear().mockReturnValue(20);
     const state = createInitialCampaign("check-secret", "actor-secret");
