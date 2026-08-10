@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { compiledSpellEffectSchema } from "./schema.js";
 
 /**
  * The runtime content compiler is deliberately smaller than the rules engine.
  * It accepts descriptive proposals and produces typed, campaign-scoped
- * definitions. Executable mechanics are reviewed by the child issues and are
- * therefore not part of this compiler revision; mundane item instances are
- * bridged into the existing inventory kernel by the engine boundary.
+ * definitions. Runtime spell execution is admitted only by the engine's
+ * reviewed-primitive synthesis gate; this compiler never trusts proposal
+ * authored mechanics. Mundane item instances are bridged into the existing
+ * inventory kernel by the engine boundary.
  */
 
 export const runtimeContentKeySchema = z
@@ -145,10 +147,42 @@ export const runtimeSpellProposalSchema = z.object({
   kind: z.literal("spell"),
   ...runtimeContentProposalBase,
   school: z.enum(["abjuration", "conjuration", "divination", "enchantment", "evocation", "illusion", "necromancy", "transmutation"]),
-  level: z.number().int().min(0).max(9),
+  // A descriptive spell may retain a requested level for compatibility, but
+  // an executable synthesis never trusts it; the reviewed primitive supplies
+  // the authoritative level at the engine boundary.
+  level: z.number().int().min(0).max(9).optional(),
   intent: z.string().trim().min(1).max(1_000),
+  synthesis: z.object({
+    primitiveContentKey: z.string().trim().startsWith("open5e:spell:").max(300),
+    modification: z.literal("damage-only"),
+  }).strict().optional(),
 }).strict();
 export type RuntimeSpellProposal = z.infer<typeof runtimeSpellProposalSchema>;
+
+const runtimeSpellDamageEffectSchema = compiledSpellEffectSchema.superRefine((effect, context) => {
+  if (effect.effectKind !== "damage") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Arcane synthesis currently admits only reviewed damage primitives.",
+    });
+  }
+});
+
+/**
+ * The executable portion of a runtime spell is persisted only after the
+ * engine has copied it from a reviewed Open5e primitive and applied the
+ * synthesis budget. None of these values are proposal-authored.
+ */
+export const runtimeSpellExecutionSchema = z.object({
+  primitiveContentKey: z.string().trim().startsWith("open5e:spell:").max(300),
+  policyRevision: z.literal("runtime-arcane-synthesis-v1"),
+  castingTime: z.enum(["action", "bonus-action"]),
+  rangeFeet: z.number().int().positive().max(120),
+  targetType: z.literal("creature"),
+  targetCount: z.literal(1),
+  effect: runtimeSpellDamageEffectSchema,
+}).strict();
+export type RuntimeSpellExecution = z.infer<typeof runtimeSpellExecutionSchema>;
 
 export const contentProposalSchema = z.discriminatedUnion("kind", [
   runtimeItemProposalSchema,
@@ -208,9 +242,11 @@ export type RuntimeLocationDefinition = z.infer<typeof runtimeLocationDefinition
 export const runtimeSpellDefinitionSchema = z.object({
   kind: z.literal("spell"),
   ...runtimeDefinitionBase,
+  executionTier: z.union([z.literal(0), z.literal(2)]),
   school: runtimeSpellProposalSchema.shape.school,
-  level: runtimeSpellProposalSchema.shape.level,
+  level: z.number().int().min(0).max(9),
   intent: runtimeSpellProposalSchema.shape.intent,
+  execution: runtimeSpellExecutionSchema.nullable().default(null),
 }).strict();
 export type RuntimeSpellDefinition = z.infer<typeof runtimeSpellDefinitionSchema>;
 
@@ -372,8 +408,9 @@ export function compileRuntimeContent(proposal: unknown, context: RuntimeContent
       parentKey: value.parentKey ?? null,
     });
   } else {
+    const { synthesis: _synthesis, ...spellValue } = value;
     definition = runtimeSpellDefinitionSchema.parse({
-      ...value,
+      ...spellValue,
       id,
       key: value.key ?? null,
       schemaRevision: 1,
@@ -381,6 +418,8 @@ export function compileRuntimeContent(proposal: unknown, context: RuntimeContent
       provenance: source,
       executionTier: 0,
       capabilities: ["spell-description"],
+      level: value.level ?? 0,
+      execution: null,
     });
   }
 

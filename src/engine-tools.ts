@@ -11,6 +11,7 @@ import {
   engineCharacterDetailsSchema,
   engineCommandSchema,
   engineContentCompileArgsSchema,
+  engineSpellKeySchema,
   engineExperienceProfileInputSchema,
   engineEncounterDecisionSchema,
   engineEncounterLifecycleProfileSchema,
@@ -315,14 +316,14 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     position: engineTacticalPositionSchema.optional(),
   }).strict(),
   learn_spell: z.object({
-    spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
+    spellKey: engineSpellKeySchema,
   }).strict(),
   prepare_spell: z.object({
-    spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
+    spellKey: engineSpellKeySchema,
     prepared: z.boolean().default(true),
   }).strict(),
   cast_spell: z.object({
-    spellKey: z.string().trim().startsWith("open5e:spell:").max(300),
+    spellKey: engineSpellKeySchema,
     slotLevel: z.number().int().min(1).max(9).optional(),
     targetIds: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
     reactionId: z.string().trim().min(1).max(120).optional(),
@@ -330,7 +331,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   reaction_response: z.object({
     reactionId: z.string().trim().min(1).max(120),
     decision: z.enum(["accept", "decline"]),
-    spellKey: z.string().trim().startsWith("open5e:spell:").max(300).optional(),
+    spellKey: engineSpellKeySchema.optional(),
     slotLevel: z.number().int().min(1).max(9).optional(),
   }).strict(),
   combat_action: z
@@ -598,7 +599,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "content_compile",
-    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. Mundane item instances enter the normal inventory ownership/container rules; derived items retain explicit source and recipe provenance. Definitions, instances, typed exits, and containment relationships are persisted separately; unknown fields and unreviewed mechanics are rejected.",
+    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. For an executable spell, provide only synthesis {primitiveContentKey: exact reviewed open5e spell key, modification: damage-only}; the engine derives and persists the bounded single-target damage effect from that primitive. Mundane item instances enter the normal inventory ownership/container rules; derived items retain explicit source and recipe provenance. Definitions, instances, typed exits, and containment relationships are persisted separately; unknown fields and unreviewed mechanics are rejected.",
     runtimeContentCompileJsonSchema,
   ),
   tool(
@@ -1125,11 +1126,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "learn_spell",
-    "Add an installed Open5e spell to a known-caster repertoire or wizard spellbook. The engine enforces class membership and level limits; use content_search first.",
+    "Add an installed Open5e spell or persisted runtime spell to a known-caster repertoire or wizard spellbook. The engine enforces class membership and level limits for Open5e content and canonical progression for runtime synthesis; use content_search or the prior content_compile result first.",
     {
       type: "object",
       properties: {
-        spellKey: { type: "string", description: "Exact open5e:spell contentKey from content_search." },
+        spellKey: { type: "string", description: "Exact open5e:spell key from content_search or runtime:spell key returned by content_compile." },
       },
       required: ["spellKey"],
       additionalProperties: false,
@@ -1137,11 +1138,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "prepare_spell",
-    "Prepare or unprepare one installed Open5e spell. The engine enforces class lists, spellbook membership, spell level, and preparation capacity.",
+    "Prepare or unprepare one installed Open5e or persisted runtime spell. The engine enforces class lists, spellbook membership, spell level, and preparation capacity.",
     {
       type: "object",
       properties: {
-        spellKey: { type: "string", description: "Exact open5e:spell contentKey from content_search." },
+        spellKey: { type: "string", description: "Exact open5e:spell key from content_search or runtime:spell key returned by content_compile." },
         prepared: { type: "boolean", description: "False unprepares the spell; defaults to true." },
       },
       required: ["spellKey"],
@@ -1150,11 +1151,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "cast_spell",
-    "Cast a learned or prepared Open5e spell. The engine owns slots, action economy, attacks, saves, typed damage or healing, target count, concentration, reactions, and exact structured upcasting. Tier-0 prose is rejected without mutation.",
+    "Cast a learned or prepared Open5e or persisted runtime spell. The engine owns slots, action economy, attacks, saves, typed damage or healing, target count, concentration, reactions, and exact structured upcasting. Tier-0 prose is rejected without mutation.",
     {
       type: "object",
       properties: {
-        spellKey: { type: "string", description: "Exact open5e:spell contentKey from the character spell list." },
+        spellKey: { type: "string", description: "Exact open5e:spell or runtime:spell key from the character spell list." },
         slotLevel: { type: "integer", minimum: 1, maximum: 9, description: "Optional slot level. Omit to use the lowest legal available slot." },
         targetIds: { type: "array", items: { type: "string" }, maxItems: 20, description: "Combatant ids selected by the DM as affected targets." },
         reactionId: { type: "string", description: "Pending reaction id when resolving Shield through cast_spell." },
