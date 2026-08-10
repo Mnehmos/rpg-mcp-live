@@ -262,11 +262,25 @@ app.get("/api/session", async (request, response) => {
   if (!userId) return;
   try {
     const campaigns = await engineClient.listCampaigns(userId, userId);
-    const result = campaigns[0] ? await engineClient.getCampaign(userId, userId, campaigns[0].id) : null;
+    const requestedCampaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
+    const selectedCampaign = requestedCampaignId
+      ? campaigns.find((campaign) => campaign.id === requestedCampaignId) ?? null
+      : campaigns[0] ?? null;
+    if (requestedCampaignId && !selectedCampaign) {
+      response.status(404).json({
+        code: "campaign_not_found",
+        error: "That campaign is no longer available in your account.",
+        campaigns,
+        subscription: store.getSubscription(userId),
+      });
+      return;
+    }
+    const result = selectedCampaign ? await engineClient.getCampaign(userId, userId, selectedCampaign.id) : null;
     response.json({
       session: result?.campaign ?? null,
       state: result?.state ?? null,
       campaigns,
+      activeCampaignId: selectedCampaign?.id ?? null,
       setupRequired: !result,
       subscription: store.getSubscription(userId),
     });
