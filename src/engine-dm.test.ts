@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import type { RequestContext } from "./engine-contracts.js";
 import type { ModelUsageTelemetry } from "./usage-ledger.js";
 import { openAiSdkFetch as sdkFetch } from "./test-openai-stream.js";
+import { engineCoreToolDefinitions } from "./engine-capabilities.js";
 
 const options = {
   apiKey: "test-key",
@@ -232,7 +233,7 @@ describe("Lantern OpenRouter tool loop", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(firstRequest.tools).toHaveLength(73);
+    expect(firstRequest.tools).toHaveLength(engineCoreToolDefinitions().length);
     const worldContextTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
       .find((candidate) => candidate.function.name === "world_context");
     expect(worldContextTool?.function.parameters).toHaveProperty("properties.objects");
@@ -1344,6 +1345,89 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(request.messages[0]?.content).toContain("minimum projection");
     expect(result.state.experienceProfile.revision).toBe(0);
     expect(result.narration.text).toContain("safer path");
+    store.close();
+  });
+
+  it("loads a reviewed capability family before sending its detailed schemas", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "tool-load-combat",
+              type: "function",
+              function: { name: "capability_load", arguments: JSON.stringify({ familyId: "combat" }) },
+            }],
+          } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "tool-read-combat",
+              type: "function",
+              function: { name: "combat_state", arguments: "{}" },
+            }],
+          } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: {
+            role: "assistant",
+            content: JSON.stringify({ text: "The arena waits.", proposedFacts: [], suggestedActions: [] }),
+          } }],
+        }),
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-capability-load", "actor-capability-load");
+    state.phase = "sandbox";
+    state.character.created = true;
+    store.createCampaign({
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I check the current fight.",
+    );
+
+    const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const secondRequest = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    const firstNames = firstRequest.tools.map((tool: { function: { name: string } }) => tool.function.name);
+    const secondNames = secondRequest.tools.map((tool: { function: { name: string } }) => tool.function.name);
+    expect(firstNames).toContain("capability_load");
+    expect(firstNames).not.toContain("combat_start");
+    expect(secondNames).toContain("combat_start");
+    expect(secondNames).toContain("combat_state");
+    expect(result.narration.text).toContain("arena waits");
     store.close();
   });
 });

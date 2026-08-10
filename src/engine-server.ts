@@ -10,6 +10,14 @@ import {
 import { Open5eContentResolver } from "./content/resolve.js";
 import { loadInstalledOpen5ePackRegistry } from "./content/registry.js";
 import { LanternDungeonMaster } from "./engine-dm.js";
+import {
+  capabilityLoadResult,
+  capabilitySchemaOverhead,
+  engineCapabilityDescriptors,
+  engineToolDefinitionsForLoadedCapabilities,
+  isCapabilityFamilyAllowed,
+  parseCapabilityFamilyId,
+} from "./engine-capabilities.js";
 import { engineConfig } from "./engine-config.js";
 import { deploymentIdentity } from "./deployment-identity.js";
 import {
@@ -167,6 +175,7 @@ app.get("/health", (_request, response) => {
       })),
     },
     toolCount: lanternToolDefinitions.length,
+    capabilitySchema: capabilitySchemaOverhead(),
   });
 });
 
@@ -180,6 +189,25 @@ app.use("/v1", (request, response, next) => {
 
 app.get("/v1/tools", (_request, response) => {
   response.json({ tools: lanternToolDefinitions });
+});
+
+app.get("/v1/capabilities", (_request, response) => {
+  response.json({
+    capabilities: engineCapabilityDescriptors(),
+    overhead: capabilitySchemaOverhead(),
+  });
+});
+
+app.get("/v1/capabilities/:familyId", (request, response) => {
+  const familyId = parseCapabilityFamilyId(request.params.familyId);
+  if (!familyId) {
+    response.status(404).json({ code: "capability_not_found", error: "That capability family is not registered." });
+    return;
+  }
+  response.json({
+    capability: capabilityLoadResult(familyId),
+    tools: engineToolDefinitionsForLoadedCapabilities([familyId]),
+  });
 });
 
 app.get("/v1/content-catalog", (_request, response) => {
@@ -569,6 +597,27 @@ app.post("/v1/campaigns/:campaignId/tool-calls", (request, response) => {
     }
     const state = store.getCampaign(context);
     const args = parseToolArguments(parsed.data.toolName, parsed.data.arguments);
+    if (parsed.data.toolName === "capability_load") {
+      const familyId = parseCapabilityFamilyId(args.familyId);
+      if (!familyId) {
+        response.status(400).json({ code: "invalid_capability_family", error: "That capability family is not registered." });
+        return;
+      }
+      if (!isCapabilityFamilyAllowed(familyId, state, context.capabilities)) {
+        response.status(403).json({ code: "capability_not_authorized", error: "That capability family is not authorized for the current server-assigned phase and role." });
+        return;
+      }
+      response.json({
+        tool: parsed.data.toolName,
+        readOnly: true,
+        accepted: true,
+        code: null,
+        message: `Loaded the ${familyId} capability family.`,
+        data: capabilityLoadResult(familyId),
+        campaignVersion: state.version,
+      });
+      return;
+    }
     const command = commandForTool(parsed.data.toolName, args);
     if (!command) {
       response.json(executeReadTool(state, parsed.data.toolName, args, contentResolverFor(state)));

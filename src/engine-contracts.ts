@@ -854,6 +854,7 @@ export type EngineWorldContextCommand = z.infer<typeof engineWorldContextCommand
 
 export const engineToolNameSchema = z.enum([
   "campaign_context",
+  "capability_load",
   "experience_profile_update",
   "experience_feedback_add",
   "experience_boundary",
@@ -931,6 +932,23 @@ export const engineToolNameSchema = z.enum([
   "tutorial_advance",
 ]);
 export type EngineToolName = z.infer<typeof engineToolNameSchema>;
+
+/**
+ * Reviewed capability families are a visibility boundary only.  They do not
+ * add authority or create a second tool registry; the existing tool registry
+ * remains the source of truth for names and argument contracts.
+ */
+export const engineCapabilityFamilyIdSchema = z.enum([
+  "rules",
+  "exploration",
+  "social",
+  "commerce",
+  "quests",
+  "combat",
+  "magic",
+  "party",
+]);
+export type EngineCapabilityFamilyId = z.infer<typeof engineCapabilityFamilyIdSchema>;
 
 const tacticalCoordinateSchema = z.number().int().min(-100_000).max(100_000);
 const tacticalDimensionSchema = z.number().int().min(1).max(20);
