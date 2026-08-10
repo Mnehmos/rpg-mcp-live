@@ -37,12 +37,41 @@ export const runtimeItemProposalSchema = z.object({
 }).strict();
 export type RuntimeItemProposal = z.infer<typeof runtimeItemProposalSchema>;
 
+export const runtimeLocationExitStateSchema = z.object({
+  key: runtimeContentKeySchema,
+  label: z.string().trim().min(1).max(160),
+  kind: z.enum(["door", "passage", "road", "portal", "stairs", "other"]),
+  open: z.boolean(),
+  locked: z.boolean(),
+  blocked: z.boolean(),
+  hidden: z.boolean(),
+  discovered: z.boolean(),
+  requirements: z.array(runtimeContentKeySchema).max(8),
+}).strict();
+export type RuntimeLocationExitState = z.infer<typeof runtimeLocationExitStateSchema>;
+
 const runtimeLocationExitSchema = z.object({
   key: runtimeContentKeySchema,
   label: z.string().trim().min(1).max(160),
   kind: z.enum(["door", "passage", "road", "portal", "stairs", "other"]),
-  targetKey: runtimeContentKeySchema.optional(),
+  targetKey: runtimeContentKeySchema,
+  open: z.boolean().default(true),
+  locked: z.boolean().default(false),
+  blocked: z.boolean().default(false),
+  hidden: z.boolean().default(false),
+  discovered: z.boolean().default(true),
+  requirements: z.array(runtimeContentKeySchema).max(8).default([]),
+}).strict().superRefine((exit, context) => {
+  if (!exit.hidden && !exit.discovered) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["discovered"], message: "A visible exit cannot begin undiscovered." });
+  }
+});
+
+const runtimeLocationEntityRefSchema = z.object({
+  kind: z.enum(["actor", "world_object", "merchant"]),
+  id: z.string().trim().min(1).max(220),
 }).strict();
+export type RuntimeLocationEntityRef = z.infer<typeof runtimeLocationEntityRefSchema>;
 
 export const runtimeLocationProposalSchema = z.object({
   kind: z.literal("location"),
@@ -51,6 +80,8 @@ export const runtimeLocationProposalSchema = z.object({
   parentKey: runtimeContentKeySchema.optional(),
   features: z.array(z.string().trim().min(1).max(160)).max(20).default([]),
   exits: z.array(runtimeLocationExitSchema).max(20).default([]),
+  occupants: z.array(runtimeLocationEntityRefSchema).max(20).default([]),
+  objects: z.array(runtimeLocationEntityRefSchema.extend({ kind: z.literal("world_object") })).max(40).default([]),
 }).strict().superRefine((proposal, context) => {
   const keys = proposal.exits.map((exit) => exit.key);
   if (new Set(keys).size !== keys.length) {
@@ -152,14 +183,31 @@ export const runtimeContentInstanceSchema = z.object({
 }).strict();
 export type RuntimeContentInstance = z.infer<typeof runtimeContentInstanceSchema>;
 
+const runtimeRelationshipEndpointKindSchema = z.enum(["content_instance", "actor", "world_object", "merchant"]);
+
 export const runtimeContentRelationshipSchema = z.object({
   id: z.string().trim().min(1).max(220),
   campaignId: z.string().trim().min(1).max(160),
   fromId: z.string().trim().min(1).max(220),
+  fromKind: runtimeRelationshipEndpointKindSchema.default("content_instance"),
   relation: z.enum(["located_in", "contains", "connects_to"]),
   toId: z.string().trim().min(1).max(220),
+  toKind: runtimeRelationshipEndpointKindSchema.default("content_instance"),
+  exit: runtimeLocationExitStateSchema.optional(),
   provenance: runtimeContentProvenanceSchema,
-}).strict();
+}).strict().superRefine((relationship, context) => {
+  if (relationship.relation === "connects_to") {
+    if (relationship.fromKind !== "content_instance" || relationship.toKind !== "content_instance") {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["relation"], message: "Location exits may connect only canonical location instances." });
+    }
+    if (!relationship.exit) context.addIssue({ code: z.ZodIssueCode.custom, path: ["exit"], message: "A typed location exit must persist its authoritative state." });
+  } else if (relationship.exit) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["exit"], message: "Only a connects_to relationship may carry exit state." });
+  }
+  if (relationship.relation === "located_in" && relationship.toKind !== "content_instance") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["toKind"], message: "Containment must target a canonical location instance." });
+  }
+});
 export type RuntimeContentRelationship = z.infer<typeof runtimeContentRelationshipSchema>;
 
 export const runtimeContentStateSchema = z.object({
@@ -256,8 +304,9 @@ export function compileRuntimeContent(proposal: unknown, context: RuntimeContent
       valueCopper: value.valueCopper ?? null,
     });
   } else if (value.kind === "location") {
+    const { occupants: _occupants, objects: _objects, ...locationValue } = value;
     definition = runtimeLocationDefinitionSchema.parse({
-      ...value,
+      ...locationValue,
       id,
       key: value.key ?? null,
       schemaRevision: 1,
@@ -294,17 +343,82 @@ export function compileRuntimeContent(proposal: unknown, context: RuntimeContent
 
   const relationships: RuntimeContentRelationship[] = [];
   if (instance && value.kind === "location" && value.parentKey) {
-    const parentId = stableContentId(context.campaignId, "location", value.parentKey, "runtime");
+    const parentId = stableContentId(context.campaignId, "location", `${value.parentKey}:default`, "instance");
     relationships.push(runtimeContentRelationshipSchema.parse({
       id: stableContentId(context.campaignId, "location", `${instance.id}:located_in:${parentId}`, "relationship"),
       campaignId: context.campaignId,
       fromId: instance.id,
+      fromKind: "content_instance",
       relation: "located_in",
       toId: parentId,
+      toKind: "content_instance",
       provenance: source,
     }));
   }
+  if (instance && value.kind === "location") {
+    for (const occupant of value.occupants) {
+      relationships.push(runtimeContentRelationshipSchema.parse({
+        id: stableContentId(context.campaignId, "location", `${occupant.kind}:${occupant.id}:located_in:${instance.id}`, "relationship"),
+        campaignId: context.campaignId,
+        fromId: occupant.id,
+        fromKind: occupant.kind,
+        relation: "located_in",
+        toId: instance.id,
+        toKind: "content_instance",
+        provenance: source,
+      }));
+    }
+    for (const object of value.objects) {
+      relationships.push(runtimeContentRelationshipSchema.parse({
+        id: stableContentId(context.campaignId, "location", `world_object:${object.id}:located_in:${instance.id}`, "relationship"),
+        campaignId: context.campaignId,
+        fromId: object.id,
+        fromKind: "world_object",
+        relation: "located_in",
+        toId: instance.id,
+        toKind: "content_instance",
+        provenance: source,
+      }));
+    }
+    for (const exit of value.exits) {
+      const targetId = stableContentId(context.campaignId, "location", `${exit.targetKey}:default`, "instance");
+      relationships.push(runtimeContentRelationshipSchema.parse({
+        id: stableContentId(context.campaignId, "location", `${instance.id}:connects_to:${exit.key}:${targetId}`, "relationship"),
+        campaignId: context.campaignId,
+        fromId: instance.id,
+        fromKind: "content_instance",
+        relation: "connects_to",
+        toId: targetId,
+        toKind: "content_instance",
+        exit: {
+          key: exit.key,
+          label: exit.label,
+          kind: exit.kind,
+          open: exit.open,
+          locked: exit.locked,
+          blocked: exit.blocked,
+          hidden: exit.hidden,
+          discovered: exit.discovered,
+          requirements: [...exit.requirements],
+        },
+        provenance: source,
+      }));
+    }
+  }
   return { ok: true, definition, instance, relationships };
+}
+
+/** Hide undiscovered secret exits from actor-facing projections while retaining them in campaign state. */
+export function projectRuntimeContentForActor(value: RuntimeContentState): RuntimeContentState {
+  return {
+    definitions: value.definitions.map((definition) => definition.kind === "location"
+      ? { ...definition, exits: definition.exits.filter((exit) => !exit.hidden || exit.discovered) }
+      : definition),
+    instances: value.instances,
+    relationships: value.relationships.filter((relationship) =>
+      relationship.relation !== "connects_to" || !relationship.exit || !relationship.exit.hidden || relationship.exit.discovered
+    ),
+  };
 }
 
 export function normalizeRuntimeContentState(value: unknown): RuntimeContentState {

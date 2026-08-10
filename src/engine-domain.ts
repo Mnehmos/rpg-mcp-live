@@ -213,6 +213,7 @@ import {
   compileRuntimeContent,
   emptyRuntimeContentState,
   normalizeRuntimeContentState,
+  projectRuntimeContentForActor,
 } from "./content/runtime-compiler.js";
 import {
   activeConditionNames,
@@ -2507,7 +2508,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     social: projection.social,
     characterCreated: state.character.created,
     worldContext: projection.worldContext,
-    runtimeContent: state.runtimeContent,
+    runtimeContent: projectRuntimeContentForActor(state.runtimeContent),
     proceduralNotices: projection.proceduralNotices,
     playerNotes: state.playerNotes,
     quests: projectQuestsForActor(state, state.actorId),
@@ -2627,7 +2628,7 @@ export function readToolData(
         time: state.time,
         social: projection.social,
         worldContext: projection.worldContext,
-        runtimeContent: state.runtimeContent,
+        runtimeContent: projectRuntimeContentForActor(state.runtimeContent),
         proceduralNotices: projection.proceduralNotices,
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
@@ -3440,6 +3441,69 @@ function resolveMove(
     return rejection(state, tool, "combat_active", "You cannot leave while the encounter is active.");
   }
 
+  const actorLocationRelationships = state.runtimeContent.relationships.filter((relationship) =>
+    relationship.relation === "located_in"
+    && relationship.fromKind === "actor"
+    && relationship.fromId === state.actorId
+    && relationship.toKind === "content_instance"
+  );
+  if (actorLocationRelationships.length > 0) {
+    if (actorLocationRelationships.length > 1) {
+      return rejection(state, tool, "location_ambiguous", "The actor has more than one canonical location; movement is paused until that contradiction is reconciled.");
+    }
+    const currentLocationId = actorLocationRelationships[0].toId;
+    const exitRelationship = state.runtimeContent.relationships.find((relationship) =>
+      relationship.relation === "connects_to"
+      && relationship.fromId === currentLocationId
+      && relationship.exit
+      && (relationship.exit.key === command.destinationId || relationship.toId === command.destinationId)
+    );
+    if (!exitRelationship || !exitRelationship.exit) {
+      return rejection(state, tool, "invalid_move", "That destination is not an established exit from the actor's canonical location.");
+    }
+    if (exitRelationship.exit.hidden && !exitRelationship.exit.discovered) {
+      return rejection(state, tool, "location_exit_undiscovered", "That exit has not been discovered by the actor.");
+    }
+    if (!exitRelationship.exit.open || exitRelationship.exit.locked || exitRelationship.exit.blocked) {
+      return rejection(state, tool, "location_exit_unavailable", "That canonical exit is closed, locked, or blocked.", { exit: exitRelationship.exit });
+    }
+    if (exitRelationship.exit.requirements.length > 0) {
+      return rejection(state, tool, "location_exit_requirements_unresolved", "That exit has traversal requirements that are not resolved by the current movement command.", { requirements: exitRelationship.exit.requirements });
+    }
+    const targetLocation = state.runtimeContent.instances.find((instance) => instance.id === exitRelationship.toId && instance.kind === "location");
+    if (!targetLocation) {
+      return rejection(state, tool, "location_exit_target_missing", "That exit points to a location instance that is not present in canonical state.");
+    }
+    const next = cloneCampaign(state);
+    next.runtimeContent.relationships = next.runtimeContent.relationships.map((relationship) =>
+      relationship.id === actorLocationRelationships[0].id
+        ? { ...relationship, toId: targetLocation.id }
+        : relationship
+    );
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      "You move through " + exitRelationship.exit.key + ".",
+      {
+        exit: exitRelationship.exit,
+        fromLocationId: currentLocationId,
+        toLocationId: targetLocation.id,
+        runtimeContent: projectRuntimeContentForActor(next.runtimeContent),
+      },
+      "location_moved",
+      [],
+      [],
+      [{
+        path: `/runtimeContent/relationships/${escapeJsonPointerSegment(actorLocationRelationships[0].id)}/toId`,
+        before: currentLocationId,
+        after: targetLocation.id,
+      }]
+    );
+  }
+
   const exit = state.worldContext?.exits.find((candidate) => candidate.id === command.destinationId);
   if (!exit) {
     return rejection(
@@ -3736,6 +3800,12 @@ function resolveContentCompile(
   command: Extract<EngineCommand, { kind: "content_compile" }>,
   tool: EngineToolName | "declare" | "listen",
 ): EngineResolution {
+  if (command.exitPatch) {
+    return resolveRuntimeLocationExitPatch(state, context, clientCommandId, command.exitPatch, tool);
+  }
+  if (!command.proposal) {
+    return rejection(state, tool, "content_proposal_required", "A content compile command needs a strict proposal.");
+  }
   const compiled = compileRuntimeContent(
     command.proposal,
     {
@@ -3749,6 +3819,9 @@ function resolveContentCompile(
     command.instanceKey ?? "default",
   );
   if (!compiled.ok) return rejection(state, tool, compiled.code, compiled.message, { proposalKind: command.proposal.kind });
+
+  const topologyValidation = validateCompiledLocationTopology(state, compiled);
+  if (topologyValidation) return rejection(state, tool, topologyValidation.code, topologyValidation.message, topologyValidation.data);
 
   const existingDefinitions = state.runtimeContent.definitions;
   const existingDefinition = existingDefinitions.find((definition) => definition.id === compiled.definition.id);
@@ -3827,6 +3900,111 @@ function resolveContentCompile(
     [],
     [],
     stateChanges,
+  );
+}
+
+function validateCompiledLocationTopology(
+  state: LanternCampaignState,
+  compiled: Extract<ReturnType<typeof compileRuntimeContent>, { ok: true }>,
+): { code: string; message: string; data?: Record<string, unknown> } | null {
+  if (compiled.definition.kind !== "location") return null;
+  if (!compiled.instance && compiled.relationships.length > 0) {
+    return { code: "location_instance_required", message: "A location with topology references must persist an instance." };
+  }
+  const definitions = state.runtimeContent.definitions;
+  const instances = state.runtimeContent.instances;
+  const instanceIds = new Set([
+    ...instances.filter((instance) => instance.kind === "location").map((instance) => instance.id),
+    ...(compiled.instance?.kind === "location" ? [compiled.instance.id] : []),
+  ]);
+  const relationships = compiled.relationships;
+  if (new Set(relationships.map((relationship) => relationship.id)).size !== relationships.length) {
+    return { code: "location_relationship_duplicate", message: "A location proposal cannot repeat the same canonical containment or exit relationship." };
+  }
+  for (const relationship of relationships) {
+    if (compiled.instance && relationship.relation === "located_in" && relationship.fromId === compiled.instance.id && relationship.toId === compiled.instance.id) {
+      return { code: "location_parent_cycle", message: "A location cannot contain itself." };
+    }
+    if (compiled.instance && relationship.relation === "connects_to" && relationship.fromId === compiled.instance.id && relationship.toId === compiled.instance.id) {
+      return { code: "location_exit_cycle", message: "A location exit must target a different canonical location instance." };
+    }
+    if (relationship.relation === "connects_to" || relationship.relation === "located_in" && relationship.toKind === "content_instance") {
+      if (!instanceIds.has(relationship.toId)) {
+        const relationLabel = relationship.relation === "connects_to" ? "exit target" : "parent location";
+        return {
+          code: relationship.relation === "connects_to" ? "location_exit_target_not_found" : "location_parent_not_found",
+          message: `The ${relationLabel} must already be a canonical location instance before this topology can be committed.`,
+          data: { targetId: relationship.toId },
+        };
+      }
+    }
+    if (relationship.relation === "located_in" && relationship.fromKind === "actor") {
+      const actorExists = relationship.fromId === state.actorId
+        || state.controlledActors.some((actor) => actor.id === relationship.fromId && actor.status === "active")
+        || state.worldContext?.npcs.some((npc) => npc.id === relationship.fromId);
+      if (!actorExists) return { code: "location_actor_not_found", message: "A location occupant must be an established actor.", data: { actorId: relationship.fromId } };
+    }
+    if (relationship.relation === "located_in" && relationship.fromKind === "merchant") {
+      if (!state.worldContext?.merchants.some((merchant) => merchant.id === relationship.fromId)) {
+        return { code: "location_merchant_not_found", message: "A location occupant must be an established merchant.", data: { merchantId: relationship.fromId } };
+      }
+    }
+    if (relationship.relation === "located_in" && relationship.fromKind === "world_object") {
+      if (!state.worldContext?.objects.some((object) => object.id === relationship.fromId)) {
+        return { code: "location_object_not_found", message: "A location object must be an established world object.", data: { objectId: relationship.fromId } };
+      }
+    }
+  }
+  const targetDefinitionIds = new Set(definitions.map((definition) => definition.id));
+  for (const relationship of relationships.filter((candidate) => candidate.relation === "connects_to")) {
+    const targetInstance = instances.find((instance) => instance.id === relationship.toId);
+    if (!targetInstance || !targetDefinitionIds.has(targetInstance.definitionId)) {
+      return { code: "location_exit_target_not_found", message: "A typed exit must target a loaded canonical location definition.", data: { targetId: relationship.toId } };
+    }
+  }
+  return null;
+}
+
+function resolveRuntimeLocationExitPatch(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  patch: Extract<EngineCommand, { kind: "content_compile" }> ["exitPatch"],
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (!patch) return rejection(state, tool, "location_exit_patch_required", "A location exit patch is required.");
+  const location = state.runtimeContent.instances.find((instance) => instance.id === patch.locationInstanceId && instance.kind === "location");
+  if (!location) return rejection(state, tool, "location_not_found", "The requested location instance is not canonical in this campaign.");
+  const relationship = state.runtimeContent.relationships.find((candidate) =>
+    candidate.relation === "connects_to"
+    && candidate.fromId === location.id
+    && candidate.exit?.key === patch.exitKey
+  );
+  if (!relationship?.exit) return rejection(state, tool, "location_exit_not_found", "The requested exit is not established on that location instance.");
+  const afterExit = { ...relationship.exit, ...patch.patch };
+  if (JSON.stringify(afterExit) === JSON.stringify(relationship.exit)) {
+    return rejection(state, tool, "location_exit_unchanged", "The canonical exit already has the requested state.");
+  }
+  const next = cloneCampaign(state);
+  next.runtimeContent.relationships = next.runtimeContent.relationships.map((candidate) =>
+    candidate.id === relationship.id ? { ...candidate, exit: afterExit } : candidate
+  );
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    { kind: "content_compile", createInstance: true, exitPatch: patch },
+    tool,
+    `Updated the canonical ${patch.exitKey} exit on ${location.id}.`,
+    { locationInstanceId: location.id, exit: afterExit, runtimeContent: projectRuntimeContentForActor(next.runtimeContent) },
+    "location_exit_updated",
+    [],
+    [],
+    [{
+      path: `/runtimeContent/relationships/${escapeJsonPointerSegment(relationship.id)}/exit`,
+      before: relationship.exit,
+      after: afterExit,
+    }]
   );
 }
 
