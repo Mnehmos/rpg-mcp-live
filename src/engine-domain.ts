@@ -12556,7 +12556,7 @@ function redactResolutionData(data: unknown): unknown {
 function redactCommand<T extends object>(command: T): T {
   const projected = JSON.parse(JSON.stringify(command)) as Record<string, unknown>;
   if (projected.kind === "world_context") delete projected.facts;
-  if (projected.kind === "procedural_notice" && projected.action === "upsert" && projected.notice && typeof projected.notice === "object" && !Array.isArray(projected.notice)) {
+  if (projected.kind === "procedural_notice" && projected.notice && typeof projected.notice === "object" && !Array.isArray(projected.notice)) {
     const notice = projected.notice as Record<string, unknown>;
     projected.notice = { ...notice, terms: null };
   }

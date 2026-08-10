@@ -94,6 +94,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     requestText: z.string().trim().min(1).max(1_000).optional(),
   }).strict().superRefine((value, context) => {
     if (value.action === "upsert" && !value.notice) context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Upsert requires typed notice terms." });
+    if (value.action !== "upsert" && value.notice) context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Only upsert accepts notice terms." });
     if (value.action !== "upsert" && !value.noticeId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["noticeId"], message: "Notice actions require a notice id." });
   }),
   player_notes: noArguments,

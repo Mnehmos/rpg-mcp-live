@@ -116,7 +116,7 @@ export function buildDmContext(
     contentPolicy: state.contentPolicy,
     experienceProfile: projectExperienceProfile(state.experienceProfile),
     worldContext: projection.worldContext,
-    proceduralNotices: state.proceduralNotices,
+    proceduralNotices: projection.proceduralNotices,
     knowledge: projection.knowledge,
     informationTiers: projection.informationTiers,
     playerNotes: state.playerNotes,

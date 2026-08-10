@@ -239,13 +239,21 @@ export const engineProceduralNoticeTermsSchema = z.object({
   clarification: proceduralNoticePolicySchema,
 }).strict().superRefine((terms, context) => {
   const restrictedPattern = /\b(?:private|restricted|secret|confidential|sealed\s+(?:statement|record|testimony))\b/i;
-  for (const [field, values] of [["admissibleEvidence", terms.admissibleEvidence], ["excludedEvidence", terms.excludedEvidence]] as const) {
-    values.forEach((value, index) => {
-      if (restrictedPattern.test(value)) {
-        context.addIssue({ code: z.ZodIssueCode.custom, path: [field, index], message: "Notice evidence terms must describe player-safe procedure, not restricted records." });
-      }
-    });
-  }
+  const checkText = (value: string, path: (string | number)[]) => {
+    if (restrictedPattern.test(value)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path, message: "Notice terms must describe player-safe procedure, not restricted records." });
+    }
+  };
+  checkText(terms.authorizedAction, ["authorizedAction"]);
+  checkText(terms.actorScope, ["actorScope"]);
+  terms.admissibleEvidence.forEach((value, index) => checkText(value, ["admissibleEvidence", index]));
+  terms.excludedEvidence.forEach((value, index) => checkText(value, ["excludedEvidence", index]));
+  checkText(terms.responseWindow, ["responseWindow"]);
+  checkText(terms.attendance, ["attendance"]);
+  checkText(terms.custodyEffect, ["custodyEffect"]);
+  checkText(terms.nextChange, ["nextChange"]);
+  if (terms.copy.denialReason) checkText(terms.copy.denialReason, ["copy", "denialReason"]);
+  if (terms.clarification.denialReason) checkText(terms.clarification.denialReason, ["clarification", "denialReason"]);
 });
 export type EngineProceduralNoticeTerms = z.infer<typeof engineProceduralNoticeTermsSchema>;
 
@@ -276,6 +284,9 @@ export const engineProceduralNoticeCommandSchema = z.object({
 }).strict().superRefine((command, context) => {
   if (command.action === "upsert" && !command.notice) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Upserting a procedural notice requires typed player-safe terms." });
+  }
+  if (command.action !== "upsert" && command.notice) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Only upserting a procedural notice may supply notice terms." });
   }
   if (command.action !== "upsert" && !command.noticeId) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["noticeId"], message: "A procedural notice action requires a notice id." });

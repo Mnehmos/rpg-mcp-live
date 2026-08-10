@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { LanternDungeonMaster } from "./engine-dm.js";
+import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
 import {
   createInitialCampaign,
   normalizeCampaignState,
@@ -46,18 +46,39 @@ function apply(state: LanternCampaignState, command: EngineCommand, clientComman
 
 describe("procedural notice delivery", () => {
   it("rejects restricted records when a model tries to put them in player-safe terms", () => {
-    const command = {
-      kind: "procedural_notice" as const,
-      action: "upsert" as const,
-      notice: {
-        ...noticeInput,
-        terms: {
-          ...noticeInput.terms,
-          excludedEvidence: ["Titus's sealed statement"],
+    for (const field of ["authorizedAction", "actorScope", "responseWindow", "attendance", "custodyEffect", "nextChange"] as const) {
+      const command = {
+        kind: "procedural_notice" as const,
+        action: "upsert" as const,
+        notice: {
+          ...noticeInput,
+          terms: { ...noticeInput.terms, [field]: "Titus's sealed statement" },
         },
-      },
-    };
-    expect(engineCommandSchema.safeParse(command).success).toBe(false);
+      };
+      expect(engineCommandSchema.safeParse(command).success).toBe(false);
+    }
+    expect(engineCommandSchema.safeParse({
+      kind: "procedural_notice",
+      action: "upsert",
+      notice: { ...noticeInput, terms: { ...noticeInput.terms, excludedEvidence: ["Titus's sealed statement"] } },
+    }).success).toBe(false);
+  });
+
+  it("does not send sealed terms to the narrator and rejects terms on transition actions", () => {
+    const state = createInitialCampaign("notice-context-account", "notice-context-actor");
+    const sealed = apply(state, { kind: "procedural_notice", action: "upsert", notice: noticeInput });
+    const context = contextFor(sealed.state);
+    const dmContext = buildDmContext(sealed.state, context, "I wait for delivery.", "player_turn") as { proceduralNotices: unknown[] };
+    expect(dmContext.proceduralNotices[0]).toMatchObject({
+      status: "sealed",
+      terms: null,
+    });
+    expect(engineCommandSchema.safeParse({
+      kind: "procedural_notice",
+      action: "authorize",
+      noticeId: noticeInput.id,
+      notice: noticeInput,
+    }).success).toBe(false);
   });
 
   it("withholds sealed terms, delivers them once, and removes stale opening suggestions", () => {
