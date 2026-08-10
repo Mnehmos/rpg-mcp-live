@@ -3,8 +3,10 @@ import {
   activeCampaignStorageKey,
   campaignSessionUrl,
   isCurrentCampaignSelection,
+  isConfirmedMissingCommand,
   isCurrentRequest,
   nextRequestSequence,
+  pendingCommandStorageKey,
   retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
@@ -13,6 +15,7 @@ describe("authenticated campaign resume", () => {
   it("keeps the active campaign storage isolated per account", () => {
     expect(activeCampaignStorageKey("user_123")).toBe("lantern.activeCampaignId.user_123");
     expect(activeCampaignStorageKey("")).toBe("lantern.activeCampaignId.anonymous");
+    expect(pendingCommandStorageKey("user_123")).toBe("lantern.pendingCommand.user_123");
   });
 
   it("requests the persisted campaign without allowing URL injection", () => {
@@ -43,6 +46,8 @@ describe("authenticated campaign resume", () => {
     expect(isCurrentCampaignSelection("campaign-a", "campaign-a")).toBe(true);
     expect(isCurrentCampaignSelection("campaign-a", "campaign-b")).toBe(false);
     expect(isCurrentCampaignSelection("", "")).toBe(false);
+    expect(isConfirmedMissingCommand(404, "command_not_found")).toBe(true);
+    expect(isConfirmedMissingCommand(404, "temporary_error")).toBe(false);
   });
 });
 
