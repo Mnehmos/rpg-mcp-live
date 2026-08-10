@@ -8,6 +8,7 @@ import {
   isCurrentCampaignSelection,
   isConfirmedMissingCommand,
   isCurrentRequest,
+  isPendingCommandForCampaign,
   nextRequestSequence,
   pendingCommandStorageKey,
   retryDelayMs,
@@ -114,6 +115,13 @@ import { isStaleCommandStatus } from "./command-status.js";
     } catch (_error) {
       // Storage can be disabled; the in-memory reconciliation path still works.
     }
+  }
+
+  function clearPendingCommandForCampaign(campaignId) {
+    var pendingCommand = readPendingCommand();
+    if (!isPendingCommandForCampaign(pendingCommand, campaignId)) return;
+    clearPendingCommand(pendingCommand.clientCommandId);
+    state.pendingPlayerText = null;
   }
 
   function waitForCampaignRetry(attempt) {
@@ -2390,6 +2398,7 @@ import { isStaleCommandStatus } from "./command-status.js";
         return refreshSession();
       }
       if (!result.response.ok) throw new Error(result.data.error || "The campaign could not be deleted.");
+      clearPendingCommandForCampaign(campaignId);
       state.campaigns = Array.isArray(result.data.campaigns) ? result.data.campaigns : state.campaigns.filter(function (candidate) { return candidate.id !== campaignId; });
       if (result.data.subscription) state.subscription = result.data.subscription;
       var deletingActive = state.session && state.session.id === campaignId;

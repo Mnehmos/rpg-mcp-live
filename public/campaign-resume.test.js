@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeCampaignStorageKey,
   campaignSessionUrl,
+  isPendingCommandForCampaign,
   isCurrentCampaignSelection,
   isConfirmedMissingCommand,
   isCurrentRequest,
@@ -21,6 +22,14 @@ describe("authenticated campaign resume", () => {
   it("requests the persisted campaign without allowing URL injection", () => {
     expect(campaignSessionUrl("campaign/one")).toBe("/api/session?campaignId=campaign%2Fone");
     expect(campaignSessionUrl(" ")).toBe("/api/session");
+  });
+
+  it("identifies a pending turn that must be cleared when its campaign is deleted", () => {
+    const pending = { campaignId: "campaign-a", clientCommandId: "command-1", playerText: "Wait." };
+    expect(isPendingCommandForCampaign(pending, "campaign-a")).toBe(true);
+    expect(isPendingCommandForCampaign(pending, "campaign-b")).toBe(false);
+    expect(isPendingCommandForCampaign({ campaignId: "campaign-a" }, "campaign-a")).toBe(false);
+    expect(isPendingCommandForCampaign(null, "campaign-a")).toBe(false);
   });
 
   it("retries transient campaign-load failures but not permanent selection errors", () => {
