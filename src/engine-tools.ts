@@ -781,7 +781,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "npc_tick",
-    "Run exactly one bounded NPC agency step at an explicit authoritative trigger. The engine computes finite legal offers, filters actor knowledge, applies deterministic fallback, and commits at most one action.",
+    "Run exactly one bounded off-screen NPC agency step at an explicit authoritative trigger. The engine computes finite legal offers, filters actor knowledge, applies deterministic fallback, and commits at most one action. Do not use this to portray an NPC who is present in the current DM scene.",
     {
       type: "object",
       properties: {
@@ -789,7 +789,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         triggerId: { type: "string", description: "Stable trigger identifier; replaying it cannot repeat the action." },
         npcId: { type: "string", description: "Optional agency-enabled NPC; omitted selects the first eligible actor." },
         offerId: { type: "string", enum: ["move_to_schedule", "report_crime", "rest", "trade_resource", "no_op"], description: "Optional bounded offer selection. Omit to use deterministic policy fallback." },
-        provider: { type: "string", enum: ["deterministic", "openrouter"], description: "Deterministic policy is the default. OpenRouter is guarded and falls back without a network call in this first slice." },
+        provider: { type: "string", enum: ["deterministic", "openrouter"], description: "Deterministic policy is the default. OpenRouter is reserved for an independently triggered server boundary and selects only from the finite offer menu." },
       },
       required: ["trigger", "triggerId"],
       additionalProperties: false,

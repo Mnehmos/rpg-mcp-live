@@ -703,6 +703,17 @@ export const engineNpcAgencyActionSchema = z.enum([
 ]);
 export type EngineNpcAgencyAction = z.infer<typeof engineNpcAgencyActionSchema>;
 
+/**
+ * The complete authority granted to an NPC-choice model. The action ID must
+ * still be present in the engine-derived offer menu at commit time; rationale
+ * is audit prose only and never becomes a command or campaign fact.
+ */
+export const engineNpcAgencyChoiceSchema = z.object({
+  offerId: engineNpcAgencyActionSchema,
+  rationale: z.string().trim().min(1).max(240),
+}).strict();
+export type EngineNpcAgencyChoice = z.infer<typeof engineNpcAgencyChoiceSchema>;
+
 export const engineNpcTickCommandSchema = z.object({
   kind: z.literal("npc_tick"),
   trigger: z.enum(["time_advance", "scene_enter", "scene_exit", "witnessed_event", "quest_clock", "combat_turn", "operator_batch"]),
@@ -2316,6 +2327,8 @@ export interface EngineNpcInvocation {
   npcId: string;
   provider: "deterministic" | "openrouter";
   model: string;
+  providerRequestId: string | null;
+  status: "success" | "provider_error" | "timeout_before_output" | "interrupted_after_output" | "invalid_response";
   inputTokens: number;
   cacheTokens: number;
   reasoningTokens: number;
@@ -2325,6 +2338,7 @@ export interface EngineNpcInvocation {
   outcome: "selected" | "fallback" | "circuit_open" | "rejected";
   fallback: boolean;
   selectedOfferId: EngineNpcAgencyAction | null;
+  rationale: string | null;
   budget: {
     maxInputTokens: number;
     maxOutputTokens: number;
@@ -2333,6 +2347,23 @@ export interface EngineNpcInvocation {
     maxInvocationsPerDay: number;
   };
   createdAt: string;
+}
+
+/** Server-only evidence supplied after a bounded provider request. */
+export interface EngineNpcProviderSelection {
+  triggerId: string;
+  npcId: string;
+  selectedOfferId: EngineNpcAgencyAction | null;
+  rationale: string | null;
+  model: string;
+  providerRequestId: string | null;
+  status: EngineNpcInvocation["status"];
+  inputTokens: number;
+  cacheTokens: number;
+  reasoningTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  latencyMs: number;
 }
 
 export interface EngineNpcAgencyState {

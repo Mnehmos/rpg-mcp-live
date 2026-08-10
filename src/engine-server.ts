@@ -619,7 +619,7 @@ app.post("/v1/campaigns/:campaignId/orchestration/decisions", (request, response
   }
 });
 
-app.post("/v1/campaigns/:campaignId/tool-calls", (request, response) => {
+app.post("/v1/campaigns/:campaignId/tool-calls", async (request, response) => {
   try {
     const context = createRequestContext(request, request.params.campaignId);
     const parsed = engineToolCallRequestSchema.safeParse(request.body);
@@ -663,16 +663,25 @@ app.post("/v1/campaigns/:campaignId/tool-calls", (request, response) => {
       return;
     }
     assertCampaignUsesActivePack(state);
-    const result = store.executeCommand({
-      context,
-      clientCommandId: parsed.data.clientCommandId,
-      expectedCampaignVersion: parsed.data.expectedCampaignVersion,
-      command,
-      tool: parsed.data.toolName,
-      playerText: parsed.data.playerText,
-      resolve: (current) =>
-        resolveEngineCommand(current, context, parsed.data.clientCommandId, command, parsed.data.toolName, parsed.data.playerText),
-    });
+    const result = command.kind === "npc_tick" && command.provider === "openrouter"
+      ? await dungeonMaster.resolveNpcAgencyTick(
+          context,
+          state,
+          parsed.data.clientCommandId,
+          parsed.data.expectedCampaignVersion,
+          command,
+          parsed.data.toolName,
+        )
+      : store.executeCommand({
+          context,
+          clientCommandId: parsed.data.clientCommandId,
+          expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+          command,
+          tool: parsed.data.toolName,
+          playerText: parsed.data.playerText,
+          resolve: (current) =>
+            resolveEngineCommand(current, context, parsed.data.clientCommandId, command, parsed.data.toolName, parsed.data.playerText),
+        });
     const publicResult = projectResolutionForActor(result, context.actorId);
     response.json({
       tool: parsed.data.toolName,
