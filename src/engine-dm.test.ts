@@ -1430,4 +1430,66 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(result.narration.text).toContain("arena waits");
     store.close();
   });
+
+  it("does not spend gameplay-loop rounds on capability-only loads", async () => {
+    const fetchMock = vi.fn();
+    for (let index = 0; index < 8; index += 1) {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: `tool-load-${index}`,
+              type: "function",
+              function: { name: "capability_load", arguments: JSON.stringify({ familyId: "combat" }) },
+            }],
+          } }],
+        }),
+      });
+    }
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: {
+          role: "assistant",
+          content: JSON.stringify({ text: "The family is ready.", proposedFacts: [], suggestedActions: [] }),
+        } }],
+      }),
+    });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-capability-budget", "actor-capability-budget");
+    state.phase = "sandbox";
+    state.character.created = true;
+    store.createCampaign({
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I prepare for the current fight.",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(9);
+    expect(result.narration.text).toContain("family is ready");
+    store.close();
+  });
 });

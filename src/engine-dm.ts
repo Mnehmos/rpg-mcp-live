@@ -616,6 +616,13 @@ export class LanternDungeonMaster {
           tool_call_id: toolCall.id,
         });
       }
+      // Loading a reviewed schema family is orchestration, not a gameplay
+      // action. It should not consume one of the eight authoritative tool
+      // rounds; otherwise a late family load could force an unnecessary
+      // fallback before the requested tool is even visible.
+      if (!repairPending && toolCalls.length > 0 && toolCalls.every((toolCall) => toolCall.function.name === "capability_load")) {
+        toolLoopTurns -= 1;
+      }
     }
 
     if (stagedEffects.length > 0) return { narration: null, stagedEffects };
