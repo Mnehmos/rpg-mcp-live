@@ -117,6 +117,7 @@ import type {
   EngineImprovEffect,
   EngineInventoryItem,
   EngineInventoryItemView,
+  EngineItemDefinition,
   EngineItemProvenance,
   EngineWeaponAttack,
   EngineMerchant,
@@ -1681,6 +1682,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   }
   next.situation = normalizeSituation((next as LanternCampaignState & { situation?: unknown }).situation, next);
   next.character = recalculateProgressionOnLoad(normalizeCharacter(next.character));
+  reconcileWorldObjectInventory(next);
   next.combat = normalizeCombat(next.combat, next.actorId, next.character.speed);
   next.quest = normalizeQuest(next.quest ?? ({} as EngineQuest));
   if (!Array.isArray(next.quests) || !next.quests.length) next.quests = [next.quest];
@@ -5662,6 +5664,7 @@ function resolveWorldObjectAffordance(
   const next = cloneCampaign(state);
   const nextWorld = next.worldContext;
   if (!nextWorld) return rejection(state, tool, "world_context_required", "There is no authoritative world context for that object interaction.");
+  const beforeInventory = JSON.parse(JSON.stringify(next.character.inventory)) as EngineInventoryItem[];
   const changes: WorldContextStateChange[] = [];
   const now = new Date().toISOString();
   const setObject = (objectId: string, patch: Partial<EngineWorldObjectInstance>): EngineWorldObjectInstance | null => {
@@ -5852,6 +5855,17 @@ function resolveWorldObjectAffordance(
     }
     case "give":
       return rejection(state, tool, "unsupported_affordance", "Giving a world object requires an actor or merchant inventory transfer; this first slice does not invent a second transfer path.");
+  }
+  const transitionedObject = nextWorld.objects.find((candidate) => candidate.id === object.id);
+  if (transitionedObject && transitionedObject.ownerRef.kind === "actor" && transitionedObject.ownerRef.id === context.actorId) {
+    const inventoryIssue = syncWorldObjectInventory(next, transitionedObject);
+    if (inventoryIssue) return rejection(state, tool, inventoryIssue.code, inventoryIssue.message, { objectId: object.id });
+  }
+  if (command.affordance === "drop" || transitionedObject?.state === "destroyed") {
+    next.character.inventory = next.character.inventory.filter((item) => item.id !== object.id);
+  }
+  if (JSON.stringify(beforeInventory) !== JSON.stringify(next.character.inventory)) {
+    changes.push({ path: "/character/inventory", before: beforeInventory, after: next.character.inventory });
   }
   if (next.situation) {
     const beforeSituation = next.situation;
@@ -12792,6 +12806,63 @@ function withActorOwnership(
     slot: undefined,
     provenance,
   };
+}
+
+function worldObjectInventoryKind(object: EngineWorldObjectInstance): EngineItemDefinition["kind"] {
+  const tags = new Set(object.definition.tags.map((tag) => tag.toLocaleLowerCase("en-US")));
+  if (tags.has("weapon")) return "weapon";
+  if (tags.has("armor")) return "armor";
+  if (tags.has("consumable") || tags.has("food") || tags.has("potion")) return "consumable";
+  if (tags.has("ammunition") || tags.has("ammo")) return "ammunition";
+  if (tags.has("tool") || tags.has("tools")) return "tool";
+  if (tags.has("treasure") || tags.has("valuable")) return "treasure";
+  return "misc";
+}
+
+function worldObjectInventoryItem(object: EngineWorldObjectInstance, inventoryOwnerId: string): EngineInventoryItem {
+  const authoredDefinition: EngineItemDefinition = {
+    name: object.definition.name,
+    kind: worldObjectInventoryKind(object),
+    weight: object.definition.weight,
+    description: object.definition.description,
+    properties: [...object.definition.tags],
+    mechanicsTier: 0,
+  };
+  return {
+    id: object.id,
+    quantity: 1,
+    authoredDefinition,
+    ownerRef: { kind: "actor", id: inventoryOwnerId },
+    provenance: { kind: "authored", sourceId: object.definition.sourceRef },
+  };
+}
+
+function syncWorldObjectInventory(
+  state: LanternCampaignState,
+  object: EngineWorldObjectInstance,
+): InventoryIssue | null {
+  if (object.ownerRef.kind !== "actor") return null;
+  const existing = state.character.inventory.find((item) => item.id === object.id);
+  if (existing) {
+    existing.ownerRef = { kind: "actor", id: state.character.id };
+    existing.containerRef = undefined;
+    existing.equipped = object.state === "equipped";
+    if (!existing.equipped) existing.slot = undefined;
+  } else {
+    state.character.inventory.push(worldObjectInventoryItem(object, state.character.id));
+  }
+  return inventoryCapacityIssue(state.character.inventory, state.character);
+}
+
+function reconcileWorldObjectInventory(state: LanternCampaignState): void {
+  const world = state.worldContext;
+  if (!world) return;
+  for (const object of world.objects) {
+    if (object.ownerRef.kind !== "actor" || object.ownerRef.id !== state.actorId) continue;
+    if (object.state !== "carried" && object.state !== "equipped") continue;
+    if (state.character.inventory.some((item) => item.id === object.id)) continue;
+    state.character.inventory.push(worldObjectInventoryItem(object, state.character.id));
+  }
 }
 
 function isContainerItem(item: EngineInventoryItemView): boolean {

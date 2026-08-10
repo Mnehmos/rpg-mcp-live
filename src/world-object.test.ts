@@ -10,9 +10,10 @@ import {
   type RequestContext,
 } from "./engine-contracts.js";
 import { compileAtomicTurnResolution } from "./engine-turn-plan.js";
-import { createInitialCampaign, resolveEngineCommand } from "./engine-domain.js";
+import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "./engine-domain.js";
 import { LanternEngineStore, EngineVersionConflictError } from "./engine-store.js";
 import { commandForTool, parseToolArguments } from "./engine-tools.js";
+import { materializeInventoryItem } from "./open5e-rules.js";
 import { ruinedGatehouseWorldContextCommand } from "./world-object-fixture.js";
 
 function context(state: LanternCampaignState): RequestContext {
@@ -177,6 +178,23 @@ describe("systemic world-object affordances", () => {
     expect(taken.accepted).toBe(true);
     const clue = taken.state.worldContext?.objects.find((object) => object.id === "gatehouse-clue");
     expect(clue).toMatchObject({ state: "carried", ownerRef: { kind: "actor", id: taken.state.actorId }, locationRef: null });
+    const carriedClue = taken.state.character.inventory.find((item) => item.id === "gatehouse-clue");
+    expect(carriedClue).toMatchObject({
+      id: "gatehouse-clue",
+      quantity: 1,
+      ownerRef: { kind: "actor", id: taken.state.character.id },
+      provenance: { kind: "authored", sourceId: "fixture:ruined-gatehouse:important-clue" },
+      authoredDefinition: { name: "Important gatehouse clue", kind: "misc" },
+    });
+    expect(carriedClue ? materializeInventoryItem(carriedClue) : null).toMatchObject({
+      id: "gatehouse-clue",
+      name: "Important gatehouse clue",
+      definitionSource: "authored",
+    });
+    const stalePersisted = JSON.parse(JSON.stringify(taken.state)) as LanternCampaignState;
+    stalePersisted.character.inventory = [];
+    const refreshed = normalizeCampaignState(stalePersisted);
+    expect(refreshed.character.inventory.some((item) => item.id === "gatehouse-clue")).toBe(true);
     const dropped = interaction(taken.state, "gatehouse-clue", "drop", { destinationId: "gatehouse-threshold" });
     expect(dropped.accepted).toBe(true);
     expect(dropped.state.worldContext?.objects.find((object) => object.id === "gatehouse-clue")).toMatchObject({
@@ -184,6 +202,7 @@ describe("systemic world-object affordances", () => {
       ownerRef: { kind: "world", id: dropped.state.worldContext?.id },
       locationRef: "gatehouse-threshold",
     });
+    expect(dropped.state.character.inventory.some((item) => item.id === "gatehouse-clue")).toBe(false);
 
     const lossCommand = {
       ...ruinedGatehouseWorldContextCommand(),
@@ -242,6 +261,37 @@ describe("systemic world-object affordances", () => {
     expect(replayAfterRestart.replayed).toBe(true);
     expect(reopened.listCampaignEvents(request)).toHaveLength(1);
     reopened.close();
+  });
+
+  it("replays an acquired world object without duplicating its inventory record", () => {
+    const state = seededState();
+    const directory = mkdtempSync(join(tmpdir(), "lantern-world-object-inventory-"));
+    const store = new LanternEngineStore(join(directory, "engine.db"));
+    const request = context(state);
+    store.createCampaign(request, state);
+    const command = engineCommandSchema.parse({
+      kind: "interact",
+      targetId: "gatehouse-clue",
+      affordance: "take",
+      goal: "Take the clue.",
+    });
+    const clientCommandId = randomUUID();
+    const execute = (expectedCampaignVersion: number) => store.executeCommand({
+      context: request,
+      clientCommandId,
+      expectedCampaignVersion,
+      command,
+      tool: "interact",
+      resolve: (current) => resolveEngineCommand(current, request, clientCommandId, command, "interact"),
+    });
+    const committed = execute(state.version);
+    expect(committed.accepted).toBe(true);
+    expect(committed.state.character.inventory.filter((item) => item.id === "gatehouse-clue")).toHaveLength(1);
+    const replay = execute(state.version);
+    expect(replay.replayed).toBe(true);
+    expect(replay.state.character.inventory.filter((item) => item.id === "gatehouse-clue")).toHaveLength(1);
+    expect(store.listCampaignEvents(request)).toHaveLength(1);
+    store.close();
   });
 
   it("keeps inspect read-only and retains legacy narration-only compatibility", () => {
