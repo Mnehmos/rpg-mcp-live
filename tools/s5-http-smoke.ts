@@ -136,6 +136,12 @@ try {
     JSON.stringify(createdCampaign.session.contentPolicy) === JSON.stringify(catalog.defaultPolicy),
     "Campaign did not persist the catalog-selected content policy."
   );
+  const resumedCampaign = await requestJson<{
+    session: { id: string; version: number } | null;
+    activeCampaignId: string | null;
+  }>(`${webBaseUrl}/api/session?campaignId=${encodeURIComponent(createdCampaign.session.id)}`);
+  assert(resumedCampaign.session?.id === createdCampaign.session.id, "Authenticated campaign resume did not restore the requested campaign.");
+  assert(resumedCampaign.activeCampaignId === createdCampaign.session.id, "Campaign resume did not report the active campaign identity.");
   const createdCharacter = await requestJson<{
     accepted: boolean;
     code: string | null;

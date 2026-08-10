@@ -3,6 +3,11 @@ import {
   uniqueAbilityScoreOptions,
 } from "./ability-score-pool.js";
 import {
+  activeCampaignStorageKey,
+  campaignSessionUrl,
+  shouldRetryCampaignLoad,
+} from "./campaign-resume.js";
+import {
   composerSubmission,
   settleComposer,
   updateComposerCounter,
@@ -12,7 +17,7 @@ import { isStaleCommandStatus } from "./command-status.js";
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [] };
+  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0 };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -28,6 +33,44 @@ import { isStaleCommandStatus } from "./command-status.js";
     if (!statusNode) return;
     statusNode.textContent = message;
     statusNode.dataset.state = status || "";
+  }
+
+  function currentUserId() {
+    if (state.clerk && state.clerk.user && state.clerk.user.id) return state.clerk.user.id;
+    if (state.config && state.config.devAuthBypass) return "dev";
+    return "";
+  }
+
+  function readActiveCampaignId() {
+    try {
+      return window.localStorage.getItem(activeCampaignStorageKey(currentUserId())) || "";
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function writeActiveCampaignId(campaignId) {
+    var normalizedCampaignId = String(campaignId || "").trim();
+    if (!normalizedCampaignId) return;
+    try {
+      window.localStorage.setItem(activeCampaignStorageKey(currentUserId()), normalizedCampaignId);
+    } catch (_error) {
+      // Storage can be disabled by privacy settings; session hydration still works.
+    }
+  }
+
+  function clearActiveCampaignId() {
+    try {
+      window.localStorage.removeItem(activeCampaignStorageKey(currentUserId()));
+    } catch (_error) {
+      // Storage can be disabled by privacy settings; session hydration still works.
+    }
+  }
+
+  function waitForCampaignRetry(attempt) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, 400 * attempt);
+    });
   }
 
   function requestJson(url, options) {
@@ -1331,6 +1374,7 @@ import { isStaleCommandStatus } from "./command-status.js";
     if (payload && payload.state) state.engineState = payload.state;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "subscription")) state.subscription = payload.subscription;
     state.session = session || null;
+    if (session && session.id) writeActiveCampaignId(session.id);
     if (previousSessionId !== (state.session && state.session.id)) {
       state.characterOptions = null;
       state.characterOptionsCampaignId = null;
@@ -1614,7 +1658,11 @@ import { isStaleCommandStatus } from "./command-status.js";
   }
 
   function refreshSession() {
-    return requestJson("/api/session").then(function (result) {
+    var sequence = state.sessionRefreshSequence + 1;
+    state.sessionRefreshSequence = sequence;
+    var preferredCampaignId = readActiveCampaignId();
+    function applySessionResult(result) {
+      if (sequence !== state.sessionRefreshSequence) return result.data;
       if (result.response.status === 401) {
         state.session = null;
         state.engineState = null;
@@ -1624,6 +1672,7 @@ import { isStaleCommandStatus } from "./command-status.js";
         state.characterOptionsLoading = null;
         state.setupRequired = false;
         state.subscription = null;
+        clearActiveCampaignId();
         renderSession({ session: null, campaigns: [], setupRequired: false });
         setStatus("Sign in to begin your campaign", "auth");
         return;
@@ -1633,8 +1682,19 @@ import { isStaleCommandStatus } from "./command-status.js";
       if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
+      if (!result.data.session && Array.isArray(result.data.campaigns) && result.data.campaigns.length > 0) {
+        return loadCampaign(result.data.campaigns[0].id).then(function () { return result.data; });
+      }
       return result.data;
+    }
+    return requestJson(campaignSessionUrl(preferredCampaignId)).then(function (result) {
+      if (result.response.status === 404 && preferredCampaignId) {
+        clearActiveCampaignId();
+        return requestJson("/api/session").then(applySessionResult);
+      }
+      return applySessionResult(result);
     }).catch(function (error) {
+      if (sequence !== state.sessionRefreshSequence) return null;
       if (!state.session) renderSession({ session: null, campaigns: state.campaigns, setupRequired: false });
       setStatus("The table needs a moment", "error");
       showToast(error.message);
@@ -2106,13 +2166,39 @@ import { isStaleCommandStatus } from "./command-status.js";
   }
 
   function loadCampaign(campaignId) {
-    return requestJson("/api/campaigns/" + encodeURIComponent(campaignId)).then(function (result) {
-      if (!result.response.ok) throw new Error(result.data.error || "That campaign could not be opened.");
-      state.managerOpen = false;
+    var attempt = 0;
+    function requestCampaign() {
+      attempt += 1;
+      return requestJson("/api/campaigns/" + encodeURIComponent(campaignId)).then(function (result) {
+        if (!result.response.ok) {
+          if (shouldRetryCampaignLoad(result.response.status) && attempt < 3) {
+            setStatus("Reconnecting to your campaign", "thinking");
+            return waitForCampaignRetry(attempt).then(requestCampaign);
+          }
+          throw new Error(result.data.error || "That campaign could not be opened.");
+        }
+        writeActiveCampaignId(campaignId);
+        state.managerOpen = false;
+        state.createMode = false;
+        renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription });
+        setStatus("Campaign loaded", "ready");
+        return true;
+      }, function (error) {
+        if (attempt < 3) {
+          setStatus("Reconnecting to your campaign", "thinking");
+          return waitForCampaignRetry(attempt).then(requestCampaign);
+        }
+        throw error;
+      });
+    }
+    return requestCampaign().catch(function (error) {
+      state.managerOpen = true;
       state.createMode = false;
-      renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription });
-      setStatus("Campaign loaded", "ready");
-    }).catch(function (error) { showToast(error.message); });
+      renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription });
+      setStatus("Campaign could not be opened. Try again.", "error");
+      showToast(error.message + " Select Open to retry.");
+      return false;
+    });
   }
 
   function openDeleteCampaign(campaignId) {
@@ -2176,6 +2262,7 @@ import { isStaleCommandStatus } from "./command-status.js";
       var deletingActive = state.session && state.session.id === campaignId;
       closeDeleteCampaign();
       if (deletingActive) {
+        clearActiveCampaignId();
         state.session = null;
         state.engineState = null;
         state.managerOpen = true;
