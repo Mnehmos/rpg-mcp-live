@@ -6,8 +6,10 @@ import {
   activeCampaignStorageKey,
   campaignSessionUrl,
   isCurrentCampaignSelection,
+  isConfirmedMissingCommand,
   isCurrentRequest,
   nextRequestSequence,
+  pendingCommandStorageKey,
   retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
@@ -68,6 +70,49 @@ import { isStaleCommandStatus } from "./command-status.js";
       window.localStorage.removeItem(activeCampaignStorageKey(currentUserId()));
     } catch (_error) {
       // Storage can be disabled by privacy settings; session hydration still works.
+    }
+  }
+
+  function readPendingCommand() {
+    try {
+      var raw = window.localStorage.getItem(pendingCommandStorageKey(currentUserId()));
+      if (!raw) return null;
+      var record = JSON.parse(raw);
+      if (!record || !record.campaignId || !record.clientCommandId) {
+        window.localStorage.removeItem(pendingCommandStorageKey(currentUserId()));
+        return null;
+      }
+      return {
+        campaignId: String(record.campaignId),
+        clientCommandId: String(record.clientCommandId),
+        playerText: String(record.playerText || "")
+      };
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function writePendingCommand(record) {
+    if (!record || !record.campaignId || !record.clientCommandId) return;
+    try {
+      window.localStorage.setItem(pendingCommandStorageKey(currentUserId()), JSON.stringify({
+        campaignId: String(record.campaignId),
+        clientCommandId: String(record.clientCommandId),
+        playerText: String(record.playerText || "")
+      }));
+    } catch (_error) {
+      // Storage can be disabled; the in-memory reconciliation path still works.
+    }
+  }
+
+  function clearPendingCommand(clientCommandId) {
+    try {
+      var record = readPendingCommand();
+      if (!record || !clientCommandId || record.clientCommandId === clientCommandId) {
+        window.localStorage.removeItem(pendingCommandStorageKey(currentUserId()));
+      }
+    } catch (_error) {
+      // Storage can be disabled; the in-memory reconciliation path still works.
     }
   }
 
@@ -1664,7 +1709,15 @@ import { isStaleCommandStatus } from "./command-status.js";
   function refreshSession() {
     var sequence = nextRequestSequence(state.sessionRefreshSequence);
     state.sessionRefreshSequence = sequence;
-    var preferredCampaignId = readActiveCampaignId();
+    var pendingCommand = readPendingCommand();
+    var preferredCampaignId = pendingCommand ? pendingCommand.campaignId : readActiveCampaignId();
+    function resumePendingCommand() {
+      var pending = readPendingCommand();
+      if (!pending || state.pendingPlayerText || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
+      state.pendingPlayerText = pending.playerText || "Your submitted action";
+      renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+      return reconcilePendingCommand(pending.campaignId, pending.clientCommandId);
+    }
     function applySessionResult(result) {
       if (!result) return null;
       if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return result.data;
@@ -1688,9 +1741,14 @@ import { isStaleCommandStatus } from "./command-status.js";
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
       if (!result.data.session && Array.isArray(result.data.campaigns) && result.data.campaigns.length > 0) {
-        return loadCampaign(result.data.campaigns[0].id).then(function () { return result.data; });
+        var campaignToLoad = pendingCommand && result.data.campaigns.some(function (campaign) { return campaign.id === pendingCommand.campaignId; })
+          ? pendingCommand.campaignId
+          : result.data.campaigns[0].id;
+        return loadCampaign(campaignToLoad).then(function () {
+          return resumePendingCommand().then(function () { return result.data; });
+        });
       }
-      return result.data;
+      return resumePendingCommand().then(function () { return result.data; });
     }
     function requestSession(url, attempt) {
       if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return Promise.resolve(null);
@@ -1719,6 +1777,7 @@ import { isStaleCommandStatus } from "./command-status.js";
       if (!result) return null;
       if (result.response.status === 404 && preferredCampaignId) {
         if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
+        if (pendingCommand && pendingCommand.campaignId === preferredCampaignId) clearPendingCommand(pendingCommand.clientCommandId);
         clearActiveCampaignId();
         return requestSession("/api/session").then(applySessionResult);
       }
@@ -1757,6 +1816,9 @@ import { isStaleCommandStatus } from "./command-status.js";
       return requestJson(
         "/api/campaigns/" + encodeURIComponent(campaignId) + "/commands/" + encodeURIComponent(clientCommandId)
       ).then(function (result) {
+        if (isConfirmedMissingCommand(result.response.status, result.data.code)) {
+          return { resolved: false, confirmedMissing: true };
+        }
         if (result.response.ok && result.data.status === "resolved" && result.data.result) {
           if (isStaleCommandStatus(result.data)) {
             return refreshSession().then(function (current) {
@@ -1782,10 +1844,19 @@ import { isStaleCommandStatus } from "./command-status.js";
     setStatus("Reconnecting to the committed turn", "thinking");
     return poll().then(function (outcome) {
       if (outcome.resolved) {
+        clearPendingCommand(clientCommandId);
         state.pendingPlayerText = null;
         renderSession(outcome.result);
         setStatus("The world answers", "ready");
         return true;
+      }
+      if (outcome.confirmedMissing) {
+        clearPendingCommand(clientCommandId);
+        state.pendingPlayerText = null;
+        renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        setStatus("That turn was not committed; you can try again.", "ready");
+        showToast("The server confirmed that turn was not committed.");
+        return false;
       }
       return refreshSession().then(function () {
         setStatus(
@@ -1817,13 +1888,14 @@ import { isStaleCommandStatus } from "./command-status.js";
       return Promise.resolve(false);
     }
 
-    state.pendingPlayerText = command.playerText || actionLabel(command.action);
-    renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-    setStatus("The DM is thinking", "thinking");
     var campaignId = state.session.id;
     var campaignPath = encodeURIComponent(campaignId);
     var commandId = clientCommandId || newCommandId();
     var expectedCampaignVersion = state.session.version;
+    state.pendingPlayerText = command.playerText || actionLabel(command.action);
+    writePendingCommand({ campaignId: campaignId, clientCommandId: commandId, playerText: state.pendingPlayerText });
+    renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+    setStatus("The DM is thinking", "thinking");
     return requestJson("/api/campaigns/" + campaignPath + "/commands", {
       method: "POST",
       body: JSON.stringify(Object.assign({
@@ -1832,11 +1904,13 @@ import { isStaleCommandStatus } from "./command-status.js";
       }, command))
     }).then(function (result) {
       if (result.response.status === 401) {
+        clearPendingCommand(commandId);
         state.pendingPlayerText = null;
         openAuth();
         return false;
       }
       if (result.response.status === 409 && result.data.code === "stale_version" && result.data.session) {
+        clearPendingCommand(commandId);
         state.pendingPlayerText = null;
         renderSession({ session: result.data.session, subscription: state.subscription });
         setStatus("The table moved; your view is current", "ready");
@@ -1853,12 +1927,14 @@ import { isStaleCommandStatus } from "./command-status.js";
         commandError.reconcile = false;
         throw commandError;
       }
+      clearPendingCommand(commandId);
       state.pendingPlayerText = null;
       renderSession(result.data);
       setStatus("The world answers", "ready");
       return true;
     }).catch(function (error) {
       if (error && error.reconcile === false) {
+        clearPendingCommand(commandId);
         state.pendingPlayerText = null;
         renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
         setStatus("The table needs a moment", "error");
@@ -1867,10 +1943,11 @@ import { isStaleCommandStatus } from "./command-status.js";
       }
       return reconcilePendingCommand(campaignId, commandId);
     }).catch(function (error) {
-      state.pendingPlayerText = null;
+      var pending = readPendingCommand();
+      state.pendingPlayerText = pending && pending.clientCommandId === commandId ? pending.playerText : null;
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("The table needs a moment", "error");
-      showToast(error.message);
+      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      showToast(error.message || "The turn is still reconciling.");
       return false;
     });
   }
@@ -2196,6 +2273,16 @@ import { isStaleCommandStatus } from "./command-status.js";
   }
 
   function loadCampaign(campaignId) {
+    var pendingCommand = readPendingCommand();
+    if (pendingCommand && pendingCommand.campaignId !== campaignId) {
+      showToast("Your submitted turn is still reconciling. Keep this campaign open.");
+      if (!state.pendingPlayerText) {
+        state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
+        renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        reconcilePendingCommand(pendingCommand.campaignId, pendingCommand.clientCommandId);
+      }
+      return Promise.resolve(false);
+    }
     // A new explicit selection supersedes any refresh/retry chain for the prior campaign.
     state.sessionRefreshSequence = nextRequestSequence(state.sessionRefreshSequence);
     var loadSequence = state.campaignLoadSequence + 1;

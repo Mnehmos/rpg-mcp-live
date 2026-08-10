@@ -3,6 +3,11 @@ export function activeCampaignStorageKey(userId) {
   return `lantern.activeCampaignId.${normalizedUserId || "anonymous"}`;
 }
 
+export function pendingCommandStorageKey(userId) {
+  const normalizedUserId = String(userId || "").trim();
+  return `lantern.pendingCommand.${normalizedUserId || "anonymous"}`;
+}
+
 export function campaignSessionUrl(campaignId) {
   const normalizedCampaignId = String(campaignId || "").trim();
   return normalizedCampaignId
@@ -32,5 +37,9 @@ export function isCurrentCampaignSelection(campaignId, selectedCampaignId) {
   const normalizedCampaignId = String(campaignId || "").trim();
   const normalizedSelectedCampaignId = String(selectedCampaignId || "").trim();
   return Boolean(normalizedCampaignId) && normalizedCampaignId === normalizedSelectedCampaignId;
+}
+
+export function isConfirmedMissingCommand(status, code) {
+  return status === 404 && code === "command_not_found";
 }
 
