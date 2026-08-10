@@ -22,7 +22,6 @@ import {
   engineSocialActionCommandSchema,
   engineNpcTickCommandSchema,
   engineQuestGraphInputSchema,
-  engineWorldObjectInputSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   engineProceduralNoticeInputSchema,
@@ -539,17 +538,6 @@ const worldFactPatchOperationsJsonSchema = {
   additionalProperties: false,
 };
 
-const worldObjectPatchOperationsJsonSchema = (() => {
-  const authoringSchema = z.object({
-    upsert: z.array(engineWorldObjectInputSchema.omit({ ownerRef: true })).max(40).optional(),
-    remove: z.array(z.string().trim().min(1).max(120)).max(40).optional(),
-  }).strict().describe(
-    "Create or update authoritative world objects. Ownership is engine-owned: use locationRef for an object held or guarded by an established NPC."
-  );
-  const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(authoringSchema) as Record<string, unknown>;
-  return jsonSchema;
-})();
-
 const runtimeContentCompileJsonSchema = (() => {
   const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(
     engineContentCompileArgsSchema,
@@ -600,7 +588,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "content_compile",
-    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. For an executable spell, provide only synthesis {primitiveContentKey: exact reviewed open5e spell key, modification: damage-only}; the engine derives and persists the bounded single-target damage effect from that primitive. Mundane item instances enter the normal inventory ownership/container rules; derived items retain explicit source and recipe provenance. Definitions, instances, typed exits, and containment relationships are persisted separately; unknown fields and unreviewed mechanics are rejected.",
+    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. A mundane item already established by released narration, current world context, or an actor-safe world fact may use materialization plus a stable instanceKey to create one linked world object; the engine verifies and hashes that evidence, derives the object definition, and returns its canonical id. Equivalent stable item definitions are reused. For an executable spell, provide only synthesis {primitiveContentKey: exact reviewed open5e spell key, modification: damage-only}; the engine derives and persists the bounded single-target damage effect from that primitive. Definitions, instances, relationships, and state remain separate; unknown fields and unreviewed mechanics are rejected.",
     runtimeContentCompileJsonSchema,
   ),
   tool(
@@ -642,7 +630,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "world_context",
-    "Establish or update the current fictional context. Concrete actionable objects belong in objects.upsert, not only in features or narration. Preserve omitted NPC, merchant, fact, and object collections when patching the current context.",
+    "Establish or update the current fictional context, actors, merchants, and facts. This tool cannot create persistent objects or definitions; use content_compile materialization for a newly established actionable item, and typed interaction tools for existing object state. Omitted collections are preserved.",
     {
       type: "object",
       properties: {
@@ -653,7 +641,6 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
         npcs: npcPatchOperationsJsonSchema,
         merchants: merchantPatchOperationsJsonSchema,
         facts: worldFactPatchOperationsJsonSchema,
-        objects: worldObjectPatchOperationsJsonSchema,
       },
       required: ["title", "description", "features", "exits"],
       additionalProperties: false,
@@ -1383,6 +1370,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         createInstance: args.createInstance,
         instanceKey: args.instanceKey,
         exitPatch: args.exitPatch,
+        materialization: args.materialization,
       });
     case "procedural_notice":
       return engineCommandSchema.parse({

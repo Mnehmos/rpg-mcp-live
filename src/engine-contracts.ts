@@ -490,6 +490,19 @@ export const engineWorldObjectPatchOperationsSchema = z.object({
 );
 export type EngineWorldObjectPatchOperations = z.infer<typeof engineWorldObjectPatchOperationsSchema>;
 
+export const engineWorldObjectMaterializationSchema = z.object({
+  runtimeDefinitionId: z.string().trim().min(1).max(180),
+  runtimeInstanceId: z.string().trim().min(1).max(220),
+  evidence: z.object({
+    kind: z.enum(["released_narration", "world_context", "world_fact"]),
+    ref: z.string().trim().min(1).max(240),
+    textHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
+  aliases: z.array(z.string().trim().min(1).max(160)).min(1).max(20),
+  compilerRevision: z.literal("runtime-world-object-bridge-v1"),
+}).strict();
+export type EngineWorldObjectMaterialization = z.infer<typeof engineWorldObjectMaterializationSchema>;
+
 export interface EngineWorldObjectInstance extends EngineWorldObjectInput {
   sceneId: string;
   locationRef: string | null;
@@ -501,6 +514,8 @@ export interface EngineWorldObjectInstance extends EngineWorldObjectInput {
     sourceVersion: number;
     occurredAt: string;
   };
+  /** Present only when this gameplay object bridges one canonical runtime-content instance. */
+  materialization?: EngineWorldObjectMaterialization;
 }
 
 export interface EngineWorldFact extends EngineWorldFactInput {
@@ -880,7 +895,7 @@ export const engineQuestGraphInputSchema = z.object({
 });
 export type EngineQuestGraphInput = z.infer<typeof engineQuestGraphInputSchema>;
 
-export const engineWorldContextArgsSchema = z.object({
+const engineWorldContextBaseArgsSchema = z.object({
   title: z.string().trim().min(1).max(160),
   description: z.string().trim().min(1).max(6_000),
   features: z.array(z.string().trim().min(1).max(120)).max(20),
@@ -891,12 +906,20 @@ export const engineWorldContextArgsSchema = z.object({
   npcs: engineNpcPatchOperationsSchema.optional(),
   merchants: engineMerchantPatchOperationsSchema.optional(),
   facts: engineWorldFactPatchOperationsSchema.optional(),
-  objects: engineWorldObjectPatchOperationsSchema.optional(),
 }).strict();
+
+/**
+ * Model-facing world context may describe and patch context, actors, merchants,
+ * and facts. New persistent object creation belongs exclusively to the typed
+ * runtime content compiler. The persisted command schema below retains the
+ * legacy object patch for replay and trusted fixture/state maintenance.
+ */
+export const engineWorldContextArgsSchema = engineWorldContextBaseArgsSchema;
 export type EngineWorldContextArgs = z.infer<typeof engineWorldContextArgsSchema>;
 
-export const engineWorldContextCommandSchema = engineWorldContextArgsSchema.extend({
+export const engineWorldContextCommandSchema = engineWorldContextBaseArgsSchema.extend({
   kind: z.literal("world_context"),
+  objects: engineWorldObjectPatchOperationsSchema.optional(),
 }).strict();
 export type EngineWorldContextCommand = z.infer<typeof engineWorldContextCommandSchema>;
 
@@ -918,11 +941,24 @@ export const engineLocationExitPatchSchema = z.object({
 }).strict();
 export type EngineLocationExitPatch = z.infer<typeof engineLocationExitPatchSchema>;
 
+export const engineContentMaterializationEvidenceSchema = z.object({
+  kind: z.enum(["released_narration", "world_context", "world_fact"]),
+  ref: z.string().trim().min(1).max(240),
+}).strict();
+export type EngineContentMaterializationEvidence = z.infer<typeof engineContentMaterializationEvidenceSchema>;
+
+export const engineContentMaterializationSchema = z.object({
+  evidence: engineContentMaterializationEvidenceSchema,
+  holderRef: worldContextEntityIdSchema.optional(),
+}).strict();
+export type EngineContentMaterialization = z.infer<typeof engineContentMaterializationSchema>;
+
 export const engineContentCompileArgsSchema = z.object({
   proposal: contentProposalSchema.optional(),
   createInstance: z.boolean().default(true),
   instanceKey: runtimeContentKeySchema.optional(),
   exitPatch: engineLocationExitPatchSchema.optional(),
+  materialization: engineContentMaterializationSchema.optional(),
 }).strict();
 
 export const engineContentCompileCommandSchema = engineContentCompileArgsSchema.extend({
@@ -934,8 +970,22 @@ export const engineContentCompileCommandSchema = engineContentCompileArgsSchema.
   if (command.proposal && command.exitPatch) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["exitPatch"], message: "A content compile command cannot compile and patch an exit at the same time." });
   }
-  if (command.exitPatch && (command.createInstance !== true || command.instanceKey !== undefined)) {
+  if (command.exitPatch && (command.createInstance !== true || command.instanceKey !== undefined || command.materialization !== undefined)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["exitPatch"], message: "Exit patches do not accept instance creation options." });
+  }
+  if (command.materialization) {
+    if (command.proposal?.kind !== "item") {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["materialization"], message: "Only a typed item proposal can materialize as a world object." });
+    }
+    if (command.createInstance !== true) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["createInstance"], message: "World materialization requires one canonical content instance." });
+    }
+    if (!command.instanceKey) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["instanceKey"], message: "World materialization requires a stable instance key." });
+    }
+    if (command.proposal?.kind === "item" && !command.proposal.key) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["proposal", "key"], message: "World materialization requires a stable definition key." });
+    }
   }
   const patch = command.exitPatch?.patch;
   if (patch?.discovered === false) {

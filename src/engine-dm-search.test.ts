@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInitialCampaign, normalizeCampaignState } from "./engine-domain.js";
 import { LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
-import type { EngineWorldObjectInput, LanternCampaignState, RequestContext } from "./engine-contracts.js";
+import type { LanternCampaignState, RequestContext } from "./engine-contracts.js";
 import { openAiSdkFetch } from "./test-openai-stream.js";
+import { compileRuntimeContent } from "./content/runtime-compiler.js";
 
 const options = {
   apiKey: "test-key",
@@ -48,7 +49,7 @@ function narration(text: string): Response {
   });
 }
 
-function searchState(accountId: string, actorId: string): LanternCampaignState {
+function searchState(accountId: string, actorId: string, withCloakFact = false): LanternCampaignState {
   const state = createInitialCampaign(accountId, actorId);
   state.phase = "sandbox";
   state.character.created = true;
@@ -64,6 +65,24 @@ function searchState(accountId: string, actorId: string): LanternCampaignState {
     merchants: [],
     objects: [],
   };
+  if (withCloakFact) {
+    const createdAt = new Date(0).toISOString();
+    state.worldFacts = [{
+      id: "staging-search-cloak",
+      kind: "object",
+      title: "Arena-worker cloak",
+      description: "A coarse red-striped arena-worker cloak is stored in the staging area.",
+      visibility: "public",
+      obscurity: "clear",
+      requiredSense: "normal",
+      passiveDc: null,
+      sceneId: "staging-area",
+      revision: 1,
+      active: true,
+      createdAt,
+      updatedAt: createdAt,
+    }];
+  }
   return normalizeCampaignState(state);
 }
 
@@ -84,32 +103,30 @@ function createStore(state: LanternCampaignState, context: RequestContext): Lant
   return store;
 }
 
-function authoredCloak(): EngineWorldObjectInput {
+function authoredCloakProposal() {
   return {
-    id: "arena-worker-cloak",
-    definition: {
-      key: "arena-worker-cloak",
-      sourceRef: "authored-table:staging-search-v1",
-      name: "Arena-worker cloak",
-      description: "A coarse red-striped cloak sized for an arena worker.",
-      material: "cloth",
-      tags: ["cloak", "disguise", "mundane"],
-      affordances: ["inspect", "take", "carry", "drop", "equip"],
-      prerequisites: [],
-      effectInteractions: [],
-      weight: 1,
-      criticalPolicy: {
-        kind: "ordinary_consequence",
-        canDestroy: true,
-        canLose: true,
-        canSell: true,
-        canConsume: false,
-        canHide: true,
-      },
-    },
-    state: "intact",
-    locationRef: null,
+    kind: "item" as const,
+    key: "arena-worker-cloak",
+    name: "Arena-worker cloak",
+    description: "A coarse red-striped cloak sized for an arena worker.",
+    material: "cloth",
+    tags: ["cloak", "disguise", "mundane"],
+    category: "tool" as const,
+    weight: 1,
+    affordances: ["inspect", "take", "drop", "use"] as const,
   };
+}
+
+function authoredCloakId(state: LanternCampaignState): string {
+  const compiled = compileRuntimeContent(authoredCloakProposal(), {
+    campaignId: state.id,
+    authorId: state.actorId,
+    source: "dm",
+    sourceRefs: ["world_fact:staging-search-cloak"],
+    createdAt: new Date(0).toISOString(),
+  }, true, "arena-worker-cloak");
+  if (!compiled.ok || !compiled.instance) throw new Error("The cloak fixture did not compile.");
+  return compiled.instance.id;
 }
 
 describe("DM broad-search provenance", () => {
@@ -153,7 +170,9 @@ describe("DM broad-search provenance", () => {
   });
 
   it("accepts a typed present object, preserves its provenance, and replays it consistently", async () => {
-    const proposal = authoredCloak();
+    const state = searchState("account-search-present", "actor-search-present", true);
+    const proposal = authoredCloakProposal();
+    const cloakId = authoredCloakId(state);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(toolResponse(
         call("search-check", "roll_check", {
@@ -163,19 +182,18 @@ describe("DM broad-search provenance", () => {
         }),
       ))
       .mockResolvedValueOnce(toolResponse(
-        call("author-cloak", "world_context", {
-          title: "The Staging Area",
-          description: "A bare service yard waits behind the arena.",
-          features: ["bare service yard", "arena wall"],
-          exits: [{ id: "service-passage", label: "A service passage leads away" }],
-          objects: { upsert: [proposal] },
+        call("author-cloak", "content_compile", {
+          proposal,
+          instanceKey: "arena-worker-cloak",
+          materialization: {
+            evidence: { kind: "world_fact", ref: "staging-search-cloak" },
+          },
         }),
       ))
       .mockResolvedValueOnce(narration("The search turns up the authored arena-worker cloak, and a low wooden hatch lies beside it."))
       .mockResolvedValueOnce(narration("You find the authored arena-worker cloak."));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
-    const state = searchState("account-search-present", "actor-search-present");
     const context = contextFor(state);
     const store = createStore(state, context);
     const clientCommandId = randomUUID();
@@ -188,24 +206,30 @@ describe("DM broad-search provenance", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check", "world_context"]);
-    const found = result.state.worldContext?.objects.find((object) => object.id === proposal.id);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check", "content_compile"]);
+    const found = result.state.worldContext?.objects.find((object) => object.id === cloakId);
+    const definitionId = result.state.runtimeContent.instances.find((instance) => instance.id === cloakId)?.definitionId;
+    expect(definitionId).toBeDefined();
     expect(found).toMatchObject({
-      id: proposal.id,
-      definition: { sourceRef: proposal.definition.sourceRef, name: proposal.definition.name },
+      id: cloakId,
+      definition: { sourceRef: `runtime-content:${definitionId}`, name: proposal.name },
       ownerRef: { kind: "world", id: "staging-area" },
       state: "intact",
+      materialization: {
+        runtimeInstanceId: cloakId,
+        evidence: {
+          kind: "world_fact",
+          ref: "staging-search-cloak",
+        },
+      },
     });
-    expect(found?.provenance).toEqual(expect.objectContaining({
-      sourceCommandId: `${clientCommandId}:1`,
-      sourceVersion: 1,
-    }));
-    expect(result.state.character.inventory.some((item) => item.id === proposal.id)).toBe(false);
+    expect(found?.materialization?.evidence.textHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.state.character.inventory.some((item) => item.id === cloakId)).toBe(false);
 
     const refreshed = store.getCampaign(context);
-    expect(refreshed.worldContext?.objects.find((object) => object.id === proposal.id)).toMatchObject({
-      definition: { sourceRef: proposal.definition.sourceRef },
-      provenance: expect.objectContaining({ sourceCommandId: `${clientCommandId}:1` }),
+    expect(refreshed.worldContext?.objects.find((object) => object.id === cloakId)).toMatchObject({
+      definition: { sourceRef: `runtime-content:${definitionId}` },
+      materialization: { evidence: { ref: "staging-search-cloak" } },
     });
     const replay = await new LanternDungeonMaster(store, options).resolveTurn(
       context,
