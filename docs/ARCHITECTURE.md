@@ -96,9 +96,11 @@ The web service owns:
 - safe rendering of returned structured data and narration.
 
 The engine exposes a narrow internal HTTP facade. Its canonical model-facing
-catalog is `lanternToolDefinitions` in `src/engine-tools.ts` (currently 72
-tools). `/v1/tools`, the OpenRouter DM request, and the health `toolCount` all
-consume that same catalog. Startup parity checks require every ordinary engine
+catalog is `lanternToolDefinitions` in `src/engine-tools.ts` (currently 74
+registered tools). `/v1/tools` and the health `toolCount` consume that same
+catalog. DM requests start with a compact 17-tool core and load one reviewed
+capability family on demand through `capability_load`; the health and internal
+capability metadata report the before/after schema overhead. Startup parity checks require every ordinary engine
 tool name and argument schema to be either advertised exactly once or named in
 the explicit player-only set. The three `experience_*` commands are
 player-only and `/v1/campaigns/:campaignId/tool-calls` rejects them.

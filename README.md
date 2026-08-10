@@ -56,9 +56,11 @@ The current test catalog is a recurring 5 USD/month Player Pass. It does not mak
 
 ## Engine tools
 
-The engine currently advertises 72 constrained model-facing tools. The canonical
-catalog is `lanternToolDefinitions` in `src/engine-tools.ts`; `/v1/tools`, the DM
-request, and the health `toolCount` all consume that same array. The three
+The engine currently registers 74 constrained model-facing tools. The canonical
+catalog is `lanternToolDefinitions` in `src/engine-tools.ts`; `/v1/tools` and the
+health `toolCount` consume that same array. DM requests start with a compact
+17-tool core and load one reviewed capability family on demand through the
+engine-owned `capability_load` path. The three
 `experience_*` commands are explicit player-only engine commands and are not
 accepted by the generic model-facing tool-call endpoint.
 
