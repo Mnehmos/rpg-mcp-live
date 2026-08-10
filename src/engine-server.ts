@@ -34,6 +34,13 @@ import {
   type RequestContext,
 } from "./engine-contracts.js";
 import { createInitialCampaign, projectEventForActor, projectExperienceProfile, projectResolutionForActor, projectStateForActor, resolveEngineCommand, resolveOrchestrationDecision, resolveProductionRoomEnter, resolveProductionRoomNarrationRelease, toSessionView } from "./engine-domain.js";
+import {
+  EngineEventStreamCursorError,
+  EngineEventStreamQueryError,
+  parseEngineEventStreamQuery,
+  toEngineEventStreamRecord,
+  type EngineEventStreamEvidence,
+} from "./engine-event-stream.js";
 import { parseProductionRoomState, productionRoomNarrationReleaseRequestSchema, projectNarrationSequenceForActor, projectSceneForActor } from "./engine-production-room.js";
 import { buildResumeProjection, emptyOrchestrationState, orchestrationDecisionRequestSchema, refreshSceneFromEvents } from "./engine-orchestration.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
@@ -352,6 +359,38 @@ app.get("/v1/campaigns/:campaignId/events", (request, response) => {
         event: projectEventForActor(context.actorId, state, resolved.event),
       }));
     response.json({ events });
+  } catch (error) {
+    sendError(response, error);
+  }
+});
+
+/**
+ * Bounded read/subscription page for internal consumers. The campaign event
+ * table remains the only source of truth; `nextCursor` is acknowledged by a
+ * consumer by sending it back as `after` on the next request.
+ */
+app.get("/v1/campaigns/:campaignId/events/stream", (request, response) => {
+  try {
+    const context = createRequestContext(request, request.params.campaignId);
+    const query = parseEngineEventStreamQuery({
+      after: typeof request.query.after === "string" ? request.query.after : null,
+      limit: typeof request.query.limit === "string" ? request.query.limit : undefined,
+    });
+    const state = store.getCampaign(context);
+    const policy = resolverPolicyForCampaign(state.contentPolicy);
+    const page = store.listCampaignEventStream(context, query);
+    const events = page.events.map((event): EngineEventStreamEvidence => {
+      const resolved = contentRegistry.resolveEvent(event, policy);
+      return {
+        ...resolved,
+        event: toEngineEventStreamRecord(
+          event,
+          projectEventForActor(context.actorId, state, resolved.event),
+          context.actorId
+        ),
+      };
+    });
+    response.json({ ...page, events });
   } catch (error) {
     sendError(response, error);
   }
@@ -759,6 +798,10 @@ function assertCampaignUsesActivePack(state: LanternCampaignState): void {
 }
 
 function sendError(response: Response, error: unknown): void {
+  if (error instanceof EngineEventStreamQueryError || error instanceof EngineEventStreamCursorError) {
+    response.status(400).json({ code: "invalid_event_stream", error: error.message });
+    return;
+  }
   if (error instanceof CampaignContentPolicyError) {
     response.status(400).json({ code: error.code, error: error.message });
     return;

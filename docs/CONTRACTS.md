@@ -114,6 +114,19 @@ Command request:
 
 The action is either a supported quick action or natural language that the private engine DM maps to one supported tool. The client cannot submit arbitrary engine mutations, authoritative rolls, DCs, damage, rewards, or state patches.
 
+## Canonical event stream
+
+`GET /api/campaigns/:campaignId/events/stream?after=<cursor>&limit=<n>` is a
+bounded read projection over committed engine events. The engine owns the
+immutable event row and returns at most 100 actor-projected events in canonical
+`version`, `createdAt`, `eventId` order. Each record carries a stable stream
+schema revision, campaign/command/revision identity, request and rules
+provenance, and the redacted event payload. Consumers acknowledge a page by
+retaining `nextCursor` and sending it as `after` on the next request; an empty
+page is safe to retry, and reconnecting with the last acknowledged cursor does
+not reapply gameplay mutation. The stream is read-only and does not create a
+second mutation or event ontology.
+
 ## Tool facade
 
 The engine publishes 52 tool definitions in OpenRouter-compatible function format:
