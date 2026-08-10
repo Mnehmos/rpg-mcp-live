@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   activeCampaignStorageKey,
   campaignSessionUrl,
+  isCurrentCampaignSelection,
+  isCurrentRequest,
+  retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
 
@@ -17,10 +20,26 @@ describe("authenticated campaign resume", () => {
   });
 
   it("retries transient campaign-load failures but not permanent selection errors", () => {
+    expect(shouldRetryCampaignLoad(408)).toBe(true);
+    expect(shouldRetryCampaignLoad(425)).toBe(true);
     expect(shouldRetryCampaignLoad(502)).toBe(true);
     expect(shouldRetryCampaignLoad(429)).toBe(true);
     expect(shouldRetryCampaignLoad(404)).toBe(false);
     expect(shouldRetryCampaignLoad(403)).toBe(false);
+  });
+
+  it("keeps retries bounded and deterministic", () => {
+    expect(retryDelayMs(1)).toBe(400);
+    expect(retryDelayMs(3)).toBe(1200);
+    expect(retryDelayMs(0)).toBe(400);
+  });
+
+  it("ignores stale refreshes and superseded campaign selections", () => {
+    expect(isCurrentRequest(4, 4)).toBe(true);
+    expect(isCurrentRequest(4, 5)).toBe(false);
+    expect(isCurrentCampaignSelection("campaign-a", "campaign-a")).toBe(true);
+    expect(isCurrentCampaignSelection("campaign-a", "campaign-b")).toBe(false);
+    expect(isCurrentCampaignSelection("", "")).toBe(false);
   });
 });
 
