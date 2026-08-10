@@ -7,6 +7,7 @@ import {
   engineProceduralNoticeSchema,
   engineQuestGraphInputSchema,
   engineWorldObjectInputSchema,
+  engineWorldObjectMaterializationSchema,
 } from "./engine-contracts.js";
 import type {
   CompiledCreatureAttack,
@@ -2166,6 +2167,7 @@ function normalizeWorldObjects(value: unknown, sceneId: string): EngineWorldObje
     });
     if (!parsed.success) return [];
     const now = new Date(0).toISOString();
+    const materialization = engineWorldObjectMaterializationSchema.safeParse(raw.materialization);
     return [{
       ...parsed.data,
       sceneId,
@@ -2178,6 +2180,7 @@ function normalizeWorldObjects(value: unknown, sceneId: string): EngineWorldObje
         sourceVersion: typeof raw.provenance?.sourceVersion === "number" ? Math.max(0, Math.trunc(raw.provenance.sourceVersion)) : 0,
         occurredAt: typeof raw.provenance?.occurredAt === "string" ? raw.provenance.occurredAt : now,
       },
+      ...(materialization.success ? { materialization: materialization.data } : {}),
     }];
   });
 }
@@ -4140,6 +4143,204 @@ function validateRuntimeItemDerivation(
   return null;
 }
 
+type ResolvedContentMaterializationEvidence = {
+  kind: "released_narration" | "world_context" | "world_fact";
+  ref: string;
+  textHash: string;
+  aliases: string[];
+};
+
+function normalizedEvidenceText(value: string): string {
+  return value.toLocaleLowerCase("en-US").replace(/[-_]+/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function contentMaterializationAliases(
+  proposal: Extract<EngineCommand, { kind: "content_compile" }>["proposal"],
+): string[] {
+  if (!proposal || proposal.kind !== "item") return [];
+  return [...new Set([proposal.key ?? "", proposal.name, ...proposal.tags]
+    .map((value) => value.trim())
+    .filter(Boolean))].slice(0, 20);
+}
+
+function contentMaterializationIdentityAliases(
+  proposal: Extract<EngineCommand, { kind: "content_compile" }>["proposal"],
+): string[] {
+  if (!proposal || proposal.kind !== "item") return [];
+  const aliases = [proposal.key ?? "", proposal.name].filter(Boolean);
+  for (const value of [...aliases]) {
+    const tokens = normalizedEvidenceText(value).split(/\s+/).filter(Boolean);
+    if (tokens.length > 1) aliases.push(tokens.slice(-2).join(" "));
+    const noun = tokens.at(-1);
+    if (noun && noun.length >= 3) aliases.push(noun);
+  }
+  return [...new Set(aliases)];
+}
+
+function evidenceMentionsAlias(text: string, aliases: string[]): boolean {
+  const normalized = ` ${normalizedEvidenceText(text)} `;
+  return aliases.some((alias) => {
+    const phrase = normalizedEvidenceText(alias);
+    return phrase.length >= 3 && normalized.includes(` ${phrase} `);
+  });
+}
+
+function resolveContentMaterializationEvidence(
+  state: LanternCampaignState,
+  context: RequestContext,
+  command: Extract<EngineCommand, { kind: "content_compile" }>,
+): { ok: true; evidence: ResolvedContentMaterializationEvidence }
+  | { ok: false; code: string; message: string } {
+  const request = command.materialization;
+  const proposal = command.proposal;
+  if (!request || !proposal || proposal.kind !== "item") {
+    return { ok: false, code: "materialization_contract_invalid", message: "World materialization requires one strict item proposal and one evidence reference." };
+  }
+  if (proposal.category === "quest" || proposal.derivation) {
+    return { ok: false, code: "materialization_out_of_scope", message: "This materialization slice admits only ordinary non-derived mundane items." };
+  }
+
+  let evidenceText: string | null = null;
+  if (request.evidence.kind === "released_narration") {
+    const message = state.log.find((entry) => entry.id === request.evidence.ref && entry.kind === "narration");
+    evidenceText = message?.text ?? null;
+  } else if (request.evidence.kind === "world_context") {
+    const world = state.worldContext;
+    if (world?.id === request.evidence.ref) {
+      evidenceText = [world.title, world.description, ...world.features].join(" ");
+    }
+  } else {
+    const fact = actorKnowledgeProjection(context.actorId, state).facts.find((candidate) =>
+      candidate.id === request.evidence.ref
+      && candidate.sceneId === state.worldContext?.id
+    );
+    if (fact) evidenceText = [fact.title, fact.description].join(" ");
+  }
+  if (!evidenceText) {
+    return { ok: false, code: "materialization_evidence_unavailable", message: "The requested item is not supported by actor-safe committed evidence." };
+  }
+
+  const aliases = contentMaterializationAliases(proposal);
+  if (!evidenceMentionsAlias(evidenceText, contentMaterializationIdentityAliases(proposal))) {
+    return { ok: false, code: "materialization_evidence_mismatch", message: "The committed evidence does not establish the proposed item." };
+  }
+  if (request.holderRef) {
+    const holder = state.worldContext?.npcs.find((npc) => npc.id === request.holderRef);
+    if (!holder || !evidenceMentionsAlias(evidenceText, [holder.id, holder.name])) {
+      return { ok: false, code: "materialization_holder_unproven", message: "The committed evidence does not establish that NPC as the item's holder." };
+    }
+  }
+
+  return {
+    ok: true,
+    evidence: {
+      kind: request.evidence.kind,
+      ref: request.evidence.ref,
+      textHash: createHash("sha256").update(evidenceText).digest("hex"),
+      aliases,
+    },
+  };
+}
+
+function sameRuntimeDefinition(
+  left: RuntimeContentState["definitions"][number],
+  right: RuntimeContentState["definitions"][number],
+): boolean {
+  const { provenance: _leftProvenance, ...leftValue } = left;
+  const { provenance: _rightProvenance, ...rightValue } = right;
+  return JSON.stringify(leftValue) === JSON.stringify(rightValue);
+}
+
+function sameRuntimeItemSemantics(
+  left: RuntimeContentState["definitions"][number],
+  right: RuntimeContentState["definitions"][number],
+): boolean {
+  if (left.kind !== "item" || right.kind !== "item") return false;
+  const { id: _leftId, key: _leftKey, provenance: _leftProvenance, ...leftValue } = left;
+  const { id: _rightId, key: _rightKey, provenance: _rightProvenance, ...rightValue } = right;
+  return JSON.stringify(leftValue) === JSON.stringify(rightValue);
+}
+
+function runtimeWorldObjectMaterial(value: string): EngineWorldObjectInstance["definition"]["material"] {
+  const material = value.toLocaleLowerCase("en-US");
+  if (/iron|steel|bronze|copper|silver|gold|metal/.test(material)) return "metal";
+  if (/wood|timber/.test(material)) return "wood";
+  if (/stone|rock/.test(material)) return "stone";
+  if (/rope|cord|hemp/.test(material)) return "rope";
+  if (/oil/.test(material)) return "oil";
+  if (/fire|flame/.test(material)) return "fire";
+  if (/cloth|linen|wool|silk|leather/.test(material)) return "cloth";
+  if (/paper|parchment/.test(material)) return "paper";
+  if (/glass|crystal/.test(material)) return "glass";
+  return "mixed";
+}
+
+function runtimeWorldObject(
+  definition: RuntimeItemDefinition,
+  instance: RuntimeContentInstance,
+  state: LanternCampaignState,
+  clientCommandId: string,
+  materialization: NonNullable<Extract<EngineCommand, { kind: "content_compile" }>["materialization"]>,
+  evidence: ResolvedContentMaterializationEvidence,
+): EngineWorldObjectInstance {
+  const world = state.worldContext;
+  if (!world) throw new Error("World materialization requires an established context.");
+  const declaredAffordances = new Set<EngineWorldObjectAffordance>(["inspect", ...definition.affordances]);
+  if (declaredAffordances.has("take")) {
+    declaredAffordances.add("carry");
+    declaredAffordances.add("drop");
+    if (materialization.holderRef) declaredAffordances.add("steal");
+  }
+  const tags = [...new Set([definition.category, definition.material, ...definition.tags]
+    .map((value) => value.trim().toLocaleLowerCase("en-US"))
+    .filter(Boolean))].slice(0, 20);
+  return {
+    id: instance.id,
+    definition: {
+      key: definition.id,
+      sourceRef: `runtime-content:${definition.id}`,
+      name: definition.name,
+      description: definition.description,
+      material: runtimeWorldObjectMaterial(definition.material),
+      tags,
+      affordances: [...declaredAffordances].slice(0, 20),
+      prerequisites: [],
+      effectInteractions: [],
+      weight: definition.weight,
+      criticalPolicy: {
+        kind: "ordinary_consequence",
+        canDestroy: true,
+        canLose: true,
+        canSell: definition.valueCopper !== null,
+        canConsume: false,
+        canHide: true,
+      },
+    },
+    state: "intact",
+    sceneId: world.id,
+    locationRef: materialization.holderRef ?? null,
+    ownerRef: { kind: "world", id: world.id },
+    containerRef: null,
+    revision: 1,
+    provenance: {
+      sourceCommandId: clientCommandId,
+      sourceVersion: state.version + 1,
+      occurredAt: instance.provenance.createdAt,
+    },
+    materialization: {
+      runtimeDefinitionId: definition.id,
+      runtimeInstanceId: instance.id,
+      evidence: {
+        kind: evidence.kind,
+        ref: evidence.ref,
+        textHash: evidence.textHash,
+      },
+      aliases: evidence.aliases,
+      compilerRevision: "runtime-world-object-bridge-v1",
+    },
+  };
+}
+
 function resolveContentCompile(
   state: LanternCampaignState,
   context: RequestContext,
@@ -4160,6 +4361,15 @@ function resolveContentCompile(
   ) {
     return rejection(state, tool, "location_instance_required", "A location with canonical topology references must persist an instance.");
   }
+  const resolvedMaterialization = command.materialization
+    ? resolveContentMaterializationEvidence(state, context, command)
+    : null;
+  if (resolvedMaterialization && !resolvedMaterialization.ok) {
+    return rejection(state, tool, resolvedMaterialization.code, resolvedMaterialization.message);
+  }
+  if (command.materialization && !state.worldContext) {
+    return rejection(state, tool, "world_context_required", "A persistent world item needs an established current context.");
+  }
   const compiled = compileRuntimeContent(
     command.proposal,
     {
@@ -4168,6 +4378,12 @@ function resolveContentCompile(
       source: command.proposal.kind === "item" && command.proposal.derivation ? "derived" : "dm",
       sourceRefs: [
         clientCommandId,
+        ...(resolvedMaterialization?.ok
+          ? [
+              `${resolvedMaterialization.evidence.kind}:${resolvedMaterialization.evidence.ref}`,
+              `sha256:${resolvedMaterialization.evidence.textHash}`,
+            ]
+          : []),
         ...(command.proposal.kind === "item" && command.proposal.derivation
           ? [
               ...command.proposal.derivation.sourceDefinitionIds,
@@ -4204,15 +4420,37 @@ function resolveContentCompile(
   if (topologyValidation) return rejection(state, tool, topologyValidation.code, topologyValidation.message, topologyValidation.data);
 
   const existingDefinitions = state.runtimeContent.definitions;
-  const existingDefinition = existingDefinitions.find((definition) => definition.id === compiledForCommit.definition.id);
+  let existingDefinition = existingDefinitions.find((definition) => definition.id === compiledForCommit.definition.id);
   if (existingDefinition) {
-    return rejection(
-      state,
-      tool,
-      "content_already_exists",
-      "That stable runtime content definition already exists in this campaign; no duplicate was created.",
-      { definitionId: existingDefinition.id, kind: existingDefinition.kind },
-    );
+    if (!command.materialization) {
+      return rejection(
+        state,
+        tool,
+        "content_already_exists",
+        "That stable runtime content definition already exists in this campaign; no duplicate was created.",
+        { definitionId: existingDefinition.id, kind: existingDefinition.kind },
+      );
+    }
+    if (existingDefinition.kind !== "item" || compiledForCommit.definition.kind !== "item" || !sameRuntimeDefinition(existingDefinition, compiledForCommit.definition)) {
+      return rejection(
+        state,
+        tool,
+        "content_definition_conflict",
+        "That stable definition key already names different canonical content.",
+        { definitionId: existingDefinition.id },
+      );
+    }
+  } else if (command.materialization && compiledForCommit.definition.kind === "item") {
+    existingDefinition = existingDefinitions.find((definition) => sameRuntimeItemSemantics(definition, compiledForCommit.definition));
+  }
+  if (existingDefinition) {
+    compiledForCommit = {
+      ...compiledForCommit,
+      definition: existingDefinition,
+      instance: compiledForCommit.instance
+        ? { ...compiledForCommit.instance, definitionId: existingDefinition.id }
+        : null,
+    };
   }
   const existingInstance = compiledForCommit.instance
     ? state.runtimeContent.instances.find((instance) => instance.id === compiledForCommit.instance!.id)
@@ -4241,7 +4479,36 @@ function resolveContentCompile(
 
   const next = cloneCampaign(state);
   let runtimeInventoryItem: EngineInventoryItem | null = null;
-  if (compiledForCommit.definition.kind === "item" && compiledForCommit.instance) {
+  let materializedWorldObject: EngineWorldObjectInstance | null = null;
+  if (
+    command.materialization
+    && resolvedMaterialization?.ok
+    && compiledForCommit.definition.kind === "item"
+    && compiledForCommit.instance
+    && next.worldContext
+  ) {
+    if (next.worldContext.objects.length >= 40) {
+      return rejection(state, tool, "object_limit_exceeded", "A world context can contain at most 40 world objects.");
+    }
+    if (next.worldContext.objects.some((object) => object.id === compiledForCommit.instance!.id)) {
+      return rejection(state, tool, "content_world_object_conflict", "That canonical content instance already has a world-object identity.");
+    }
+    materializedWorldObject = runtimeWorldObject(
+      compiledForCommit.definition,
+      compiledForCommit.instance,
+      state,
+      clientCommandId,
+      command.materialization,
+      resolvedMaterialization.evidence,
+    );
+    const topologyIssue = worldObjectTopologyValidation(
+      [...next.worldContext.objects, materializedWorldObject],
+      next.worldContext.id,
+      state.actorId,
+    );
+    if (topologyIssue) return rejection(state, tool, topologyIssue.code, topologyIssue.message);
+    next.worldContext.objects = [...next.worldContext.objects, materializedWorldObject];
+  } else if (compiledForCommit.definition.kind === "item" && compiledForCommit.instance) {
     runtimeInventoryItem = runtimeItemInventoryItem(compiledForCommit.definition, compiledForCommit.instance, next.character.id);
     const inventoryConflict = next.character.inventory.some((item) => item.id === runtimeInventoryItem!.id);
     if (inventoryConflict) {
@@ -4254,18 +4521,20 @@ function resolveContentCompile(
     if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
   }
   next.runtimeContent = {
-    definitions: [...state.runtimeContent.definitions, compiledForCommit.definition],
+    definitions: existingDefinition
+      ? [...state.runtimeContent.definitions]
+      : [...state.runtimeContent.definitions, compiledForCommit.definition],
     instances: compiledForCommit.instance
       ? [...state.runtimeContent.instances, compiledForCommit.instance]
       : [...state.runtimeContent.instances],
     relationships: [...state.runtimeContent.relationships, ...compiledForCommit.relationships],
   };
   const stateChanges = [
-    {
+    ...(!existingDefinition ? [{
       path: `/runtimeContent/definitions/${escapeJsonPointerSegment(compiledForCommit.definition.id)}`,
       before: null,
       after: compiledForCommit.definition,
-    },
+    }] : []),
     ...(compiledForCommit.instance ? [{
       path: `/runtimeContent/instances/${escapeJsonPointerSegment(compiledForCommit.instance.id)}`,
       before: null,
@@ -4275,6 +4544,11 @@ function resolveContentCompile(
       path: "/character/inventory",
       before: state.character.inventory,
       after: next.character.inventory,
+    }] : []),
+    ...(materializedWorldObject ? [{
+      path: `/worldContext/objects/${escapeJsonPointerSegment(materializedWorldObject.id)}`,
+      before: null,
+      after: materializedWorldObject,
     }] : []),
     ...compiledForCommit.relationships.map((relationship) => ({
       path: `/runtimeContent/relationships/${escapeJsonPointerSegment(relationship.id)}`,
@@ -4288,14 +4562,18 @@ function resolveContentCompile(
     clientCommandId,
     command,
     tool,
-    `Compiled canonical ${compiledForCommit.definition.kind} content: ${compiledForCommit.definition.name}.`,
+    materializedWorldObject
+      ? `Compiled and materialized canonical item content: ${compiledForCommit.definition.name}.`
+      : `Compiled canonical ${compiledForCommit.definition.kind} content: ${compiledForCommit.definition.name}.`,
     {
       definition: compiledForCommit.definition,
       instance: compiledForCommit.instance,
       relationships: compiledForCommit.relationships,
       inventoryItem: runtimeInventoryItem ? materializeInventoryItem(runtimeInventoryItem) : null,
+      worldObject: materializedWorldObject,
+      definitionReused: Boolean(existingDefinition),
     },
-    "content_compiled",
+    materializedWorldObject ? "content_materialized" : "content_compiled",
     [],
     [],
     stateChanges,
@@ -14319,10 +14597,14 @@ function worldObjectInventoryItem(object: EngineWorldObjectInstance, inventoryOw
   };
   return {
     id: object.id,
+    ...(object.materialization ? { runtimeContentInstanceId: object.materialization.runtimeInstanceId } : {}),
     quantity: 1,
     authoredDefinition,
     ownerRef: { kind: "actor", id: inventoryOwnerId },
-    provenance: { kind: "authored", sourceId: object.definition.sourceRef },
+    provenance: {
+      kind: "authored",
+      sourceId: object.materialization?.runtimeDefinitionId ?? object.definition.sourceRef,
+    },
   };
 }
 

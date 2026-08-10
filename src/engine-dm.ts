@@ -220,7 +220,7 @@ export class LanternDungeonMaster {
         "Use the campaign premise, setting, tone, and the completed character to author a concrete first situation.",
         "The opening must create immediate dramatic motion: a present-tense circumstance, a relevant NPC or threat when appropriate, and a clear thing the player can respond to.",
         "Persist the authored situation with world_context before you finish. You may also create a quest or campaign beat when the opening warrants one.",
-        "Any concrete item shown as held, guarded, dropped, offered, usable, movable, breakable, openable, or otherwise actionable must be included in world_context.objects.upsert before it appears in the final narration; features alone are descriptive, not authoritative objects.",
+        "After world_context establishes the scene evidence, every concrete actionable mundane item must be compiled with content_compile materialization before it appears in final narration. The compiler creates the canonical definition and instance and bridges it into the existing world-object rules.",
         "Do not wait for the player to ask what is in the room; the DM is opening the story now.",
       ].join(" ");
       const toolLoop = await this.runToolLoop(
@@ -432,10 +432,10 @@ export class LanternDungeonMaster {
           "When the fiction establishes a meaningful place or situation, use world_context so the current context persists. It may be a town, ship, wilderness, battlefield, or anything else the story calls for.",
           "When the player travels or the current place changes, update world_context; do not force the campaign through a preset route.",
           "When the fiction needs rooms or connected places with gameplay consequences, use content_compile with location proposals: author the destination location first, then compile the current location with typed exits targeting that existing location instance. Use occupants for established actors and objects for established world objects. Use content_compile.exitPatch to open, close, lock, block, or reveal an established exit. Once an actor has a canonical location, move is valid only through its persisted exit graph; never narrate traversal through an absent, hidden, locked, blocked, or closed exit.",
-          "When the fiction establishes a persistent mundane item, use content_compile with an item proposal so the engine creates a canonical definition and a normal actor-owned inventory instance. For a derived item, use a new stable key plus derivation.sourceDefinitionIds, any sourceInstanceIds, recipeKey, and a plain-language modification; the engine creates a new definition and never mutates the base item. Do not put damage, armor, attack, magic, value, or other unsupported mechanics in the proposal; rejected compilation must be corrected before narration.",
-          "For a broad search or investigation, a successful check does not create a reward. Only an existing world object/fact, a reviewed hidden-fact discovery, a defeated-encounter loot result, or a bounded mundane proposal committed through world_context.objects.upsert may be narrated as found. A new proposal must use a stable id and an explicit definition.sourceRef such as authored, derived, or dm-proposal evidence. If no typed discovery was accepted, say that no specific authorized item was found; never turn the requested category into a guaranteed cloak, bundle, weapon, disguise, supplies, hatch, or escape route.",
+          "When the fiction establishes a persistent mundane item, use content_compile. Omit materialization only when creating a normal actor-owned inventory item. For an item already established by released narration, current context, or an actor-safe world fact, provide a stable definition key, stable instanceKey, and materialization evidence; use holderRef only when that same evidence establishes an existing NPC holder. The compiler verifies and hashes the evidence, reuses an equivalent definition, derives one world object, and returns its canonical id. For a derived item, use a new stable key plus derivation provenance and do not materialize it in this first slice. Do not put damage, armor, attack, magic, or other unsupported mechanics in the proposal.",
+          "For a broad search or investigation, a successful check does not create a reward. Only an existing canonical object/fact, a reviewed hidden-fact discovery, defeated-encounter loot, or content_compile materialization backed by evidence that existed before the search may be narrated as found. Player wording and a newly added descriptive feature are not evidence. If no typed discovery was accepted, say that no specific authorized item was found; never turn the requested category into a guaranteed cloak, bundle, weapon, disguise, supplies, hatch, or escape route.",
           "Formal notices are typed state, not prose. When the fiction introduces a sealed letter, warrant, order, docket, clerk notice, or similar procedure, call procedural_notice with player-safe operative terms before narrating it. Keep restricted records out of every notice field. Use authorize then deliver for the prescribed clerk step; after delivery, call request_copy or request_clarification when asked. A denied request must still expose the minimum operative projection and a concrete next event; never leave the player in a wait/return loop or claim a read-back without the typed tool result.",
-          "If public recentLog or the current features already establish a mundane object that is absent from worldContext.objects, do not refuse the player's action. In the same atomic turn, preserve the current context and upsert one stable object through world_context, using definition.sourceRef for the public evidence and definition.tags for ordinary aliases, then continue the original action. Never materialize from private or rejected text, and never add unsupported magic or mechanics.",
+          "If public recentLog, the current context, or an actor-safe fact already establishes a mundane item absent from worldContext.objects, do not refuse the player's action. In the same atomic turn, call content_compile with a strict item proposal, stable key and instanceKey, and the exact released_narration, world_context, or world_fact evidence ref. Then continue the original action using the returned worldObject id. Never materialize from private, rejected, or newly player-asserted text.",
           "Use player_note_add only for durable facts, goals, preferences, promises, or other information the player explicitly states or clearly confirms.",
           "Treat the character sheet details as durable canon. When the player establishes appearance, personality, ideals, bonds, flaws, backstory, allies, faction, treasure, inspiration, or temporary hit points, use character_update so the sheet stays current; never rename the player character without consent.",
           "The campaign's pinned Open5e content policy defines its exact game system, base rules, enabled source documents, and licenses. Never borrow a rule or creature from another partition. The deterministic kernel owns ability modifiers, proficiency, skills, saving throws, hit dice, equipment, armor class, currency, combat, and rest at the fidelity each source record reached. Use authored campaign fiction for things the sources do not define, but never invent source-backed mechanics.",
@@ -466,7 +466,7 @@ export class LanternDungeonMaster {
           "Use rules_reference before making an exact SRD ruling; it searches the campaign's pinned rules, rulesets, legacy sections, and planes. Use content_search and content_get for creatures, spells, equipment, and other definitions. Respect each record's fidelity tier: tier 0 is reference-only, tier 1 resolves only typed fields, and tier 2 may execute its reviewed program.",
           "A player turn may require several ordered mechanical effects. Call every required mutating tool; Lantern stages accepted effects against one working snapshot and commits the complete plan atomically with one campaign-version increment.",
           "Mutating tool results are provisional until your final response. A rejected effect is not part of the plan; correct it before narration if the consequence is required. Never narrate a provisional effect that was rejected.",
-          "An object_not_found result for a mundane object already present in public recentLog or current features must be repaired with world_context.objects.upsert and the original action retried in this turn. Never expose missing engine state as an in-world explanation.",
+          "An object_not_found result for a mundane item already present in public recentLog, current context, or actor-safe facts must be repaired with content_compile materialization and the original action retried in this turn. Never expose missing engine state as an in-world explanation.",
           "Never invent a mechanical result in prose. If a result matters, call the matching engine tool. You may invent the content being offered to the engine.",
           "Never use prose to imply that a rejected action succeeded.",
           "After a tool result, narrate only the committed result and keep the response concise and immersive.",
@@ -610,7 +610,7 @@ export class LanternDungeonMaster {
       });
 
       for (const toolCall of toolCalls) {
-        const toolOutput = this.executeToolCall(
+        let toolOutput = this.executeToolCall(
           context,
           currentState,
           clientCommandId,
@@ -618,6 +618,22 @@ export class LanternDungeonMaster {
           stagedEffects.length,
           loadedCapabilityFamilies,
         );
+        if (
+          searchIntent
+          && toolOutput.stagedEffect?.command.kind === "content_compile"
+          && toolOutput.stagedEffect.command.materialization
+          && !searchMaterializationAuthorized(initialState, stagedEffects, toolOutput.stagedEffect.command)
+        ) {
+          const { stagedEffect: _discarded, ...base } = toolOutput;
+          toolOutput = {
+            ...base,
+            accepted: false,
+            code: "search_materialization_not_authorized",
+            message: "A broad search cannot materialize an item without evidence that predated the search or a typed committed discovery.",
+            data: null,
+            provisional: false,
+          };
+        }
         if (toolOutput.loadedCapabilityFamily) loadedCapabilityFamilies.add(toolOutput.loadedCapabilityFamily);
         if (toolOutput.stagedEffect) {
           stagedEffects.push(toolOutput.stagedEffect);
@@ -1357,6 +1373,20 @@ function searchTurnAuthorizedAliases(
     }
   }
   for (const effect of effects) {
+    if (effect.command.kind === "content_compile" && effect.command.materialization) {
+      const data = effect.resolution.data;
+      const worldObject = data && typeof data === "object" && !Array.isArray(data)
+        ? (data as { worldObject?: unknown }).worldObject
+        : null;
+      if (worldObject && typeof worldObject === "object" && !Array.isArray(worldObject)) {
+        const record = worldObject as { id?: unknown; definition?: { name?: unknown; tags?: unknown } };
+        if (typeof record.id === "string") aliases.push(record.id);
+        if (typeof record.definition?.name === "string") aliases.push(record.definition.name);
+        if (Array.isArray(record.definition?.tags)) {
+          aliases.push(...record.definition.tags.filter((tag): tag is string => typeof tag === "string"));
+        }
+      }
+    }
     if (effect.command.kind === "challenge_attempt") {
       const data = effect.resolution.data;
       if (data && typeof data === "object" && !Array.isArray(data) && "discovery" in data) {
@@ -1384,6 +1414,53 @@ function searchTurnAuthorizedAliases(
   return aliases;
 }
 
+function searchMaterializationAuthorized(
+  initialState: LanternCampaignState,
+  effects: StagedEngineTurnEffect[],
+  command: Extract<EngineCommand, { kind: "content_compile" }>,
+): boolean {
+  if (!command.materialization || command.proposal?.kind !== "item") return true;
+  const aliases = [command.proposal.key ?? "", command.proposal.name].filter(Boolean);
+  for (const value of [...aliases]) {
+    const tokens = value.toLocaleLowerCase("en-US").replace(/[-_]+/g, " ").replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+    if (tokens.length > 1) aliases.push(tokens.slice(-2).join(" "));
+    const noun = tokens.at(-1);
+    if (noun && noun.length >= 3) aliases.push(noun);
+  }
+  const evidence = command.materialization.evidence;
+  let text: string | null = null;
+  if (evidence.kind === "released_narration") {
+    text = initialState.log.find((entry) => entry.id === evidence.ref && entry.kind === "narration")?.text ?? null;
+  } else if (evidence.kind === "world_context") {
+    const world = initialState.worldContext;
+    if (world?.id === evidence.ref) text = [world.title, world.description, ...world.features].join(" ");
+  } else {
+    const initialFact = actorKnowledgeProjection(initialState.actorId, initialState).facts.find((fact) =>
+      fact.id === evidence.ref
+      && fact.sceneId === initialState.worldContext?.id
+    );
+    if (initialFact) {
+      text = [initialFact.title, initialFact.description].join(" ");
+    } else {
+      const discoveryEffect = effects.find((effect) => {
+        if (effect.command.kind !== "challenge_attempt") return false;
+        const data = effect.resolution.data;
+        if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+        const discovery = (data as { discovery?: { factId?: unknown } }).discovery;
+        return discovery?.factId === evidence.ref;
+      });
+      const discoveredFact = discoveryEffect
+        ? actorKnowledgeProjection(initialState.actorId, discoveryEffect.resolution.state).facts.find((fact) =>
+            fact.id === evidence.ref
+            && fact.sceneId === initialState.worldContext?.id
+          )
+        : null;
+      if (discoveredFact) text = [discoveredFact.title, discoveredFact.description].join(" ");
+    }
+  }
+  return Boolean(text && searchAliasMatches(text, aliases));
+}
+
 function searchTurnHasTypedDiscovery(
   initialState: LanternCampaignState,
   state: LanternCampaignState,
@@ -1407,7 +1484,7 @@ function searchTurnRepair(
   return [
     "The previous broad-search narration claimed a specific discovery without an accepted typed discovery.",
     "Do not guarantee an item merely because the player named a category.",
-    "If a bounded mundane proposal is actually present, call world_context with objects.upsert, a stable id, and an explicit definition.sourceRef such as authored:, derived:, or dm-proposal: before narrating it.",
+    "If a mundane item was established before this search, call content_compile with its stable definition key, stable instanceKey, and the exact released_narration, world_context, or world_fact materialization evidence ref before narrating it.",
     "Otherwise return valid narration saying that the search did not reveal a specific authorized item. Do not name a new cloak, bundle, weapon, disguise, supplies, hatch, escape route, or other reward.",
   ].join(" ");
 }
@@ -1481,7 +1558,7 @@ function objectTurnRepair(intent: ObjectTurnIntent, state: LanternCampaignState,
     return [
       "The previous plan did not complete the player's attempted transfer of an established NPC-held object.",
       "Continue with tools before narration; do not claim possession in prose.",
-      "If the object is present in recentLog or features but absent from worldContext.objects, call world_context first and preserve the existing context while upserting exactly one stable object with a public-evidence sourceRef, the established holder's id as locationRef, and ordinary affordances.",
+      "If the item is present in recentLog, the current context, or an actor-safe fact but absent from worldContext.objects, call content_compile with a strict mundane item proposal, stable key and instanceKey, the exact materialization evidence ref, and the established holder as holderRef. Use the returned worldObject id for every later call.",
       "Then call challenge_attempt with challengeId seize-held-object-v1, the established holder as opponentId, and sceneId exactly worldContext.id + ':' + targetId.",
       "If the contest succeeds, immediately call interact with that same targetId and affordance take or steal. If it fails, do not call interact; preserve the holder's ownership and narrate that outcome.",
       `Current authoritative context: ${state.worldContext?.id ?? "none"}.`,
@@ -1490,7 +1567,7 @@ function objectTurnRepair(intent: ObjectTurnIntent, state: LanternCampaignState,
   return [
     "The previous response did not resolve the player's use of an authoritative object.",
     "Continue with tools before narration; do not substitute a generic no-check or prose-only consequence.",
-    "Use the actor-owned source object from worldContext.objects. If the target is described publicly but missing, upsert it with world_context while preserving the current context, then call interact with the typed affordance and sourceId for that source object.",
+    "Use the actor-owned source object from worldContext.objects. If a mundane target is publicly established but missing, materialize it with content_compile first, then call interact with the typed affordance and returned id.",
   ].join(" ");
 }
 

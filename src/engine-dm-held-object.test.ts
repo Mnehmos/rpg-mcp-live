@@ -12,6 +12,7 @@ import { LanternDungeonMaster } from "./engine-dm.js";
 import { LanternEngineStore } from "./engine-store.js";
 import type { EngineWorldObjectInstance, LanternCampaignState, RequestContext } from "./engine-contracts.js";
 import { openAiSdkFetch } from "./test-openai-stream.js";
+import { compileRuntimeContent } from "./content/runtime-compiler.js";
 
 const options = { apiKey: "test-key", baseUrl: "https://openrouter.example/v1", model: "openai/gpt-5.6-luna", reasoningEffort: "medium", maxTokens: 2_500, siteUrl: "https://lantern.example", appName: "Lantern Table Engine" };
 
@@ -39,8 +40,33 @@ function object(id: string, name: string, sourceRef: string, tags: string[], aff
   } as unknown as EngineWorldObjectInstance;
 }
 
-const keyRing = () => object("ledrus-key-ring", "Ledrus's key ring", "public-log:released-key-ring-beat", ["key-ring", "keys", "mundane"], ["inspect", "move", "carry", "throw", "take", "steal", "drop"], { kind: "ordinary_consequence", canDestroy: true, canLose: true, canSell: false, canConsume: false, canHide: true }, "intact", "ledrus");
 const serviceHatch = () => object("service-hatch", "service hatch", "public-feature:ludus-vault", ["hatch", "locked", "mundane"], ["inspect", "unlock", "open", "close", "lock"], { kind: "recoverable_route", canDestroy: false, canLose: false, canSell: false, canConsume: false, canHide: false }, "locked");
+
+function keyRingProposal() {
+  return {
+    kind: "item" as const,
+    key: "mundane-key-ring",
+    name: "Ledrus's iron key ring",
+    description: "A mundane ring of iron keys established in released narration.",
+    tags: ["key-ring", "keys", "mundane"],
+    category: "tool" as const,
+    material: "iron",
+    weight: 0.25,
+    affordances: ["inspect", "take", "drop", "use"] as const,
+  };
+}
+
+function keyRingId(state: LanternCampaignState): string {
+  const compiled = compileRuntimeContent(keyRingProposal(), {
+    campaignId: state.id,
+    authorId: state.actorId,
+    source: "dm",
+    sourceRefs: ["released_narration:released-key-ring-beat"],
+    createdAt: new Date(0).toISOString(),
+  }, true, "ledrus-key-ring");
+  if (!compiled.ok || !compiled.instance) throw new Error("The key-ring fixture did not compile.");
+  return compiled.instance.id;
+}
 
 function heldObjectState(): LanternCampaignState {
   const state = createInitialCampaign("account-held-object", "actor-held-object");
@@ -64,9 +90,10 @@ function contextFor(state: LanternCampaignState): RequestContext {
 
 function createStore(state: LanternCampaignState, context: RequestContext): LanternEngineStore {
   const dir = mkdtempSync(join(tmpdir(), "lantern-dm-held-object-"));
-  const store = new LanternEngineStore(join(dir, "engine.db"));
+  const databasePath = join(dir, "engine.db");
+  const store = new LanternEngineStore(databasePath);
   store.createCampaign(context, state);
-  return store;
+  return Object.assign(store, { databasePath });
 }
 
 describe("DM held-object reconciliation", () => {
@@ -75,36 +102,61 @@ describe("DM held-object reconciliation", () => {
     const state = heldObjectState();
     const context = contextFor(state);
     const store = createStore(state, context);
+    const canonicalKeyRingId = keyRingId(state);
+    const transferCommandId = randomUUID();
+    const transferText = "I wrench Ledrus's key ring from his belt and seize it.";
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(toolResponse(call("social-check", "social_check", { npcId: "ledrus", ability: "cha", goal: "Loosen Ledrus's grip on the key ring." })))
       .mockResolvedValueOnce(narration("You wrench the key ring free and close your hand around it."))
       .mockResolvedValueOnce(toolResponse(
-        call("materialize-key-ring", "world_context", { title: state.worldContext!.title, description: state.worldContext!.description, features: state.worldContext!.features, exits: [], objects: { upsert: [keyRing()] } }),
-        call("seize-key-ring", "challenge_attempt", { challengeId: "seize-held-object-v1", goal: "Seize Ledrus's key ring", approach: "Lunge through the opening and wrench it from Ledrus's belt.", sceneId: "ludus-vault:ledrus-key-ring", opponentId: "ledrus" }),
-        call("steal-key-ring", "interact", { targetId: "ledrus-key-ring", affordance: "steal", goal: "Take the key ring from Ledrus." }),
+        call("materialize-key-ring", "content_compile", {
+          proposal: keyRingProposal(),
+          instanceKey: "ledrus-key-ring",
+          materialization: { evidence: { kind: "released_narration", ref: "released-key-ring-beat" }, holderRef: "ledrus" },
+        }),
+        call("seize-key-ring", "challenge_attempt", { challengeId: "seize-held-object-v1", goal: "Seize Ledrus's key ring", approach: "Lunge through the opening and wrench it from Ledrus's belt.", sceneId: `ludus-vault:${canonicalKeyRingId}`, opponentId: "ledrus" }),
+        call("steal-key-ring", "interact", { targetId: canonicalKeyRingId, affordance: "steal", goal: "Take the key ring from Ledrus." }),
       ))
       .mockResolvedValueOnce(narration("The contest is settled: the key ring is now in your hand."))
       .mockResolvedValueOnce(narration("The hatch remains shut for the moment."))
-      .mockResolvedValueOnce(toolResponse(call("unlock-hatch", "interact", { targetId: "service-hatch", sourceId: "ledrus-key-ring", affordance: "unlock", goal: "Use the key ring to unlock the service hatch." })))
+      .mockResolvedValueOnce(toolResponse(call("unlock-hatch", "interact", { targetId: "service-hatch", sourceId: canonicalKeyRingId, affordance: "unlock", goal: "Use the key ring to unlock the service hatch." })))
       .mockResolvedValueOnce(narration("The key ring turns the lock, and the service hatch clicks open."));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     const dm = new LanternDungeonMaster(store, options);
-    const transfer = await dm.resolveTurn(context, state, randomUUID(), state.version, "I wrench Ledrus's key ring from his belt and seize it.");
+    const transfer = await dm.resolveTurn(context, state, transferCommandId, state.version, transferText);
     expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(transfer.event?.effects?.map((effect) => effect.tool)).toEqual(["social_check", "world_context", "challenge_attempt", "interact"]);
-    expect(transfer.state.worldContext?.objects).toEqual(expect.arrayContaining([expect.objectContaining({ id: "ledrus-key-ring", state: "carried", locationRef: null, ownerRef: { kind: "actor", id: state.actorId } })]));
-    expect(transfer.narration.text).toContain("now in your hand");
+    expect(transfer.event?.effects?.map((effect) => effect.tool)).toEqual(["social_check", "content_compile", "interact"]);
+    expect(transfer.state.worldContext?.objects).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: canonicalKeyRingId,
+      state: "carried",
+      locationRef: null,
+      ownerRef: { kind: "actor", id: state.actorId },
+      materialization: expect.objectContaining({ runtimeInstanceId: canonicalKeyRingId }),
+    })]));
+    expect(transfer.narration.text).toContain("carried by the acting character");
 
-    const unlock = await dm.resolveTurn(context, transfer.state, randomUUID(), transfer.state.version, "I use Ledrus's key ring to unlock the service hatch.");
+    const databasePath = (store as LanternEngineStore & { databasePath: string }).databasePath;
+    store.close();
+    const restartedStore = new LanternEngineStore(databasePath);
+    const restartedDm = new LanternDungeonMaster(restartedStore, options);
+    const replay = await restartedDm.resolveTurn(context, state, transferCommandId, state.version, transferText);
+    expect(replay.replayed).toBe(true);
+    expect(replay.event).toEqual(transfer.event);
+    expect(replay.state.runtimeContent.definitions).toHaveLength(1);
+    expect(replay.state.runtimeContent.instances).toHaveLength(1);
+    expect(replay.state.worldContext?.objects.filter((entry) => entry.id === canonicalKeyRingId)).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const unlock = await restartedDm.resolveTurn(context, replay.state, randomUUID(), replay.state.version, "I use Ledrus's key ring to unlock the service hatch.");
     expect(fetchMock).toHaveBeenCalledTimes(7);
     expect(unlock.event?.effects?.map((effect) => effect.tool)).toEqual(["interact"]);
     expect(unlock.state.worldContext?.objects).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "ledrus-key-ring", ownerRef: { kind: "actor", id: state.actorId }, state: "carried" }),
+      expect.objectContaining({ id: canonicalKeyRingId, ownerRef: { kind: "actor", id: state.actorId }, state: "carried" }),
       expect.objectContaining({ id: "service-hatch", state: "unlocked" }),
     ]));
     expect(unlock.narration.text).toContain("clicks open");
     expect(JSON.stringify(unlock.narration)).not.toContain("object_not_found");
-    store.close();
+    restartedStore.close();
   });
 });

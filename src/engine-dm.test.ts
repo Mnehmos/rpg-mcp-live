@@ -236,7 +236,10 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(firstRequest.tools).toHaveLength(engineCoreToolDefinitions().length);
     const worldContextTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
       .find((candidate) => candidate.function.name === "world_context");
-    expect(worldContextTool?.function.parameters).toHaveProperty("properties.objects");
+    const contentCompileTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
+      .find((candidate) => candidate.function.name === "content_compile");
+    expect(worldContextTool?.function.parameters).not.toHaveProperty("properties.objects");
+    expect(contentCompileTool?.function.parameters).toHaveProperty("properties.materialization");
     expect(JSON.stringify(worldContextTool?.function.parameters)).not.toContain('"ownerRef"');
     expect(firstRequest.provider).toEqual({ require_parameters: true });
     expect(firstRequest.response_format).toMatchObject({
@@ -261,7 +264,8 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(systemPrompt).toContain("challenge_attempt");
     expect(systemPrompt).toContain("commits the complete plan atomically");
     expect(systemPrompt).toContain("seize-held-object-v1");
-    expect(systemPrompt).toContain("world_context.objects.upsert");
+    expect(systemPrompt).toContain("content_compile materialization");
+    expect(systemPrompt).not.toContain("world_context.objects.upsert");
     expect(systemPrompt).toContain("Never expose missing engine state");
     expect(systemPrompt).toContain("context-aware moves");
     expect(systemPrompt).toContain('The shorthand kinds "npc" and "location" are invalid');
