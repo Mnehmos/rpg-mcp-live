@@ -5,6 +5,9 @@ import {
 import {
   activeCampaignStorageKey,
   campaignSessionUrl,
+  isCurrentCampaignSelection,
+  isCurrentRequest,
+  retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
 import {
@@ -17,7 +20,7 @@ import { isStaleCommandStatus } from "./command-status.js";
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0 };
+  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -69,7 +72,7 @@ import { isStaleCommandStatus } from "./command-status.js";
 
   function waitForCampaignRetry(attempt) {
     return new Promise(function (resolve) {
-      window.setTimeout(resolve, 400 * attempt);
+      window.setTimeout(resolve, retryDelayMs(attempt));
     });
   }
 
@@ -1662,7 +1665,8 @@ import { isStaleCommandStatus } from "./command-status.js";
     state.sessionRefreshSequence = sequence;
     var preferredCampaignId = readActiveCampaignId();
     function applySessionResult(result) {
-      if (sequence !== state.sessionRefreshSequence) return result.data;
+      if (!result) return null;
+      if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return result.data;
       if (result.response.status === 401) {
         state.session = null;
         state.engineState = null;
@@ -1687,10 +1691,35 @@ import { isStaleCommandStatus } from "./command-status.js";
       }
       return result.data;
     }
-    return requestJson(campaignSessionUrl(preferredCampaignId)).then(function (result) {
+    function requestSession(url, attempt) {
+      if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return Promise.resolve(null);
+      var currentAttempt = attempt || 1;
+      return requestJson(url).then(function (result) {
+        if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
+        if (shouldRetryCampaignLoad(result.response.status) && currentAttempt < 3) {
+          setStatus("Reconnecting to your campaign", "thinking");
+          return waitForCampaignRetry(currentAttempt).then(function () {
+            return requestSession(url, currentAttempt + 1);
+          });
+        }
+        return result;
+      }, function (error) {
+        if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
+        if (currentAttempt < 3) {
+          setStatus("Reconnecting to your campaign", "thinking");
+          return waitForCampaignRetry(currentAttempt).then(function () {
+            return requestSession(url, currentAttempt + 1);
+          });
+        }
+        throw error;
+      });
+    }
+    return requestSession(campaignSessionUrl(preferredCampaignId)).then(function (result) {
+      if (!result) return null;
       if (result.response.status === 404 && preferredCampaignId) {
+        if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
         clearActiveCampaignId();
-        return requestJson("/api/session").then(applySessionResult);
+        return requestSession("/api/session").then(applySessionResult);
       }
       return applySessionResult(result);
     }).catch(function (error) {
@@ -2166,10 +2195,19 @@ import { isStaleCommandStatus } from "./command-status.js";
   }
 
   function loadCampaign(campaignId) {
+    var loadSequence = state.campaignLoadSequence + 1;
+    state.campaignLoadSequence = loadSequence;
+    state.pendingCampaignLoadId = campaignId;
     var attempt = 0;
+    function isCurrentLoad() {
+      return isCurrentRequest(loadSequence, state.campaignLoadSequence)
+        && isCurrentCampaignSelection(campaignId, state.pendingCampaignLoadId);
+    }
     function requestCampaign() {
+      if (!isCurrentLoad()) return Promise.resolve(false);
       attempt += 1;
       return requestJson("/api/campaigns/" + encodeURIComponent(campaignId)).then(function (result) {
+        if (!isCurrentLoad()) return false;
         if (!result.response.ok) {
           if (shouldRetryCampaignLoad(result.response.status) && attempt < 3) {
             setStatus("Reconnecting to your campaign", "thinking");
@@ -2177,6 +2215,7 @@ import { isStaleCommandStatus } from "./command-status.js";
           }
           throw new Error(result.data.error || "That campaign could not be opened.");
         }
+        if (!isCurrentLoad()) return false;
         writeActiveCampaignId(campaignId);
         state.managerOpen = false;
         state.createMode = false;
@@ -2184,6 +2223,7 @@ import { isStaleCommandStatus } from "./command-status.js";
         setStatus("Campaign loaded", "ready");
         return true;
       }, function (error) {
+        if (!isCurrentLoad()) return false;
         if (attempt < 3) {
           setStatus("Reconnecting to your campaign", "thinking");
           return waitForCampaignRetry(attempt).then(requestCampaign);
@@ -2192,12 +2232,15 @@ import { isStaleCommandStatus } from "./command-status.js";
       });
     }
     return requestCampaign().catch(function (error) {
+      if (!isCurrentLoad()) return false;
       state.managerOpen = true;
       state.createMode = false;
       renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription });
       setStatus("Campaign could not be opened. Try again.", "error");
       showToast(error.message + " Select Open to retry.");
       return false;
+    }).finally(function () {
+      if (isCurrentLoad()) state.pendingCampaignLoadId = null;
     });
   }
 
