@@ -101,6 +101,7 @@ async function resolveWithModelNarration(
   actingNpcIds = ["titus"],
   configureState?: (state: LanternCampaignState) => void,
   providerFailure = false,
+  suggestedActions: Array<{ id: string; label: string; prompt: string }> = [],
 ) {
   const state = socialState();
   configureState?.(state);
@@ -130,7 +131,7 @@ async function resolveWithModelNarration(
   } else {
     fetchMock.mockResolvedValueOnce(legacyResponse({
       role: "assistant",
-      content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions: [] }),
+      content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions }),
     }));
   }
   vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
@@ -393,5 +394,18 @@ describe("social check actor attribution", () => {
 
     expect(result.narrationSource).toBe("rules");
     expect(result.narration.text).toBe("Let's fade to black and continue with a safer thread.");
+  });
+
+  it("removes suggested actions that ask the mediated NPC to roll", async () => {
+    const result = await resolveWithModelNarration(
+      "The sentries answer cautiously.",
+      ["titus"],
+      undefined,
+      false,
+      [{ id: "titus-roll", label: "Roll again", prompt: "Have Titus roll again using his modifier." }],
+    );
+
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.suggestedActions).toEqual([]);
   });
 });

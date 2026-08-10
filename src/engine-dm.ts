@@ -1291,7 +1291,7 @@ function narrationContradictsMediatedCheck(text: string, attribution: EngineSoci
   const actorClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs|got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,60}\\b(?:check|roll|score|result|total)\\b`, "iu");
   const numericScoreClaim = new RegExp(`${actorBoundary}[^.!?]{0,40}\\b(?:got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,20}\\b\\d+(?:\\.\\d+)?\\b`, "iu");
   const possessiveClaim = new RegExp(`${actorBoundary}(?:['’]s)(?![\\p{L}\\p{N}_])[^.!?]{0,80}\\b(?:check|roll|modifier)\\b`, "iu");
-  const pronounModifierClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:uses?|used|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "iu");
+  const pronounModifierClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:uses?|used|using|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "iu");
   return actorClaim.test(normalized)
     || numericScoreClaim.test(normalized)
     || possessiveClaim.test(normalized)
@@ -1337,6 +1337,18 @@ function compactActorName(name: string): string {
   return normalized.length <= 48 ? normalized : normalized.slice(0, 45) + "...";
 }
 
+function removeMediatedSuggestedActionClaims(
+  narration: NarrationEnvelope,
+  attributions: EngineSocialCheckAttribution[],
+): NarrationEnvelope {
+  return {
+    ...narration,
+    suggestedActions: narration.suggestedActions.filter((action) =>
+      !attributions.some((attribution) => narrationContradictsMediatedCheck(`${action.label} ${action.prompt}`, attribution))
+    ),
+  };
+}
+
 function preserveMediatedCheckAttribution(
   result: EngineCommandResult,
   narration: NarrationEnvelope,
@@ -1354,7 +1366,10 @@ function preserveMediatedCheckAttribution(
   }
   const completed = appendMissingMediatedAttributions(sanitized, attributions, true);
   return {
-    narration: sanitizeNarrationForProfile(completed, experienceProfile),
+    narration: removeMediatedSuggestedActionClaims(
+      sanitizeNarrationForProfile(completed, experienceProfile),
+      attributions,
+    ),
     source: "llm",
   };
 }
