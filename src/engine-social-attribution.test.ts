@@ -315,4 +315,12 @@ describe("social check actor attribution", () => {
     expect(result.narration.text).toContain("Marcus acts for Mnehmos toward Arena Sentries");
     expect(result.narration.text).not.toContain("Titus's Persuasion roll");
   });
+
+  it("keeps the authoritative suffix inside the narration contract limit", async () => {
+    const result = await resolveWithModelNarration("A".repeat(6_000));
+
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.text.length).toBeLessThanOrEqual(6_000);
+    expect(result.narration.text).toContain("Authoritative check record: Titus acts for Mnehmos toward Arena Sentries");
+  });
 });

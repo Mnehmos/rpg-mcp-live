@@ -1293,9 +1293,15 @@ function appendMissingMediatedAttributions(
       return present ? null : marker;
     })
     .filter((addition): addition is string => addition !== null);
-  return additions.length > 0
-    ? { ...narration, text: `${narration.text.trim()}\n\n${additions.join("\n\n")}` }
-    : narration;
+  if (additions.length === 0) return narration;
+  const suffix = additions.join("\n\n");
+  const prefixSeparator = "\n\n";
+  const availablePrefixLength = Math.max(0, 6_000 - prefixSeparator.length - suffix.length);
+  const prefix = narration.text.trim().slice(0, availablePrefixLength).trimEnd();
+  return {
+    ...narration,
+    text: prefix ? `${prefix}${prefixSeparator}${suffix}` : suffix,
+  };
 }
 
 function preserveMediatedCheckAttribution(
