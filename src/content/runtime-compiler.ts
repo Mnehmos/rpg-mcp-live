@@ -41,6 +41,9 @@ export const runtimeLocationExitStateSchema = z.object({
   key: runtimeContentKeySchema,
   label: z.string().trim().min(1).max(160),
   kind: z.enum(["door", "passage", "road", "portal", "stairs", "other"]),
+  // Null keeps legacy #131 definitions/relationships readable. New compiled
+  // topology always carries the canonical target key.
+  targetKey: runtimeContentKeySchema.nullable().default(null),
   open: z.boolean(),
   locked: z.boolean(),
   blocked: z.boolean(),
@@ -67,6 +70,24 @@ const runtimeLocationExitSchema = z.object({
   }
 });
 
+/**
+ * Persisted definitions predate typed topology. Defaults deliberately retain
+ * those definitions instead of silently dropping them during reload; a legacy
+ * exit with no target remains descriptive and is not traversable.
+ */
+const runtimeLocationExitDefinitionSchema = z.object({
+  key: runtimeContentKeySchema,
+  label: z.string().trim().min(1).max(160),
+  kind: z.enum(["door", "passage", "road", "portal", "stairs", "other"]),
+  targetKey: runtimeContentKeySchema.nullable().default(null),
+  open: z.boolean().default(true),
+  locked: z.boolean().default(false),
+  blocked: z.boolean().default(false),
+  hidden: z.boolean().default(false),
+  discovered: z.boolean().default(true),
+  requirements: z.array(runtimeContentKeySchema).max(8).default([]),
+}).strict();
+
 const runtimeLocationEntityRefSchema = z.object({
   kind: z.enum(["actor", "world_object", "merchant"]),
   id: z.string().trim().min(1).max(220),
@@ -86,6 +107,9 @@ export const runtimeLocationProposalSchema = z.object({
   const keys = proposal.exits.map((exit) => exit.key);
   if (new Set(keys).size !== keys.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["exits"], message: "Location exit keys must be unique." });
+  }
+  if ((proposal.parentKey || proposal.exits.length > 0 || proposal.occupants.length > 0 || proposal.objects.length > 0) && !proposal.key) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["key"], message: "A location with canonical topology references must declare a stable key." });
   }
 });
 export type RuntimeLocationProposal = z.infer<typeof runtimeLocationProposalSchema>;
@@ -147,7 +171,7 @@ export const runtimeLocationDefinitionSchema = z.object({
   locationKind: runtimeLocationProposalSchema.shape.locationKind,
   parentKey: runtimeContentKeySchema.nullable(),
   features: runtimeLocationProposalSchema.shape.features,
-  exits: runtimeLocationProposalSchema.shape.exits,
+  exits: z.array(runtimeLocationExitDefinitionSchema).max(20),
 }).strict();
 export type RuntimeLocationDefinition = z.infer<typeof runtimeLocationDefinitionSchema>;
 
@@ -394,6 +418,7 @@ export function compileRuntimeContent(proposal: unknown, context: RuntimeContent
           key: exit.key,
           label: exit.label,
           kind: exit.kind,
+          targetKey: exit.targetKey,
           open: exit.open,
           locked: exit.locked,
           blocked: exit.blocked,

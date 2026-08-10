@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   createInitialCampaign,
   normalizeCampaignState,
+  projectResolutionForActor,
+  projectStateForActor,
   resolveEngineCommand,
   toSessionView,
 } from "./engine-domain.js";
@@ -234,5 +236,113 @@ describe("runtime content engine boundary", () => {
     expect(result.accepted).toBe(false);
     expect(result.code).toBe("location_exit_target_not_found");
     expect(result.state.runtimeContent).toEqual({ definitions: [], instances: [], relationships: [] });
+  });
+
+  it("resolves exits to the one canonical non-default target instance", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = context(initial.id);
+    const target = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "content_compile", proposal: locationProposal("tower", {}), instanceKey: "upper" }),
+      "content_compile",
+    );
+    expect(target.accepted).toBe(true);
+    const targetInstance = target.state.runtimeContent.instances.find((instance) => instance.instanceKey === "upper");
+    expect(targetInstance).toBeDefined();
+    const source = resolveEngineCommand(
+      target.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("courtyard", {
+          exits: [{ key: "tower-stairs", label: "Stairs", kind: "stairs", targetKey: "tower" }],
+        }),
+      }),
+      "content_compile",
+    );
+    expect(source.accepted).toBe(true);
+    expect(source.state.runtimeContent.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: "connects_to", toId: targetInstance?.id, exit: expect.objectContaining({ targetKey: "tower" }) }),
+    ]));
+  });
+
+  it("rejects duplicate actor containment and createInstance false without mutation", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = context(initial.id);
+    const first = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("first-room", { occupants: [{ kind: "actor", id: initial.actorId }] }),
+      }),
+      "content_compile",
+    );
+    expect(first.accepted).toBe(true);
+    const before = JSON.stringify(first.state);
+    const duplicate = resolveEngineCommand(
+      first.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("second-room", { occupants: [{ kind: "actor", id: initial.actorId }] }),
+      }),
+      "content_compile",
+    );
+    expect(duplicate.accepted).toBe(false);
+    expect(duplicate.code).toBe("location_actor_already_located");
+    expect(JSON.stringify(duplicate.state)).toBe(before);
+
+    const noInstance = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        createInstance: false,
+        proposal: locationProposal("orphan-room", { exits: [{ key: "door", label: "Door", kind: "door", targetKey: "first-room" }] }),
+      }),
+      "content_compile",
+    );
+    expect(noInstance.accepted).toBe(false);
+    expect(noInstance.code).toBe("location_instance_required");
+    expect(noInstance.state.runtimeContent).toEqual({ definitions: [], instances: [], relationships: [] });
+  });
+
+  it("redacts undiscovered exits from state, command, resolution data, and event evidence", () => {
+    const initial = createInitialCampaign("account-132", "actor-132", randomUUID());
+    const requestContext = context(initial.id);
+    const target = resolveEngineCommand(
+      initial,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({ kind: "content_compile", proposal: locationProposal("target-room") }),
+      "content_compile",
+    );
+    const result = resolveEngineCommand(
+      target.state,
+      requestContext,
+      randomUUID(),
+      engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: locationProposal("secret-room", {
+          exits: [{ key: "hidden-door", label: "Hidden door", kind: "door", targetKey: "target-room", hidden: true, discovered: false }],
+        }),
+      }),
+      "content_compile",
+    );
+    expect(result.accepted).toBe(true);
+    const publicState = projectStateForActor(initial.actorId, result.state);
+    expect(JSON.stringify(publicState)).not.toContain("hidden-door");
+    const publicResult = projectResolutionForActor(result, initial.actorId);
+    expect(JSON.stringify(publicResult.event?.command)).not.toContain("hidden-door");
+    expect(JSON.stringify(publicResult.event?.command)).not.toContain("target-room");
+    expect(JSON.stringify(publicResult.data)).not.toContain("hidden-door");
+    expect(JSON.stringify(publicResult.data)).not.toContain("target-room");
   });
 });

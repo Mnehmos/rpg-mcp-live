@@ -3806,6 +3806,13 @@ function resolveContentCompile(
   if (!command.proposal) {
     return rejection(state, tool, "content_proposal_required", "A content compile command needs a strict proposal.");
   }
+  if (
+    command.proposal.kind === "location"
+    && command.createInstance === false
+    && Boolean(command.proposal.parentKey || command.proposal.exits.length || command.proposal.occupants.length || command.proposal.objects.length)
+  ) {
+    return rejection(state, tool, "location_instance_required", "A location with canonical topology references must persist an instance.");
+  }
   const compiled = compileRuntimeContent(
     command.proposal,
     {
@@ -3820,11 +3827,16 @@ function resolveContentCompile(
   );
   if (!compiled.ok) return rejection(state, tool, compiled.code, compiled.message, { proposalKind: command.proposal.kind });
 
-  const topologyValidation = validateCompiledLocationTopology(state, compiled);
+  const resolvedTopology = resolveCompiledLocationTargets(state, command.proposal, compiled);
+  if (!resolvedTopology.ok) {
+    return rejection(state, tool, resolvedTopology.code, resolvedTopology.message, resolvedTopology.data);
+  }
+  const compiledForCommit = resolvedTopology.compiled;
+  const topologyValidation = validateCompiledLocationTopology(state, command.proposal, compiledForCommit);
   if (topologyValidation) return rejection(state, tool, topologyValidation.code, topologyValidation.message, topologyValidation.data);
 
   const existingDefinitions = state.runtimeContent.definitions;
-  const existingDefinition = existingDefinitions.find((definition) => definition.id === compiled.definition.id);
+  const existingDefinition = existingDefinitions.find((definition) => definition.id === compiledForCommit.definition.id);
   if (existingDefinition) {
     return rejection(
       state,
@@ -3834,8 +3846,8 @@ function resolveContentCompile(
       { definitionId: existingDefinition.id, kind: existingDefinition.kind },
     );
   }
-  const existingInstance = compiled.instance
-    ? state.runtimeContent.instances.find((instance) => instance.id === compiled.instance!.id)
+  const existingInstance = compiledForCommit.instance
+    ? state.runtimeContent.instances.find((instance) => instance.id === compiledForCommit.instance!.id)
     : null;
   if (existingInstance) {
     return rejection(
@@ -3846,7 +3858,7 @@ function resolveContentCompile(
       { instanceId: existingInstance.id, definitionId: existingInstance.definitionId },
     );
   }
-  const conflictingRelationship = compiled.relationships.find((relationship) =>
+  const conflictingRelationship = compiledForCommit.relationships.find((relationship) =>
     state.runtimeContent.relationships.some((existing) => existing.id === relationship.id)
   );
   if (conflictingRelationship) {
@@ -3861,24 +3873,24 @@ function resolveContentCompile(
 
   const next = cloneCampaign(state);
   next.runtimeContent = {
-    definitions: [...state.runtimeContent.definitions, compiled.definition],
-    instances: compiled.instance
-      ? [...state.runtimeContent.instances, compiled.instance]
+    definitions: [...state.runtimeContent.definitions, compiledForCommit.definition],
+    instances: compiledForCommit.instance
+      ? [...state.runtimeContent.instances, compiledForCommit.instance]
       : [...state.runtimeContent.instances],
-    relationships: [...state.runtimeContent.relationships, ...compiled.relationships],
+    relationships: [...state.runtimeContent.relationships, ...compiledForCommit.relationships],
   };
   const stateChanges = [
     {
-      path: `/runtimeContent/definitions/${escapeJsonPointerSegment(compiled.definition.id)}`,
+      path: `/runtimeContent/definitions/${escapeJsonPointerSegment(compiledForCommit.definition.id)}`,
       before: null,
-      after: compiled.definition,
+      after: compiledForCommit.definition,
     },
-    ...(compiled.instance ? [{
-      path: `/runtimeContent/instances/${escapeJsonPointerSegment(compiled.instance.id)}`,
+    ...(compiledForCommit.instance ? [{
+      path: `/runtimeContent/instances/${escapeJsonPointerSegment(compiledForCommit.instance.id)}`,
       before: null,
-      after: compiled.instance,
+      after: compiledForCommit.instance,
     }] : []),
-    ...compiled.relationships.map((relationship) => ({
+    ...compiledForCommit.relationships.map((relationship) => ({
       path: `/runtimeContent/relationships/${escapeJsonPointerSegment(relationship.id)}`,
       before: null,
       after: relationship,
@@ -3890,11 +3902,11 @@ function resolveContentCompile(
     clientCommandId,
     command,
     tool,
-    `Compiled inert ${compiled.definition.kind} content: ${compiled.definition.name}.`,
+    `Compiled inert ${compiledForCommit.definition.kind} content: ${compiledForCommit.definition.name}.`,
     {
-      definition: compiled.definition,
-      instance: compiled.instance,
-      relationships: compiled.relationships,
+      definition: compiledForCommit.definition,
+      instance: compiledForCommit.instance,
+      relationships: compiledForCommit.relationships,
     },
     "content_compiled",
     [],
@@ -3905,10 +3917,15 @@ function resolveContentCompile(
 
 function validateCompiledLocationTopology(
   state: LanternCampaignState,
+  proposal: Extract<EngineCommand, { kind: "content_compile" }> ["proposal"],
   compiled: Extract<ReturnType<typeof compileRuntimeContent>, { ok: true }>,
 ): { code: string; message: string; data?: Record<string, unknown> } | null {
   if (compiled.definition.kind !== "location") return null;
-  if (!compiled.instance && compiled.relationships.length > 0) {
+  const locationProposal = proposal?.kind === "location" ? proposal : null;
+  if (!compiled.instance && (
+    compiled.relationships.length > 0
+    || Boolean(locationProposal?.parentKey || locationProposal?.exits.length || locationProposal?.occupants.length || locationProposal?.objects.length)
+  )) {
     return { code: "location_instance_required", message: "A location with topology references must persist an instance." };
   }
   const definitions = state.runtimeContent.definitions;
@@ -3939,6 +3956,11 @@ function validateCompiledLocationTopology(
       }
     }
     if (relationship.relation === "located_in" && relationship.fromKind === "actor") {
+      if (state.runtimeContent.relationships.some((existing) =>
+        existing.relation === "located_in" && existing.fromKind === "actor" && existing.fromId === relationship.fromId
+      )) {
+        return { code: "location_actor_already_located", message: "An actor may have only one canonical location relationship at a time.", data: { actorId: relationship.fromId } };
+      }
       const actorExists = relationship.fromId === state.actorId
         || state.controlledActors.some((actor) => actor.id === relationship.fromId && actor.status === "active")
         || state.worldContext?.npcs.some((npc) => npc.id === relationship.fromId);
@@ -3963,6 +3985,72 @@ function validateCompiledLocationTopology(
     }
   }
   return null;
+}
+
+function resolveCompiledLocationTargets(
+  state: LanternCampaignState,
+  proposal: Extract<EngineCommand, { kind: "content_compile" }> ["proposal"],
+  compiled: Extract<ReturnType<typeof compileRuntimeContent>, { ok: true }>,
+):
+  | { ok: true; compiled: Extract<ReturnType<typeof compileRuntimeContent>, { ok: true }> }
+  | { ok: false; code: string; message: string; data?: Record<string, unknown> } {
+  if (!proposal || proposal.kind !== "location" || !compiled.instance) return { ok: true, compiled };
+
+  const instancesForKey = (key: string) => {
+    const definitionIds = new Set(
+      state.runtimeContent.definitions
+        .filter((definition) => definition.kind === "location" && definition.key === key)
+        .map((definition) => definition.id),
+    );
+    return state.runtimeContent.instances.filter((instance) =>
+      instance.kind === "location" && definitionIds.has(instance.definitionId)
+    );
+  };
+  const resolveTarget = (key: string, relation: "parent" | "exit") => {
+    if (proposal.key === key) {
+      return {
+        ok: false as const,
+        code: relation === "exit" ? "location_exit_cycle" : "location_parent_cycle",
+        message: relation === "exit" ? "A location exit must target a different canonical location instance." : "A location cannot contain itself.",
+      };
+    }
+    const candidates = instancesForKey(key);
+    if (candidates.length === 0) {
+      return {
+        ok: false as const,
+        code: relation === "exit" ? "location_exit_target_not_found" : "location_parent_not_found",
+        message: `The ${relation === "exit" ? "exit target" : "parent location"} must already be a canonical location instance before this topology can be committed.`,
+        data: { targetKey: key },
+      };
+    }
+    if (candidates.length > 1) {
+      return {
+        ok: false as const,
+        code: relation === "exit" ? "location_exit_target_ambiguous" : "location_parent_ambiguous",
+        message: `The ${relation === "exit" ? "exit target" : "parent location"} resolves to more than one canonical location instance.`,
+        data: { targetKey: key, instanceIds: candidates.map((candidate) => candidate.id) },
+      };
+    }
+    return { ok: true as const, instance: candidates[0] };
+  };
+
+  const relationships: typeof compiled.relationships = [];
+  for (const relationship of compiled.relationships) {
+    if (relationship.relation === "located_in" && relationship.fromId === compiled.instance!.id && proposal.parentKey) {
+      const target = resolveTarget(proposal.parentKey, "parent");
+      if (!target.ok) return target;
+      relationships.push({ ...relationship, toId: target.instance.id });
+      continue;
+    }
+    if (relationship.relation === "connects_to" && relationship.exit?.targetKey) {
+      const target = resolveTarget(relationship.exit.targetKey, "exit");
+      if (!target.ok) return target;
+      relationships.push({ ...relationship, toId: target.instance.id });
+      continue;
+    }
+    relationships.push(relationship);
+  }
+  return { ok: true, compiled: { ...compiled, relationships } };
 }
 
 function resolveRuntimeLocationExitPatch(
@@ -13145,6 +13233,7 @@ export function projectStateForActor(actorId: string, state: LanternCampaignStat
     terms: notice.status === "delivered" || notice.status === "resolved" ? { ...notice.terms } : null,
   })) as unknown as LanternCampaignState["proceduralNotices"];
   projected.actorKnowledge = projection.knowledge;
+  projected.runtimeContent = projectRuntimeContentForActor(projected.runtimeContent);
   projected.controlledActors = projected.controlledActors
     .filter((actor) => actor.ownerActorId === actorId || actor.controllerActorId === actorId)
     .map((actor) => controlledActorView(projected, actor, actorId)) as unknown as EngineControlledActor[];
@@ -13216,9 +13305,61 @@ function redactControlledActorValue(value: unknown): unknown {
   return projected;
 }
 
+function isUndiscoveredHiddenExit(value: unknown): value is Record<string, unknown> {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (value as Record<string, unknown>).hidden === true
+    && (value as Record<string, unknown>).discovered === false,
+  );
+}
+
+function containsUndiscoveredHiddenExit(value: unknown): boolean {
+  if (isUndiscoveredHiddenExit(value)) return true;
+  if (Array.isArray(value)) return value.some(containsUndiscoveredHiddenExit);
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).some(containsUndiscoveredHiddenExit);
+}
+
+/**
+ * Apply the same hidden-exit boundary to every actor-facing shape, including
+ * command proposals, resolution data, and event state-change evidence. This
+ * is intentionally structural so older event payloads cannot bypass the
+ * typed runtime-content projection.
+ */
+function redactRuntimeContentValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry) => !(entry && typeof entry === "object" && !Array.isArray(entry)
+        && (entry as Record<string, unknown>).relation === "connects_to"
+        && isUndiscoveredHiddenExit((entry as Record<string, unknown>).exit)))
+      .map((entry) => redactRuntimeContentValue(entry));
+  }
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const projected: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(source)) {
+    if (key === "exit" && isUndiscoveredHiddenExit(child)) continue;
+    if (key === "exits" && Array.isArray(child)) {
+      projected[key] = child
+        .filter((exit) => !isUndiscoveredHiddenExit(exit))
+        .map((exit) => redactRuntimeContentValue(exit));
+      continue;
+    }
+    if (key === "relationships" && Array.isArray(child)) {
+      projected[key] = redactRuntimeContentValue(child);
+      continue;
+    }
+    projected[key] = redactRuntimeContentValue(child);
+  }
+  return projected;
+}
+
 function redactStateChanges(changes: Array<{ path: string; before: unknown; after: unknown }>): Array<{ path: string; before: unknown; after: unknown }> {
   return changes
     .filter((change) => !change.path.startsWith("/worldFacts") && !change.path.startsWith("/actorKnowledge") && !change.path.startsWith("/productionRoom"))
+    .filter((change) => !(change.path.startsWith("/runtimeContent") && (containsUndiscoveredHiddenExit(change.before) || containsUndiscoveredHiddenExit(change.after))))
     .map((change) => {
       if (change.path.startsWith("/controlledActors") || change.path.startsWith("/time/scheduledEvents")) {
         return { ...change, before: redactControlledActorValue(change.before), after: redactControlledActorValue(change.after) };
@@ -13235,14 +13376,18 @@ function redactStateChanges(changes: Array<{ path: string; before: unknown; afte
         };
         return { ...change, before: redactNotice(change.before), after: redactNotice(change.after) };
       }
-      return change;
+      return {
+        ...change,
+        before: redactRuntimeContentValue(change.before),
+        after: redactRuntimeContentValue(change.after),
+      };
     });
 }
 
 function redactResolutionData(data: unknown): unknown {
   if (Array.isArray(data)) return data.map((entry) => redactResolutionData(entry));
   if (!data || typeof data !== "object") return data;
-  const projected = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
+  const projected = redactRuntimeContentValue(data) as Record<string, unknown>;
   if (projected.command && typeof projected.command === "object" && !Array.isArray(projected.command)) {
     projected.command = redactCommand(projected.command as Record<string, unknown>);
   }
@@ -13282,7 +13427,7 @@ function redactResolutionData(data: unknown): unknown {
 }
 
 function redactCommand<T extends object>(command: T): T {
-  const projected = JSON.parse(JSON.stringify(command)) as Record<string, unknown>;
+  const projected = redactRuntimeContentValue(command) as Record<string, unknown>;
   if (projected.kind === "world_context") delete projected.facts;
   if (projected.kind === "procedural_notice" && projected.notice && typeof projected.notice === "object" && !Array.isArray(projected.notice)) {
     const notice = projected.notice as Record<string, unknown>;
@@ -13327,7 +13472,7 @@ function redactCommand<T extends object>(command: T): T {
       };
     });
   }
-  return projected as T;
+  return redactRuntimeContentValue(projected) as T;
 }
 
 function redactWithheldAdjudication<T>(adjudication: T): T {

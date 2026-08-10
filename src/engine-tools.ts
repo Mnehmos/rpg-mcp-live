@@ -111,7 +111,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   npc_context: noArguments,
   merchant_catalog: noArguments,
   observe: noArguments,
-  move: z.object({ destinationId: z.string().trim().min(1).max(80) }).strict(),
+  move: z.object({ destinationId: z.string().trim().min(1).max(120) }).strict(),
   travel: z.object({
     routeId: z.string().trim().min(1).max(120),
     destinationId: z.string().trim().min(1).max(120),

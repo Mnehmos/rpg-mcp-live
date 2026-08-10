@@ -177,4 +177,34 @@ describe("strict runtime content compiler", () => {
     expect(normalized.definitions).toHaveLength(1);
     expect(normalized.instances).toHaveLength(1);
   });
+
+  it("preserves legacy location exits during reload normalization", () => {
+    const legacyDefinition = {
+      kind: "location",
+      id: "runtime:location:old-room-legacy",
+      key: "old-room",
+      schemaRevision: 1,
+      name: "Old room",
+      description: "A location saved before typed topology was added.",
+      tags: [],
+      campaignId: context.campaignId,
+      provenance: {
+        ...context,
+        compilerRevision: "runtime-content-v1",
+        policyRevision: "runtime-content-policy-v1",
+      },
+      executionTier: 0,
+      capabilities: ["navigation"],
+      locationKind: "room",
+      parentKey: null,
+      features: [],
+      exits: [{ key: "old-door", label: "An old door", kind: "door" }],
+    };
+    const normalized = normalizeRuntimeContentState({ definitions: [legacyDefinition], instances: [], relationships: [] });
+    expect(normalized.definitions).toHaveLength(1);
+    expect(normalized.definitions[0]).toMatchObject({
+      id: legacyDefinition.id,
+      exits: [{ key: "old-door", targetKey: null, open: true, discovered: true }],
+    });
+  });
 });
