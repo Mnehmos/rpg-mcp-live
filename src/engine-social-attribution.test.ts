@@ -96,8 +96,13 @@ function legacyResponse(message: Record<string, unknown>): Response {
   return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) } as Response;
 }
 
-async function resolveWithModelNarration(modelText: string, actingNpcIds = ["titus"]) {
+async function resolveWithModelNarration(
+  modelText: string,
+  actingNpcIds = ["titus"],
+  configureState?: (state: LanternCampaignState) => void,
+) {
   const state = socialState();
+  configureState?.(state);
   const context = contextFor(state);
   const directory = mkdtempSync(join(tmpdir(), "lantern-social-attribution-model-"));
   const store = new LanternEngineStore(join(directory, "engine.db"));
@@ -322,5 +327,33 @@ describe("social check actor attribution", () => {
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.text.length).toBeLessThanOrEqual(6_000);
     expect(result.narration.text).toContain("Authoritative check record: Titus acts for Mnehmos toward Arena Sentries");
+  });
+
+  it("compacts an oversized mediated-check suffix while retaining the contract bound", async () => {
+    const result = await resolveWithModelNarration(
+      "The gate shudders but the committed checks remain authoritative.",
+      Array.from({ length: 16 }, () => "titus"),
+      (state) => {
+        state.character.name = `Player ${"P".repeat(113)}`;
+        const titus = state.worldContext?.npcs.find((npc) => npc.id === "titus");
+        const sentries = state.worldContext?.npcs.find((npc) => npc.id === "arena-sentries");
+        if (titus) titus.name = `Titus ${"T".repeat(114)}`;
+        if (sentries) sentries.name = `Arena Sentries ${"S".repeat(104)}`;
+      },
+    );
+
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.text.length).toBeLessThanOrEqual(6_000);
+    expect(result.narration.text).toContain("Authoritative mediated check 1:");
+  });
+
+  it("re-sanitizes attribution after appending authoritative records", async () => {
+    const result = await resolveWithModelNarration(
+      "The scene continues safely.",
+      ["titus"],
+      (state) => { state.experienceProfile.excludedThemes = ["Arena Sentries"]; },
+    );
+
+    expect(result.narration.text).toBe("Let's fade to black and continue with a safer thread.");
   });
 });

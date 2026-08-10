@@ -1285,16 +1285,24 @@ function appendMissingMediatedAttributions(
   attributions: EngineSocialCheckAttribution[],
   requireAuthoritativeLabel: boolean,
 ): NarrationEnvelope {
-  const additions = attributions
+  const missing = attributions
     .map((attribution) => {
       const text = mediatedCheckAttributionText(attribution);
       const marker = "Authoritative check record: " + text;
       const present = requireAuthoritativeLabel ? narration.text.includes(marker) : narration.text.includes(text);
-      return present ? null : marker;
+      return present ? null : attribution;
     })
-    .filter((addition): addition is string => addition !== null);
-  if (additions.length === 0) return narration;
-  const suffix = additions.join("\n\n");
+    .filter((attribution): attribution is EngineSocialCheckAttribution => attribution !== null);
+  if (missing.length === 0) return narration;
+  const fullSuffix = missing
+    .map((attribution) => "Authoritative check record: " + mediatedCheckAttributionText(attribution))
+    .join("\n\n");
+  const compactSuffix = missing
+    .map((attribution, index) => `Authoritative mediated check ${index + 1}: ${compactActorName(attribution.actingActorName)} acts for ${compactActorName(attribution.rollingActorName)} toward ${compactActorName(attribution.targetName)}; modifiers: ${compactActorName(attribution.modifierSourceActorName)}.`)
+    .join("\n");
+  const suffix = fullSuffix.length <= 6_000 ? fullSuffix : compactSuffix.length <= 6_000
+    ? compactSuffix
+    : `Authoritative mediated checks: ${missing.length} committed checks; the player remained the roller and modifier source for each.`;
   const prefixSeparator = "\n\n";
   const availablePrefixLength = Math.max(0, 6_000 - prefixSeparator.length - suffix.length);
   const prefix = narration.text.trim().slice(0, availablePrefixLength).trimEnd();
@@ -1302,6 +1310,11 @@ function appendMissingMediatedAttributions(
     ...narration,
     text: prefix ? `${prefix}${prefixSeparator}${suffix}` : suffix,
   };
+}
+
+function compactActorName(name: string): string {
+  const normalized = name.trim();
+  return normalized.length <= 48 ? normalized : normalized.slice(0, 45) + "...";
 }
 
 function preserveMediatedCheckAttribution(
@@ -1313,13 +1326,15 @@ function preserveMediatedCheckAttribution(
   const sanitized = sanitizeNarrationForProfile(narration, experienceProfile);
   if (attributions.length === 0) return { narration: sanitized, source: "llm" };
   if (attributions.some((attribution) => narrationContradictsMediatedCheck(sanitized.text, attribution))) {
+    const fallback = appendMissingMediatedAttributions(committedRulesNarration(result), attributions, false);
     return {
-      narration: appendMissingMediatedAttributions(committedRulesNarration(result), attributions, false),
+      narration: sanitizeNarrationForProfile(fallback, experienceProfile),
       source: "rules",
     };
   }
+  const completed = appendMissingMediatedAttributions(sanitized, attributions, true);
   return {
-    narration: appendMissingMediatedAttributions(sanitized, attributions, true),
+    narration: sanitizeNarrationForProfile(completed, experienceProfile),
     source: "llm",
   };
 }
