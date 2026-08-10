@@ -10,6 +10,7 @@ import type { RequestContext } from "./engine-contracts.js";
 import type { ModelUsageTelemetry } from "./usage-ledger.js";
 import { openAiSdkFetch as sdkFetch } from "./test-openai-stream.js";
 import { engineCoreToolDefinitions } from "./engine-capabilities.js";
+import { prepareWatchtowerWorld, situationFixtureId, watchtowerSituationDefinition } from "./situation-test-fixtures.js";
 
 const options = {
   apiKey: "test-key",
@@ -411,7 +412,7 @@ describe("Lantern OpenRouter tool loop", () => {
                     description: "Cold lamplight catches on damp stone while Titus listens for Ledrus behind you.",
                     features: ["damp stone", "cold lamplight"],
                     exits: [
-                      { id: "watchtower-yard", label: "Cross into the watchtower yard" },
+                      { id: situationFixtureId("watchtower-relic", "node", "yard"), label: "Cross into the watchtower yard" },
                       { id: "storage-niche", label: "Search the storage niche" },
                     ],
                   }),
@@ -432,7 +433,7 @@ describe("Lantern OpenRouter tool loop", () => {
               tool_calls: [{
                 id: "tool-watchtower-yard-move",
                 type: "function",
-                function: { name: "move", arguments: JSON.stringify({ destinationId: "watchtower-yard" }) },
+                function: { name: "move", arguments: JSON.stringify({ destinationId: situationFixtureId("watchtower-relic", "node", "yard") }) },
               }],
             },
           }],
@@ -467,14 +468,14 @@ describe("Lantern OpenRouter tool loop", () => {
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
-    const state = createInitialCampaign("account-context-fallback", "actor-context-fallback");
+    const state = prepareWatchtowerWorld(createInitialCampaign("account-context-fallback", "actor-context-fallback"));
     state.character.created = true;
     state.character.abilities.wis = 20;
     state.phase = "sandbox";
     const situation = resolveEngineCommand(state, {
       requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
       actorId: state.actorId, capabilities: ["player", "dm"],
-    }, randomUUID(), { kind: "situation_create", templateId: "watchtower-relic-v1" }, "situation_create");
+    }, randomUUID(), { kind: "situation_create", definition: watchtowerSituationDefinition() }, "situation_create");
     expect(situation.accepted).toBe(true);
     state.situation = situation.state.situation;
     state.worldContext = {
@@ -507,7 +508,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(result.narration.text).toContain("The attempt succeeds");
     expect(result.narration.text).not.toContain("against DC");
     expect(result.narration.text).not.toContain("Paths onward:");
-    expect(result.state.situation?.currentLocationId).toBe("watchtower-yard");
+    expect(result.state.situation?.currentLocationId).toBe(situationFixtureId("watchtower-relic", "node", "yard"));
     expect(result.event?.effects?.[2]?.stateChanges.some((change) => change.path === "/situation")).toBe(true);
     const playerFacing = JSON.stringify({
       narration: result.narration,

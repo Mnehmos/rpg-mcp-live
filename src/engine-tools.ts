@@ -26,7 +26,7 @@ import {
   engineWorldContextArgsSchema,
   engineProceduralNoticeInputSchema,
   proceduralNoticeActionSchema,
-  engineSituationTemplateIdSchema,
+  engineSituationDefinitionProposalSchema,
   type EngineCommand,
   type EngineToolName,
   type EngineToolResult,
@@ -260,11 +260,11 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     goal: z.string().trim().min(1).max(2_000),
     actorIds: z.array(z.string().trim().min(1).max(120)).min(1).max(3),
   }).strict(),
-  situation_create: z.object({ templateId: engineSituationTemplateIdSchema, sourceRandomEventId: z.string().trim().min(1).max(120).optional() }).strict(),
+  situation_create: z.object({ definition: engineSituationDefinitionProposalSchema, sourceRandomEventId: z.string().trim().min(1).max(120).optional() }).strict(),
   situation_visit: z.object({ locationId: z.string().trim().min(1).max(120) }).strict(),
   situation_clue_attempt: z.object({ clueId: z.string().trim().min(1).max(120), approach: z.string().trim().min(1).max(2_000) }).strict(),
   situation_ignore: noArguments,
-  situation_choose: z.object({ choice: z.enum(["solve", "expose", "bargain", "walk-away"]) }).strict(),
+  situation_choose: z.object({ outcomeId: z.string().trim().min(1).max(120) }).strict(),
   controlled_actor_create: z.object({ profileId: z.enum(["familiar-scout-v1", "summon-scout-v1"]) }).strict(),
   controlled_actor_command: z.object({
     actorId: z.string().trim().min(1).max(120),
@@ -981,12 +981,15 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("party_rejoin", "Reunite all party members in the current world context and restore a coherent shared scene.", {}),
   tool("party_shared_transfer", "Move a typed owned item between one party member's personal inventory and the explicit shared container exactly once.", { type: "object", properties: { actorId: { type: "string" }, itemId: { type: "string" }, quantity: { type: "integer", minimum: 1, maximum: 100 }, direction: { type: "string", enum: ["to_shared", "from_shared"] } }, required: ["actorId", "itemId", "direction"], additionalProperties: false }),
   tool("party_group_check", "Resolve one reviewed server-owned group ability check. The leader's derived modifier and bounded ally assistance determine the result; model text cannot author the roll or DC.", { type: "object", properties: { ability: { type: "string", enum: ["str", "dex", "con", "int", "wis", "cha"] }, skill: { type: "string" }, goal: { type: "string" }, actorIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 } }, required: ["ability", "goal", "actorIds"], additionalProperties: false }),
-  tool("situation_context", "Read the active reviewed situation with actor-safe clues, revelations, fallback status, pressure, and critical-object policy. Hidden facts are redacted until this actor discovers them.", {}),
-  tool("situation_create", "Instantiate the server-owned watchtower-relic-v1 situation template. The DM selects only the reviewed template and optional committed random-event source.", { type: "object", properties: { templateId: { type: "string", enum: ["watchtower-relic-v1"] }, sourceRandomEventId: { type: "string" } }, required: ["templateId"], additionalProperties: false }),
+  tool("situation_context", "Read the active situation's actor-safe nodes, public clue leads, discovered revelations, functional-role status, pressure, and currently legal outcomes. Hidden facts and undiscovered clue findings remain redacted.", {}),
+  tool("situation_create", "Commit one authored open situation before affected choices. Supply nodes, truths, redundant clues, actor goals/knowledge, functional roles/fallbacks, pressure, references to already-canonical hard objects/actors, and declarative outcomes. This tool cannot create an NPC, object, trap, treasure, or exit after the player searches.", (() => {
+    const { $schema: _schema, ...parameters } = z.toJSONSchema(toolArgumentSchemas.situation_create, { target: "draft-7" }) as Record<string, unknown>;
+    return parameters;
+  })()),
   tool("situation_visit", "Visit a connected location in the active situation; stable node identity and traversal order are engine-owned.", { type: "object", properties: { locationId: { type: "string" } }, required: ["locationId"], additionalProperties: false }),
   tool("situation_clue_attempt", "Attempt one clue using the existing server-owned check and retry policy. The model supplies only an approach; the engine owns the roll, DC, discovery, and fail-forward complication.", { type: "object", properties: { clueId: { type: "string" }, approach: { type: "string" } }, required: ["clueId", "approach"], additionalProperties: false }),
   tool("situation_ignore", "Advance one fixed reviewed time boundary while leaving the active situation unattended; authoritative pressure advances only when its time boundary is due.", {}),
-  tool("situation_choose", "Choose a bounded situation approach. The engine derives whether solve, expose, bargain, or walk-away is legal from committed facts and object/role state.", { type: "object", properties: { choice: { type: "string", enum: ["solve", "expose", "bargain", "walk-away"] } }, required: ["choice"], additionalProperties: false }),
+  tool("situation_choose", "Commit one currently available declarative outcome by the exact id returned from situation_context. The engine validates revelation, role, pressure, and critical-object requirements; the DM portrays the resulting fiction.", { type: "object", properties: { outcomeId: { type: "string" } }, required: ["outcomeId"], additionalProperties: false }),
   tool(
     "combat_start",
     "Start a DM-authored encounter using installed Open5e creature content keys. Search creatures first; never supply or invent stats.",
@@ -1504,7 +1507,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "party_group_check":
       return engineCommandSchema.parse({ kind: "party_group_check", ability: args.ability, skill: args.skill, goal: args.goal, actorIds: args.actorIds });
     case "situation_create":
-      return engineCommandSchema.parse({ kind: "situation_create", templateId: args.templateId, sourceRandomEventId: args.sourceRandomEventId });
+      return engineCommandSchema.parse({ kind: "situation_create", definition: args.definition, sourceRandomEventId: args.sourceRandomEventId });
     case "situation_visit":
       return engineCommandSchema.parse({ kind: "situation_visit", locationId: args.locationId });
     case "situation_clue_attempt":
@@ -1512,7 +1515,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "situation_ignore":
       return engineCommandSchema.parse({ kind: "situation_ignore" });
     case "situation_choose":
-      return engineCommandSchema.parse({ kind: "situation_choose", choice: args.choice });
+      return engineCommandSchema.parse({ kind: "situation_choose", outcomeId: args.outcomeId });
     case "advancement_confirm":
       return engineCommandSchema.parse({ kind: "advancement_confirm", pendingId: args.pendingId });
     case "npc_advance":

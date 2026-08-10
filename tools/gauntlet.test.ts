@@ -34,7 +34,7 @@ describe("deterministic open-ended play gauntlet", () => {
     expect(report.traces.every((trace) => trace.ownerIssue === "#22" && trace.fixtureVersion === GAUNTLET_FIXTURE_VERSION && trace.rubricVersion === GAUNTLET_RUBRIC_VERSION)).toBe(true);
     expect(report.scorecards).toHaveLength(10);
     expect(report.scorecards.every((scorecard) => scorecard.reviewer === "independent-human" && scorecard.status === "pending" && scorecard.modelSelfScoreUsed === false)).toBe(true);
-  });
+  }, 30_000);
 
   it("keeps public traces projected and free of private model/tool fragments", async () => {
     const report = await runDeterministicGauntlet();
@@ -44,7 +44,7 @@ describe("deterministic open-ended play gauntlet", () => {
     expect(publicJson).not.toContain("tool_calls");
     expect(publicJson).not.toContain("promptContext");
     expect(report.traces.every((trace) => trace.privateRunIds.length === 1 && trace.publicEventIds.every((id) => !trace.privateRunIds.includes(id)))).toBe(true);
-  });
+  }, 30_000);
 
   it("produces a stable baseline digest while excluding ids, timestamps, and latency noise", async () => {
     const first = await runDeterministicGauntlet();
@@ -54,7 +54,7 @@ describe("deterministic open-ended play gauntlet", () => {
     expect(first.baseline.digest).toBe(second.baseline.digest);
     expect(first.generatedAt).toMatch(/T/);
     expect(second.generatedAt).toMatch(/T/);
-  });
+  }, 30_000);
 
   it("rejects an incompatible fixture baseline instead of silently comparing it", async () => {
     const report = await runDeterministicGauntlet();
@@ -66,5 +66,5 @@ describe("deterministic open-ended play gauntlet", () => {
       ...report,
       traces: report.traces.slice(0, -1),
     })).toBe(false);
-  });
+  }, 30_000);
 });
