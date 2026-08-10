@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { NarrationEnvelope } from "./ai-contracts.js";
-import type { ProductionRoomState } from "./engine-production-room.js";
+import type { ProductionRoomState, PublicNarrationSequence } from "./engine-production-room.js";
 import type {
   OrchestrationDecisionInput,
   OrchestrationState,
@@ -3610,6 +3610,8 @@ export interface EngineCommandResult extends EngineResolution {
   replayed: boolean;
   session: EngineSessionView;
   narrationSource: "rules" | "llm";
+  /** Completed, validated public beats. Private planner/narrator run IDs are removed. */
+  narrationSequence?: PublicNarrationSequence;
 }
 
 export interface EngineToolResult {

@@ -199,6 +199,11 @@ describe("procedural notice delivery", () => {
         ok: true,
         status: 200,
         json: async () => ({ choices: [{ message: { role: "assistant", content: JSON.stringify({ text: "The sealed notice is recorded for the prescribed delivery step.", proposedFacts: [], suggestedActions: [] }) } }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { role: "assistant", content: JSON.stringify({ text: "The sealed notice is recorded for the prescribed delivery step.", proposedFacts: [], suggestedActions: [] }) } }] }),
       });
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
     const directory = mkdtempSync(join(tmpdir(), "lantern-notice-dm-"));
@@ -215,7 +220,7 @@ describe("procedural notice delivery", () => {
       siteUrl: "https://example.test",
       appName: "Lantern Test",
     }).resolveTurn(context, state, randomUUID(), 0, "A sealed notice arrives and I need its operative terms.");
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(JSON.stringify(fetchMock.mock.calls[1]?.[1]?.body)).toContain("procedural_notice");
     expect(result.state.proceduralNotices[0]?.status).toBe("sealed");
     expect(result.narration.text).toContain("recorded");

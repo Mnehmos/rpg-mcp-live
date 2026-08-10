@@ -6,6 +6,13 @@ import type { NarrationEnvelope } from "./ai-contracts.js";
 import type { Open5ePackDescriptor } from "./content/pack.js";
 import { cloneCampaign, normalizeCampaignState, toSessionView } from "./engine-domain.js";
 import {
+  emptyProductionRoomState,
+  parseProductionRoomState,
+  projectNarrationSequenceForActor,
+  recordProductionRoomLiveRelease,
+  type ProductionRoomLiveRelease,
+} from "./engine-production-room.js";
+import {
   ENGINE_EVENT_STREAM_DEFAULT_PAGE_SIZE,
   ENGINE_EVENT_STREAM_MAX_PAGE_SIZE,
   ENGINE_EVENT_STREAM_SCHEMA_REVISION,
@@ -665,61 +672,71 @@ export class LanternEngineStore {
     context: RequestContext,
     clientCommandId: string,
     narration: NarrationEnvelope,
-    narrationSource: EngineCommandResult["narrationSource"] = "llm"
+    narrationSource: EngineCommandResult["narrationSource"] = "llm",
+    release?: ProductionRoomLiveRelease,
   ): EngineCommandResult | null {
-    const row = this.db
-      .prepare(
-        "SELECT request_json, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
-      )
-      .get(context.accountId, clientCommandId) as { request_json: string; result_json: string | null } | undefined;
-    if (!row?.result_json) return null;
+    return this.db.transaction((): EngineCommandResult | null => {
+      const row = this.db
+        .prepare(
+          "SELECT request_json, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
+        )
+        .get(context.accountId, clientCommandId) as { request_json: string; result_json: string | null } | undefined;
+      if (!row?.result_json) return null;
 
-    const stored = JSON.parse(row.result_json) as EngineCommandResult;
-    if (stored.narrationSource === "llm") return stored;
-    const request = JSON.parse(row.request_json) as { playerText?: unknown };
-    const persistNarration = !stored.readOnly || typeof request.playerText === "string";
-    const state = persistNarration ? this.getCampaign(context) : stored.state;
-    const createdAt = new Date().toISOString();
-    const nextState = cloneCampaign(state);
-    nextState.suggestedActions = narration.suggestedActions;
-    if (persistNarration) {
-      const narrationMessage: EngineMessage = {
-        id: randomUUID(),
-        kind: "narration",
-        text: narration.text,
-        createdAt,
-      };
-      let playerIndex = -1;
-      for (let index = nextState.log.length - 1; index >= 0; index -= 1) {
-        if (nextState.log[index]?.kind === "player") {
-          playerIndex = index;
-          break;
-        }
+      const stored = JSON.parse(row.result_json) as EngineCommandResult;
+      if (stored.narrationSource === "llm") return stored;
+      const request = JSON.parse(row.request_json) as { playerText?: unknown };
+      const persistNarration = !stored.readOnly || typeof request.playerText === "string";
+      const state = persistNarration ? this.getCampaign(context) : stored.state;
+      const createdAt = new Date().toISOString();
+      const nextState = cloneCampaign(state);
+      if (release) {
+        const room = nextState.productionRoom
+          ? parseProductionRoomState(nextState.productionRoom)
+          : emptyProductionRoomState();
+        nextState.productionRoom = recordProductionRoomLiveRelease(room, release, clientCommandId);
       }
-      const retainedMessages = playerIndex >= 0
-        ? [
-            ...nextState.log.slice(0, playerIndex + 1),
-            ...nextState.log.slice(playerIndex + 1).filter((message) => message.kind === "roll"),
-          ]
-        : nextState.log;
-      nextState.log = [...retainedMessages, narrationMessage].slice(-40);
-      nextState.updatedAt = createdAt;
-      this.writeState(nextState);
-    }
+      nextState.suggestedActions = narration.suggestedActions;
+      if (persistNarration) {
+        const narrationMessage: EngineMessage = {
+          id: randomUUID(),
+          kind: "narration",
+          text: narration.text,
+          createdAt,
+        };
+        let playerIndex = -1;
+        for (let index = nextState.log.length - 1; index >= 0; index -= 1) {
+          if (nextState.log[index]?.kind === "player") {
+            playerIndex = index;
+            break;
+          }
+        }
+        const retainedMessages = playerIndex >= 0
+          ? [
+              ...nextState.log.slice(0, playerIndex + 1),
+              ...nextState.log.slice(playerIndex + 1).filter((message) => message.kind === "roll"),
+            ]
+          : nextState.log;
+        nextState.log = [...retainedMessages, narrationMessage].slice(-40);
+        nextState.updatedAt = createdAt;
+        this.writeState(nextState);
+      }
 
-    const updated: EngineCommandResult = {
-      ...stored,
-      state: nextState,
-      session: toSessionView(nextState),
-      narration,
-      narrationSource,
-    };
-    this.db
-      .prepare(
-        "UPDATE engine_commands SET result_json = ? WHERE account_id = ? AND client_command_id = ?"
-      )
-      .run(JSON.stringify(updated), context.accountId, clientCommandId);
-    return updated;
+      const updated: EngineCommandResult = {
+        ...stored,
+        state: nextState,
+        session: toSessionView(nextState),
+        narration,
+        narrationSource,
+        ...(release ? { narrationSequence: projectNarrationSequenceForActor(release.sequence) } : {}),
+      };
+      this.db
+        .prepare(
+          "UPDATE engine_commands SET result_json = ? WHERE account_id = ? AND client_command_id = ?"
+        )
+        .run(JSON.stringify(updated), context.accountId, clientCommandId);
+      return updated;
+    })();
   }
 
   public close(): void {

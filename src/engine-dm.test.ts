@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "./engine-domain.js";
+import { createInitialCampaign, normalizeCampaignState, projectResolutionForActor, resolveEngineCommand } from "./engine-domain.js";
 import { buildDmContext, dmSystemPromptMeasurement, LanternDungeonMaster } from "./engine-dm.js";
 import { EngineCommandInProgressError, LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
@@ -25,6 +25,24 @@ const options = {
 function createStore(): LanternEngineStore {
   const directory = mkdtempSync(join(tmpdir(), "lantern-dm-"));
   return new LanternEngineStore(join(directory, "engine.db"));
+}
+
+function providerNarration(
+  text: string,
+  suggestedActions: Array<{ id: string; label: string; prompt: string }> = [],
+) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: JSON.stringify({ text, proposedFacts: [], suggestedActions }),
+        },
+      }],
+    }),
+  };
 }
 
 describe("Lantern OpenRouter tool loop", () => {
@@ -96,7 +114,8 @@ describe("Lantern OpenRouter tool loop", () => {
             },
           }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The table holds its breath."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -204,7 +223,33 @@ describe("Lantern OpenRouter tool loop", () => {
             },
           ],
         }),
-      });
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                text: "A useful detail emerges from the first lead.",
+                proposedFacts: [],
+                suggestedActions: [],
+              }),
+              tool_calls: [{
+                id: "forbidden-narrator-tool",
+                type: "function",
+                function: { name: "observe", arguments: "{}" },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce(providerNarration("A useful detail emerges from the first lead.", [{
+        id: "study-lead",
+        label: "Study the lead",
+        prompt: "I study the first lead closely for anything it reveals.",
+      }]));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -238,7 +283,7 @@ describe("Lantern OpenRouter tool loop", () => {
       "I study the current moment for a useful detail."
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(firstRequest.tools).toHaveLength(engineCoreToolDefinitions().length);
     const worldContextTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
@@ -252,7 +297,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(firstRequest.response_format).toMatchObject({
       type: "json_schema",
       json_schema: {
-        name: "lantern_narration",
+        name: "lantern_private_planner_completion",
         strict: true,
         schema: {
           type: "object",
@@ -262,6 +307,15 @@ describe("Lantern OpenRouter tool loop", () => {
       },
     });
     expect(purposes).toEqual(expect.arrayContaining(["player_turn", "narration"]));
+    const narratorRequest = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body));
+    const narratorRepairRequest = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body));
+    expect(narratorRequest.tools).toBeUndefined();
+    expect(narratorRequest.tool_choice).toBe("none");
+    expect(narratorRequest.response_format.json_schema.name).toBe("lantern_public_narration_draft");
+    expect(narratorRequest.messages[0]?.content).toContain("public narrator");
+    expect(narratorRequest.messages[1]?.content).not.toContain("privateDraft");
+    expect(narratorRepairRequest.tools).toBeUndefined();
+    expect(narratorRepairRequest.messages.at(-1)?.content).toContain("corrected object only");
     const systemPrompt = firstRequest.messages[0]?.content;
     const promptMeasurement = dmSystemPromptMeasurement("player_turn");
     expect(systemPrompt).toContain("LAW ZERO — THE GAME MOVES");
@@ -291,6 +345,16 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.text).toContain("useful detail");
     expect(result.narration.suggestedActions[0]?.prompt).toContain("first lead");
+    expect(result.narrationSequence?.status).toBe("released");
+    expect(result.narrationSequence?.committedEventIds).toEqual([result.event?.id]);
+    expect(JSON.stringify(result.narrationSequence)).not.toContain("dm-run:");
+    expect(result.state.productionRoom?.runs.map((run) => run.kind)).toEqual([
+      "intent_interpretation",
+      "narration",
+    ]);
+    const publicResult = projectResolutionForActor(result, context.actorId);
+    expect(publicResult.state.productionRoom).toBeUndefined();
+    expect(JSON.stringify(publicResult)).not.toContain(result.state.productionRoom!.runs[0]!.id);
     expect(result.session.suggestedActions[0]?.id).toBe("study-lead");
     expect(store.getCampaign(context).suggestedActions[0]?.id).toBe("study-lead");
     expect(result.session.log.slice(-3).map((message) => message.kind)).toEqual(["player", "roll", "narration"]);
@@ -324,7 +388,8 @@ describe("Lantern OpenRouter tool loop", () => {
           }],
         }),
       })
-      .mockRejectedValueOnce(new Error("provider timeout after commit"));
+      .mockRejectedValueOnce(new Error("provider timeout after commit"))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -383,8 +448,8 @@ describe("Lantern OpenRouter tool loop", () => {
     const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules" });
     expect(replay.narration.text).toBe(result.narration.text);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(store.getModelUsageSummary({ clientCommandId }).requestCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(store.getModelUsageSummary({ clientCommandId }).requestCount).toBe(3);
     store.close();
   });
 
@@ -478,7 +543,8 @@ describe("Lantern OpenRouter tool loop", () => {
           }],
         }),
       })
-      .mockRejectedValueOnce(new Error("provider timeout after context commit"));
+      .mockRejectedValueOnce(new Error("provider timeout after context commit"))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -533,7 +599,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(playerFacing).not.toMatch(/The DM must establish|The DM establishes|toward Slip|Slip through a side arch/i);
     expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules", state: { version: 1 } });
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
     store.close();
   });
 
@@ -596,7 +662,8 @@ describe("Lantern OpenRouter tool loop", () => {
             },
           }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The cauldrons crash together, pulling every worker's attention toward the noise while Titus gets a clear opening."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -631,7 +698,7 @@ describe("Lantern OpenRouter tool loop", () => {
     const dm = new LanternDungeonMaster(store, options);
     const result = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["improvise"]);
     expect(result.event?.effects?.some((effect) => effect.tool === "move")).toBe(false);
     expect(result.narration.text).toContain("cauldrons crash together");
@@ -641,7 +708,7 @@ describe("Lantern OpenRouter tool loop", () => {
     const replay = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
     expect(replay.replayed).toBe(true);
     expect(replay.narration.text).toBe(result.narration.text);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     store.close();
   });
 
@@ -679,7 +746,8 @@ describe("Lantern OpenRouter tool loop", () => {
             },
           }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The kitchen holds its breath while Titus watches for the opening."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -717,16 +785,14 @@ describe("Lantern OpenRouter tool loop", () => {
       "I watch the kitchen for a safe opening.",
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(result.narration.text).toBe("The kitchen holds its breath while Titus watches for the opening.");
     expect(result.narration.text).not.toMatch(/DM must establish|engine must|system must/i);
     store.close();
   });
 
   it("records a declaration when a second model attempt still replaces a distraction with movement", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue({
+    const repeatedMove = {
         ok: true,
         status: 200,
         json: async () => ({
@@ -742,7 +808,12 @@ describe("Lantern OpenRouter tool loop", () => {
             },
           }],
         }),
-      });
+      };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(repeatedMove)
+      .mockResolvedValueOnce(repeatedMove)
+      .mockResolvedValueOnce(providerNarration("The cauldrons remain loud, but you hold your ground and keep watching the workers."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -781,7 +852,7 @@ describe("Lantern OpenRouter tool loop", () => {
       playerText,
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(result.tool).toBe("declare");
     expect(result.event?.effects).toBeUndefined();
     expect(result.state.worldContext?.id).toBe("kitchen-arch");
@@ -809,7 +880,8 @@ describe("Lantern OpenRouter tool loop", () => {
           }],
         }),
       })
-      .mockRejectedValueOnce(new Error("provider timeout after death save"));
+      .mockRejectedValueOnce(new Error("provider timeout after death save"))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1033,7 +1105,8 @@ describe("Lantern OpenRouter tool loop", () => {
             suggestedActions: [],
           }) } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("Dawn finds you at the road's first impossible tremor. The watch post door swings open by itself."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1128,7 +1201,12 @@ describe("Lantern OpenRouter tool loop", () => {
             }],
           }) } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("A key rings against the stones just beyond the bars. The guard has not noticed it fall.", [{
+        id: "reach-for-key",
+        label: "Reach for the key",
+        prompt: "I reach through the bars and try to draw the key closer.",
+      }]));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1167,7 +1245,7 @@ describe("Lantern OpenRouter tool loop", () => {
     );
     const replay = await dm.startOpening(context, state, commandId, 1);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     const repairRequest = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
     expect(repairRequest.tools).toBeUndefined();
     expect(repairRequest.messages.at(-1)).toMatchObject({
@@ -1175,7 +1253,7 @@ describe("Lantern OpenRouter tool loop", () => {
       content: expect.stringContaining("proposedFacts.0.kind"),
     });
     expect(repairRequest.messages.at(-1)?.content).toContain("discover_location");
-    expect(purposes).toEqual(["opening", "narration", "narration_repair"]);
+    expect(purposes).toEqual(["opening", "opening", "narration_repair", "narration"]);
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.text).toContain("guard has not noticed");
     expect(result.narration.text).not.toContain("proposedFacts");
@@ -1208,7 +1286,8 @@ describe("Lantern OpenRouter tool loop", () => {
         json: async () => ({
           choices: [{ message: { role: "assistant", content: malformed("The invalid repair should not replace safe text.") } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The bellkeeper lowers her voice."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1237,7 +1316,7 @@ describe("Lantern OpenRouter tool loop", () => {
       "I ask what the bellkeeper knows."
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("narration contract repair failed"));
     expect(result.narration.text).toBe("The bellkeeper lowers her voice.");
     expect(result.narration.text).not.toContain("proposedFacts");
@@ -1263,7 +1342,8 @@ describe("Lantern OpenRouter tool loop", () => {
         json: async () => ({
           choices: [{ message: { role: "assistant", content: JSON.stringify("The repair is still only a string.") } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The hall is dark.\nSomething moves."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1292,7 +1372,7 @@ describe("Lantern OpenRouter tool loop", () => {
       "I listen for movement."
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("narration contract repair failed"));
     expect(result.narration.text).toBe("The hall is dark.\nSomething moves.");
     expect(result.narration.proposedFacts).toEqual([]);
@@ -1355,7 +1435,8 @@ describe("Lantern OpenRouter tool loop", () => {
             suggestedActions: [],
           }) } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("Narin seals the bargain and orders the caravan east."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1406,7 +1487,7 @@ describe("Lantern OpenRouter tool loop", () => {
     const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
     expect(replay.replayed).toBe(true);
     expect(replay.state.version).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(store.getCampaign(context).version).toBe(1);
     store.close();
   });
@@ -1476,7 +1557,8 @@ describe("Lantern OpenRouter tool loop", () => {
             suggestedActions: [],
           }) } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The bellkeeper taps the ledger and points toward the storm-dark channel."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1579,7 +1661,8 @@ describe("Lantern OpenRouter tool loop", () => {
             },
           }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("I keep the focus on a safer path."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1661,7 +1744,8 @@ describe("Lantern OpenRouter tool loop", () => {
             content: JSON.stringify({ text: "The arena waits.", proposedFacts: [], suggestedActions: [] }),
           } }],
         }),
-      });
+      })
+      .mockResolvedValueOnce(providerNarration("The arena waits."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1739,6 +1823,7 @@ describe("Lantern OpenRouter tool loop", () => {
         } }],
       }),
     });
+    fetchMock.mockResolvedValueOnce(providerNarration("The family is ready."));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -1767,7 +1852,7 @@ describe("Lantern OpenRouter tool loop", () => {
       "I prepare for the current fight.",
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(9);
+    expect(fetchMock).toHaveBeenCalledTimes(10);
     expect(result.narration.text).toContain("family is ready");
     store.close();
   });
