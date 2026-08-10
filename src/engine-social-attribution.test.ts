@@ -96,6 +96,26 @@ function legacyResponse(message: Record<string, unknown>): Response {
   return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) } as Response;
 }
 
+function socialConsequenceResponse(): Response {
+  return legacyResponse({
+    role: "assistant",
+    content: null,
+    tool_calls: [{
+      id: "social-consequence",
+      type: "function",
+      function: {
+        name: "campaign_beat",
+        arguments: JSON.stringify({
+          title: "The gate holds",
+          description: "The sentries answer the appeal but hold the gate until the prisoner presents evidence.",
+          pressure: "The sentries are losing patience.",
+          choices: ["Present evidence", "Change approach", "Withdraw"],
+        }),
+      },
+    }],
+  });
+}
+
 async function resolveWithModelNarration(
   modelText: string,
   actingNpcIds = ["titus"],
@@ -125,7 +145,8 @@ async function resolveWithModelNarration(
           }),
         },
       })),
-    }));
+    }))
+    .mockResolvedValueOnce(socialConsequenceResponse());
   if (providerFailure) {
     fetchMock
       .mockRejectedValueOnce(new Error("provider timeout after social commit"))
@@ -152,7 +173,7 @@ async function resolveWithModelNarration(
       state.version,
       "I tell Titus to explain what happened and turn the sentries against Ledrus.",
     );
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     return result;
   } finally {
     store.close();
@@ -280,6 +301,7 @@ describe("social check actor attribution", () => {
           },
         }],
       }))
+      .mockResolvedValueOnce(socialConsequenceResponse())
       .mockRejectedValueOnce(new Error("provider timeout after social commit"))
       .mockRejectedValueOnce(new Error("public narrator unavailable"));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
@@ -297,7 +319,7 @@ describe("social check actor attribution", () => {
       expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
       expect(result.narration.text).toContain("Mnehmos's modifiers");
       expect(result.event?.effects?.[0]?.check?.attribution).toMatchObject({ mode: "npc-mediated", actingActorId: "titus" });
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });
@@ -367,7 +389,7 @@ describe("social check actor attribution", () => {
   it("compacts an oversized mediated-check suffix while retaining the contract bound", async () => {
     const result = await resolveWithModelNarration(
       "The gate shudders but the committed checks remain authoritative.",
-      Array.from({ length: 16 }, () => "titus"),
+      Array.from({ length: 15 }, () => "titus"),
       (state) => {
         state.character.name = `Player ${"P".repeat(113)}`;
         const titus = state.worldContext?.npcs.find((npc) => npc.id === "titus");

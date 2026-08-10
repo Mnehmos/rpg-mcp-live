@@ -226,7 +226,7 @@ describe("authored situation compiler", () => {
       approach: "Follow the prints in the open road.",
     });
     expect(failed).toMatchObject({ accepted: true, event: { outcome: "situation_clue_failed_forward" } });
-    expect(failed.message).toContain("DM must now commit and portray");
+    expect(failed.message).toContain("concrete caused consequence is required");
     expect(failed.state.situation?.lastComplication).toBe("pending-dm-consequence");
     expect(failed.state.actorKnowledge.some((record) => record.actorId === failed.state.actorId && record.factId === truthId("warden"))).toBe(false);
 
@@ -237,7 +237,7 @@ describe("authored situation compiler", () => {
       approach: "Read the marked route without disturbing it.",
     });
     expect(found).toMatchObject({ accepted: true, event: { outcome: "situation_clue_found" }, data: { success: true } });
-    expect(found.message).toContain("DM must now portray");
+    expect(found.message).toContain("concrete discovery");
     expect(found.event?.adjudication?.requestedDifficultyBand).toBe("gentle");
     expect(found.state.situation?.revelations.find((revelation) => revelation.id === revelationId("central"))?.status).toBe("revealed");
     expect(found.state.actorKnowledge.filter((record) => record.actorId === found.state.actorId).map((record) => record.factId)).toEqual(

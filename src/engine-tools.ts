@@ -22,6 +22,7 @@ import {
   engineSocialActionCommandSchema,
   engineNpcTickCommandSchema,
   engineQuestGraphInputSchema,
+  engineSceneMoveSchema,
   engineWorldObjectAffordanceSchema,
   engineWorldContextArgsSchema,
   engineProceduralNoticeInputSchema,
@@ -183,6 +184,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       durationRounds: z.number().int().min(1).max(1_000).optional(),
       condition: z.string().trim().min(1).max(80).optional(),
       checkCategory: z.enum(["attack-roll", "ability-check", "saving-throw"]).optional(),
+      sceneMove: engineSceneMoveSchema.optional(),
     })
     .strict(),
   campaign_beat: z
@@ -262,7 +264,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   }).strict(),
   situation_create: z.object({ definition: engineSituationDefinitionProposalSchema, sourceRandomEventId: z.string().trim().min(1).max(120).optional() }).strict(),
   situation_visit: z.object({ locationId: z.string().trim().min(1).max(120) }).strict(),
-  situation_clue_attempt: z.object({ clueId: z.string().trim().min(1).max(120), approach: z.string().trim().min(1).max(2_000) }).strict(),
+  situation_clue_attempt: z.object({ clueId: z.string().trim().min(1).max(120), approach: z.string().trim().min(1).max(2_000), sourceActorId: z.string().trim().min(1).max(120).optional() }).strict(),
   situation_ignore: noArguments,
   situation_choose: z.object({ outcomeId: z.string().trim().min(1).max(120) }).strict(),
   controlled_actor_create: z.object({ profileId: z.enum(["familiar-scout-v1", "summon-scout-v1"]) }).strict(),
@@ -853,10 +855,30 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "improvise",
-    "Apply an authored rule-of-cool stunt or effect. The creative description is recorded, while only the typed mechanical consequence is applied (damage, healing, condition, advantage, movement, or duration). Advantage/disadvantage may target one bounded check category; fictional is explicitly non-mechanical.",
+    "Apply an authored rule-of-cool stunt or effect. The creative description is recorded, while only the typed mechanical consequence is applied. After a check, a non-mechanical fictional sceneMove may bind a concrete caused consequence to the exact provisionalEffectIndex and outcome returned by an earlier tool round. It cannot reveal facts, move actors, or apply mechanics; use the existing authoritative tool for those changes.",
     {
       type: "object",
-      properties: { title: { type: "string" }, description: { type: "string" }, effectType: { type: "string", enum: ["fictional", "advantage", "disadvantage", "condition", "damage", "healing", "movement", "summoning"] }, targetId: { type: "string" }, amount: { type: "integer", minimum: 0 }, durationRounds: { type: "integer", minimum: 1 }, condition: { type: "string" }, checkCategory: { type: "string", enum: ["attack-roll", "ability-check", "saving-throw"] } },
+      properties: {
+        title: { type: "string" },
+        description: { type: "string" },
+        effectType: { type: "string", enum: ["fictional", "advantage", "disadvantage", "condition", "damage", "healing", "movement", "summoning"] },
+        targetId: { type: "string" },
+        amount: { type: "integer", minimum: 0 },
+        durationRounds: { type: "integer", minimum: 1 },
+        condition: { type: "string" },
+        checkCategory: { type: "string", enum: ["attack-roll", "ability-check", "saving-throw"] },
+        sceneMove: {
+          type: "object",
+          properties: {
+            category: { type: "string", enum: ["reaction", "cost", "pressure", "choice", "closure"] },
+            sourceEffectIndex: { type: "integer", minimum: 0, maximum: 15 },
+            outcome: { type: "string", enum: ["success", "failure"] },
+            nextDecision: { type: "string" },
+          },
+          required: ["category", "sourceEffectIndex", "outcome", "nextDecision"],
+          additionalProperties: false,
+        },
+      },
       required: ["title", "description", "effectType"],
       additionalProperties: false,
     }
@@ -987,7 +1009,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     return parameters;
   })()),
   tool("situation_visit", "Visit a connected location in the active situation; stable node identity and traversal order are engine-owned.", { type: "object", properties: { locationId: { type: "string" } }, required: ["locationId"], additionalProperties: false }),
-  tool("situation_clue_attempt", "Attempt one clue using the existing server-owned check and retry policy. The model supplies only an approach; the engine owns the roll, DC, discovery, and fail-forward complication.", { type: "object", properties: { clueId: { type: "string" }, approach: { type: "string" } }, required: ["clueId", "approach"], additionalProperties: false }),
+  tool("situation_clue_attempt", "Resolve one authorized situation clue. Normally the engine owns the check, DC, discovery, and fail-forward complication. For an ordinary direct question, sourceActorId skips the roll only when that established present actor canonically knows the linked truth; the engine then commits the answer to player knowledge.", { type: "object", properties: { clueId: { type: "string" }, approach: { type: "string" }, sourceActorId: { type: "string" } }, required: ["clueId", "approach"], additionalProperties: false }),
   tool("situation_ignore", "Advance one fixed reviewed time boundary while leaving the active situation unattended; authoritative pressure advances only when its time boundary is due.", {}),
   tool("situation_choose", "Commit one currently available declarative outcome by the exact id returned from situation_context. Validates revelation, role, pressure, and critical-object requirements and returns committed outcome evidence.", { type: "object", properties: { outcomeId: { type: "string" } }, required: ["outcomeId"], additionalProperties: false }),
   tool(
@@ -1436,7 +1458,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "quest_update":
       return engineCommandSchema.parse({ kind: "quest_update", questId: args.questId, status: args.status, objective: args.objective, progress: args.progress });
     case "improvise":
-      return engineCommandSchema.parse({ kind: "improvise", title: args.title, description: args.description, effectType: args.effectType, targetId: args.targetId, amount: args.amount, durationRounds: args.durationRounds, condition: args.condition, checkCategory: args.checkCategory });
+      return engineCommandSchema.parse({ kind: "improvise", title: args.title, description: args.description, effectType: args.effectType, targetId: args.targetId, amount: args.amount, durationRounds: args.durationRounds, condition: args.condition, checkCategory: args.checkCategory, sceneMove: args.sceneMove });
     case "campaign_beat":
       return engineCommandSchema.parse({ kind: "campaign_beat", title: args.title, description: args.description, pressure: args.pressure, choices: args.choices });
     case "character_create":
@@ -1511,7 +1533,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
     case "situation_visit":
       return engineCommandSchema.parse({ kind: "situation_visit", locationId: args.locationId });
     case "situation_clue_attempt":
-      return engineCommandSchema.parse({ kind: "situation_clue_attempt", clueId: args.clueId, approach: args.approach });
+      return engineCommandSchema.parse({ kind: "situation_clue_attempt", clueId: args.clueId, approach: args.approach, sourceActorId: args.sourceActorId });
     case "situation_ignore":
       return engineCommandSchema.parse({ kind: "situation_ignore" });
     case "situation_choose":

@@ -193,6 +193,7 @@ describe("Lantern OpenRouter tool loop", () => {
                         ability: "wis",
                         skill: "perception",
                         goal: "Study the current moment for a useful detail.",
+                        passive: true,
                       }),
                     },
                   },
@@ -210,15 +211,25 @@ describe("Lantern OpenRouter tool loop", () => {
             {
               message: {
                 role: "assistant",
-                content: JSON.stringify({
-                  text: "A useful detail emerges from the first lead.",
-                  proposedFacts: [],
-                  suggestedActions: [{
-                    id: "study-lead",
-                    label: "Study the lead",
-                    prompt: "I study the first lead closely for anything it reveals.",
-                  }],
-                }),
+                content: null,
+                tool_calls: [{
+                  id: "tool-scene-move",
+                  type: "function",
+                  function: {
+                    name: "improvise",
+                    arguments: JSON.stringify({
+                      title: "Attention gathers",
+                      description: "Your prolonged scrutiny makes the room notice your interest in the first lead.",
+                      effectType: "fictional",
+                      sceneMove: {
+                        category: "reaction",
+                        sourceEffectIndex: 0,
+                        outcome: "failure",
+                        nextDecision: "The lead remains unread; decide whether to press openly or change approach.",
+                      },
+                    }),
+                  },
+                }],
               },
             },
           ],
@@ -232,7 +243,23 @@ describe("Lantern OpenRouter tool loop", () => {
             message: {
               role: "assistant",
               content: JSON.stringify({
-                text: "A useful detail emerges from the first lead.",
+                text: "The room notices your scrutiny; the unread lead now demands an open approach or a different angle.",
+                proposedFacts: [],
+                suggestedActions: [],
+              }),
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                text: "The room notices your scrutiny; the unread lead now demands an open approach or a different angle.",
                 proposedFacts: [],
                 suggestedActions: [],
               }),
@@ -245,15 +272,16 @@ describe("Lantern OpenRouter tool loop", () => {
           }],
         }),
       })
-      .mockResolvedValueOnce(providerNarration("A useful detail emerges from the first lead.", [{
+      .mockResolvedValueOnce(providerNarration("The room notices your scrutiny; the unread lead now demands an open approach or a different angle.", [{
         id: "study-lead",
-        label: "Study the lead",
-        prompt: "I study the first lead closely for anything it reveals.",
+        label: "Change approach",
+        prompt: "I change my approach to the first lead.",
       }]));
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
     const state = createInitialCampaign("account-a", "actor-a");
+    state.character.abilities.wis = 8;
     store.createCampaign(
       {
         requestId: randomUUID(),
@@ -283,7 +311,7 @@ describe("Lantern OpenRouter tool loop", () => {
       "I study the current moment for a useful detail."
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(firstRequest.tools).toHaveLength(engineCoreToolDefinitions().length);
     const worldContextTool = (firstRequest.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
@@ -307,8 +335,11 @@ describe("Lantern OpenRouter tool loop", () => {
       },
     });
     expect(purposes).toEqual(expect.arrayContaining(["player_turn", "narration"]));
-    const narratorRequest = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body));
-    const narratorRepairRequest = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body));
+    const consequenceRequest = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
+    expect(consequenceRequest.messages.at(-1)?.content).toContain('"sourceEffectIndex":0');
+    expect(consequenceRequest.messages.at(-1)?.content).toContain('"outcome":"failure"');
+    const narratorRequest = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body));
+    const narratorRepairRequest = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body));
     expect(narratorRequest.tools).toBeUndefined();
     expect(narratorRequest.tool_choice).toBe("none");
     expect(narratorRequest.response_format.json_schema.name).toBe("lantern_public_narration_draft");
@@ -339,12 +370,12 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(promptMeasurement.characterReduction).toBeGreaterThan(10_000);
     expect(promptMeasurement.estimatedTokens).toBeLessThan(2_000);
     expect(result.event?.tool).toBe("turn_plan");
-    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check"]);
-    expect(result.event?.rolls[0]?.kind).toBe("d20");
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check", "improvise"]);
+    expect(result.event?.rolls[0]?.kind).toBe("passive_score");
     expect(result.state.version).toBe(1);
     expect(result.narrationSource).toBe("llm");
-    expect(result.narration.text).toContain("useful detail");
-    expect(result.narration.suggestedActions[0]?.prompt).toContain("first lead");
+    expect(result.narration.text).toContain("room notices");
+    expect(result.narration.suggestedActions[0]?.prompt).toContain("change my approach");
     expect(result.narrationSequence?.status).toBe("released");
     expect(result.narrationSequence?.committedEventIds).toEqual([result.event?.id]);
     expect(JSON.stringify(result.narrationSequence)).not.toContain("dm-run:");
@@ -362,9 +393,9 @@ describe("Lantern OpenRouter tool loop", () => {
   });
 
   it.each([
-    { label: "successful", wisdom: 20, outcome: "The attempt succeeds" },
-    { label: "failed", wisdom: 8, outcome: "The attempt falls short" },
-  ])("persists a contextual rules fallback for a $label check", async ({ wisdom, outcome }) => {
+    { label: "successful", wisdom: 20 },
+    { label: "failed", wisdom: 8 },
+  ])("discards an orphaned $label check when the consequence pass is unavailable", async ({ wisdom }) => {
     const goal = "retrieve the fallen key without alerting Titus";
     const fetchMock = vi
       .fn()
@@ -435,15 +466,14 @@ describe("Lantern OpenRouter tool loop", () => {
     });
     const result = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
 
-    const rollText = result.session.log.filter((message) => message.kind === "roll").at(-1)?.text;
     const narrationText = result.session.log.at(-1)?.text;
     expect(result.narrationSource).toBe("rules");
+    expect(result.tool).toBe("declare");
+    expect(result.event?.effects).toBeUndefined();
     expect(result.narration.text).toBe(narrationText);
-    expect(result.narration.text).toContain(outcome);
     expect(result.narration.text).toContain("The Ludus Holding Vault");
-    expect(result.narration.text).toContain(goal);
-    expect(result.narration.text).not.toBe(rollText);
-    expect(result.narration.text).not.toContain("against DC");
+    expect(result.session.log.some((message) => message.kind === "roll")).toBe(false);
+    expect(result.narration.text).not.toMatch(/against DC|outcome now stands|attempt succeeds|attempt falls short/i);
 
     const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules" });
@@ -581,11 +611,11 @@ describe("Lantern OpenRouter tool loop", () => {
     const replay = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
 
     expect(result).toMatchObject({ narrationSource: "rules", state: { version: 1 } });
-    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context", "move", "roll_check"]);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "world_context", "move"]);
     expect(result.narration.text).toContain("You reach The Ludus Service Passage.");
     expect(result.narration.text).toContain("Cold lamplight catches on damp stone");
     expect(result.narration.text).toContain("You continue along the chosen path: Cross into the watchtower yard.");
-    expect(result.narration.text).toContain("The attempt succeeds");
+    expect(result.narration.text).not.toMatch(/attempt succeeds|attempt falls short|outcome now stands/i);
     expect(result.narration.text).not.toContain("against DC");
     expect(result.narration.text).not.toContain("Paths onward:");
     expect(result.state.situation?.currentLocationId).toBe(situationFixtureId("watchtower-relic", "node", "yard"));
@@ -600,6 +630,71 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(store.getCampaign(context).log.at(-1)?.text).toBe(result.narration.text);
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules", state: { version: 1 } });
     expect(fetchMock).toHaveBeenCalledTimes(6);
+    store.close();
+  });
+
+  it("does not claim arrival or offer stale exits when only a route selection committed", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-standalone-move",
+                type: "function",
+                function: { name: "move", arguments: JSON.stringify({ destinationId: "service-arch" }) },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error("planner unavailable after route selection"))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-route-only", "actor-route-only");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "ludus-vault",
+      title: "The Ludus Holding Vault",
+      description: "Iron bars divide the vault from a narrow service arch.",
+      features: ["iron bars"],
+      exits: [
+        { id: "service-arch", label: "Slip through the service arch" },
+        { id: "arena-gate", label: "Approach the arena gate" },
+      ],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I slip through the service arch.",
+    );
+
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move"]);
+    expect(result.state.worldContext?.id).toBe("ludus-vault");
+    expect(result.narration.text).toBe("You continue along the chosen path: Slip through the service arch.");
+    expect(result.narration.text).not.toMatch(/beyond|Available routes|arena gate|Ludus Holding Vault/i);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     store.close();
   });
 
