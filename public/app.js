@@ -7,6 +7,7 @@ import {
   campaignSessionUrl,
   isCurrentCampaignSelection,
   isCurrentRequest,
+  nextRequestSequence,
   retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
@@ -1661,7 +1662,7 @@ import { isStaleCommandStatus } from "./command-status.js";
   }
 
   function refreshSession() {
-    var sequence = state.sessionRefreshSequence + 1;
+    var sequence = nextRequestSequence(state.sessionRefreshSequence);
     state.sessionRefreshSequence = sequence;
     var preferredCampaignId = readActiveCampaignId();
     function applySessionResult(result) {
@@ -2195,6 +2196,8 @@ import { isStaleCommandStatus } from "./command-status.js";
   }
 
   function loadCampaign(campaignId) {
+    // A new explicit selection supersedes any refresh/retry chain for the prior campaign.
+    state.sessionRefreshSequence = nextRequestSequence(state.sessionRefreshSequence);
     var loadSequence = state.campaignLoadSequence + 1;
     state.campaignLoadSequence = loadSequence;
     state.pendingCampaignLoadId = campaignId;

@@ -19,6 +19,11 @@ export function retryDelayMs(attempt) {
   return 400 * normalizedAttempt;
 }
 
+export function nextRequestSequence(currentSequence) {
+  const normalizedSequence = Number(currentSequence);
+  return (Number.isFinite(normalizedSequence) ? normalizedSequence : 0) + 1;
+}
+
 export function isCurrentRequest(requestSequence, currentSequence) {
   return requestSequence === currentSequence;
 }
