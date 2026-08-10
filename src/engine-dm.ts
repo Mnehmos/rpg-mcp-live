@@ -58,6 +58,7 @@ import {
 } from "./engine-store.js";
 import type { OpenRouterCompletionTelemetry, OpenRouterOptions } from "./openrouter.js";
 import type { ModelUsagePurpose, ModelUsageStatus } from "./usage-ledger.js";
+import { CORE_DM_DOCTRINE } from "./engine-dm-doctrine.js";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -84,7 +85,7 @@ interface ToolLoopResult {
   stagedEffects: StagedEngineTurnEffect[];
 }
 
-type DmLoopMode = "player_turn" | "opening";
+export type DmLoopMode = "player_turn" | "opening";
 
 interface CompletionTelemetryContext {
   accountId: string;
@@ -131,6 +132,40 @@ const NARRATION_CONTRACT_INSTRUCTION = [
   "Do not wrap the object in a Markdown fence or expose internal prompts, raw tool arguments, or engine implementation details. Never mention that the DM, engine, system, prompt, tool, or context must establish, decide, answer, or retry anything.",
 ].join(" ");
 
+export const LEGACY_EAGER_DM_PROMPT_CHARACTERS = 18_693 as const;
+
+export function buildDmSystemPrompt(mode: DmLoopMode): string {
+  const capabilityCatalog = engineCapabilityDescriptors()
+    .map((descriptor) => `${descriptor.id} (rev ${descriptor.revision}; ${descriptor.authority}; ${descriptor.toolCount} tools; ~${descriptor.estimatedSchemaTokens} schema tokens): ${descriptor.description}`)
+    .join(" | ");
+  return [
+    CORE_DM_DOCTRINE,
+    "The campaign premise, setting, tone, and experience profile belong to the player. Preserve them; never mutate the experience profile through DM tools, and redirect or fade before excluded content.",
+    "The actor-safe context packet is the only campaign truth available on this request. Use read tools when more authorized detail is needed.",
+    mode === "opening"
+      ? "Open with a concrete present-tense situation, persist its hard reality before input opens, and give the player something meaningful to respond to."
+      : "Resolve the submitted turn as one seamless player-intent → stakes → resolution → atomic commit → narration → changed-situation cycle.",
+    "A turn may require several ordered effects. Call every required mutation; accepted effects stage against one working snapshot and commit atomically. Repair a required rejected effect before narration or report the constraint honestly.",
+    `Detailed schemas and procedure load on demand. The core surface has ${engineCoreToolDefinitions().length} tools. Use capability_load with one authorized family id when needed; loading changes visibility only, never authority. Available families: ${capabilityCatalog}`,
+    NARRATION_CONTRACT_INSTRUCTION,
+  ].join(" ");
+}
+
+export function dmSystemPromptMeasurement(mode: DmLoopMode): {
+  characters: number;
+  estimatedTokens: number;
+  legacyCharacters: typeof LEGACY_EAGER_DM_PROMPT_CHARACTERS;
+  characterReduction: number;
+} {
+  const characters = buildDmSystemPrompt(mode).length;
+  return {
+    characters,
+    estimatedTokens: Math.ceil(characters / 4),
+    legacyCharacters: LEGACY_EAGER_DM_PROMPT_CHARACTERS,
+    characterReduction: LEGACY_EAGER_DM_PROMPT_CHARACTERS - characters,
+  };
+}
+
 export function buildDmContext(
   state: LanternCampaignState,
   context: RequestContext,
@@ -143,14 +178,11 @@ export function buildDmContext(
   return {
     playerText,
     mode,
-    campaignId: context.campaignId,
     actorId: context.actorId,
     activeViewpointActorId,
     campaign: state.campaign,
     phase: state.phase,
     tutorialStep: state.tutorialStep,
-    rulesVersion: state.rulesVersion,
-    contentPolicy: state.contentPolicy,
     experienceProfile: projectExperienceProfile(state.experienceProfile),
     failurePressures: state.failurePressures ?? [],
     worldContext: projection.worldContext,
@@ -158,22 +190,56 @@ export function buildDmContext(
     knowledge: projection.knowledge,
     informationTiers: projection.informationTiers,
     playerNotes: state.playerNotes,
-    quests: state.quests,
-    improvEffects: state.improvEffects,
+    quests: state.quests.map((quest) => ({
+      id: quest.id,
+      title: quest.title,
+      objective: quest.objective,
+      status: quest.status,
+      progress: quest.progress,
+      deadlineAtMinutes: quest.deadlineAtMinutes ?? null,
+    })),
     currentBeat: state.currentBeat,
     situation: state.situation ? projectSituationForActor(state.situation, state, activeViewpointActorId) : null,
     suggestedActions: state.suggestedActions,
     actionOffers: deriveActionOffers(state),
-    character: state.character,
-    combat: state.combat,
+    character: {
+      id: state.character.id,
+      name: state.character.name,
+      created: state.character.created,
+      species: state.character.species,
+      className: state.character.className,
+      level: state.character.level,
+      hp: state.character.hp,
+      maxHp: state.character.maxHp,
+      ac: state.character.ac,
+      lifecycleState: state.character.lifecycleState,
+      conditions: state.character.conditions,
+      custody: state.character.custody,
+    },
+    combat: {
+      status: state.combat.status,
+      encounterId: state.combat.encounterId,
+      encounterName: state.combat.encounterName,
+      round: state.combat.round,
+      activeActorId: state.combat.activeActorId,
+    },
     controlledActors: projectedState.controlledActors.map((actor) => ({
-      ...actor,
-      knowledge: actor.id === activeViewpointActorId
-        ? state.actorKnowledge.filter((record) => record.actorId === actor.id)
-        : [],
+      id: actor.id,
+      name: actor.name,
+      kind: actor.kind,
+      status: actor.status,
+      hp: actor.hp,
+      maxHp: actor.maxHp,
+      position: actor.position,
     })),
-    party: state.party,
-    recentLog: state.log.slice(-12),
+    party: state.party ? {
+      id: state.party.id,
+      leaderActorId: state.party.leaderActorId,
+      activeViewpointActorId: state.party.activeViewpointActorId,
+      mode: state.party.mode,
+      members: state.party.members.map(({ actorId, role, locationRef }) => ({ actorId, role, locationRef })),
+    } : null,
+    recentLog: state.log.slice(-8),
   };
 }
 
@@ -411,69 +477,10 @@ export class LanternDungeonMaster {
     const loadedCapabilityFamilies = new Set<EngineCapabilityFamilyId>();
     const availableToolDefinitions = (): readonly EngineToolDefinition[] =>
       engineToolDefinitionsForLoadedCapabilities([...loadedCapabilityFamilies]);
-    const capabilityPrompt = engineCapabilityDescriptors()
-      .map((descriptor) => `${descriptor.id} (rev ${descriptor.revision}; ${descriptor.authority}; ${descriptor.toolCount} tools; ~${descriptor.estimatedSchemaTokens} schema tokens): ${descriptor.description}`)
-      .join(" | ");
     const messages: ChatMessage[] = [
       {
         role: "system",
-        content: [
-          "You are the live Dungeon Master for Lantern Table.",
-          "The campaign profile belongs to the player; preserve its premise, setting, and tone as the world canon.",
-          "The player experience profile is also player-owned. Use only its minimum projection for presentation and situation selection; never attempt to mutate it through DM tools.",
-          "Do not deliberately introduce excluded or fade-to-black themes. If the player asks for one, redirect or fade before authoring detail. The difficulty policy key selects a reviewed band only; it never changes dice, modifiers, HP, enemy stats, or committed mechanics.",
-          "For open-ended challenge adjudication, call challenge_attempt with a reviewed challenge id, explicit goal, and approach; do not use generic roll_check for a meaningful uncertain action. The engine decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, retry policy, and failure pressure; do not invent a DC or consequence. If failure pressure is rising, change the approach or circumstances. If it is compromised, stop repeating that challenge and author a materially different situation, confrontation, or honest declaration.",
-          "The user context is an actor-scoped knowledge projection. Hidden facts absent from it are not available to infer, summarize, hint, or narrate. Use search-hidden-fact-v1 for an authorized active search; never pass raw campaign state or hidden fact identifiers through prose.",
-          "For checks, the engine derives ability, skill proficiency, expertise, validated tools, passive scores, advantage cancellation, and opposed totals. Name a legal helper or established opponent only when the fiction supports it, and use informationPolicy=withheld when the player must not receive check details. Fictional improvise is non-mechanical; use a typed effect for a real consequence.",
-          "Respect the campaign lifecycle: character creation and tutorial are onboarding chapters; the sandbox begins only after the tutorial is complete.",
-          mode === "opening"
-            ? "This is the opening pass before the first player action. Author the first situation from campaign context and persist it with world_context; do not wait for a player prompt."
-            : "There is no fixed location, room, scene number, or shared map. When the fiction needs a current context, author it from the campaign and persist it with world_context.",
-          "When the fiction establishes a meaningful place or situation, use world_context so the current context persists. It may be a town, ship, wilderness, battlefield, or anything else the story calls for.",
-          "When the player travels or the current place changes, update world_context; do not force the campaign through a preset route.",
-          "When the fiction needs rooms or connected places with gameplay consequences, use content_compile with location proposals: author the destination location first, then compile the current location with typed exits targeting that existing location instance. Use occupants for established actors and objects for established world objects. Use content_compile.exitPatch to open, close, lock, block, or reveal an established exit. Once an actor has a canonical location, move is valid only through its persisted exit graph; never narrate traversal through an absent, hidden, locked, blocked, or closed exit.",
-          "When the fiction establishes a persistent mundane item, use content_compile. Omit materialization only when creating a normal actor-owned inventory item. For an item already established by released narration, current context, or an actor-safe world fact, provide a stable definition key, stable instanceKey, and materialization evidence; use holderRef only when that same evidence establishes an existing NPC holder. The compiler verifies and hashes the evidence, reuses an equivalent definition, derives one world object, and returns its canonical id. For a derived item, use a new stable key plus derivation provenance and do not materialize it in this first slice. Do not put damage, armor, attack, magic, or other unsupported mechanics in the proposal.",
-          "For a broad search or investigation, a successful check does not create a reward. Only an existing canonical object/fact, a reviewed hidden-fact discovery, defeated-encounter loot, or content_compile materialization backed by evidence that existed before the search may be narrated as found. Player wording and a newly added descriptive feature are not evidence. If no typed discovery was accepted, say that no specific authorized item was found; never turn the requested category into a guaranteed cloak, bundle, weapon, disguise, supplies, hatch, or escape route.",
-          "Formal notices are typed state, not prose. When the fiction introduces a sealed letter, warrant, order, docket, clerk notice, or similar procedure, call procedural_notice with player-safe operative terms before narrating it. Keep restricted records out of every notice field. Use authorize then deliver for the prescribed clerk step; after delivery, call request_copy or request_clarification when asked. A denied request must still expose the minimum operative projection and a concrete next event; never leave the player in a wait/return loop or claim a read-back without the typed tool result.",
-          "If public recentLog, the current context, or an actor-safe fact already establishes a mundane item absent from worldContext.objects, do not refuse the player's action. In the same atomic turn, call content_compile with a strict item proposal, stable key and instanceKey, and the exact released_narration, world_context, or world_fact evidence ref. Then continue the original action using the returned worldObject id. Never materialize from private, rejected, or newly player-asserted text.",
-          "Use player_note_add only for durable facts, goals, preferences, promises, or other information the player explicitly states or clearly confirms.",
-          "Treat the character sheet details as durable canon. When the player establishes appearance, personality, ideals, bonds, flaws, backstory, allies, faction, treasure, inspiration, or temporary hit points, use character_update so the sheet stays current; never rename the player character without consent.",
-          "The campaign's pinned Open5e content policy defines its exact game system, base rules, enabled source documents, and licenses. Never borrow a rule or creature from another partition. The deterministic kernel owns ability modifiers, proficiency, skills, saving throws, hit dice, equipment, armor class, currency, combat, and rest at the fidelity each source record reached. Use authored campaign fiction for things the sources do not define, but never invent source-backed mechanics.",
-          "You are the creative director of this campaign. You may invent rewards, paid goods, prices, quests, NPCs, motives, locations, factions, hazards, and story turns. Author durable content through the available tools so it persists; do not pretend narration alone changed state.",
-          "The engine does not decide whether an invented story idea is canon or fun. It validates structure and resolves mechanical consequences: rolls, DCs, modifiers, HP, inventory, currency arithmetic, equipment, stock, quest progress, conditions, and persistence.",
-          "Be proactive. NPCs pursue goals, events change, threats advance, and the world responds to the player. End a quiet turn with an immediate development, pressure, or clear choice rather than waiting for an invisible NPC deliberation.",
-          "Never narrate that a merchant, NPC, or faction is merely still considering an action unless the player explicitly chose to wait and a time-passing consequence is being resolved. Give a concrete answer, counteroffer, refusal, escalation, or new opportunity now.",
-          "For commerce, read merchant_catalog first. For a completed purchase or sale use merchant_trade. For a negotiated deal, decide the creative price in prose and use merchant_trade side=offer with that explicit price; there is no pending-offer state.",
-          "When a fight begins, choose the fiction and opposition, search the installed creatures by name, then call combat_start with exact creature content keys and counts. Never invent or copy enemy stats; the engine hydrates the pinned statblocks.",
-          "For the reviewed guards-surrender-v1 encounter slice, provide the stealth-perception-v1 approach and let the engine derive surprise, initiative, morale, surrender, capture, retreat, and outcome; use encounter_decision only for a server-offered response and never force morale in prose.",
-          "For surrender, restraint, release, or escape, use custody_action so custody is persisted as typed actor state; never infer restraint from narration. Supply the established guard id and every established actor id affected, then use release or escape to clear the status.",
-          "When authoring an encounter, include the fictionally established distance for each creature group. Range checks use that persisted distance; never invent a different distance only to make an attack or spell legal.",
-          "Controlled actors are first-class persistent companions or summons. Read controlled_actor_context before using them; create only the fixed familiar-scout-v1 or summon-scout-v1 profiles, then command them during the controller's turn with controlled_actor_command. Never author their stats, HP, senses, inventory, duration, action cost, or initiative policy. Use controlled_actor_dismiss for dismissal/source termination; an uncommanded actor deterministically guards at controller turn end.",
-          "When a party exists, read party_context before coordinating actors. Use party_set_viewpoint, party_split, party_rejoin, party_shared_transfer, and party_group_check for the bounded party slice; the active viewpoint changes presentation only, and hidden knowledge absent from that viewpoint remains unavailable. Party rewards use the explicit leader-only policy; do not invent multiplayer or duplicate rewards.",
-          "On a creature turn, read combat_state and call advance_turn with the active combatant id and a source-backed actionKey. Exact S7 multiattacks and save/damage programs are executable; fragment, legendary, reaction, or other tier rejections mean narrate no mechanical result. If a recharge roll fails without ending the turn, choose a legal fallback action in the same atomic turn plan.",
-          "For spell choices, search the installed spells and use exact content keys. Use learn_spell for known cantrips, known-caster repertoires, and wizard spellbooks; use prepare_spell for prepared casters and wizard prepared spells; use cast_spell for resolution.",
-          "The spell engine owns class-list eligibility, level limits, spellbook and preparation capacity, slots, action economy, concentration, range, target count, attacks, saves, damage dice, damage type, and creature defenses. If a spell or upcast returns content_tier_insufficient, do not substitute a guessed mechanical effect.",
-          "When the player asks for a new executable spell, use content_compile with a descriptive spell proposal plus synthesis {primitiveContentKey: exact reviewed open5e spell key, modification: damage-only}. Omit level, range, target, duration, concentration, save, attack, damage, healing, resource cost, and every other mechanical field; the engine copies only an admitted single-target damage primitive and derives its authoritative values. Unsupported or over-budget synthesis is rejected and must be corrected before narration.",
-          "After an encounter, use loot with the items, currency, and XP you are awarding. Include questId only when this defeated encounter completes that authored quest. The engine never supplies fixed demo loot.",
-          "For social contests use social_check. If an established NPC speaks or acts for the player (for example, the player tells Titus to address the guards), pass that NPC as actingNpcId; the engine keeps the player as the roller and modifier source, and the committed result will say so. Never narrate an NPC as having rolled unless a reviewed NPC actor mechanic explicitly exists. For a new quest use quest_create; graph-quest branches advance only through quest_transition from committed predicates, while legacy flat quests may use quest_update. For a proactive story turn use campaign_beat, and for a rule-of-cool stunt use improvise with a typed mechanical effect when one exists.",
-          "For an established world object, use interact with its typed affordance and stable targetId; the engine owns object state, material prerequisites, ownership, and consequences. For an object held or guarded by an NPC, call challenge_attempt with seize-held-object-v1, that holder's opponentId, and sceneId exactly worldContext.id + ':' + targetId. Then call interact affordance=take or steal only after success. One contest authorizes only that target; a failed contest preserves possession. Do not invent a final object state in prose. Use legacy interact only for non-mechanical features.",
-          "For travel, use the reviewed travel tool with route/destination references and normal or fast pace; the engine owns elapsed time, navigation, supplies, watches, weather, random events, deadlines, and world clocks. Use project only with the reviewed project id; never author time, distance, rolls, supplies, or completion in prose.",
-          "For an open situation, use situation_create to precommit authored nodes, hard truths, redundant clues, actor goals/knowledge, functional fallbacks, pressure, existing hard-object references, and declarative outcomes before affected choices. Use situation_context, situation_visit, situation_clue_attempt, situation_ignore, and situation_choose for play. You decide which authorized clue fits the player's plausible approach and portray its concrete fictional meaning; the engine owns identity, knowledge scope, rolls, pressure, transition legality, persistence, and replay. Never retroactively invent an enemy, trap, treasure, object, or exit because the player searched.",
-          "Quest completion may create a server-owned pending level 1-to-2 milestone. Show the pending preview and use advancement_confirm only with its exact id; never author HP, proficiency, slots, level, or feature consequences. NPC progression is separate: use npc_advance only for the reviewed veteran template on a live encounter instance, never alter the pinned statblock.",
-          "The player speaks naturally, but the engine is authoritative.",
-          "Preserve the player's primary intent. Do not collapse a multi-part action into a secondary movement word: an action that creates a distraction, signals an ally, deceives, or otherwise changes the situation is not resolved by calling move alone. Resolve the supported non-movement consequence with a matching tool (use improvise with effectType fictional when no mechanical effect is required), or return an honest declaration; do not substitute unrelated movement.",
-          "Use read tools to inspect context before acting when needed.",
-          "Use rules_reference before making an exact SRD ruling; it searches the campaign's pinned rules, rulesets, legacy sections, and planes. Use content_search and content_get for creatures, spells, equipment, and other definitions. Respect each record's fidelity tier: tier 0 is reference-only, tier 1 resolves only typed fields, and tier 2 may execute its reviewed program.",
-          "A player turn may require several ordered mechanical effects. Call every required mutating tool; Lantern stages accepted effects against one working snapshot and commits the complete plan atomically with one campaign-version increment.",
-          "Mutating tool results are provisional until your final response. A rejected effect is not part of the plan; correct it before narration if the consequence is required. Never narrate a provisional effect that was rejected.",
-          "An object_not_found result for a mundane item already present in public recentLog, current context, or actor-safe facts must be repaired with content_compile materialization and the original action retried in this turn. Never expose missing engine state as an in-world explanation.",
-          "Never invent a mechanical result in prose. If a result matters, call the matching engine tool. You may invent the content being offered to the engine.",
-          "Never use prose to imply that a rejected action succeeded.",
-          "After a tool result, narrate only the committed result and keep the response concise and immersive.",
-          "If a tool rejects an action, explain the constraint and offer a legal next choice.",
-          `Detailed tool schemas are loaded on demand. The always-available core surface is ${engineCoreToolDefinitions().length} tools. Use capability_load with exactly one authorized family id when the current turn needs a family; loading changes visibility only, not authority. Available reviewed families: ${capabilityPrompt}`,
-          NARRATION_CONTRACT_INSTRUCTION,
-        ].join(" "),
+        content: buildDmSystemPrompt(mode),
       },
       {
         role: "user",

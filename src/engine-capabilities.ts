@@ -26,6 +26,7 @@ export const engineCoreToolNames = [
   "player_notes",
   "player_note_add",
   "roll_check",
+  "challenge_attempt",
   "move",
   "quest_create",
   "death_save",
@@ -43,6 +44,7 @@ export interface EngineCapabilityFamily {
   id: EngineCapabilityFamilyId;
   revision: number;
   description: string;
+  promptlet: string;
   phases: readonly EngineCampaignPhase[];
   visibility: "dm";
   requiredCapabilities: readonly ["dm"];
@@ -60,13 +62,15 @@ export interface EngineCapabilityDescriptor extends Omit<EngineCapabilityFamily,
 const family = (
   id: EngineCapabilityFamilyId,
   description: string,
+  promptlet: string,
   phases: readonly EngineCampaignPhase[],
   authority: CapabilityAuthority,
   toolNames: readonly EngineToolName[],
 ): EngineCapabilityFamily => ({
   id,
-  revision: 1,
+  revision: 2,
   description,
+  promptlet,
   phases,
   visibility: "dm",
   requiredCapabilities: ["dm"],
@@ -81,6 +85,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "rules",
     "Pinned rules and source-backed character/content lookup.",
+    "RULES CAPABILITY (rev 2). Use rules_reference for exact rulings and content_search/content_get for definitions. Stay inside the campaign's pinned game system and sources. Fidelity tier 0 is reference-only, tier 1 resolves only typed fields, and tier 2 may execute its reviewed program. Never fill a missing mechanical field from memory.",
     allPhases,
     "read",
     ["content_search", "content_get", "rules_reference", "character_options"],
@@ -88,6 +93,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "exploration",
     "Travel, world-object interaction, notices, and bounded situations.",
+    "EXPLORATION CAPABILITY (rev 2). Traverse only persisted open exits and interact through stable object affordances. Travel owns elapsed time, supplies, weather, random events, deadlines, and clocks. A broad search may reveal only canonical or previously authorized evidence; it cannot create the requested item, exit, trap, enemy, or treasure. Formal notices and authored situations are typed state: commit their safe terms, truths, clues, roles, pressure, and outcomes before portraying them.",
     allPhases,
     "resolve",
     [
@@ -105,13 +111,15 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "social",
     "NPC context, social checks, contests, and NPC turns.",
+    "SOCIAL CAPABILITY (rev 2). Portray every present NPC directly from actor-safe knowledge, goals, relationships, and current state. Answer an ordinary question in character when the NPC can answer; refusal, uncertainty, a lie, or a counteroffer is still a concrete answer. Use a social check only for meaningful uncertainty, and set actingNpcId when an established NPC acts for the player. Never let pleasing prose silently rewrite established hostility, loyalty, trust, or commitment; persist only durable consequences.",
     allPhases,
     "resolve",
-    ["challenge_attempt", "npc_context", "social_check", "npc_tick", "social_action"],
+    ["npc_context", "social_check", "npc_tick", "social_action"],
   ),
   family(
     "commerce",
     "Merchant, inventory, equipment, and item ownership actions.",
+    "COMMERCE CAPABILITY (rev 2). Read merchant_catalog before trading. Commit purchases, sales, negotiated explicit prices, inventory transfers, equipment, drops, and uses through their typed operations. Ownership, stock, currency arithmetic, and item state are authoritative; never imply a completed exchange in prose alone.",
     ["sandbox"],
     "resolve",
     ["merchant_catalog", "merchant_trade", "inventory", "inventory_transfer", "equip_item", "unequip_item", "drop_item", "use_item"],
@@ -119,6 +127,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "quests",
     "Quest progress, advancement, and reviewed downtime projects.",
+    "QUESTS CAPABILITY (rev 2). Advance graph quests only through committed predicates and quest_transition; legacy flat quests may use quest_update. Pending advancement uses the exact server preview and id. Projects use reviewed definitions. Never author level, HP, proficiency, slots, rewards, elapsed time, or completion in prose.",
     ["tutorial", "sandbox"],
     "resolve",
     ["quest_progress", "quest_transition", "quest_update", "advancement_confirm", "project"],
@@ -126,6 +135,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "combat",
     "Encounter lifecycle, tactical turns, creature actions, loot, and rest.",
+    "COMBAT CAPABILITY (rev 2). Start opposition from exact installed creature content keys and fictionally established distances; never invent or copy stats. Read combat_state, use the active combatant and source-backed action keys, and obey turn, range, reaction, condition, morale, custody, loot, rest, and action-economy results. A tier or legality rejection means no mechanical effect occurred. Narrate the committed combat result as physical consequence, with exact mechanics secondary.",
     ["sandbox"],
     "resolve",
     ["combat_state", "combat_start", "encounter_decision", "custody_action", "spawn_creature", "combat_action", "combat_move", "end_turn", "advance_turn", "npc_advance", "loot", "rest"],
@@ -133,6 +143,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "magic",
     "Reviewed spell learning, preparation, casting, and reactions.",
+    "MAGIC CAPABILITY (rev 2). Use exact installed spell keys for learning, preparation, casting, and reactions. The spell engine owns eligibility, slots, action economy, concentration, range, targets, attacks, saves, damage, and defenses. Never guess an effect after a fidelity rejection. New executable spells use content_compile synthesis from one reviewed damage primitive; omit caller-authored mechanics.",
     ["sandbox"],
     "resolve",
     ["learn_spell", "prepare_spell", "cast_spell", "reaction_response"],
@@ -140,6 +151,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
   family(
     "party",
     "Controlled actors and bounded party viewpoint/split operations.",
+    "PARTY CAPABILITY (rev 2). Read controlled_actor_context or party_context before coordination. Active viewpoint changes presentation, never authority; knowledge absent from that actor remains unavailable. Use typed split, rejoin, transfer, group-check, command, create, and dismiss operations. Never author companion stats, HP, senses, inventory, duration, initiative, or action cost.",
     ["sandbox"],
     "resolve",
     ["controlled_actor_context", "party_context", "party_create", "party_set_viewpoint", "party_split", "party_rejoin", "party_shared_transfer", "party_group_check", "controlled_actor_create", "controlled_actor_command", "controlled_actor_dismiss"],

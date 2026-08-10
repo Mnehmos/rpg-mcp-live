@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "./engine-domain.js";
-import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
+import { buildDmContext, dmSystemPromptMeasurement, LanternDungeonMaster } from "./engine-dm.js";
 import { EngineCommandInProgressError, LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -52,6 +52,12 @@ describe("Lantern OpenRouter tool loop", () => {
         stateVersion: state.version,
       }),
     ]));
+    expect(dmContext.character).toMatchObject({ id: state.character.id, name: state.character.name, level: state.character.level });
+    expect(dmContext.character).not.toHaveProperty("inventory");
+    expect(dmContext.character).not.toHaveProperty("spellcasting");
+    expect(dmContext.combat).not.toHaveProperty("enemies");
+    expect(dmContext).not.toHaveProperty("contentPolicy");
+    expect(dmContext).not.toHaveProperty("improvEffects");
   });
 
   it("reserves a player turn before asynchronous model work can be observed", async () => {
@@ -257,19 +263,27 @@ describe("Lantern OpenRouter tool loop", () => {
     });
     expect(purposes).toEqual(expect.arrayContaining(["player_turn", "narration"]));
     const systemPrompt = firstRequest.messages[0]?.content;
-    expect(systemPrompt).toContain("creative director");
-    expect(systemPrompt).toContain("combat_start");
-    expect(systemPrompt).toContain("creature content keys");
-    expect(systemPrompt).toContain("never supplies fixed demo loot");
-    expect(systemPrompt).toContain("procedural_notice");
-    expect(systemPrompt).toContain("challenge_attempt");
-    expect(systemPrompt).toContain("commits the complete plan atomically");
-    expect(systemPrompt).toContain("seize-held-object-v1");
-    expect(systemPrompt).toContain("content_compile materialization");
+    const promptMeasurement = dmSystemPromptMeasurement("player_turn");
+    expect(systemPrompt).toContain("LAW ZERO — THE GAME MOVES");
+    expect(systemPrompt).toContain("MOMENTUM TRUST");
+    expect(systemPrompt).toContain("NO ORPHANED MECHANICS; NO ORPHANED FICTION");
+    expect(systemPrompt).toContain("portray every present NPC");
+    expect(systemPrompt).toContain("Ordinary answers and reactions need no mechanics call");
+    expect(systemPrompt).toContain("hard numbers underneath and soft fiction on top");
+    expect(systemPrompt).toContain("loading changes visibility only, never authority");
+    expect(systemPrompt).not.toContain("combat_start");
+    expect(systemPrompt).not.toContain("creature content keys");
+    expect(systemPrompt).not.toContain("merchant_catalog");
+    expect(systemPrompt).not.toContain("watchtower-relic-v1");
+    expect(systemPrompt).not.toContain("seize-held-object-v1");
+    expect(systemPrompt).not.toContain("content_compile materialization");
     expect(systemPrompt).not.toContain("world_context.objects.upsert");
-    expect(systemPrompt).toContain("Never expose missing engine state");
     expect(systemPrompt).toContain("context-aware moves");
     expect(systemPrompt).toContain('The shorthand kinds "npc" and "location" are invalid');
+    expect(systemPrompt.length).toBe(promptMeasurement.characters);
+    expect(promptMeasurement.legacyCharacters).toBe(18_693);
+    expect(promptMeasurement.characterReduction).toBeGreaterThan(10_000);
+    expect(promptMeasurement.estimatedTokens).toBeLessThan(2_000);
     expect(result.event?.tool).toBe("turn_plan");
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check"]);
     expect(result.event?.rolls[0]?.kind).toBe("d20");
@@ -1599,7 +1613,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(names).not.toContain("experience_profile_update");
     expect(names).not.toContain("experience_feedback_add");
     expect(names).not.toContain("experience_boundary");
-    expect(request.messages[0]?.content).toContain("minimum projection");
+    expect(request.messages[0]?.content).toContain("experience profile belong to the player");
     expect(result.state.experienceProfile.revision).toBe(0);
     expect(result.narration.text).toContain("safer path");
     store.close();
@@ -1684,6 +1698,14 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(firstNames).not.toContain("combat_start");
     expect(secondNames).toContain("combat_start");
     expect(secondNames).toContain("combat_state");
+    expect(firstRequest.messages[0]?.content).not.toContain("COMBAT CAPABILITY");
+    const capabilityResult = secondRequest.messages
+      .filter((message: { role: string }) => message.role === "tool")
+      .map((message: { content: string }) => JSON.parse(message.content))
+      .find((message: { tool: string }) => message.tool === "capability_load");
+    expect(capabilityResult.data).toMatchObject({ id: "combat", revision: 2, authority: "resolve" });
+    expect(capabilityResult.data.promptlet).toContain("COMBAT CAPABILITY (rev 2)");
+    expect(capabilityResult.data.promptlet).not.toContain("MAGIC CAPABILITY");
     expect(result.narration.text).toContain("arena waits");
     store.close();
   });

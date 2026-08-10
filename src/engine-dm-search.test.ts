@@ -165,7 +165,7 @@ describe("DM broad-search provenance", () => {
     expect(result.state.worldContext?.objects).toEqual([]);
     expect(JSON.stringify(result.state.character.inventory)).not.toContain("arena-worker-cloak");
     const firstRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(firstRequest.messages[0]?.content).toContain("a successful check does not create a reward");
+    expect(firstRequest.messages[0]?.content).toContain("Pre-existing enemies, traps, treasure, exits, locks, ownership, locations");
     store.close();
   });
 
