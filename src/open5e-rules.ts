@@ -6,6 +6,7 @@ import type {
   EngineItemChargeState,
   EngineItemOwnerRef,
   EngineItemProvenance,
+  EngineItemTheftProvenance,
   EngineInventoryItem,
   EngineInventoryItemInput,
   EngineInventoryItemView,
@@ -15,6 +16,7 @@ import type {
   EngineTacticalFootprint,
   EngineTacticalPosition,
 } from "./engine-contracts.js";
+import { engineItemTheftProvenanceSchema } from "./engine-contracts.js";
 import {
   loadActiveRulesKernel,
   loadRulesKernelForPackHash,
@@ -433,6 +435,7 @@ export function normalizeInventoryItem(
     : undefined;
   const charges = normalizeChargeState(raw.charges);
   const suppliedProvenance = normalizeItemProvenance(raw.provenance);
+  const theftProvenance = normalizeItemTheftProvenance(raw.theftProvenance);
   if (typeof raw.contentKey === "string" && raw.contentKey.trim()) {
     const contentKey = raw.contentKey.trim();
     const packHash = typeof raw.packHash === "string" && raw.packHash.trim()
@@ -447,6 +450,7 @@ export function normalizeInventoryItem(
       containerRef,
       charges,
       provenance: suppliedProvenance ?? { kind: "open5e" },
+      theftProvenance,
     });
   }
 
@@ -461,6 +465,7 @@ export function normalizeInventoryItem(
     containerRef,
     charges: authoredCharges,
     provenance: suppliedProvenance ?? { kind: "authored" },
+    theftProvenance,
   });
 }
 
@@ -1126,6 +1131,13 @@ function normalizeItemProvenance(value: unknown): EngineItemProvenance | undefin
   if (kind !== "starter" && kind !== "loot" && kind !== "merchant" && kind !== "authored" && kind !== "open5e") return undefined;
   const sourceId = typeof value.sourceId === "string" && value.sourceId.trim() ? value.sourceId.trim() : undefined;
   return { kind, ...(sourceId ? { sourceId } : {}) };
+}
+
+function normalizeItemTheftProvenance(value: unknown): EngineItemTheftProvenance[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("Inventory theft provenance must be an append-only record list.");
+  const records = value.map((candidate) => engineItemTheftProvenanceSchema.parse(candidate));
+  return records.length > 0 ? records : undefined;
 }
 
 function normalizeChargeState(value: unknown): EngineItemChargeState | undefined {
