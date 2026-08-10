@@ -686,6 +686,23 @@ export const engineNpcPatchOperationsSchema = z.object({
 );
 export type EngineNpcPatchOperations = z.infer<typeof engineNpcPatchOperationsSchema>;
 
+/**
+ * Server-owned actor custody.  This is deliberately separate from the
+ * ordinary condition list so a narrated surrender cannot imply a mechanical
+ * restraint without a persisted authority, source, and release policy.
+ */
+export const engineCustodyStatusSchema = z.object({
+  actorId: worldContextEntityIdSchema,
+  groupId: worldContextEntityIdSchema,
+  status: z.enum(["restrained", "under_guard"]),
+  sourceGuardId: worldContextEntityIdSchema,
+  reason: z.enum(["surrender", "capture"]),
+  locationRef: worldContextEntityIdSchema,
+  startedVersion: z.number().int().nonnegative(),
+  releasePolicy: z.literal("guard-release-or-escape"),
+}).strict();
+export type EngineCustodyStatus = z.infer<typeof engineCustodyStatusSchema>;
+
 export const engineMerchantPatchOperationsSchema = z.object({
   upsert: z.array(engineMerchantPatchSchema).max(20).optional(),
   remove: z.array(worldContextEntityIdSchema).max(20).optional(),
@@ -910,6 +927,7 @@ export const engineToolNameSchema = z.enum([
   "party_group_check",
   "combat_start",
   "encounter_decision",
+  "custody_action",
   "spawn_creature",
   "learn_spell",
   "prepare_spell",
@@ -1159,7 +1177,7 @@ export const engineEncounterDecisionSchema = z.enum([
 export type EngineEncounterDecision = z.infer<typeof engineEncounterDecisionSchema>;
 
 export type EngineEncounterPhase = "pre-combat" | "active" | "resolving" | "terminal";
-export type EngineEncounterOutcome = "killed" | "surrendered" | "captured" | "escaped";
+export type EngineEncounterOutcome = "killed" | "surrendered" | "captured" | "escaped" | "player_surrendered";
 
 export interface EngineEncounterApproachEvidence {
   challengeId: "stealth-perception-v1";
@@ -1709,6 +1727,12 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     decision: engineEncounterDecisionSchema,
     targetId: z.string().trim().min(1).max(120).optional(),
   }).strict(),
+  z.object({
+    kind: z.literal("custody_action"),
+    action: z.enum(["surrender", "release", "escape"]),
+    guardId: worldContextEntityIdSchema.optional(),
+    affectedActorIds: z.array(worldContextEntityIdSchema).min(1).max(8).optional(),
+  }).strict(),
   z
     .object({
       kind: z.literal("spawn_creature"),
@@ -2031,6 +2055,7 @@ export interface EngineNpc {
   socialDc: number;
   relationshipScore: number;
   memories: string[];
+  custody?: EngineCustodyStatus | null;
   agency?: EngineNpcAgencyState;
 }
 
@@ -2241,6 +2266,7 @@ export interface EngineCharacter {
   xp: number;
   conditions: string[];
   conditionEffects: EngineAppliedCondition[];
+  custody?: EngineCustodyStatus | null;
   deathSaveSuccesses: number;
   deathSaveFailures: number;
   /** Revision of the server-owned progression formulas used for derived state. */
@@ -2558,6 +2584,7 @@ export interface EngineControlledActor {
   guardedUntilRound: number | null;
   attack: EngineControlledActorAttack;
   effects: EngineEffectInstance[];
+  custody?: EngineCustodyStatus | null;
   inventory: EngineInventoryItem[];
   createdAtMinutes: number;
   expiresAtMinutes: number | null;
