@@ -1071,13 +1071,13 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "custody_action",
-    "Record a typed surrender, guard release, or escape. Never narrate restraint without this tool; include every established actor being restrained and the established guard id.",
+    "Record a typed surrender, guard release, or escape. Never narrate restraint without this tool; include every established actor being restrained and the established guard id. If the player escaped while companions remain captive, include those outstanding companion ids when requesting the source guard's release.",
     {
       type: "object",
       properties: {
         action: { type: "string", enum: ["surrender", "release", "escape"] },
         guardId: { type: "string", description: "Established guard or patrol NPC receiving surrender or authorizing release." },
-        affectedActorIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 8, description: "Established actor ids affected by surrender; include the player and any named companion." },
+        affectedActorIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 8, description: "Established actor ids affected by surrender, or outstanding companion ids targeted by a source-guard release; include the player for surrender." },
       },
       required: ["action"],
       additionalProperties: false,

@@ -65,6 +65,15 @@ function establishGuards(state: LanternCampaignState): LanternCampaignState {
           disposition: "neutral",
           goals: ["stay with Mnehmos"],
           memories: [],
+          agency: {
+            actorType: "traveler",
+            locationRef: "holding-vault",
+            schedule: [],
+            goals: [],
+            resources: { inventory: [], copper: 0, actionPoints: 1 },
+            maxHp: 10,
+            hp: 10,
+          },
         },
       ],
     },
@@ -150,5 +159,65 @@ describe("typed custody and restraint", () => {
     expect(repeat.accepted).toBe(false);
     expect(repeat.code).toBe("custody_not_active");
     expect(repeat.state).toEqual(beforeRepeat);
+
+    const releasedCompanion = apply(escaped.state, {
+      kind: "custody_action",
+      action: "release",
+      guardId: "guard-patrol",
+      affectedActorIds: ["titus"],
+    });
+    expect(releasedCompanion.accepted).toBe(true);
+    expect(releasedCompanion.state.worldContext?.npcs.find((npc) => npc.id === "titus")?.custody).toBeNull();
+    const repeatedCompanionRelease = apply(releasedCompanion.state, {
+      kind: "custody_action",
+      action: "release",
+      guardId: "guard-patrol",
+      affectedActorIds: ["titus"],
+    });
+    expect(repeatedCompanionRelease.accepted).toBe(false);
+    expect(repeatedCompanionRelease.code).toBe("custody_release_target_invalid");
+  });
+
+  it("keeps captive NPC and controlled actors from taking engine actions", () => {
+    const state = establishGuards(sandbox());
+    const controlled = apply(state, { kind: "controlled_actor_create", profileId: "familiar-scout-v1" });
+    expect(controlled.accepted).toBe(true);
+    const controlledId = controlled.state.controlledActors[0]!.id;
+    const surrendered = apply(controlled.state, {
+      kind: "custody_action",
+      action: "surrender",
+      guardId: "guard-patrol",
+      affectedActorIds: [controlled.state.actorId, "titus", controlledId],
+    });
+    expect(surrendered.accepted).toBe(true);
+
+    const npcTick = apply(surrendered.state, {
+      kind: "npc_tick",
+      npcId: "titus",
+      trigger: "operator_batch",
+      triggerId: "custody-npc-tick",
+      offerId: "no_op",
+    });
+    expect(npcTick.accepted).toBe(false);
+    expect(npcTick.code).toBe("custody_restricted");
+
+    const controlledCommand = apply(surrendered.state, {
+      kind: "controlled_actor_command",
+      actorId: controlledId,
+      action: "guard",
+    });
+    expect(controlledCommand.accepted).toBe(false);
+    expect(controlledCommand.code).toBe("custody_restricted");
+
+    const escaped = apply(surrendered.state, { kind: "custody_action", action: "escape" });
+    expect(escaped.accepted).toBe(true);
+    expect(toSessionView(escaped.state).controlledActors.find((actor) => actor.id === controlledId)?.legalCommands.every((offer) => !offer.legal)).toBe(true);
+    const stillCaptiveCommand = apply(escaped.state, {
+      kind: "controlled_actor_command",
+      actorId: controlledId,
+      action: "guard",
+    });
+    expect(stillCaptiveCommand.accepted).toBe(false);
+    expect(stillCaptiveCommand.code).toBe("custody_restricted");
   });
 });

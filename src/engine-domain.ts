@@ -2530,6 +2530,7 @@ function controlledActorLegalCommands(state: LanternCampaignState, actor: Engine
   return actions.map(({ action, cost, targetRequired }) => {
     let reason: string | null = null;
     if (actor.status !== "active") reason = `Actor is ${actor.status}.`;
+    else if (actor.custody) reason = "Actor is under guard custody.";
     else if (actor.controllerActorId !== viewerActorId) reason = "This actor has a different controller.";
     else if (state.combat.status !== "active") reason = "A controller-turn command requires an active encounter.";
     else if (state.combat.pendingReaction) reason = "Resolve the pending reaction first.";
@@ -3241,6 +3242,16 @@ export function resolveEngineCommand(
     && !(command.kind === "cast_spell" && state.combat.pendingReaction.eligibleReactionIds.includes(command.spellKey))
   ) {
     return rejection(state, tool, "reaction_pending", "Resolve the offered incoming-hit reaction before taking another action.");
+  }
+  const custodyTarget = command.kind === "npc_tick"
+    ? (state.worldContext?.npcs.find((npc) => npc.id === command.npcId)
+      ?? (command.npcId ? null : state.worldContext?.npcs.find((npc) => Boolean(npc.agency)))
+      ?? null)
+    : command.kind === "controlled_actor_command" || command.kind === "controlled_actor_dismiss"
+      ? state.controlledActors.find((actor) => actor.id === command.actorId) ?? null
+      : null;
+  if (custodyTarget?.custody) {
+    return rejection(state, tool, "custody_restricted", "That actor is under guard custody and cannot move, fight, or receive commands until released.");
   }
   if (
     state.character.custody
@@ -4432,6 +4443,15 @@ function npcLegalOffers(
 ): EngineNpcActionOffer[] {
   const agency = npc.agency;
   if (!agency || agency.lifecycleState !== "conscious" || agency.hp <= 0) return [];
+  if (npc.custody) {
+    return [{
+      id: "no_op",
+      label: "Remain under guard custody.",
+      legal: true,
+      prerequisites: [`custody:${npc.custody.groupId}`],
+      costs: { actionPoints: 0, copper: 0, itemIds: [] },
+    }];
+  }
   const offers: EngineNpcActionOffer[] = [];
   const scheduled = npcScheduleEntryAt(npc, state.time.gameTime.totalMinutes);
   if (scheduled && scheduled.locationRef !== agency.locationRef && npcLocationReachable(state, scheduled.locationRef)) {
@@ -7233,6 +7253,12 @@ function establishedCustodyActor(state: LanternCampaignState, actorId: string): 
   return null;
 }
 
+function custodyStatusForActor(state: LanternCampaignState, actor: CustodyActorRef): EngineCustodyStatus | null {
+  if (actor.kind === "player") return state.character.custody ?? null;
+  if (actor.kind === "npc") return state.worldContext?.npcs.find((npc) => npc.id === actor.id)?.custody ?? null;
+  return state.controlledActors.find((candidate) => candidate.id === actor.id)?.custody ?? null;
+}
+
 function resolveCustodyAction(
   state: LanternCampaignState,
   context: RequestContext,
@@ -7319,9 +7345,27 @@ function resolveCustodyAction(
     );
   }
 
-  if (command.affectedActorIds?.length) return rejection(state, tool, "custody_actor_ids_not_allowed", "Affected actor ids are only supplied when surrendering.");
-  const current = state.character.custody;
-  if (!current) return rejection(state, tool, "custody_not_active", "You are not under guard custody.");
+  let current = state.character.custody;
+  if (command.action === "release" && command.affectedActorIds?.length) {
+    const requestedIds = command.affectedActorIds;
+    if (new Set(requestedIds).size !== requestedIds.length) return rejection(state, tool, "custody_duplicate_actor", "Each release target must be listed once.");
+    const targetRefs = requestedIds.map((actorId) => establishedCustodyActor(state, actorId));
+    if (targetRefs.some((actor) => !actor)) return rejection(state, tool, "custody_actor_not_found", "Every release target must already be established in the current campaign.");
+    const targetCustody = (targetRefs as CustodyActorRef[]).map((actor) => custodyStatusForActor(state, actor));
+    if (targetCustody.some((custody) => !custody)) return rejection(state, tool, "custody_release_target_invalid", "Every release target must still be under an active custody group.");
+    const first = targetCustody[0] as EngineCustodyStatus;
+    if (targetCustody.some((custody) => custody!.groupId !== first.groupId || custody!.sourceGuardId !== first.sourceGuardId)) {
+      return rejection(state, tool, "custody_release_target_invalid", "Release targets must belong to one custody group and source guard.");
+    }
+    if (current && current.groupId !== first.groupId) {
+      return rejection(state, tool, "custody_release_target_invalid", "The requested release targets are not part of your custody group.");
+    }
+    current = first;
+  }
+  if (!current) return rejection(state, tool, "custody_not_active", "You are not under guard custody; specify an outstanding captive actor to release.");
+  if (command.action !== "release" && command.affectedActorIds?.length) {
+    return rejection(state, tool, "custody_actor_ids_not_allowed", "Affected actor ids are only supplied when surrendering or releasing companions.");
+  }
   if (command.action === "release" && !command.guardId) return rejection(state, tool, "custody_guard_required", "A release must name the established source guard.");
   const guard = command.action === "release"
     ? custodyGuard(state, command.guardId)
@@ -7336,9 +7380,11 @@ function resolveCustodyAction(
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   const clear = (actor: CustodyActorRef): void => {
     if (actor.kind === "player") {
-      const before = next.character.custody ?? null;
-      next.character.custody = null;
-      changes.push({ path: "/character/custody", before, after: null });
+      if (next.character.custody?.groupId === current.groupId) {
+        const before = next.character.custody;
+        next.character.custody = null;
+        changes.push({ path: "/character/custody", before, after: null });
+      }
     } else if (actor.kind === "npc") {
       const target = next.worldContext?.npcs.find((npc) => npc.id === actor.id);
       if (target?.custody?.groupId === current.groupId) {
