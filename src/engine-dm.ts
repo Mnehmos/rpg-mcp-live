@@ -1341,9 +1341,33 @@ function removeMediatedSuggestedActionClaims(
   return {
     ...narration,
     suggestedActions: narration.suggestedActions.filter((action) =>
-      !attributions.some((attribution) => narrationContradictsMediatedCheck(`${action.label} ${action.prompt}`, attribution))
+      !attributions.some((attribution) => suggestedActionContradictsMediatedCheck(`${action.label} ${action.prompt}`, attribution))
     ),
   };
+}
+
+function suggestedActionContradictsMediatedCheck(
+  text: string,
+  attribution: EngineSocialCheckAttribution,
+): boolean {
+  if (narrationContradictsMediatedCheck(text, attribution)) return true;
+  const normalized = text.toLocaleLowerCase("en-US");
+  const rollWords = "(?:roll|rolled|rolling|make|made|attempt|attempted|perform|performed)";
+  const pronounDirectedRoll = new RegExp(
+    `\\b(?:have|let|ask|tell|make|allow)\\s+(?:him|her|them)\\b[^.!?]{0,100}\\b${rollWords}\\b`,
+    "iu",
+  );
+  const rollForPronoun = new RegExp(
+    `\\b${rollWords}\\b[^.!?]{0,100}\\b(?:for|as)\\s+(?:him|her|them)\\b`,
+    "iu",
+  );
+  const pronounModifierOwnership = new RegExp(
+    `\\b${rollWords}\\b[^.!?]{0,100}\\b(?:his|her|their)\\b[^.!?]{0,30}\\bmodifiers?\\b`,
+    "iu",
+  );
+  return pronounDirectedRoll.test(normalized)
+    || rollForPronoun.test(normalized)
+    || pronounModifierOwnership.test(normalized);
 }
 
 function preserveMediatedCheckAttribution(

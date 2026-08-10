@@ -408,4 +408,17 @@ describe("social check actor attribution", () => {
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.suggestedActions).toEqual([]);
   });
+
+  it("removes pronoun-only suggested actions that ask the mediated NPC to roll", async () => {
+    const result = await resolveWithModelNarration(
+      "The sentries answer cautiously.",
+      ["titus"],
+      undefined,
+      false,
+      [{ id: "npc-roll", label: "Try again", prompt: "Have him roll again using his modifier." }],
+    );
+
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.suggestedActions).toEqual([]);
+  });
 });
