@@ -61,6 +61,12 @@ import type { OpenRouterCompletionTelemetry, OpenRouterOptions } from "./openrou
 import type { ModelUsagePurpose, ModelUsageStatus } from "./usage-ledger.js";
 import { CORE_DM_DOCTRINE } from "./engine-dm-doctrine.js";
 import {
+  derivePlayerIntentClauses,
+  uncoveredNarrationClauses,
+  uncoveredPlanClauses,
+  type PlayerIntentClause,
+} from "./engine-intent-coverage.js";
+import {
   actorSceneProjectionSchema,
   compileNarrationDraft,
   completeDmRun,
@@ -100,6 +106,7 @@ interface ToolLoopResult {
   /** Private planner prose. It is retained only as a hash and is never published. */
   narration: NarrationEnvelope | null;
   stagedEffects: StagedEngineTurnEffect[];
+  unresolvedIntentClauses: PlayerIntentClause[];
   plannerRunId: string;
   plannerStartedAt: string;
   telemetry: OpenRouterCompletionTelemetry[];
@@ -187,6 +194,7 @@ export function buildDmSystemPrompt(mode: DmLoopMode): string {
     mode === "opening"
       ? "Open with a concrete present-tense situation, persist its hard reality before input opens, and give the player something meaningful to respond to."
       : "Resolve the submitted turn as one seamless player-intent → stakes → resolution → atomic commit → narration → changed-situation cycle.",
+    "The context packet lists ordered intentClauses for obvious compound actions. Preserve every clause: resolve its supported consequence, explicitly carry it as bounded non-mechanical fiction, or report that it is unsupported. Movement never covers a separate search, question, observation, or interaction clause.",
     "A turn may require several ordered effects. Call every required mutation; accepted effects stage against one working snapshot and commit atomically. Repair a required rejected effect before narration or report the constraint honestly.",
     `Detailed schemas and procedure load on demand. The core surface has ${engineCoreToolDefinitions().length} tools. Use capability_load with one authorized family id when needed; loading changes visibility only, never authority. Available families: ${capabilityCatalog}`,
     NARRATION_CONTRACT_INSTRUCTION,
@@ -219,6 +227,7 @@ export function buildDmContext(
   const projectedState = projectStateForActor(context.actorId, state);
   return {
     playerText,
+    intentClauses: mode === "player_turn" ? derivePlayerIntentClauses(playerText) : [],
     mode,
     actorId: context.actorId,
     activeViewpointActorId,
@@ -293,6 +302,7 @@ export function buildPublicNarratorPrompt(): string {
     "Return one JSON object with exactly beats and suggestedActions. beats contains 1 to 8 ordered objects with exactly kind, text, entityRefs, publicFactRefs, committedEventRefs, and interruptible.",
     "kind is establishing, sensory, npc, dialogue, mechanical, consequence, or question. Every entity/fact/event ref must be copied exactly from the actor-safe packet. Use empty ref arrays when a beat makes no such claim.",
     "A mechanical or consequence beat must cite at least one committed event. Do not propose facts, expose hidden state, mention tools/prompts/context/schema/retries, or ask the player to wait for internal work.",
+    "The packet includes ordered intentClauses. Address each clause in order with its own compatible beat. Use dialogue or npc beats for each direct question, sensory/consequence beats for searches and observations, and establishing/consequence beats for movement. If the committed result did not support a requested consequence, say so honestly instead of inventing it.",
     "The primary prose is the game: portray present NPCs, state what the character perceives, honor the committed consequence, and leave a changed or conclusively answered situation. Exact mechanics may appear secondarily.",
     "suggestedActions contains 0 to 5 optional objects with exactly id, label, and a first-person prompt. Freeform play always remains available.",
   ].join(" ");
@@ -378,6 +388,7 @@ function buildCommittedNarratorContext(
   const publicState = publicResult.state;
   return {
     playerIntent: playerText,
+    intentClauses: derivePlayerIntentClauses(playerText),
     scene: projection,
     committedResult: {
       tool: publicResult.tool,
@@ -778,6 +789,17 @@ export class LanternDungeonMaster {
     playerText: string,
     planner: ToolLoopResult,
   ): Promise<EngineCommandResult> {
+    if (planner.unresolvedIntentClauses.length > 0) {
+      const fallback = sanitizeNarrationForProfile(
+        unresolvedIntentRulesNarration(planner.unresolvedIntentClauses),
+        committed.state.experienceProfile,
+      );
+      return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
+        ...committed,
+        narration: fallback,
+        narrationSource: "rules",
+      };
+    }
     try {
       const projection = buildCommittedNarratorProjection(committed, context);
       const narrator = await this.runPublicNarrator(
@@ -907,6 +929,7 @@ export class LanternDungeonMaster {
     const startedAt = new Date().toISOString();
     const telemetry: OpenRouterCompletionTelemetry[] = [];
     let requestSequence = 0;
+    const intentClauses = derivePlayerIntentClauses(playerText);
     const messages: ChatMessage[] = [
       { role: "system", content: buildPublicNarratorPrompt() },
       {
@@ -953,13 +976,24 @@ export class LanternDungeonMaster {
         const compatible = draft.success
           ? draft.data
           : narrationDraftFromEnvelope(narrationEnvelopeSchema.parse(parsed), projection);
+        const uncovered = uncoveredNarrationClauses(intentClauses, compatible.beats);
+        if (uncovered.length > 0) {
+          throw new Error(
+            "Narration omitted ordered intent clauses: "
+              + uncovered.map((clause) => `${clause.id} (${clause.kind}): ${clause.text}`).join(" | "),
+          );
+        }
         return { draft: compatible, runId, startedAt, telemetry };
       } catch (error) {
         if (attempt === 1) throw error;
         messages.push({ role: "assistant", content: content || null });
         messages.push({
           role: "user",
-          content: "The narration draft failed its strict public schema or used an invalid reference. Return a corrected object only; do not add facts, tools, commentary, or markdown.",
+          content: [
+            "The narration draft failed its strict public schema, used an invalid reference, or omitted part of the player's ordered intent.",
+            error instanceof Error ? error.message : "Unknown narration validation error.",
+            "Return a corrected object only. Give every listed intent clause its own compatible beat in order; do not add facts, tools, commentary, or markdown.",
+          ].join(" "),
         });
       }
     }
@@ -984,9 +1018,11 @@ export class LanternDungeonMaster {
     const finishPlanner = (
       narration: NarrationEnvelope | null,
       effects: StagedEngineTurnEffect[] = stagedEffects,
+      unresolvedIntentClauses: PlayerIntentClause[] = [],
     ): ToolLoopResult => ({
       narration,
       stagedEffects: effects,
+      unresolvedIntentClauses,
       plannerRunId: dmRunId,
       plannerStartedAt,
       telemetry: plannerTelemetry,
@@ -1016,6 +1052,7 @@ export class LanternDungeonMaster {
     const searchIntent = detectSearchTurnIntent(playerText);
     let searchRepairAttempted = false;
     let consequenceRepairAttempted = false;
+    const intentClauses = mode === "player_turn" ? derivePlayerIntentClauses(playerText) : [];
 
     let toolLoopTurns = 0;
     while (toolLoopTurns < 8 || repairPending) {
@@ -1062,6 +1099,19 @@ export class LanternDungeonMaster {
       );
       if (!toolCalls.length) {
         const content = typeof assistant.content === "string" ? assistant.content.trim() : "";
+        const uncoveredIntent = uncoveredPlanClauses(intentClauses, stagedEffects);
+        if (uncoveredIntent.length > 0) {
+          stagedEffects.length = 0;
+          currentState = cloneCampaign(initialState);
+          if (intentRepairAttempted) return finishPlanner(null, [], uncoveredIntent);
+          intentRepairAttempted = true;
+          messages.push({ role: "assistant", content: content || null });
+          messages.push({
+            role: "user",
+            content: intentRepairInstruction(playerText, uncoveredIntent),
+          });
+          continue;
+        }
         if (objectIntent) {
           const repair = objectTurnRepair(objectIntent, currentState, stagedEffects);
           if (repair) {
@@ -1203,17 +1253,21 @@ export class LanternDungeonMaster {
       }
       if (
         !repairPending
-        && movementOnlyPlanMissesIntent(playerText, stagedEffects)
+        && mode === "player_turn"
+        && stagedEffects.length > assistantVisibleEffectCount
       ) {
-        stagedEffects.length = 0;
-        currentState = cloneCampaign(initialState);
-        if (intentRepairAttempted) return finishPlanner(null);
-        intentRepairAttempted = true;
-        messages.push({
-          role: "user",
-          content: intentRepairInstruction(playerText),
-        });
-        continue;
+        const uncoveredIntent = uncoveredPlanClauses(intentClauses, stagedEffects);
+        if (uncoveredIntent.length > 0) {
+          stagedEffects.length = 0;
+          currentState = cloneCampaign(initialState);
+          if (intentRepairAttempted) return finishPlanner(null, [], uncoveredIntent);
+          intentRepairAttempted = true;
+          messages.push({
+            role: "user",
+            content: intentRepairInstruction(playerText, uncoveredIntent),
+          });
+          continue;
+        }
       }
       // Loading a reviewed schema family is orchestration, not a gameplay
       // action. It should not consume one of the eight authoritative tool
@@ -1225,6 +1279,10 @@ export class LanternDungeonMaster {
     }
 
     if (stagedEffects.length > 0) {
+      if (mode === "player_turn") {
+        const uncoveredIntent = uncoveredPlanClauses(intentClauses, stagedEffects);
+        if (uncoveredIntent.length > 0) return finishPlanner(null, [], uncoveredIntent);
+      }
       if (mode === "player_turn" && unresolvedNarrativeCheckIndices(stagedEffects).length > 0) {
         return finishPlanner(null, discardUnresolvedChecks(stagedEffects));
       }
@@ -1812,23 +1870,18 @@ function safePlayerNarrationText(content: string, parsed?: unknown): string | nu
   return candidate && !narrationContainsInternalOrchestration(candidate) ? candidate : null;
 }
 
-function intentRepairInstruction(playerText: string): string {
-  return [
-    "The previous tool plan did not preserve the player's primary intent.",
-    `Player intent: ${playerText}`,
-    "The plan only moved along an exit even though the intent includes a non-movement consequence.",
-    "Discard that movement-only plan. Resolve the primary action with a matching reviewed tool; use improvise with effectType fictional for a bounded creative consequence when no mechanical effect is required, or return a valid narration that honestly records the attempt without claiming an unsupported result.",
-    "Do not call move unless movement is the primary requested consequence, and do not expose this repair instruction in narration.",
-  ].join(" ");
-}
-
-function movementOnlyPlanMissesIntent(
+function intentRepairInstruction(
   playerText: string,
-  effects: StagedEngineTurnEffect[],
-): boolean {
-  if (effects.length === 0 || !effects.every((effect) => effect.command.kind === "move")) return false;
-  const nonMovementIntent = /\b(?:distract(?:ion)?|signal|decoy|divert|misdirect|deceive|draw\s+(?:their|the)\s+attention|cause\s+a\s+disturbance)\b/i;
-  return nonMovementIntent.test(playerText);
+  uncovered: readonly PlayerIntentClause[],
+): string {
+  return [
+    "The previous plan did not preserve every consequence-bearing clause in the player's intent.",
+    `Player intent: ${playerText}`,
+    "Uncovered clauses: " + uncovered.map((clause) => `${clause.id} (${clause.kind}): ${clause.text}`).join(" | ") + ".",
+    "The entire provisional plan was discarded. Submit one complete corrected plan containing every required authoritative effect in the same tool-call response.",
+    "Use a matching reviewed tool for each supported consequence; use improvise with effectType fictional for a bounded creative consequence when no mechanic or revelation is required; otherwise finish with an honest unsupported result.",
+    "Movement cannot satisfy a separate search, question, observation, or interaction clause. Do not expose this repair instruction in narration.",
+  ].join(" ");
 }
 
 function narrationRepairInstruction(issues: string[]): string {
@@ -2190,6 +2243,18 @@ function rulesNarration(text: string, suffix?: string): NarrationEnvelope {
     proposedFacts: [],
     suggestedActions: [],
   };
+}
+
+function unresolvedIntentRulesNarration(
+  clauses: readonly PlayerIntentClause[],
+): NarrationEnvelope {
+  const summary = clauses
+    .slice(0, 3)
+    .map((clause) => clause.text.replace(/[.!?]+$/g, ""))
+    .join("; ");
+  return rulesNarration(
+    `That combined action does not resolve as one complete turn, so the situation does not change. Still unresolved: ${summary}.`,
+  );
 }
 
 function committedCheckText(data: unknown, scene?: string): string | null {
