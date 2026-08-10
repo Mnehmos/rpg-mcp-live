@@ -9,6 +9,7 @@ vi.mock("node:crypto", async (importOriginal) => {
 
 import { createInitialCampaign, resolveEngineCommand } from "./engine-domain.js";
 import type { EngineCommand, LanternCampaignState, RequestContext } from "./engine-contracts.js";
+import { ruinedGatehouseWorldContextCommand } from "./world-object-fixture.js";
 
 function contextFor(state: LanternCampaignState): RequestContext {
   return { requestId: randomUUID(), accountId: state.accountId, campaignId: state.id, actorId: state.actorId, capabilities: ["player", "dm"] };
@@ -91,14 +92,16 @@ describe("canonical check execution", () => {
 
   it("requires a tool proficiency and preserves full evidence for withheld checks", () => {
     deterministicRandomInt.mockClear().mockReturnValue(20);
-    const state = createInitialCampaign("check-secret", "actor-secret");
-    const invalid = resolve(state, { kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force it", approach: "Pick the lock", tool: "Thieves' Tools" });
+    let state = createInitialCampaign("check-secret", "actor-secret");
+    state = resolve(state, ruinedGatehouseWorldContextCommand()).state;
+    const invalid = resolve(state, { kind: "challenge_attempt", challengeId: "pick-lock-v1", targetId: "gatehouse-door", goal: "Pick the lock", approach: "Work the pins" });
     expect(invalid).toMatchObject({ accepted: false, code: "tool_proficiency_required" });
     state.character.proficiencies.tools = ["Thieves' Tools"];
-    const result = resolve(state, { kind: "challenge_attempt", challengeId: "barred-door-v1", goal: "Force it", approach: "Pick the lock", tool: "Thieves' Tools", informationPolicy: "withheld" });
+    const result = resolve(state, { kind: "challenge_attempt", challengeId: "pick-lock-v1", targetId: "gatehouse-door", goal: "Pick the lock", approach: "Work the pins", informationPolicy: "withheld" });
     expect(result.accepted).toBe(true);
-    expect(result.message).toContain("withheld");
+    expect(result.message).toContain("now unlocked");
     expect(result.data).not.toHaveProperty("roll");
+    expect(result.data).toMatchObject({ informationPolicy: "withheld", objectTransition: { afterState: "unlocked" } });
     expect(result.event?.check).toMatchObject({ informationPolicy: "withheld", tool: "Thieves' Tools" });
     expect(result.event?.rolls.length).toBeGreaterThan(0);
   });

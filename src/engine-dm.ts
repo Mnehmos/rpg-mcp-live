@@ -507,9 +507,10 @@ function checkOutcomeEnvelope(effect: StagedEngineTurnEffect, sourceEffectIndex:
   };
 }
 
-function checkHasCommittedDiscovery(effect: StagedEngineTurnEffect): boolean {
+function checkHasCommittedConsequence(effect: StagedEngineTurnEffect): boolean {
   return Boolean(effect.resolution.event?.stateChanges.some((change) =>
     change.path.startsWith("/actorKnowledge/")
+    || change.path.startsWith("/worldContext/objects/")
   ));
 }
 
@@ -538,7 +539,7 @@ function unresolvedNarrativeCheckIndices(effects: readonly StagedEngineTurnEffec
   const unresolved: number[] = [];
   effects.forEach((effect, index) => {
     if (!isNarrativeCheckEffect(effect)) return;
-    if (checkHasCommittedDiscovery(effect)) return;
+    if (checkHasCommittedConsequence(effect)) return;
     if (hasConcreteLaterConsequence(effects, index)) return;
     unresolved.push(index);
   });
@@ -2075,7 +2076,7 @@ function detectObjectTurnIntent(state: LanternCampaignState, playerText: string)
   const world = state.worldContext;
   if (!world) return null;
   const transferVerb = /\b(seize|snatch|grab|wrench|steal|take|carry|pick\s+up|pocket|claim|secure)\b/i.test(playerText);
-  const actionVerb = /\b(use|unlock|open|close|lock|equip|drop|throw|move|ignite|extinguish|break|damage|attach|activate)\b/i.test(playerText);
+  const actionVerb = /\b(use|unlock|open|close|lock|force|shoulder|ram|lockpick|pick\s+(?:the\s+)?lock|equip|drop|throw|move|ignite|extinguish|break|damage|attach|activate)\b/i.test(playerText);
   if (!transferVerb && !actionVerb) return null;
 
   for (const object of world.objects) {
@@ -2108,8 +2109,15 @@ function heldContest(effect: StagedEngineTurnEffect): { outcome: string; targetI
 function objectTurnResolved(intent: ObjectTurnIntent, effects: StagedEngineTurnEffect[]): boolean {
   if (intent.kind === "object-action") {
     return effects.some((effect) =>
-      effect.command.kind === "interact"
-      && (!intent.objectId || effect.command.targetId === intent.objectId || effect.command.sourceId === intent.objectId)
+      (
+        effect.command.kind === "interact"
+        && (!intent.objectId || effect.command.targetId === intent.objectId || effect.command.sourceId === intent.objectId)
+      )
+      || (
+        effect.command.kind === "challenge_attempt"
+        && (effect.command.challengeId === "barred-door-v1" || effect.command.challengeId === "pick-lock-v1")
+        && (!intent.objectId || effect.command.targetId === intent.objectId)
+      )
     );
   }
 
@@ -2140,7 +2148,7 @@ function objectTurnRepair(intent: ObjectTurnIntent, state: LanternCampaignState,
   return [
     "The previous response did not resolve the player's use of an authoritative object.",
     "Continue with tools before narration; do not substitute a generic no-check or prose-only consequence.",
-    "Use the actor-owned source object from worldContext.objects. If a mundane target is publicly established but missing, materialize it with content_compile first, then call interact with the typed affordance and returned id.",
+    "Use the exact object id from worldContext.objects. For a locked object, call challenge_attempt with barred-door-v1 and targetId to force it, or pick-lock-v1 and targetId to use Thieves' Tools; a generic roll_check cannot change the object. For an automatic affordance, call interact. If a mundane target is publicly established but missing, materialize it with content_compile first.",
   ].join(" ");
 }
 
@@ -2188,7 +2196,16 @@ function committedCheckText(data: unknown, scene?: string): string | null {
   if (data === null || typeof data !== "object" || typeof (data as { success?: unknown }).success !== "boolean") {
     return null;
   }
-  const check = data as { success: boolean; goal?: unknown; attribution?: EngineSocialCheckAttribution };
+  const check = data as {
+    success: boolean;
+    goal?: unknown;
+    attribution?: EngineSocialCheckAttribution;
+    objectTransition?: {
+      objectName?: unknown;
+      beforeState?: unknown;
+      afterState?: unknown;
+    };
+  };
   const goal = typeof check.goal === "string" ? check.goal.trim().replace(/[.!?]+$/, "") : "";
   const outcome = check.success ? "The attempt succeeds" : "The attempt falls short";
   const location = scene ? " in " + scene : "";
@@ -2196,7 +2213,12 @@ function committedCheckText(data: unknown, scene?: string): string | null {
   const attribution = check.attribution?.mode === "npc-mediated"
     ? mediatedCheckAttributionText(check.attribution) + " "
     : "";
-  return `${attribution}${outcome}${location}${purpose}.`;
+  const transition = check.success
+    && typeof check.objectTransition?.objectName === "string"
+    && typeof check.objectTransition.afterState === "string"
+      ? " " + check.objectTransition.objectName + " is now " + check.objectTransition.afterState + "."
+      : "";
+  return attribution + outcome + location + purpose + "." + transition;
 }
 
 function mediatedCheckAttributionText(attribution: EngineSocialCheckAttribution): string {
