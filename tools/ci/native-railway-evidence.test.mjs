@@ -11,6 +11,8 @@ const SHA = "a".repeat(40);
 const OTHER_SHA = "b".repeat(40);
 const ENVIRONMENT = "RPG MCP Live / staging";
 const DEPLOYMENT_ID = "railway-deployment-1";
+const ENVIRONMENT_ID = "staging-environment";
+const PRODUCTION_ENVIRONMENT_ID = "production-environment";
 
 function deployment(overrides = {}) {
   return {
@@ -29,6 +31,7 @@ function serviceStatus(context, state = "success", overrides = {}) {
     context,
     state,
     creator: { login: RAILWAY_BOT },
+    target_url: `https://railway.com/project/project/service/service?environmentId=${ENVIRONMENT_ID}`,
     updated_at: "2026-08-10T10:00:00Z",
     ...overrides,
   };
@@ -42,6 +45,8 @@ function evidence(overrides = {}) {
         id: "deployment-status-1",
         state: "in_progress",
         creator: { login: RAILWAY_BOT },
+        environment: ENVIRONMENT,
+        environment_url: `https://railway.com/project/project?environmentId=${ENVIRONMENT_ID}`,
         updated_at: "2026-08-10T10:00:00Z",
       },
     ],
@@ -110,6 +115,7 @@ describe("native Railway evidence", () => {
     expect(result.ready).toBe(true);
     expect(result.deploymentState).toBe("in_progress");
     expect(result.missingContexts).toEqual([]);
+    expect(Object.values(result.serviceStatusBindings)).toEqual([true, true]);
   });
 
   it("waits until both service statuses succeed", () => {
@@ -130,6 +136,8 @@ describe("native Railway evidence", () => {
             id: "deployment-status-2",
             state: "success",
             creator: { login: RAILWAY_BOT },
+            environment: ENVIRONMENT,
+            environment_url: `https://railway.com/project/project?environmentId=${ENVIRONMENT_ID}`,
             updated_at: "2026-08-10T10:02:00Z",
           },
         ],
@@ -147,6 +155,8 @@ describe("native Railway evidence", () => {
               id: "deployment-status-3",
               state: "failure",
               creator: { login: RAILWAY_BOT },
+              environment: ENVIRONMENT,
+              environment_url: `https://railway.com/project/project?environmentId=${ENVIRONMENT_ID}`,
               updated_at: "2026-08-10T10:03:00Z",
             },
           ],
@@ -160,6 +170,30 @@ describe("native Railway evidence", () => {
     );
     expect(result.ready).toBe(false);
     expect(result.missingContexts).toEqual(RAILWAY_SERVICE_CONTEXTS);
+  });
+
+  it("does not treat a different Railway environment's green statuses as ready", () => {
+    const result = evaluateNativeRailwayEvidence(
+      evidence({
+        deployment: deployment({
+          environment: "RPG MCP Live / production",
+        }),
+        deploymentStatuses: [
+          {
+            id: "deployment-status-production",
+            state: "in_progress",
+            creator: { login: RAILWAY_BOT },
+            environment: "RPG MCP Live / production",
+            environment_url: `https://railway.com/project/project?environmentId=${PRODUCTION_ENVIRONMENT_ID}`,
+            updated_at: "2026-08-10T10:04:00Z",
+          },
+        ],
+        expectedEnvironment: "RPG MCP Live / production",
+      })
+    );
+    expect(result.ready).toBe(false);
+    expect(result.missingContexts).toEqual(RAILWAY_SERVICE_CONTEXTS);
+    expect(Object.values(result.serviceStatusBindings)).toEqual([false, false]);
   });
 
   it("accepts nested API pages from slurped GitHub responses", () => {

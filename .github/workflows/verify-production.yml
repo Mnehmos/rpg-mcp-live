@@ -112,7 +112,8 @@ jobs:
           for i in $(seq 1 60); do
             resp=$(curl -fsS "$ENGINE_PRODUCTION_URL/health" || true)
             if echo "$resp" | jq -e \
-              '.status == "ok" and .service == "lantern-engine" and .environment == "production"' >/dev/null; then
+              --arg sha "$SHA" \
+              '.status == "ok" and .service == "lantern-engine" and .environment == "production" and .deployment.commitSha == $sha' >/dev/null; then
               printf '%s\n' "$resp" > engine-health.json
               echo "$resp" | jq '{status,service,environment,rules,toolCount}'
               exit 0
@@ -129,9 +130,10 @@ jobs:
           for i in $(seq 1 60); do
             resp=$(curl -fsS "$WEB_PRODUCTION_URL/api/health" || true)
             if echo "$resp" | jq -e \
-              '.status == "ok" and .service == "rpg-mcp-live-web" and .environment == "production" and
+              --arg sha "$SHA" \
+              '.status == "ok" and .service == "rpg-mcp-live-web" and .environment == "production" and .deployment.commitSha == $sha and
                .integrations.lanternEngine == true and .engine.service == "lantern-engine" and
-               .engine.environment == "production"' >/dev/null; then
+               .engine.environment == "production" and .engine.deployment.commitSha == $sha' >/dev/null; then
               printf '%s\n' "$resp" > web-health.json
               echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
               exit 0

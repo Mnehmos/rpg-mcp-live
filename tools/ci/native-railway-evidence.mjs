@@ -37,6 +37,24 @@ function assertSha(sha) {
   if (!SHA_PATTERN.test(sha ?? "")) throw new Error("Expected a full 40-character SHA");
 }
 
+function environmentId(url) {
+  try {
+    return new URL(url).searchParams.get("environmentId");
+  } catch {
+    return null;
+  }
+}
+
+function statusBelongsToDeployment(status, environmentUrl) {
+  const expectedEnvironmentId = environmentId(environmentUrl);
+  const actualEnvironmentId = environmentId(status?.target_url);
+  return Boolean(
+    expectedEnvironmentId &&
+      actualEnvironmentId &&
+      expectedEnvironmentId === actualEnvironmentId
+  );
+}
+
 export function validateNativeDeployment({
   deployment,
   expectedSha,
@@ -61,6 +79,7 @@ export function validateNativeDeployment({
     sha: deployment.sha,
     ref: deployment.ref,
     environment: deployment.environment,
+    environmentUrl: deployment.environment_url,
     creator: deployment.creator.login,
   };
 }
@@ -98,14 +117,24 @@ export function evaluateNativeRailwayEvidence({
       (status) => status?.creator?.login === RAILWAY_BOT
     )
   );
-  const serviceStatuses = latestRailwayServiceStatuses(commitStatuses);
-  const missingContexts = RAILWAY_SERVICE_CONTEXTS.filter(
-    (context) => serviceStatuses[context]?.state !== "success"
-  );
-
   if (!latestDeploymentStatus) {
     throw new Error("Native Railway deployment has no Railway status");
   }
+  if (latestDeploymentStatus.environment !== expectedEnvironment) {
+    throw new Error("Native Railway deployment status environment does not match");
+  }
+  const deploymentEnvironmentUrl =
+    deployment.environment_url ?? latestDeploymentStatus.environment_url;
+  const serviceStatuses = latestRailwayServiceStatuses(commitStatuses);
+  const missingContexts = RAILWAY_SERVICE_CONTEXTS.filter(
+    (context) =>
+      serviceStatuses[context]?.state !== "success" ||
+      !statusBelongsToDeployment(
+        serviceStatuses[context],
+        deploymentEnvironmentUrl
+      )
+  );
+
   if (TERMINAL_FAILURE_STATES.has(latestDeploymentStatus.state)) {
     throw new Error(
       `Native Railway deployment reached terminal state ${latestDeploymentStatus.state}`
@@ -124,6 +153,12 @@ export function evaluateNativeRailwayEvidence({
       RAILWAY_SERVICE_CONTEXTS.map((context) => [
         context,
         serviceStatuses[context]?.state ?? null,
+      ])
+    ),
+    serviceStatusBindings: Object.fromEntries(
+      RAILWAY_SERVICE_CONTEXTS.map((context) => [
+        context,
+        statusBelongsToDeployment(serviceStatuses[context], deploymentEnvironmentUrl),
       ])
     ),
     ready: missingContexts.length === 0,
