@@ -210,6 +210,11 @@ import {
 import type { DmRun, NarrationSequenceIR, ProductionRoomState } from "./engine-production-room.js";
 import type { EffectApplyInput } from "./engine-effects.js";
 import {
+  compileRuntimeContent,
+  emptyRuntimeContentState,
+  normalizeRuntimeContentState,
+} from "./content/runtime-compiler.js";
+import {
   activeConditionNames,
   applyEffect,
   clearEffectsByPolicy,
@@ -1625,6 +1630,7 @@ export function createInitialCampaign(
     time: defaultTimeState(),
     social: defaultSocialState(),
     worldContext: null,
+    runtimeContent: emptyRuntimeContentState(),
     proceduralNotices: [],
     worldFacts: [],
     actorKnowledge: [],
@@ -1688,6 +1694,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     proceduralNotices?: unknown;
     productionRoom?: unknown;
     orchestration?: unknown;
+    runtimeContent?: unknown;
     time?: unknown;
   };
   next.time = normalizeTimeState(next.time);
@@ -1717,6 +1724,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     }).slice(-40)
     : [];
   next.worldFacts = normalizeWorldFacts(next.worldFacts);
+  next.runtimeContent = normalizeRuntimeContentState(next.runtimeContent);
   next.proceduralNotices = normalizeProceduralNotices((next as LanternCampaignState & { proceduralNotices?: unknown }).proceduralNotices);
   next.actorKnowledge = normalizeKnowledgeRecords(next.actorKnowledge);
   next.productionRoom = next.productionRoom ? parseProductionRoomState(next.productionRoom) : null;
@@ -2499,6 +2507,7 @@ export function toSessionView(state: LanternCampaignState): EngineSessionView {
     social: projection.social,
     characterCreated: state.character.created,
     worldContext: projection.worldContext,
+    runtimeContent: state.runtimeContent,
     proceduralNotices: projection.proceduralNotices,
     playerNotes: state.playerNotes,
     quests: projectQuestsForActor(state, state.actorId),
@@ -2618,6 +2627,7 @@ export function readToolData(
         time: state.time,
         social: projection.social,
         worldContext: projection.worldContext,
+        runtimeContent: state.runtimeContent,
         proceduralNotices: projection.proceduralNotices,
         knowledge: projection.knowledge,
         playerNotes: state.playerNotes,
@@ -3210,6 +3220,7 @@ export function resolveEngineCommand(
     state.character.lifecycleState === "dead"
     && command.kind !== "observe"
     && command.kind !== "world_context"
+    && command.kind !== "content_compile"
     && command.kind !== "procedural_notice"
     && command.kind !== "player_note_add"
     && command.kind !== "experience_profile_update"
@@ -3279,6 +3290,8 @@ export function resolveEngineCommand(
       return resolveCheck(state, context, clientCommandId, command, tool, "wis", "perception", playerText ?? "Listen carefully.");
     case "world_context":
       return resolveWorldContext(state, context, clientCommandId, command, tool);
+    case "content_compile":
+      return resolveContentCompile(state, context, clientCommandId, command, tool);
     case "procedural_notice":
       return resolveProceduralNotice(state, context, clientCommandId, command, tool);
     case "player_note_add":
@@ -3713,6 +3726,107 @@ function resolveWorldContext(
     [],
     [],
     stateChanges
+  );
+}
+
+function resolveContentCompile(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "content_compile" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const compiled = compileRuntimeContent(
+    command.proposal,
+    {
+      campaignId: state.id,
+      authorId: context.actorId,
+      source: "dm",
+      sourceRefs: [clientCommandId],
+      createdAt: new Date().toISOString(),
+    },
+    command.createInstance,
+    command.instanceKey ?? "default",
+  );
+  if (!compiled.ok) return rejection(state, tool, compiled.code, compiled.message, { proposalKind: command.proposal.kind });
+
+  const existingDefinitions = state.runtimeContent.definitions;
+  const existingDefinition = existingDefinitions.find((definition) => definition.id === compiled.definition.id);
+  if (existingDefinition) {
+    return rejection(
+      state,
+      tool,
+      "content_already_exists",
+      "That stable runtime content definition already exists in this campaign; no duplicate was created.",
+      { definitionId: existingDefinition.id, kind: existingDefinition.kind },
+    );
+  }
+  const existingInstance = compiled.instance
+    ? state.runtimeContent.instances.find((instance) => instance.id === compiled.instance!.id)
+    : null;
+  if (existingInstance) {
+    return rejection(
+      state,
+      tool,
+      "content_instance_already_exists",
+      "That stable runtime content instance already exists in this campaign; no duplicate was created.",
+      { instanceId: existingInstance.id, definitionId: existingInstance.definitionId },
+    );
+  }
+  const conflictingRelationship = compiled.relationships.find((relationship) =>
+    state.runtimeContent.relationships.some((existing) => existing.id === relationship.id)
+  );
+  if (conflictingRelationship) {
+    return rejection(
+      state,
+      tool,
+      "content_relationship_already_exists",
+      "That stable runtime content relationship already exists in this campaign; no duplicate was created.",
+      { relationshipId: conflictingRelationship.id },
+    );
+  }
+
+  const next = cloneCampaign(state);
+  next.runtimeContent = {
+    definitions: [...state.runtimeContent.definitions, compiled.definition],
+    instances: compiled.instance
+      ? [...state.runtimeContent.instances, compiled.instance]
+      : [...state.runtimeContent.instances],
+    relationships: [...state.runtimeContent.relationships, ...compiled.relationships],
+  };
+  const stateChanges = [
+    {
+      path: `/runtimeContent/definitions/${escapeJsonPointerSegment(compiled.definition.id)}`,
+      before: null,
+      after: compiled.definition,
+    },
+    ...(compiled.instance ? [{
+      path: `/runtimeContent/instances/${escapeJsonPointerSegment(compiled.instance.id)}`,
+      before: null,
+      after: compiled.instance,
+    }] : []),
+    ...compiled.relationships.map((relationship) => ({
+      path: `/runtimeContent/relationships/${escapeJsonPointerSegment(relationship.id)}`,
+      before: null,
+      after: relationship,
+    })),
+  ];
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `Compiled inert ${compiled.definition.kind} content: ${compiled.definition.name}.`,
+    {
+      definition: compiled.definition,
+      instance: compiled.instance,
+      relationships: compiled.relationships,
+    },
+    "content_compiled",
+    [],
+    [],
+    stateChanges,
   );
 }
 

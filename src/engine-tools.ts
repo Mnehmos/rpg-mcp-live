@@ -10,6 +10,7 @@ import {
   engineCapabilityFamilyIdSchema,
   engineCharacterDetailsSchema,
   engineCommandSchema,
+  engineContentCompileCommandSchema,
   engineExperienceProfileInputSchema,
   engineEncounterDecisionSchema,
   engineEncounterLifecycleProfileSchema,
@@ -75,6 +76,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
   content_get: z.object({
     contentKey: z.string().trim().min(1).max(300),
   }).strict(),
+  content_compile: engineContentCompileCommandSchema.omit({ kind: true }),
   rules_reference: z.discriminatedUnion("action", [
     z.object({
       action: z.literal("search"),
@@ -546,6 +548,14 @@ const worldObjectPatchOperationsJsonSchema = (() => {
   return jsonSchema;
 })();
 
+const runtimeContentCompileJsonSchema = (() => {
+  const { $schema: _schema, ...jsonSchema } = z.toJSONSchema(
+    engineContentCompileCommandSchema.omit({ kind: true }),
+    { unrepresentable: "any" },
+  ) as Record<string, unknown>;
+  return jsonSchema;
+})();
+
 export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("campaign_context", "Read the campaign profile, emergent world context if one exists, character, notes, combat, quest, and recent log. Read-only.", {}),
   tool(
@@ -585,6 +595,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       required: ["contentKey"],
       additionalProperties: false,
     }
+  ),
+  tool(
+    "content_compile",
+    "Compile a strict campaign-scoped item, location, or spell proposal into inert runtime content. Definitions and instances are persisted separately; unknown fields and unreviewed mechanics are rejected.",
+    runtimeContentCompileJsonSchema,
   ),
   tool(
     "rules_reference",
@@ -1358,6 +1373,13 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       return engineCommandSchema.parse({
         kind: "world_context",
         ...args,
+      });
+    case "content_compile":
+      return engineCommandSchema.parse({
+        kind: "content_compile",
+        proposal: args.proposal,
+        createInstance: args.createInstance,
+        instanceKey: args.instanceKey,
       });
     case "procedural_notice":
       return engineCommandSchema.parse({
