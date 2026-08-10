@@ -127,7 +127,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
     "Encounter lifecycle, tactical turns, creature actions, loot, and rest.",
     ["sandbox"],
     "resolve",
-    ["combat_state", "combat_start", "encounter_decision", "spawn_creature", "combat_action", "combat_move", "end_turn", "advance_turn", "npc_advance", "loot", "rest"],
+    ["combat_state", "combat_start", "encounter_decision", "custody_action", "spawn_creature", "combat_action", "combat_move", "end_turn", "advance_turn", "npc_advance", "loot", "rest"],
   ),
   family(
     "magic",

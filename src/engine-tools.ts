@@ -301,6 +301,11 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     decision: engineEncounterDecisionSchema,
     targetId: z.string().trim().min(1).max(120).optional(),
   }).strict(),
+  custody_action: z.object({
+    action: z.enum(["surrender", "release", "escape"]),
+    guardId: z.string().trim().min(1).max(120).optional(),
+    affectedActorIds: z.array(z.string().trim().min(1).max(120)).min(1).max(8).optional(),
+  }).strict(),
   spawn_creature: z.object({
     creatureKey: z.string().trim().startsWith("open5e:creature:").max(300),
     count: z.number().int().min(1).max(20),
@@ -1065,6 +1070,20 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     }
   ),
   tool(
+    "custody_action",
+    "Record a typed surrender, guard release, or escape. Never narrate restraint without this tool; include every established actor being restrained and the established guard id.",
+    {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["surrender", "release", "escape"] },
+        guardId: { type: "string", description: "Established guard or patrol NPC receiving surrender or authorizing release." },
+        affectedActorIds: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 8, description: "Established actor ids affected by surrender; include the player and any named companion." },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
     "spawn_creature",
     "Add one or more instances of an installed Open5e creature to the active encounter. The engine copies no caller-supplied stats.",
     {
@@ -1500,6 +1519,13 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         kind: "encounter_decision",
         decision: args.decision,
         targetId: args.targetId,
+      });
+    case "custody_action":
+      return engineCommandSchema.parse({
+        kind: "custody_action",
+        action: args.action,
+        guardId: args.guardId,
+        affectedActorIds: args.affectedActorIds,
       });
     case "spawn_creature":
       return engineCommandSchema.parse({

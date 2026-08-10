@@ -32,6 +32,7 @@ import type {
   EngineCharacterFeatureView,
   EngineCharacterSourceDetailsView,
   EngineCharacterView,
+  EngineCustodyStatus,
   EngineActionOffer,
   EngineActionOfferCost,
   EngineActionOfferTiming,
@@ -1914,6 +1915,7 @@ function normalizeControlledActors(value: unknown, state: LanternCampaignState):
       guardedUntilRound: typeof raw.guardedUntilRound === "number" ? Math.max(0, Math.trunc(raw.guardedUntilRound)) : null,
       attack: { ...profile.attack },
       effects: Array.isArray(raw.effects) ? raw.effects.map((effect) => ({ ...effect })) : [],
+      custody: normalizeCustodyStatus(raw.custody, raw.id),
       inventory: Array.isArray(raw.inventory) ? raw.inventory.map((item) => normalizeInventoryItem(item)) : [],
       createdAtMinutes,
       expiresAtMinutes,
@@ -2396,6 +2398,10 @@ export function deriveActionOffers(state: LanternCampaignState): EngineActionOff
     }
   }
 
+  if (state.character.custody) {
+    offers.push(actionOffer(state, "custody_action:escape", "Attempt to escape your guard custody.", "free", {}, [state.character.custody.sourceGuardId]));
+  }
+
   if (state.combat.status !== "active") return offers;
 
   const enemyTargets = state.combat.enemies.filter((enemy) => enemy.alive && enemy.hp > 0).map((enemy) => enemy.id);
@@ -2559,6 +2565,7 @@ function controlledActorView(state: LanternCampaignState, actor: EngineControlle
     guardedUntilRound: actor.guardedUntilRound,
     attack: actor.attack,
     effects: actor.effects.filter((effect) => effect.status === "active"),
+    custody: actor.custody ?? null,
     createdAtMinutes: actor.createdAtMinutes,
     expiresAtMinutes: actor.expiresAtMinutes,
     terminalAtMinutes: actor.terminalAtMinutes,
@@ -3235,6 +3242,25 @@ export function resolveEngineCommand(
   ) {
     return rejection(state, tool, "reaction_pending", "Resolve the offered incoming-hit reaction before taking another action.");
   }
+  if (
+    state.character.custody
+    && [
+      "move",
+      "travel",
+      "combat_start",
+      "combat_action",
+      "combat_move",
+      "cast_spell",
+      "spawn_creature",
+      "encounter_decision",
+      "end_turn",
+      "advance_turn",
+      "npc_advance",
+      "controlled_actor_command",
+    ].includes(command.kind)
+  ) {
+    return rejection(state, tool, "custody_restricted", "You are under guard and cannot move or start or resolve combat until released or escaped.");
+  }
   switch (command.kind) {
     case "observe":
       return readOnlyResolution(state, tool, "The DM's current world context is available to you.", readToolData(state, "observe"));
@@ -3334,6 +3360,8 @@ export function resolveEngineCommand(
       return resolveCombatStart(state, context, clientCommandId, command, tool);
     case "encounter_decision":
       return resolveEncounterDecision(state, context, clientCommandId, command, tool);
+    case "custody_action":
+      return resolveCustodyAction(state, context, clientCommandId, command, tool);
     case "spawn_creature":
       return resolveSpawnCreature(state, context, clientCommandId, command, tool);
     case "learn_spell":
@@ -4048,6 +4076,7 @@ function mergeNpcPatch(existing: EngineNpc | undefined, patch: EngineNpcPatch): 
     socialDc: patch.socialDc ?? existing?.socialDc ?? 12,
     relationshipScore: existing?.relationshipScore ?? 0,
     memories: patch.memories ?? existing?.memories ?? [],
+    custody: existing?.custody ?? null,
     ...(patch.agency
       ? { agency: mergeNpcAgency(existing?.agency, patch.agency, patch.id) }
       : existing?.agency ? { agency: existing.agency } : {}),
@@ -7180,6 +7209,174 @@ function resolveCombatStart(
   );
 }
 
+type CustodyActorRef = { kind: "player" | "npc" | "controlled"; id: string };
+
+function custodyGuard(state: LanternCampaignState, guardId: string | undefined): { id: string; name: string } | null {
+  if (!guardId) return null;
+  const npc = state.worldContext?.npcs.find((candidate) => candidate.id === guardId);
+  if (npc) {
+    const name = `${npc.id} ${npc.name}`.toLocaleLowerCase("en-US");
+    const isGuard = npc.agency?.actorType === "guard" || /guard|patrol|watch|warden|jailer|constable|soldier/.test(name);
+    return isGuard ? { id: npc.id, name: npc.name } : null;
+  }
+  const enemy = state.combat.enemies.find((candidate) => candidate.id === guardId && candidate.alive);
+  if (enemy && state.combat.lifecycle?.profile === "guards-surrender-v1") {
+    return { id: enemy.id, name: materializeCombatant(enemy).name };
+  }
+  return null;
+}
+
+function establishedCustodyActor(state: LanternCampaignState, actorId: string): CustodyActorRef | null {
+  if (actorId === state.actorId || actorId === state.character.id) return { kind: "player", id: state.actorId };
+  if (state.worldContext?.npcs.some((npc) => npc.id === actorId)) return { kind: "npc", id: actorId };
+  if (state.controlledActors.some((actor) => actor.id === actorId)) return { kind: "controlled", id: actorId };
+  return null;
+}
+
+function resolveCustodyAction(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "custody_action" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (command.action === "surrender") {
+    if (state.character.custody) return rejection(state, tool, "custody_already_active", "You are already under guard custody.");
+    const guard = custodyGuard(state, command.guardId);
+    if (!guard) return rejection(state, tool, "custody_guard_not_found", "Surrender requires an established guard or patrol authority.");
+    if (state.combat.status === "active" && state.combat.activeActorId !== state.actorId) {
+      return rejection(state, tool, "off_turn", "You may surrender only on your turn.");
+    }
+    const requestedIds = command.affectedActorIds ?? [state.actorId];
+    if (new Set(requestedIds).size !== requestedIds.length) return rejection(state, tool, "custody_duplicate_actor", "Each restrained actor must be listed once.");
+    const affected = requestedIds.map((actorId) => establishedCustodyActor(state, actorId));
+    if (affected.some((actor) => !actor)) return rejection(state, tool, "custody_actor_not_found", "Every restrained actor must already be established in the current campaign.");
+    const actorRefs = affected as CustodyActorRef[];
+    if (!actorRefs.some((actor) => actor.kind === "player")) return rejection(state, tool, "custody_player_required", "Surrender must include the player actor.");
+    if (actorRefs.some((actor) => actor.id === guard.id)) return rejection(state, tool, "custody_guard_targeted", "The guard receiving surrender cannot also be restrained.");
+
+    const next = cloneCampaign(state);
+    const groupId = randomUUID();
+    const locationRef = state.worldContext?.id ?? state.combat.encounterId ?? `campaign:${state.id}`;
+    const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+    for (const actor of actorRefs) {
+      const custody: EngineCustodyStatus = {
+        actorId: actor.id,
+        groupId,
+        status: actor.kind === "player" ? "restrained" : "under_guard",
+        sourceGuardId: guard.id,
+        reason: "surrender",
+        locationRef,
+        startedVersion: state.version + 1,
+        releasePolicy: "guard-release-or-escape",
+      };
+      if (actor.kind === "player") {
+        const before = next.character.custody ?? null;
+        next.character.custody = custody;
+        changes.push({ path: "/character/custody", before, after: custody });
+      } else if (actor.kind === "npc") {
+        const target = next.worldContext?.npcs.find((npc) => npc.id === actor.id);
+        if (target) {
+          const before = target.custody ?? null;
+          target.custody = custody;
+          changes.push({ path: `/worldContext/npcs/${actor.id}/custody`, before, after: custody });
+        }
+      } else {
+        const target = next.controlledActors.find((candidate) => candidate.id === actor.id);
+        if (target) {
+          const before = target.custody ?? null;
+          target.custody = custody;
+          changes.push({ path: `/controlledActors/${actor.id}/custody`, before, after: custody });
+        }
+      }
+    }
+    if (next.combat.status === "active") {
+      const beforeCombat = state.combat;
+      next.combat.status = "ended";
+      next.combat.activeActorId = null;
+      next.combat.pendingReaction = null;
+      next.combat.lastAction = "custody_surrender";
+      if (next.combat.lifecycle) {
+        next.combat.lifecycle.phase = "terminal";
+        next.combat.lifecycle.outcome = "player_surrendered";
+        next.combat.lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:player_surrendered`;
+        next.combat.lifecycle.objective.status = "succeeded";
+      }
+      changes.push({ path: "/combat", before: beforeCombat, after: next.combat });
+    }
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `You surrender to ${guard.name}. The established actors are restrained under guard custody.`,
+      { guard, affectedActors: actorRefs.map((actor) => actor.id), custody: next.character.custody ?? null, combat: combatData(next.combat) },
+      "custody_surrendered",
+      [],
+      [],
+      changes,
+    );
+  }
+
+  if (command.affectedActorIds?.length) return rejection(state, tool, "custody_actor_ids_not_allowed", "Affected actor ids are only supplied when surrendering.");
+  const current = state.character.custody;
+  if (!current) return rejection(state, tool, "custody_not_active", "You are not under guard custody.");
+  if (command.action === "release" && !command.guardId) return rejection(state, tool, "custody_guard_required", "A release must name the established source guard.");
+  const guard = command.action === "release"
+    ? custodyGuard(state, command.guardId)
+    : { id: current.sourceGuardId, name: current.sourceGuardId };
+  if (command.action === "release" && (!guard || guard.id !== current.sourceGuardId)) {
+    return rejection(state, tool, "custody_release_not_authorized", "Only the established source guard can release this custody.");
+  }
+  const guardName = guard?.name ?? current.sourceGuardId;
+  if (command.action === "escape" && state.combat.status === "active") return rejection(state, tool, "combat_active", "Escape must resolve outside an active encounter.");
+
+  const next = cloneCampaign(state);
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const clear = (actor: CustodyActorRef): void => {
+    if (actor.kind === "player") {
+      const before = next.character.custody ?? null;
+      next.character.custody = null;
+      changes.push({ path: "/character/custody", before, after: null });
+    } else if (actor.kind === "npc") {
+      const target = next.worldContext?.npcs.find((npc) => npc.id === actor.id);
+      if (target?.custody?.groupId === current.groupId) {
+        const before = target.custody;
+        target.custody = null;
+        changes.push({ path: `/worldContext/npcs/${actor.id}/custody`, before, after: null });
+      }
+    } else {
+      const target = next.controlledActors.find((candidate) => candidate.id === actor.id);
+      if (target?.custody?.groupId === current.groupId) {
+        const before = target.custody;
+        target.custody = null;
+        changes.push({ path: `/controlledActors/${actor.id}/custody`, before, after: null });
+      }
+    }
+  };
+  if (command.action === "release") {
+    clear({ kind: "player", id: state.actorId });
+    for (const npc of next.worldContext?.npcs ?? []) if (npc.custody?.groupId === current.groupId) clear({ kind: "npc", id: npc.id });
+    for (const actor of next.controlledActors) if (actor.custody?.groupId === current.groupId) clear({ kind: "controlled", id: actor.id });
+  } else {
+    clear({ kind: "player", id: state.actorId });
+  }
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    command.action === "release" ? `${guardName} releases the custody group.` : "You escape the guard custody.",
+    { action: command.action, guard, releasedGroupId: current.groupId, custody: next.character.custody ?? null },
+    command.action === "release" ? "custody_released" : "custody_escaped",
+    [],
+    [],
+    changes,
+  );
+}
+
 function resolveEncounterDecision(
   state: LanternCampaignState,
   context: RequestContext,
@@ -8610,6 +8807,7 @@ function resolveControlledActorCreate(
     guardedUntilRound: null,
     attack: { ...profile.attack },
     effects: [],
+    custody: null,
     inventory: [],
     createdAtMinutes,
     expiresAtMinutes: profile.expiresAfterMinutes === null ? null : createdAtMinutes + profile.expiresAfterMinutes,
@@ -11650,6 +11848,7 @@ function createCanonicalCharacter(
     xp: 0,
     conditions: [],
     conditionEffects: [],
+    custody: null,
     deathSaveSuccesses: 0,
     deathSaveFailures: 0,
   };
@@ -11823,6 +12022,7 @@ function createCharacter(
     xp: 0,
     conditions: [],
     conditionEffects: [],
+    custody: null,
     deathSaveSuccesses: 0,
     deathSaveFailures: 0,
   };
@@ -11856,6 +12056,7 @@ function normalizeCharacter(character: EngineCharacter): EngineCharacter {
     inventory: Array.isArray(raw.inventory) ? raw.inventory.map(normalizeInventoryItem) : [],
     conditions: Array.isArray(raw.conditions) ? raw.conditions : [],
     conditionEffects: normalizeAppliedConditions(raw.conditionEffects),
+    custody: normalizeCustodyStatus(raw.custody, raw.id),
     featureUses: normalizeFeatureUses(raw.featureUses, raw.className),
     senses: normalizeSenseCapabilities((raw as EngineCharacter & { senses?: unknown }).senses),
     deathSaveSuccesses: raw.deathSaveSuccesses ?? 0,
@@ -12091,6 +12292,30 @@ function normalizeAppliedConditions(value: unknown): EngineCharacter["conditionE
       repeatSave: candidate.repeatSave ?? null,
     }];
   });
+}
+
+function normalizeCustodyStatus(value: unknown, ownerActorId: string): EngineCustodyStatus | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Partial<EngineCustodyStatus>;
+  if (
+    typeof raw.groupId !== "string" || !raw.groupId.trim()
+    || (raw.status !== "restrained" && raw.status !== "under_guard")
+    || typeof raw.sourceGuardId !== "string" || !raw.sourceGuardId.trim()
+    || (raw.reason !== "surrender" && raw.reason !== "capture")
+    || typeof raw.locationRef !== "string" || !raw.locationRef.trim()
+    || typeof raw.startedVersion !== "number" || !Number.isInteger(raw.startedVersion) || raw.startedVersion < 0
+    || raw.releasePolicy !== "guard-release-or-escape"
+  ) return null;
+  return {
+    actorId: typeof raw.actorId === "string" && raw.actorId.trim() ? raw.actorId : ownerActorId,
+    groupId: raw.groupId,
+    status: raw.status,
+    sourceGuardId: raw.sourceGuardId,
+    reason: raw.reason,
+    locationRef: raw.locationRef,
+    startedVersion: raw.startedVersion,
+    releasePolicy: "guard-release-or-escape",
+  };
 }
 
 function normalizeEffects(value: unknown, state: LanternCampaignState): EngineEffectInstance[] {
@@ -12419,6 +12644,7 @@ function normalizeNpc(npc: EngineNpc): EngineNpc {
     socialDc: npc.socialDc ?? 12,
     relationshipScore: npc.relationshipScore ?? 0,
     memories: npc.memories ?? [],
+    custody: normalizeCustodyStatus(npc.custody, npc.id),
     ...(agency ? { agency } : {}),
   };
 }
@@ -13418,7 +13644,7 @@ function normalizeEncounterLifecycle(value: unknown): EngineEncounterLifecycle |
   const phase = ["pre-combat", "active", "resolving", "terminal"].includes(candidate.phase ?? "")
     ? candidate.phase as EngineEncounterLifecycle["phase"]
     : "active";
-  const outcome = ["killed", "surrendered", "captured", "escaped"].includes(candidate.outcome ?? "")
+  const outcome = ["killed", "surrendered", "captured", "escaped", "player_surrendered"].includes(candidate.outcome ?? "")
     ? candidate.outcome as EngineEncounterOutcome
     : null;
   const evidence = rawSurprise.evidence && typeof rawSurprise.evidence === "object"
@@ -13968,6 +14194,7 @@ function characterData(character: EngineCharacter): EngineCharacterView {
     xp: character.xp,
     conditions: character.conditions,
     conditionEffects: character.conditionEffects,
+    custody: character.custody ?? null,
     deathSaveSuccesses: character.deathSaveSuccesses,
     deathSaveFailures: character.deathSaveFailures,
     derived: {

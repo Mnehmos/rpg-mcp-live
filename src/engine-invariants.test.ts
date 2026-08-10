@@ -60,6 +60,7 @@ const ALL_COMMAND_KINDS = [
   "roll_check",
   "combat_start",
   "encounter_decision",
+  "custody_action",
   "spawn_creature",
   "learn_spell",
   "prepare_spell",
@@ -156,6 +157,21 @@ function createdState(className: "fighter" | "wizard" = "fighter"): LanternCampa
   const result = resolveEngineCommand(state, context, randomUUID(), command, "character_create");
   if (!result.accepted) throw new Error(`Fixture character creation failed: ${result.code}`);
   return result.state;
+}
+
+function custodyState(): LanternCampaignState {
+  const state = createdState();
+  state.character.custody = {
+    actorId: state.actorId,
+    groupId: "invariant-custody-group",
+    status: "restrained",
+    sourceGuardId: "invariant-guard",
+    reason: "surrender",
+    locationRef: "invariant-vault",
+    startedVersion: state.version,
+    releasePolicy: "guard-release-or-escape",
+  };
+  return normalizeCampaignState(state);
 }
 
 function applyAccepted(
@@ -479,6 +495,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "use_item", tool: "use_item", expectedCode: "item_not_found", state: createdState, rawCommand: () => ({ kind: "use_item", itemId: "missing-item" }) },
   { kind: "combat_start", tool: "combat_start", expectedCode: "encounter_too_large", state: createdState, rawCommand: () => ({ kind: "combat_start", encounterId: "too-large", encounterName: "Too Large", creatures: [{ creatureKey: GOBLIN, count: 20 }, { creatureKey: GOBLIN, count: 1 }] }) },
   { kind: "encounter_decision", tool: "encounter_decision", expectedCode: "encounter_terminal", state: createdState, rawCommand: () => ({ kind: "encounter_decision", decision: "retreat" }) },
+  { kind: "custody_action", tool: "custody_action", expectedCode: "custody_not_active", state: createdState, rawCommand: () => ({ kind: "custody_action", action: "escape" }) },
   { kind: "spawn_creature", tool: "spawn_creature", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "spawn_creature", creatureKey: GOBLIN, count: 1 }) },
   { kind: "learn_spell", tool: "learn_spell", expectedCode: "spellcasting_unavailable", state: initialState, rawCommand: () => ({ kind: "learn_spell", spellKey: FIRE_BOLT }) },
   { kind: "prepare_spell", tool: "prepare_spell", expectedCode: "spellcasting_unavailable", state: initialState, rawCommand: () => ({ kind: "prepare_spell", spellKey: BURNING_HANDS, prepared: true }) },
@@ -526,6 +543,7 @@ const controlFixtures: readonly ControlFixture[] = [
   { kind: "declare", tool: "declare", state: initialState, rawCommand: () => ({ kind: "declare", goal: "Take a fictional action." }) },
   { kind: "project", tool: "project", state: initialState, rawCommand: () => ({ kind: "project", action: "start", projectId: "research-v1" }) },
   { kind: "encounter_decision", tool: "encounter_decision", state: lifecycleOfferState, rawCommand: () => ({ kind: "encounter_decision", decision: "reject_surrender", targetId: "fixture" }) },
+  { kind: "custody_action", tool: "custody_action", state: custodyState, rawCommand: () => ({ kind: "custody_action", action: "escape" }) },
 ];
 
 const replayFixtures: readonly ReplayFixture[] = [
@@ -599,6 +617,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "roll_check", tool: "roll_check", build: () => ({ state: initialState(), command: parseCommand({ kind: "roll_check", ability: "wis", goal: "Replay a check." }) }) },
   { kind: "combat_start", tool: "combat_start", build: () => ({ state: createdState(), command: parseCommand({ kind: "combat_start", encounterId: "replay-encounter", encounterName: "Replay Encounter", creatures: [{ creatureKey: GOBLIN, count: 1 }] }) }) },
   { kind: "encounter_decision", tool: "encounter_decision", build: () => ({ state: lifecycleOfferState(), command: parseCommand({ kind: "encounter_decision", decision: "reject_surrender", targetId: "fixture" }) }) },
+  { kind: "custody_action", tool: "custody_action", build: () => ({ state: custodyState(), command: parseCommand({ kind: "custody_action", action: "escape" }) }) },
   { kind: "spawn_creature", tool: "spawn_creature", build: () => ({ state: activeCombatState(), command: parseCommand({ kind: "spawn_creature", creatureKey: GOBLIN, count: 1 }) }) },
   { kind: "learn_spell", tool: "learn_spell", build: () => ({ state: createdState("wizard"), command: parseCommand({ kind: "learn_spell", spellKey: FIRE_BOLT }) }) },
   { kind: "prepare_spell", tool: "prepare_spell", build: () => ({ state: (() => { const state = createdState("wizard"); return applyAccepted(state, { kind: "learn_spell", spellKey: BURNING_HANDS }, "learn_spell"); })(), command: parseCommand({ kind: "prepare_spell", spellKey: BURNING_HANDS, prepared: true }) }) },
@@ -635,7 +654,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(61);
+    expect(ALL_COMMAND_KINDS).toHaveLength(62);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

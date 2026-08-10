@@ -22,6 +22,7 @@ import {
   updateComposerCounter,
 } from "./turn-composer.js";
 import { isStaleCommandStatus } from "./command-status.js";
+import { projectCustodyActors } from "./custody-status.mjs";
 
 (function () {
   "use strict";
@@ -930,6 +931,14 @@ import { isStaleCommandStatus } from "./command-status.js";
           + (duration ? '<small>' + escapeHtml(duration) + '</small>' : '') + '</span>';
       }).join("");
     }
+    var custodyNode = $("#character-custody");
+    var custody = character.custody && typeof character.custody === "object" ? character.custody : null;
+    if (custodyNode) {
+      custodyNode.hidden = !custody;
+      custodyNode.innerHTML = custody
+        ? '<span class="condition-chip" title="' + escapeHtml("Source guard: " + custody.sourceGuardId + " / location: " + custody.locationRef) + '"><strong>' + escapeHtml(titleCase(custody.status)) + '</strong><small>Guarded by ' + escapeHtml(custody.sourceGuardId) + '</small></span>'
+        : "";
+    }
     var abilitiesNode = $("#character-abilities");
     if (abilitiesNode) {
       var abilityNames = ["str", "dex", "con", "int", "wis", "cha"];
@@ -1432,6 +1441,17 @@ import { isStaleCommandStatus } from "./command-status.js";
     setPanel("#tutorial-panel", true);
   }
 
+  function renderCustodyActors(session) {
+    var node = $("#scene-actor-status");
+    if (!node) return;
+    var playerId = session && session.character && session.character.id;
+    var rows = projectCustodyActors(session).filter(function (actor) { return actor.id !== playerId; });
+    node.hidden = rows.length === 0;
+    node.innerHTML = rows.map(function (actor) {
+      return '<span class="condition-chip" title="' + escapeHtml("Source guard: " + actor.sourceGuardId + " / location: " + actor.locationRef) + '"><strong>' + escapeHtml(actor.name) + '</strong><small>' + escapeHtml(titleCase(actor.status)) + '</small></span>';
+    }).join("");
+  }
+
   function renderSession(payload) {
     var session = payload && payload.session;
     var previousSessionId = state.session && state.session.id;
@@ -1457,6 +1477,11 @@ import { isStaleCommandStatus } from "./command-status.js";
     setText("#campaign-dossier-setting", campaign.setting, "The world is yours to shape.");
     setText("#phase-status", titleCase(session.phase || "sandbox").toUpperCase(), "SANDBOX");
     renderCharacter(character);
+    renderCustodyActors({
+      character: character,
+      worldContext: session.worldContext || snapshot.worldContext || null,
+      controlledActors: session.controlledActors || snapshot.controlledActors || [],
+    });
     renderNotes(session.playerNotes || snapshot.playerNotes || []);
     renderBeat(session.currentBeat || snapshot.currentBeat || null);
     renderQuests(session.quests || snapshot.quests || []);
