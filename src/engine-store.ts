@@ -124,6 +124,54 @@ export interface ExecuteEngineCommandInput {
   resolve: (state: LanternCampaignState) => EngineResolution;
 }
 
+export interface ReservePlayerTurnInput {
+  context: RequestContext;
+  clientCommandId: string;
+  expectedCampaignVersion: number;
+  playerText: string;
+}
+
+interface CommandRequestRecord {
+  campaignId?: unknown;
+  clientCommandId?: unknown;
+  expectedCampaignVersion?: unknown;
+  command?: unknown;
+  tool?: unknown;
+  playerText?: unknown;
+  reservation?: unknown;
+}
+
+function parseCommandRequest(requestJson: string): CommandRequestRecord | null {
+  try {
+    const parsed = JSON.parse(requestJson) as unknown;
+    return parsed && typeof parsed === "object" ? parsed as CommandRequestRecord : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function playerTurnReservationJson(input: ReservePlayerTurnInput): string {
+  return JSON.stringify({
+    campaignId: input.context.campaignId,
+    clientCommandId: input.clientCommandId,
+    expectedCampaignVersion: input.expectedCampaignVersion,
+    playerText: input.playerText,
+    reservation: "player_turn",
+  });
+}
+
+function matchesPlayerTurnReservation(
+  requestJson: string,
+  input: Pick<ReservePlayerTurnInput, "context" | "clientCommandId" | "expectedCampaignVersion" | "playerText">
+): boolean {
+  const request = parseCommandRequest(requestJson);
+  return request?.reservation === "player_turn"
+    && request.campaignId === input.context.campaignId
+    && request.clientCommandId === input.clientCommandId
+    && request.expectedCampaignVersion === input.expectedCampaignVersion
+    && request.playerText === input.playerText;
+}
+
 function appendPlayerTurn(
   current: LanternCampaignState,
   resolution: EngineResolution,
@@ -370,6 +418,61 @@ export class LanternEngineStore {
     };
   }
 
+  /**
+   * Reserve a player-text command before the asynchronous DM loop starts.
+   *
+   * The reservation makes command status observable while model work is in
+   * flight, so a lost HTTP response cannot look like an unknown command and
+   * trigger a second model resolution with a new client command ID.
+   */
+  public reservePlayerTurn(input: ReservePlayerTurnInput): EngineCommandResult | null {
+    const requestJson = playerTurnReservationJson(input);
+    const transaction = this.db.transaction((): EngineCommandResult | null => {
+      const existing = this.db
+        .prepare(
+          "SELECT account_id, campaign_id, client_command_id, request_json, status, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
+        )
+        .get(input.context.accountId, input.clientCommandId) as CommandRow | undefined;
+
+      if (existing) {
+        if (!matchesPlayerTurnReservation(existing.request_json, input)) {
+          const request = parseCommandRequest(existing.request_json);
+          if (
+            request?.campaignId !== input.context.campaignId
+            || request?.clientCommandId !== input.clientCommandId
+            || request?.playerText !== input.playerText
+          ) {
+            throw new EngineCommandIdReuseError();
+          }
+        }
+        if (existing.status === "resolved" && existing.result_json) {
+          return { ...(JSON.parse(existing.result_json) as EngineCommandResult), replayed: true };
+        }
+        throw new EngineCommandInProgressError();
+      }
+
+      const current = this.getCampaign(input.context);
+      if (current.version !== input.expectedCampaignVersion) {
+        throw new EngineVersionConflictError(current, input.expectedCampaignVersion);
+      }
+
+      this.db
+        .prepare(
+          "INSERT INTO engine_commands (account_id, campaign_id, client_command_id, request_json, status, created_at) VALUES (?, ?, ?, ?, 'processing', ?)"
+        )
+        .run(
+          input.context.accountId,
+          input.context.campaignId,
+          input.clientCommandId,
+          requestJson,
+          new Date().toISOString()
+        );
+      return null;
+    });
+
+    return transaction();
+  }
+
   public executeCommand(input: ExecuteEngineCommandInput): EngineCommandResult {
     const requestJson = JSON.stringify({
       campaignId: input.context.campaignId,
@@ -386,30 +489,61 @@ export class LanternEngineStore {
           "SELECT account_id, campaign_id, client_command_id, request_json, status, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
         )
         .get(input.context.accountId, input.clientCommandId) as CommandRow | undefined;
+      let current: LanternCampaignState;
 
       if (existing) {
-        if (existing.request_json !== requestJson) throw new EngineCommandIdReuseError();
-        if (existing.status !== "resolved" || !existing.result_json) throw new EngineCommandInProgressError();
-        return { ...(JSON.parse(existing.result_json) as EngineCommandResult), replayed: true };
-      }
+        const reservationInput: ReservePlayerTurnInput = {
+          context: input.context,
+          clientCommandId: input.clientCommandId,
+          expectedCampaignVersion: input.expectedCampaignVersion,
+          playerText: input.playerText ?? "",
+        };
+        const isReservation = existing.request_json !== requestJson
+          && matchesPlayerTurnReservation(existing.request_json, reservationInput);
+        if (existing.request_json !== requestJson) {
+          if (!isReservation) {
+            throw new EngineCommandIdReuseError();
+          }
+        }
+        if (existing.status === "resolved" && existing.result_json) {
+          return { ...(JSON.parse(existing.result_json) as EngineCommandResult), replayed: true };
+        }
+        if (existing.status !== "processing") throw new EngineCommandInProgressError();
+        current = this.getCampaign(input.context);
+        if (current.version !== input.expectedCampaignVersion) {
+          if (isReservation) {
+            this.db
+              .prepare("DELETE FROM engine_commands WHERE account_id = ? AND client_command_id = ?")
+              .run(input.context.accountId, input.clientCommandId);
+          }
+          throw new EngineVersionConflictError(current, input.expectedCampaignVersion);
+        }
+        if (isReservation) {
+          this.db
+            .prepare(
+              "UPDATE engine_commands SET request_json = ? WHERE account_id = ? AND client_command_id = ?"
+            )
+            .run(requestJson, input.context.accountId, input.clientCommandId);
+        }
+      } else {
+        current = this.getCampaign(input.context);
+        if (current.version !== input.expectedCampaignVersion) {
+          throw new EngineVersionConflictError(current, input.expectedCampaignVersion);
+        }
 
-      const current = this.getCampaign(input.context);
-      if (current.version !== input.expectedCampaignVersion) {
-        throw new EngineVersionConflictError(current, input.expectedCampaignVersion);
+        const createdAt = new Date().toISOString();
+        this.db
+          .prepare(
+            "INSERT INTO engine_commands (account_id, campaign_id, client_command_id, request_json, status, created_at) VALUES (?, ?, ?, ?, 'processing', ?)"
+          )
+          .run(
+            input.context.accountId,
+            input.context.campaignId,
+            input.clientCommandId,
+            requestJson,
+            createdAt
+          );
       }
-
-      const createdAt = new Date().toISOString();
-      this.db
-        .prepare(
-          "INSERT INTO engine_commands (account_id, campaign_id, client_command_id, request_json, status, created_at) VALUES (?, ?, ?, ?, 'processing', ?)"
-        )
-        .run(
-          input.context.accountId,
-          input.context.campaignId,
-          input.clientCommandId,
-          requestJson,
-          createdAt
-        );
 
       const rawResolution = input.resolve(current);
       // Boundary rejections must not copy the sensitive player text into the

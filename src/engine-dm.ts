@@ -294,20 +294,13 @@ export class LanternDungeonMaster {
     expectedCampaignVersion: number,
     playerText: string
   ): Promise<EngineCommandResult> {
-    const existing = this.store.getStoredCommand(context.accountId, clientCommandId);
-    if (existing) {
-      let storedRequest: { campaignId?: string; playerText?: string } = {};
-      try {
-        storedRequest = JSON.parse(existing.requestJson) as typeof storedRequest;
-      } catch (_error) {
-        storedRequest = {};
-      }
-      if (storedRequest.campaignId !== context.campaignId || storedRequest.playerText !== playerText) {
-        throw new EngineCommandIdReuseError();
-      }
-      if (existing.result) return { ...existing.result, replayed: true };
-    }
-    if (existing) throw new EngineCommandInProgressError();
+    const reservation = this.store.reservePlayerTurn({
+      context,
+      clientCommandId,
+      expectedCampaignVersion,
+      playerText,
+    });
+    if (reservation) return reservation;
 
     let committed: EngineCommandResult | null = null;
     try {
