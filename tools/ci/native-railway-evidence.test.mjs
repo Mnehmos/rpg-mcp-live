@@ -3,7 +3,10 @@ import {
   RAILWAY_BOT,
   RAILWAY_SERVICE_CONTEXTS,
   evaluateNativeRailwayEvidence,
+  isRailwayServiceStatusEvent,
   latestRailwayServiceStatuses,
+  selectNativeDeployment,
+  statusEventMatchesEnvironment,
   validateNativeDeployment,
 } from "./native-railway-evidence.mjs";
 
@@ -20,6 +23,7 @@ function deployment(overrides = {}) {
     sha: SHA,
     ref: SHA,
     environment: ENVIRONMENT,
+    payload: { environmentId: ENVIRONMENT_ID },
     creator: { login: RAILWAY_BOT },
     ...overrides,
   };
@@ -61,6 +65,85 @@ function evidence(overrides = {}) {
 }
 
 describe("native Railway evidence", () => {
+  it("accepts only Railway success events for expected service contexts", () => {
+    expect(
+      isRailwayServiceStatusEvent({
+        state: "success",
+        sender: { login: RAILWAY_BOT },
+        context: RAILWAY_SERVICE_CONTEXTS[0],
+        sha: SHA,
+        target_url: `https://railway.com/service/service?environmentId=${ENVIRONMENT_ID}`,
+      })
+    ).toBe(true);
+    expect(
+      isRailwayServiceStatusEvent({
+        state: "success",
+        sender: { login: "someone-else" },
+        context: RAILWAY_SERVICE_CONTEXTS[0],
+        sha: SHA,
+      })
+    ).toBe(false);
+    expect(
+      statusEventMatchesEnvironment(
+        {
+          state: "success",
+          sender: { login: RAILWAY_BOT },
+          context: RAILWAY_SERVICE_CONTEXTS[0],
+          sha: SHA,
+          target_url: `https://railway.com/service/service?environmentId=${ENVIRONMENT_ID}`,
+        },
+        ENVIRONMENT_ID,
+      )
+    ).toBe(true);
+    expect(
+      statusEventMatchesEnvironment(
+        {
+          state: "success",
+          sender: { login: RAILWAY_BOT },
+          context: RAILWAY_SERVICE_CONTEXTS[0],
+          sha: SHA,
+          target_url: `https://railway.com/service/service?environmentId=${PRODUCTION_ENVIRONMENT_ID}`,
+        },
+        ENVIRONMENT_ID,
+      )
+    ).toBe(false);
+    expect(
+      isRailwayServiceStatusEvent({
+        state: "success",
+        sender: { login: RAILWAY_BOT },
+        context: "unrelated-check",
+        sha: SHA,
+      })
+    ).toBe(false);
+  });
+
+  it("selects only the newest exact-SHA deployment for the requested environment", () => {
+    const selected = selectNativeDeployment(
+      [
+        deployment({ id: "staging-old", created_at: "2026-08-10T09:00:00Z" }),
+        deployment({ id: "staging-new", created_at: "2026-08-10T10:00:00Z" }),
+        deployment({
+          id: "production",
+          environment: "RPG MCP Live / production",
+          created_at: "2026-08-10T11:00:00Z",
+        }),
+        deployment({ id: "other-sha", sha: OTHER_SHA, ref: OTHER_SHA }),
+      ],
+      SHA,
+      ENVIRONMENT,
+      ENVIRONMENT_ID,
+    );
+    expect(selected.id).toBe("staging-new");
+    expect(
+      selectNativeDeployment(
+        [deployment({ environment: "RPG MCP Live / production" })],
+        SHA,
+        ENVIRONMENT,
+        ENVIRONMENT_ID,
+      )
+    ).toBeUndefined();
+  });
+
   it("requires the exact Railway deployment identity", () => {
     expect(
       validateNativeDeployment({
@@ -116,6 +199,12 @@ describe("native Railway evidence", () => {
     expect(result.deploymentState).toBe("in_progress");
     expect(result.missingContexts).toEqual([]);
     expect(Object.values(result.serviceStatusBindings)).toEqual([true, true]);
+  });
+
+  it("is idempotent when the same successful status event is delivered twice", () => {
+    const first = evaluateNativeRailwayEvidence(evidence());
+    const duplicate = evaluateNativeRailwayEvidence(evidence());
+    expect(duplicate).toEqual(first);
   });
 
   it("waits until both service statuses succeed", () => {
