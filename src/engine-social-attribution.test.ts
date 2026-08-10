@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 
 const deterministicRandomInt = vi.hoisted(() => vi.fn((_min: number, _max: number) => 15));
@@ -8,8 +11,21 @@ vi.mock("node:crypto", async (importOriginal) => ({
 }));
 
 import { createInitialCampaign, normalizeCampaignState, projectEventForActor, resolveEngineCommand } from "./engine-domain.js";
+import { LanternDungeonMaster } from "./engine-dm.js";
+import { LanternEngineStore } from "./engine-store.js";
 import { commandForTool, parseToolArguments } from "./engine-tools.js";
 import type { EngineCommand, LanternCampaignState, RequestContext } from "./engine-contracts.js";
+import { openAiSdkFetch } from "./test-openai-stream.js";
+
+const dmOptions = {
+  apiKey: "test-key",
+  baseUrl: "https://openrouter.example/v1",
+  model: "openai/gpt-5.6-luna",
+  reasoningEffort: "medium",
+  maxTokens: 2_500,
+  siteUrl: "https://lantern.example",
+  appName: "Lantern Table Engine",
+};
 
 function contextFor(state: LanternCampaignState): RequestContext {
   return {
@@ -64,6 +80,10 @@ function socialState(): LanternCampaignState {
 function resolve(state: LanternCampaignState, command: EngineCommand) {
   const context = contextFor(state);
   return resolveEngineCommand(state, context, randomUUID(), command, command.kind);
+}
+
+function legacyResponse(message: Record<string, unknown>): Response {
+  return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) } as Response;
 }
 
 describe("social check actor attribution", () => {
@@ -160,5 +180,52 @@ describe("social check actor attribution", () => {
       ability: "cha",
       goal: "Have Titus address the sentries.",
     });
+  });
+
+  it("preserves mediated attribution when narration falls back to committed rules", async () => {
+    const state = socialState();
+    const context = contextFor(state);
+    const directory = mkdtempSync(join(tmpdir(), "lantern-social-attribution-"));
+    const store = new LanternEngineStore(join(directory, "engine.db"));
+    store.createCampaign(context, state);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(legacyResponse({
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "social-tool",
+          type: "function",
+          function: {
+            name: "social_check",
+            arguments: JSON.stringify({
+              npcId: "arena-sentries",
+              actingNpcId: "titus",
+              ability: "cha",
+              goal: "Tell Titus to explain what happened and turn the sentries against Ledrus.",
+            }),
+          },
+        }],
+      }))
+      .mockRejectedValueOnce(new Error("provider timeout after social commit"));
+    vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
+
+    try {
+      const dm = new LanternDungeonMaster(store, dmOptions);
+      const result = await dm.resolveTurn(
+        context,
+        state,
+        randomUUID(),
+        state.version,
+        "I tell Titus to explain what happened and turn the sentries against Ledrus.",
+      );
+      expect(result.narrationSource).toBe("rules");
+      expect(result.narration.text).toContain("Titus speaks for Mnehmos to Arena Sentries");
+      expect(result.narration.text).toContain("Mnehmos's modifiers");
+      expect(result.event?.effects?.[0]?.check?.attribution).toMatchObject({ mode: "npc-mediated", actingActorId: "titus" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

@@ -27,6 +27,7 @@ import { materializeInventoryItem } from "./open5e-rules.js";
 import type {
   EngineCommand,
   EngineCommandResult,
+  EngineSocialCheckAttribution,
   EngineToolName,
   EngineToolResult,
   LanternCampaignState,
@@ -1216,15 +1217,18 @@ function committedCheckText(data: unknown, scene?: string): string | null {
   if (data === null || typeof data !== "object" || typeof (data as { success?: unknown }).success !== "boolean") {
     return null;
   }
-  const check = data as { success: boolean; goal?: unknown };
+  const check = data as { success: boolean; goal?: unknown; attribution?: EngineSocialCheckAttribution };
   const goal = typeof check.goal === "string" ? check.goal.trim().replace(/[.!?]+$/, "") : "";
   const outcome = check.success ? "The attempt succeeds" : "The attempt falls short";
   const location = scene ? " in " + scene : "";
   const purpose = goal ? ": " + goal : "";
+  const attribution = check.attribution?.mode === "npc-mediated"
+    ? `${check.attribution.actingActorName} speaks for ${check.attribution.rollingActorName} to ${check.attribution.targetName}; the check uses ${check.attribution.modifierSourceActorName}'s modifiers. `
+    : "";
   const consequence = check.success
     ? "The outcome now stands in the scene."
     : "The setback now stands, and the situation continues from there.";
-  return `${outcome}${location}${purpose}. ${consequence}`;
+  return `${attribution}${outcome}${location}${purpose}. ${consequence}`;
 }
 
 function committedMoveText(data: unknown): string {
