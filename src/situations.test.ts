@@ -1,9 +1,15 @@
-import { mkdtempSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { EngineCommand, LanternCampaignState, RequestContext } from "./engine-contracts.js";
+import {
+  engineCommandSchema,
+  engineSituationDefinitionProposalSchema,
+  type EngineCommand,
+  type LanternCampaignState,
+  type RequestContext,
+} from "./engine-contracts.js";
 import {
   createInitialCampaign,
   normalizeCampaignState,
@@ -12,6 +18,13 @@ import {
   toSessionView,
 } from "./engine-domain.js";
 import { EngineVersionConflictError, LanternEngineStore } from "./engine-store.js";
+import {
+  ashmereSituationDefinition,
+  prepareAshmereWorld,
+  prepareWatchtowerWorld,
+  situationFixtureId,
+  watchtowerSituationDefinition,
+} from "./situation-test-fixtures.js";
 
 const deterministicRandomInt = vi.hoisted(() => vi.fn((min: number, _max: number) => min));
 
@@ -41,7 +54,7 @@ function apply(state: LanternCampaignState, command: EngineCommand, actorId = st
 
 function accepted(state: LanternCampaignState, command: EngineCommand): LanternCampaignState {
   const result = apply(state, command);
-  if (!result.accepted) throw new Error(`${command.kind} failed: ${result.code}`);
+  if (!result.accepted) throw new Error(`${command.kind} failed: ${result.code} ${result.message}`);
   return result.state;
 }
 
@@ -56,14 +69,37 @@ function characterReady(): LanternCampaignState {
 }
 
 function situationReady(): LanternCampaignState {
-  return accepted(characterReady(), { kind: "situation_create", templateId: "watchtower-relic-v1" });
+  return accepted(prepareWatchtowerWorld(characterReady()), {
+    kind: "situation_create",
+    definition: watchtowerSituationDefinition(),
+  });
 }
 
 function strongInvestigator(state: LanternCampaignState): LanternCampaignState {
-  state.character.abilities.str = 20;
-  state.character.skills.athletics = { ability: "str", proficient: true, expertise: true, bonus: 0 };
+  state.character.abilities.wis = 20;
+  state.character.skills.perception = { ability: "wis", proficient: true, expertise: true, bonus: 0 };
   state.experienceProfile.difficulty = "gentle";
   return state;
+}
+
+function nodeId(key: string): string {
+  return situationFixtureId("watchtower-relic", "node", key);
+}
+
+function clueId(key: string): string {
+  return situationFixtureId("watchtower-relic", "clue", key);
+}
+
+function truthId(key: string): string {
+  return situationFixtureId("watchtower-relic", "truth", key);
+}
+
+function revelationId(key: string): string {
+  return situationFixtureId("watchtower-relic", "revelation", key);
+}
+
+function outcomeId(key: string): string {
+  return situationFixtureId("watchtower-relic", "outcome", key);
 }
 
 function removeWarden(state: LanternCampaignState): LanternCampaignState {
@@ -79,8 +115,8 @@ function removeWarden(state: LanternCampaignState): LanternCampaignState {
 }
 
 function revealCentral(state: LanternCampaignState): LanternCampaignState {
-  const visited = accepted(strongInvestigator(state), { kind: "situation_visit", locationId: "watchtower-yard" });
-  return accepted(visited, { kind: "situation_clue_attempt", clueId: "watchtower-clue-map", approach: "Read the marked route without disturbing it." });
+  const visited = accepted(strongInvestigator(state), { kind: "situation_visit", locationId: nodeId("yard") });
+  return accepted(visited, { kind: "situation_clue_attempt", clueId: clueId("map"), approach: "Read the marked route without disturbing it." });
 }
 
 function withTravelSupplies(state: LanternCampaignState): LanternCampaignState {
@@ -91,130 +127,215 @@ function withTravelSupplies(state: LanternCampaignState): LanternCampaignState {
   return normalizeCampaignState(state);
 }
 
-describe("reviewed situations", () => {
-  it("instantiates a stable graph, committed facts, fallback policy, and actor-safe projection", () => {
-    const state = situationReady();
+describe("authored situation compiler", () => {
+  it("compiles the watchtower as data with stable identities, canonical knowledge, and actor-safe projection", () => {
+    const prepared = prepareWatchtowerWorld(characterReady());
+    const worldBefore = structuredClone(prepared.worldContext);
+    const state = accepted(prepared, { kind: "situation_create", definition: watchtowerSituationDefinition() });
     const situation = state.situation!;
-    expect(situation.templateId).toBe("watchtower-relic-v1");
-    expect(situation.nodes.map((node) => node.id)).toEqual(["watchtower-road", "watchtower-yard", "watchtower-vault"]);
-    expect(situation.revelations).toHaveLength(3);
-    expect(situation.revelations[0]!.clueIds).toHaveLength(3);
-    expect(situation.role).toMatchObject({ fallbackRef: "watchtower-inscription", status: "preferred" });
-    expect(situation.criticalObject.policy.kind).toBe("alternate_path");
-    expect(state.worldContext?.npcs.map((npc) => npc.id)).toContain("watchtower-warden");
-    expect(state.worldContext?.objects.map((object) => object.id)).toContain("watchtower-relic");
-    expect(state.worldFacts.map((fact) => fact.id)).toContain("watchtower-truth-warden");
 
-    const projection = readToolData(state, "situation_context") as typeof state.situation;
-    expect(projection).not.toBeNull();
-    expect(JSON.stringify(projection)).not.toContain("watchtower-truth-warden");
+    expect(situation.definitionKey).toBe("watchtower-relic");
+    expect(situation.nodes.map((node) => node.id)).toEqual([nodeId("road"), nodeId("yard"), nodeId("vault")]);
+    expect(situation.revelations.find((revelation) => revelation.id === revelationId("central"))?.clueIds).toHaveLength(3);
+    expect(situation.roles[0]).toMatchObject({ status: "preferred", preferred: { kind: "actor", ref: "watchtower-warden" } });
+    expect(situation.criticalObject?.policy.kind).toBe("alternate_path");
+    expect(state.worldContext).toEqual(worldBefore);
+    expect(state.worldFacts.map((fact) => fact.id)).toEqual(expect.arrayContaining([truthId("warden"), situationFixtureId("watchtower-relic", "clue-fact", "map")]));
+    expect(state.actorKnowledge.filter((record) => record.actorId === "watchtower-warden").map((record) => record.factId)).toEqual(
+      expect.arrayContaining([truthId("warden"), truthId("relic"), truthId("pressure")]),
+    );
+
+    const projection = readToolData(state, "situation_context") as NonNullable<ReturnType<typeof toSessionView>["situation"]>;
     expect(JSON.stringify(projection)).not.toContain("The warden diverted the patrol");
-    expect(projection!.revelations.every((revelation) => revelation.title === "Unresolved lead")).toBe(true);
-    expect(projection!.clues.every((clue) => !("factId" in clue))).toBe(true);
+    expect(JSON.stringify(projection)).not.toContain("The route bends away from the village");
+    expect(JSON.stringify(projection)).not.toContain("diverted patrol, a warning relic");
+    expect(JSON.stringify(projection)).not.toContain("The patrol arrives according to its committed route");
+    expect(projection.pressure.defaultDevelopment).toBeNull();
+    expect(projection.revelations.every((revelation) => revelation.title === "Unresolved lead")).toBe(true);
+    expect(projection.clues.every((clue) => !("factId" in clue) && !("finding" in clue))).toBe(true);
+    expect(projection.roles[0]).toEqual({ id: situation.roles[0]!.id, capability: "reveal-location", status: "preferred" });
     expect(toSessionView(state).situation).toEqual(projection);
 
     const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(state)) as LanternCampaignState);
     expect(restarted.situation).toEqual(state.situation);
+  });
 
-    const bypassContext = accepted(characterReady(), {
-      kind: "world_context",
-      title: "A side road",
-      description: "The expected entrance was never used.",
-      features: ["side entrance"],
-      exits: [{ id: "side-yard", label: "the side yard" }],
+  it("compiles a second Ashmere definition without a critical object or source-owned adventure code", () => {
+    const state = accepted(prepareAshmereWorld(characterReady()), {
+      kind: "situation_create",
+      definition: ashmereSituationDefinition(),
     });
-    const bypassed = accepted(bypassContext, { kind: "situation_create", templateId: "watchtower-relic-v1" });
-    expect(bypassed.situation?.currentLocationId).toBe("watchtower-road");
-    expect(bypassed.worldContext?.features).toEqual(expect.arrayContaining(["watchtower-road", "watchtower-vault", "watchtower-relic"]));
+    expect(state.situation).toMatchObject({ definitionKey: "bell-beneath-ashmere", title: "The Bell Beneath Ashmere", criticalObject: null });
+    expect(state.situation?.nodes).toHaveLength(3);
+    expect(state.situation?.revelations[0]?.clueIds).toHaveLength(3);
+    expect(state.situation?.roles[0]).toMatchObject({ capability: "testify", status: "preferred" });
+    expect(state.actorKnowledge.filter((record) => record.actorId === "oren-dockhand")).toHaveLength(1);
+
+    const projection = readToolData(state, "situation_context") as NonNullable<ReturnType<typeof toSessionView>["situation"]>;
+    expect(projection.nodes.map((node) => node.title)).not.toContain("Flooded Cistern");
+    expect(JSON.stringify(projection)).not.toContain("submerged mechanism");
+  });
+
+  it("rejects malformed, disconnected, dangling-hard-reference, and critical-object authoring without mutation", () => {
+    const valid = watchtowerSituationDefinition();
+    const tooFewCentral = structuredClone(valid);
+    tooFewCentral.clues = tooFewCentral.clues.filter((clue) => clue.key !== "inscription");
+    expect(engineSituationDefinitionProposalSchema.safeParse(tooFewCentral).success).toBe(false);
+
+    const prepared = prepareWatchtowerWorld(characterReady());
+    const disconnected = structuredClone(valid);
+    disconnected.nodes[1]!.exitKeys = ["road"];
+    disconnected.nodes[2]!.exitKeys = ["yard"];
+    disconnected.nodes[0]!.exitKeys = [];
+    const before = JSON.stringify(prepared);
+    const graphResult = apply(prepared, { kind: "situation_create", definition: disconnected });
+    expect(graphResult).toMatchObject({ accepted: false, code: "situation_graph_disconnected", event: null });
+    expect(JSON.stringify(graphResult.state)).toBe(before);
+
+    const dangling = structuredClone(valid);
+    dangling.roles[0]!.preferred = { kind: "actor", ref: "invented-after-search" };
+    const danglingResult = apply(prepared, { kind: "situation_create", definition: dangling });
+    expect(danglingResult).toMatchObject({ accepted: false, code: "situation_role_reference_not_found", event: null });
+    expect(JSON.stringify(danglingResult.state)).toBe(before);
+
+    const missingObject = structuredClone(valid);
+    missingObject.criticalObject = { objectId: "invented-treasure" };
+    const objectResult = apply(prepared, { kind: "situation_create", definition: missingObject });
+    expect(objectResult).toMatchObject({ accepted: false, code: "situation_critical_object_not_found", event: null });
+    expect(JSON.stringify(objectResult.state)).toBe(before);
   });
 
   it("keeps traversal explicit and rejects out-of-order node access without mutation", () => {
     const state = situationReady();
     const before = JSON.stringify(state);
-    const outOfOrder = apply(state, { kind: "situation_visit", locationId: "watchtower-vault" });
+    const outOfOrder = apply(state, { kind: "situation_visit", locationId: nodeId("vault") });
     expect(outOfOrder).toMatchObject({ accepted: false, code: "location_not_reachable", event: null });
     expect(JSON.stringify(outOfOrder.state)).toBe(before);
 
-    const yard = apply(state, { kind: "situation_visit", locationId: "watchtower-yard" });
+    const yard = apply(state, { kind: "situation_visit", locationId: nodeId("yard") });
     expect(yard.accepted).toBe(true);
-    const vault = apply(yard.state, { kind: "situation_visit", locationId: "watchtower-vault" });
+    const vault = apply(yard.state, { kind: "situation_visit", locationId: nodeId("vault") });
     expect(vault.accepted).toBe(true);
-    expect(vault.state.situation?.visitedLocationIds).toEqual(["watchtower-road", "watchtower-yard", "watchtower-vault"]);
+    expect(vault.state.situation?.visitedLocationIds).toEqual([nodeId("road"), nodeId("yard"), nodeId("vault")]);
   });
 
-  it("uses server-owned checks for both fail-forward and discovery", () => {
+  it("uses server-owned checks while leaving the concrete fictional consequence to the DM", () => {
     const failed = apply(situationReady(), {
       kind: "situation_clue_attempt",
-      clueId: "watchtower-clue-boots",
+      clueId: clueId("boots"),
       approach: "Follow the prints in the open road.",
     });
     expect(failed).toMatchObject({ accepted: true, event: { outcome: "situation_clue_failed_forward" } });
-    expect(failed.state.situation?.complicationCount).toBe(1);
-    expect(failed.state.situation?.clues.find((clue) => clue.id === "watchtower-clue-boots")).toMatchObject({ failedAttempts: 1 });
-    expect(failed.state.situation?.clues.find((clue) => clue.id === "watchtower-clue-map")?.foundBy).toEqual([]);
+    expect(failed.message).toContain("DM must now commit and portray");
+    expect(failed.state.situation?.lastComplication).toBe("pending-dm-consequence");
+    expect(failed.state.actorKnowledge.some((record) => record.actorId === failed.state.actorId && record.factId === truthId("warden"))).toBe(false);
 
-    const yard = accepted(failed.state, { kind: "situation_visit", locationId: "watchtower-yard" });
+    const yard = accepted(failed.state, { kind: "situation_visit", locationId: nodeId("yard") });
     const found = apply(strongInvestigator(yard), {
       kind: "situation_clue_attempt",
-      clueId: "watchtower-clue-map",
+      clueId: clueId("map"),
       approach: "Read the marked route without disturbing it.",
     });
     expect(found).toMatchObject({ accepted: true, event: { outcome: "situation_clue_found" }, data: { success: true } });
+    expect(found.message).toContain("DM must now portray");
     expect(found.event?.adjudication?.requestedDifficultyBand).toBe("gentle");
-    expect(found.state.situation?.revelations.find((revelation) => revelation.id === "watchtower-revelation-central")?.status).toBe("revealed");
-    expect(found.state.actorKnowledge.map((record) => record.factId)).toEqual(expect.arrayContaining(["watchtower-fact-map", "watchtower-truth-warden"]));
-    const revealedProjection = readToolData(found.state, "situation_context") as { revelations: Array<{ id: string; title: string; status: string }> } | null;
-    expect(revealedProjection?.revelations.find((revelation) => revelation.id === "watchtower-revelation-central")).toEqual({ id: "watchtower-revelation-central", title: "Who changed the patrol route", status: "revealed" });
+    expect(found.state.situation?.revelations.find((revelation) => revelation.id === revelationId("central"))?.status).toBe("revealed");
+    expect(found.state.actorKnowledge.filter((record) => record.actorId === found.state.actorId).map((record) => record.factId)).toEqual(
+      expect.arrayContaining([situationFixtureId("watchtower-relic", "clue-fact", "map"), truthId("warden")]),
+    );
+    const revealedProjection = readToolData(found.state, "situation_context") as NonNullable<ReturnType<typeof toSessionView>["situation"]>;
+    expect(revealedProjection.revelations.find((revelation) => revelation.id === revelationId("central"))?.title).toBe("Who changed the patrol route");
+    expect(revealedProjection.clues.find((clue) => clue.id === clueId("map"))?.finding).toContain("Mara's hand");
   });
 
-  it("reconciles actor loss and critical-object acquisition or destruction", () => {
-    const fallback = removeWarden(situationReady());
-    expect(fallback.situation?.role).toMatchObject({ status: "fallback", activeSourceRef: "watchtower-inscription" });
+  it("reconciles preferred, alternate, and fallback sources plus critical-object lifecycle", () => {
+    const alternate = removeWarden(situationReady());
+    expect(alternate.situation?.roles[0]).toMatchObject({ status: "alternate", activeSource: { kind: "object", ref: "watchtower-relic" } });
+
+    const fallback = accepted(alternate, { kind: "interact", targetId: "watchtower-relic", affordance: "break", goal: "Destroy the relic and use the inscription." });
+    expect(fallback.situation?.roles[0]).toMatchObject({ status: "fallback", activeSource: { kind: "feature", ref: "watchtower-inscription" } });
+    expect(fallback.situation?.criticalObject).toMatchObject({ destroyed: true, reaction: "declared-loss" });
 
     const early = accepted(situationReady(), { kind: "interact", targetId: "watchtower-relic", affordance: "take", goal: "Carry the relic before deciding." });
     expect(early.situation?.criticalObject).toMatchObject({ acquiredByActorId: early.actorId, reaction: "retained-early", destroyed: false });
-    expect(normalizeCampaignState(JSON.parse(JSON.stringify(early)) as LanternCampaignState).situation?.criticalObject.reaction).toBe("retained-early");
-
-    const destroyed = accepted(situationReady(), { kind: "interact", targetId: "watchtower-relic", affordance: "break", goal: "Break the relic and follow the alternate route." });
-    expect(destroyed.situation?.criticalObject).toMatchObject({ destroyed: true, reaction: "declared-loss" });
-    expect(normalizeCampaignState(JSON.parse(JSON.stringify(destroyed)) as LanternCampaignState).situation?.criticalObject).toMatchObject({ destroyed: true, reaction: "declared-loss" });
+    expect(normalizeCampaignState(JSON.parse(JSON.stringify(early)) as LanternCampaignState).situation?.criticalObject?.reaction).toBe("retained-early");
   });
 
-  it("advances pressure at authoritative boundaries and exposes bounded outcomes", () => {
+  it("advances authored pressure and exposes only declaratively legal outcomes", () => {
     let pressured = situationReady();
     pressured = accepted(pressured, { kind: "situation_ignore" });
     pressured = accepted(pressured, { kind: "situation_ignore" });
     pressured = accepted(pressured, { kind: "situation_ignore" });
-    expect(pressured.situation?.pressure).toMatchObject({ current: 3, max: 3, defaultDevelopmentApplied: true });
+    expect(pressured.situation?.pressure).toMatchObject({ current: 3, max: 3, intervalMinutes: 60, defaultDevelopmentApplied: true });
+    const pressuredProjection = readToolData(pressured, "situation_context") as NonNullable<ReturnType<typeof toSessionView>["situation"]>;
+    expect(pressuredProjection.pressure.defaultDevelopment?.title).toBe("The patrol reaches the village");
 
-    const walkedAway = apply(situationReady(), { kind: "situation_choose", choice: "walk-away" });
-    expect(walkedAway).toMatchObject({ accepted: true, data: { outcome: { choice: "walk-away" } } });
-
-    const solved = apply(revealCentral(situationReady()), { kind: "situation_choose", choice: "solve" });
-    expect(solved).toMatchObject({ accepted: true, data: { outcome: { choice: "solve" } } });
-
-    const bargained = apply(revealCentral(situationReady()), { kind: "situation_choose", choice: "bargain" });
-    expect(bargained).toMatchObject({ accepted: true, data: { outcome: { choice: "bargain" } } });
-
-    const exposed = apply(removeWarden(revealCentral(situationReady())), { kind: "situation_choose", choice: "expose" });
-    expect(exposed).toMatchObject({ accepted: true, data: { outcome: { choice: "expose" } } });
-  });
-
-  it("rejects unavailable choices, unknown source events, and duplicate creation without mutation", () => {
-    const state = characterReady();
-    const before = JSON.stringify(state);
-    const missingSource = apply(state, { kind: "situation_create", templateId: "watchtower-relic-v1", sourceRandomEventId: "missing-event" });
-    expect(missingSource).toMatchObject({ accepted: false, code: "random_event_not_found", event: null });
-    expect(JSON.stringify(missingSource.state)).toBe(before);
-
-    const created = accepted(state, { kind: "situation_create", templateId: "watchtower-relic-v1" });
-    const unavailable = apply(created, { kind: "situation_choose", choice: "solve" });
+    const initialProjection = readToolData(situationReady(), "situation_context") as NonNullable<ReturnType<typeof toSessionView>["situation"]>;
+    expect(initialProjection.outcomes.map((outcome) => outcome.title)).toEqual(["Walk away"]);
+    const unavailable = apply(situationReady(), { kind: "situation_choose", outcomeId: outcomeId("solve") });
     expect(unavailable).toMatchObject({ accepted: false, code: "situation_choice_unavailable", event: null });
-    const duplicate = apply(created, { kind: "situation_create", templateId: "watchtower-relic-v1" });
-    expect(duplicate).toMatchObject({ accepted: false, code: "situation_exists", event: null });
+
+    const revealed = revealCentral(situationReady());
+    const revealedProjection = readToolData(revealed, "situation_context") as NonNullable<ReturnType<typeof toSessionView>["situation"]>;
+    expect(revealedProjection.outcomes.map((outcome) => outcome.id)).toEqual(expect.arrayContaining([outcomeId("solve"), outcomeId("bargain"), outcomeId("walk-away")]));
+    const solved = apply(revealed, { kind: "situation_choose", outcomeId: outcomeId("solve") });
+    expect(solved).toMatchObject({ accepted: true, data: { outcome: { outcomeId: outcomeId("solve"), title: "Use the truth and intact relic" } } });
+
+    const fallback = accepted(removeWarden(revealCentral(situationReady())), { kind: "interact", targetId: "watchtower-relic", affordance: "break", goal: "Use the fallback record." });
+    const exposed = apply(fallback, { kind: "situation_choose", outcomeId: outcomeId("expose") });
+    expect(exposed).toMatchObject({ accepted: true, data: { outcome: { outcomeId: outcomeId("expose") } } });
   });
 
-  it("persists situation commands exactly once and rejects stale versions", () => {
+  it("records random-event provenance without auto-authoring a situation or altering established truths", () => {
+    let seedState = accepted(characterReady(), {
+      kind: "world_context",
+      title: "The war road",
+      description: "A reviewed road segment with a distant pier.",
+      features: [],
+      exits: [{ id: "west-pier", label: "the west pier" }],
+    });
+    seedState = withTravelSupplies(seedState);
+    deterministicRandomInt
+      .mockImplementationOnce((min: number, _max: number) => min)
+      .mockImplementationOnce((min: number, _max: number) => min)
+      .mockImplementationOnce((_min: number, max: number) => max);
+    const traveled = apply(seedState, { kind: "travel", routeId: "one-day-road-v1", destinationId: "west-pier", pace: "normal" });
+    expect(traveled.accepted).toBe(true);
+    const event = traveled.state.time.randomEvents.at(-1)!;
+    expect(event.selectedEntryId).toBe("roadside-sign");
+    expect(traveled.state.situation).toBeNull();
+    expect(event.createdSituationIds).toEqual([]);
+
+    const seeded = apply(prepareWatchtowerWorld(traveled.state), {
+      kind: "situation_create",
+      definition: watchtowerSituationDefinition(),
+      sourceRandomEventId: event.id,
+    });
+    expect(seeded).toMatchObject({ accepted: true });
+    expect(seeded.state.situation?.provenance.sourceRandomEvent).toMatchObject({ tableId: "travel-watch-v1", tableVersion: "1", entryId: "roadside-sign" });
+    expect(seeded.state.time.randomEvents.find((candidate) => candidate.id === event.id)?.createdSituationIds).toEqual([seeded.state.situation?.id]);
+
+    const replayState = structuredClone(seeded.state);
+    replayState.situation = null;
+    const beforeReplay = JSON.stringify(replayState);
+    const reusedEvent = apply(replayState, { kind: "situation_create", definition: watchtowerSituationDefinition(), sourceRandomEventId: event.id });
+    expect(reusedEvent).toMatchObject({ accepted: false, code: "random_event_replayed", event: null });
+    expect(JSON.stringify(reusedEvent.state)).toBe(beforeReplay);
+
+    let existing = withTravelSupplies(situationReady());
+    existing.worldContext!.exits = [{ id: "west-pier", label: "the west pier" }];
+    const truthIdsBefore = existing.situation!.truths.map((truth) => truth.id);
+    deterministicRandomInt
+      .mockImplementationOnce((min: number, _max: number) => min)
+      .mockImplementationOnce((min: number, _max: number) => min)
+      .mockImplementationOnce((_min: number, max: number) => max);
+    const altered = apply(existing, { kind: "travel", routeId: "one-day-road-v1", destinationId: "west-pier", pace: "normal" });
+    expect(altered.accepted).toBe(true);
+    expect(altered.state.situation?.truths.map((truth) => truth.id)).toEqual(truthIdsBefore);
+    expect(altered.state.situation?.complicationCount).toBe(0);
+  });
+
+  it("persists commands exactly once, rejects stale versions, and retains legacy load/replay compatibility", () => {
     const state = situationReady();
     const directory = mkdtempSync(join(tmpdir(), "lantern-situation-"));
     const store = new LanternEngineStore(join(directory, "engine.db"));
@@ -238,38 +359,35 @@ describe("reviewed situations", () => {
     expect(() => store.executeCommand({ ...input, clientCommandId: randomUUID(), expectedCampaignVersion: state.version })).toThrow(EngineVersionConflictError);
     expect(store.getCampaign(owner).situation?.pressure.current).toBe(1);
     store.close();
-  });
 
-  it("lets the reviewed roadside-sign table entry seed a durable situation and alter one already in motion", () => {
-    let seedState = accepted(characterReady(), {
-      kind: "world_context",
-      title: "The war road",
-      description: "A reviewed road segment with a distant pier.",
-      features: [],
-      exits: [{ id: "west-pier", label: "the west pier" }],
-    });
-    seedState = withTravelSupplies(seedState);
-    deterministicRandomInt
-      .mockImplementationOnce((min: number, _max: number) => min)
-      .mockImplementationOnce((min: number, _max: number) => min)
-      .mockImplementationOnce((_min: number, max: number) => max);
-    const seeded = apply(seedState, { kind: "travel", routeId: "one-day-road-v1", destinationId: "west-pier", pace: "normal" });
-    expect(seeded.accepted).toBe(true);
-    expect(seeded.state.time.randomEvents.at(-1)?.selectedEntryId).toBe("roadside-sign");
-    expect(seeded.state.situation?.provenance.sourceRandomEvent).toMatchObject({ tableId: "travel-watch-v1", tableVersion: "1", entryId: "roadside-sign" });
-    expect(seeded.state.time.randomEvents.at(-1)?.createdSituationIds).toEqual([seeded.state.situation?.id]);
-    expect(seeded.state.situation?.revelations).toHaveLength(3);
+    expect(engineCommandSchema.safeParse({ kind: "situation_create", templateId: "watchtower-relic-v1" }).success).toBe(true);
+    const freshLegacy = prepareWatchtowerWorld(characterReady());
+    const beforeLegacy = JSON.stringify(freshLegacy);
+    const legacyCommand = apply(freshLegacy, { kind: "situation_create", templateId: "watchtower-relic-v1" });
+    expect(legacyCommand).toMatchObject({ accepted: false, code: "legacy_situation_template_retired", event: null });
+    expect(JSON.stringify(legacyCommand.state)).toBe(beforeLegacy);
 
-    let existing = withTravelSupplies(situationReady());
-    const originalTruthIds = existing.situation!.truths.map((truth) => truth.id);
-    deterministicRandomInt
-      .mockImplementationOnce((min: number, _max: number) => min)
-      .mockImplementationOnce((min: number, _max: number) => min)
-      .mockImplementationOnce((_min: number, max: number) => max);
-    const altered = apply(existing, { kind: "travel", routeId: "one-day-road-v1", destinationId: "watchtower-yard", pace: "normal" });
-    expect(altered.accepted).toBe(true);
-    expect(altered.state.situation?.truths.map((truth) => truth.id)).toEqual(originalTruthIds);
-    expect(altered.state.situation?.lastComplication).toContain("newly posted sign");
-    expect(altered.state.time.randomEvents.at(-1)?.createdSituationIds).toEqual([]);
+    const legacyState = prepareWatchtowerWorld(characterReady());
+    (legacyState as unknown as { situation: unknown }).situation = {
+      id: "situation:legacy-watchtower",
+      templateId: "watchtower-relic-v1",
+      status: "active",
+      currentLocationId: "watchtower-road",
+      visitedLocationIds: ["watchtower-road"],
+      nodes: [{ id: "watchtower-road", title: "Road", description: "Road", exitIds: [] }],
+      truths: [], revelations: [], clues: [],
+      role: { id: "legacy-role", capability: "reveal_location", preferredRef: "watchtower-warden", alternateRefs: ["watchtower-relic"], fallbackRef: "watchtower-inscription", activeSourceRef: "watchtower-warden", status: "preferred" },
+      pressure: { id: "legacy-pressure", title: "Patrol", current: 0, max: 3, nextAdvanceAtMinutes: 60, lastAdvancedAtMinutes: null, defaultDevelopmentId: "patrol-arrives", defaultDevelopmentApplied: false },
+      criticalObject: { objectId: "watchtower-relic", policy: legacyState.worldContext!.objects[0]!.definition.criticalPolicy, acquiredByActorId: null, destroyed: false, reaction: "none" },
+      outcome: null,
+      sourceRandomEventId: null,
+      revision: 1,
+      complicationCount: 0,
+      lastComplication: null,
+      provenance: { sourceCommandId: "legacy", sourceVersion: 1, rulesVersion: "situations-v1", sourceRandomEvent: null },
+    };
+    const migrated = normalizeCampaignState(legacyState);
+    expect(migrated.situation).toMatchObject({ definitionKey: "watchtower-relic-v1", definitionHash: "legacy-watchtower-relic-v1" });
+    expect(migrated.situation?.roles[0]).toMatchObject({ status: "preferred", preferred: { kind: "actor", ref: "watchtower-warden" } });
   });
 });

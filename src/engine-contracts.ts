@@ -1176,14 +1176,167 @@ export const enginePartyGroupCheckCommandSchema = z.object({
 }).strict();
 export type EnginePartyGroupCheckCommand = z.infer<typeof enginePartyGroupCheckCommandSchema>;
 
-export const engineSituationTemplateIdSchema = z.enum(["watchtower-relic-v1"]);
+export const engineSituationKeySchema = z.string().trim().min(1).max(80).regex(
+  /^[a-z0-9][a-z0-9-]*$/,
+  "Situation keys use lowercase letters, numbers, and hyphens.",
+);
+export type EngineSituationKey = z.infer<typeof engineSituationKeySchema>;
+
+export const engineSituationReferenceSchema = z.object({
+  kind: z.enum(["actor", "object", "feature", "node", "clue"]),
+  ref: worldContextEntityIdSchema,
+}).strict();
+export type EngineSituationReferenceInput = z.infer<typeof engineSituationReferenceSchema>;
+
+export const engineSituationOutcomeRequirementInputSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("revelation_revealed"), revelationKey: engineSituationKeySchema }).strict(),
+  z.object({
+    kind: z.literal("role_status"),
+    roleKey: engineSituationKeySchema,
+    statuses: z.array(z.enum(["preferred", "alternate", "fallback", "impossible"])).min(1).max(4),
+  }).strict(),
+  z.object({
+    kind: z.literal("critical_object_state"),
+    state: z.enum(["intact", "destroyed", "actor-owned"]),
+  }).strict(),
+  z.object({ kind: z.literal("pressure_at_least"), value: z.number().int().min(0).max(20) }).strict(),
+]);
+export type EngineSituationOutcomeRequirementInput = z.infer<typeof engineSituationOutcomeRequirementInputSchema>;
+
+export const engineSituationDefinitionProposalSchema = z.object({
+  key: engineSituationKeySchema,
+  title: z.string().trim().min(1).max(160),
+  summary: z.string().trim().min(1).max(2_000),
+  initialNodeKey: engineSituationKeySchema,
+  centralRevelationKey: engineSituationKeySchema,
+  nodes: z.array(z.object({
+    key: engineSituationKeySchema,
+    title: z.string().trim().min(1).max(160),
+    description: z.string().trim().min(1).max(2_000),
+    visibility: z.enum(["public", "hidden"]),
+    exitKeys: z.array(engineSituationKeySchema).max(12),
+  }).strict()).min(2).max(20),
+  truths: z.array(z.object({
+    key: engineSituationKeySchema,
+    title: z.string().trim().min(1).max(160),
+    description: z.string().trim().min(1).max(4_000),
+    visibility: z.enum(["public", "hidden"]),
+  }).strict()).min(1).max(30),
+  revelations: z.array(z.object({
+    key: engineSituationKeySchema,
+    title: z.string().trim().min(1).max(240),
+    truthKey: engineSituationKeySchema,
+  }).strict()).min(1).max(20),
+  clues: z.array(z.object({
+    key: engineSituationKeySchema,
+    title: z.string().trim().min(1).max(240),
+    finding: z.string().trim().min(1).max(2_000),
+    visibility: z.enum(["public", "hidden"]),
+    nodeKey: engineSituationKeySchema,
+    revelationKey: engineSituationKeySchema,
+    difficultyBand: z.enum(["gentle", "standard", "challenging"]),
+  }).strict()).min(3).max(40),
+  actors: z.array(z.object({
+    actorRef: worldContextEntityIdSchema,
+    goals: z.array(z.string().trim().min(1).max(240)).min(1).max(8),
+    knowsTruthKeys: z.array(engineSituationKeySchema).max(20),
+  }).strict()).max(12).default([]),
+  roles: z.array(z.object({
+    key: engineSituationKeySchema,
+    capability: z.enum(["reveal-location", "identify-object", "testify", "provide-access"]),
+    preferred: engineSituationReferenceSchema,
+    alternates: z.array(engineSituationReferenceSchema).max(6),
+    fallback: engineSituationReferenceSchema,
+  }).strict()).min(1).max(8),
+  pressure: z.object({
+    key: engineSituationKeySchema,
+    title: z.string().trim().min(1).max(160),
+    max: z.number().int().min(2).max(20),
+    intervalMinutes: z.number().int().min(10).max(1_440),
+    defaultDevelopment: z.object({
+      key: engineSituationKeySchema,
+      title: z.string().trim().min(1).max(160),
+      description: z.string().trim().min(1).max(2_000),
+    }).strict(),
+  }).strict(),
+  criticalObject: z.object({ objectId: worldContextEntityIdSchema }).strict().optional(),
+  outcomes: z.array(z.object({
+    key: engineSituationKeySchema,
+    title: z.string().trim().min(1).max(160),
+    terminalStatus: z.enum(["resolved", "walked-away"]),
+    reactivityTier: z.enum(["systemic", "contextual", "booster", "major-branch"]),
+    requirements: z.array(engineSituationOutcomeRequirementInputSchema).max(8),
+  }).strict()).min(2).max(12),
+}).strict().superRefine((definition, context) => {
+  const unique = (values: string[], path: (string | number)[], label: string): Set<string> => {
+    const result = new Set<string>();
+    for (const value of values) {
+      if (result.has(value)) context.addIssue({ code: z.ZodIssueCode.custom, path, message: `${label} keys must be unique.` });
+      result.add(value);
+    }
+    return result;
+  };
+  const nodeKeys = unique(definition.nodes.map((node) => node.key), ["nodes"], "Node");
+  const truthKeys = unique(definition.truths.map((truth) => truth.key), ["truths"], "Truth");
+  const revelationKeys = unique(definition.revelations.map((revelation) => revelation.key), ["revelations"], "Revelation");
+  const clueKeys = unique(definition.clues.map((clue) => clue.key), ["clues"], "Clue");
+  const roleKeys = unique(definition.roles.map((role) => role.key), ["roles"], "Role");
+  unique(definition.actors.map((actor) => actor.actorRef), ["actors"], "Actor reference");
+  unique(definition.outcomes.map((outcome) => outcome.key), ["outcomes"], "Outcome");
+  if (!nodeKeys.has(definition.initialNodeKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["initialNodeKey"], message: "The initial node must be declared." });
+  if (!revelationKeys.has(definition.centralRevelationKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["centralRevelationKey"], message: "The central revelation must be declared." });
+  for (const node of definition.nodes) {
+    if (node.exitKeys.includes(node.key)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["nodes"], message: "A node cannot exit to itself." });
+    if (node.exitKeys.some((key) => !nodeKeys.has(key))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["nodes"], message: "Node exits must reference declared nodes." });
+  }
+  for (const revelation of definition.revelations) {
+    if (!truthKeys.has(revelation.truthKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["revelations"], message: "Revelations must reference declared truths." });
+  }
+  for (const clue of definition.clues) {
+    if (!nodeKeys.has(clue.nodeKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["clues"], message: "Clues must reference declared nodes." });
+    if (!revelationKeys.has(clue.revelationKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["clues"], message: "Clues must reference declared revelations." });
+  }
+  for (const actor of definition.actors) {
+    if (actor.knowsTruthKeys.some((key) => !truthKeys.has(key))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["actors"], message: "Actor knowledge must reference declared truths." });
+  }
+  for (const role of definition.roles) {
+    for (const reference of [role.preferred, ...role.alternates, role.fallback]) {
+      if (reference.kind === "node" && !nodeKeys.has(reference.ref)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["roles"], message: "Node role references must be declared by this situation." });
+      if (reference.kind === "clue" && !clueKeys.has(reference.ref)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["roles"], message: "Clue role references must be declared by this situation." });
+    }
+  }
+  for (const outcome of definition.outcomes) {
+    for (const requirement of outcome.requirements) {
+      if (requirement.kind === "revelation_revealed" && !revelationKeys.has(requirement.revelationKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcomes"], message: "Outcome revelation requirements must reference declared revelations." });
+      if (requirement.kind === "role_status" && !roleKeys.has(requirement.roleKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcomes"], message: "Outcome role requirements must reference declared roles." });
+      if (requirement.kind === "critical_object_state" && !definition.criticalObject) context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcomes"], message: "Critical-object requirements need a declared critical object." });
+      if (requirement.kind === "pressure_at_least" && requirement.value > definition.pressure.max) context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcomes"], message: "Pressure requirements cannot exceed the pressure maximum." });
+    }
+  }
+  const centralClueCount = definition.clues.filter((clue) => clue.revelationKey === definition.centralRevelationKey).length;
+  if (centralClueCount < 3) context.addIssue({ code: z.ZodIssueCode.custom, path: ["centralRevelationKey"], message: "The central revelation needs at least three independent clue paths." });
+  for (const revelationKey of revelationKeys) {
+    if (!definition.clues.some((clue) => clue.revelationKey === revelationKey)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["revelations"], message: "Every revelation needs at least one clue." });
+  }
+  if (!definition.outcomes.some((outcome) => outcome.terminalStatus === "walked-away" && outcome.requirements.length === 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcomes"], message: "A situation needs one unconditional walk-away outcome." });
+  }
+});
+export type EngineSituationDefinitionProposal = z.infer<typeof engineSituationDefinitionProposalSchema>;
+
+export const engineSituationTemplateIdSchema = z.literal("watchtower-relic-v1");
 export type EngineSituationTemplateId = z.infer<typeof engineSituationTemplateIdSchema>;
 
 export const engineSituationCreateCommandSchema = z.object({
   kind: z.literal("situation_create"),
-  templateId: engineSituationTemplateIdSchema,
+  definition: engineSituationDefinitionProposalSchema.optional(),
+  templateId: engineSituationTemplateIdSchema.optional(),
   sourceRandomEventId: worldContextEntityIdSchema.optional(),
-}).strict();
+}).strict().superRefine((command, context) => {
+  if (Boolean(command.definition) === Boolean(command.templateId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["definition"], message: "Provide exactly one authored definition or legacy template identifier." });
+  }
+});
 export type EngineSituationCreateCommand = z.infer<typeof engineSituationCreateCommandSchema>;
 
 export const engineSituationVisitCommandSchema = z.object({
@@ -1206,8 +1359,13 @@ export type EngineSituationIgnoreCommand = z.infer<typeof engineSituationIgnoreC
 
 export const engineSituationChoiceCommandSchema = z.object({
   kind: z.literal("situation_choose"),
-  choice: z.enum(["solve", "expose", "bargain", "walk-away"]),
-}).strict();
+  outcomeId: worldContextEntityIdSchema.optional(),
+  choice: z.enum(["solve", "expose", "bargain", "walk-away"]).optional(),
+}).strict().superRefine((command, context) => {
+  if (Boolean(command.outcomeId) === Boolean(command.choice)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcomeId"], message: "Provide exactly one authored outcome id or legacy choice." });
+  }
+});
 export type EngineSituationChoiceCommand = z.infer<typeof engineSituationChoiceCommandSchema>;
 
 export const engineTacticalBoundsSchema = z.object({
@@ -3141,6 +3299,7 @@ export interface EngineSituationNode {
   id: string;
   title: string;
   description: string;
+  visibility: "public" | "hidden";
   exitIds: string[];
 }
 
@@ -3163,10 +3322,12 @@ export interface EngineSituationRevelation {
 export interface EngineSituationClue {
   id: string;
   title: string;
+  finding: string;
+  visibility: "public" | "hidden";
   locationId: string;
   revelationId: string;
   factId: string;
-  challengeId: "barred-door-v1";
+  challengeId: "situation-clue-v1" | "barred-door-v1";
   difficultyBand: "gentle" | "standard" | "challenging";
   foundBy: string[];
   attempts: number;
@@ -3174,14 +3335,24 @@ export interface EngineSituationClue {
   lastComplication: string | null;
 }
 
+export interface EngineSituationReference {
+  kind: "actor" | "object" | "feature" | "node" | "clue";
+  ref: string;
+}
+
+export interface EngineSituationActor {
+  actorRef: string;
+  goals: string[];
+}
+
 export interface EngineSituationRole {
   id: string;
-  capability: "reveal_location";
-  preferredRef: string;
-  alternateRefs: string[];
-  fallbackRef: string;
-  activeSourceRef: string | null;
-  status: "preferred" | "fallback" | "impossible";
+  capability: "reveal-location" | "identify-object" | "testify" | "provide-access";
+  preferred: EngineSituationReference;
+  alternates: EngineSituationReference[];
+  fallback: EngineSituationReference;
+  activeSource: EngineSituationReference | null;
+  status: "preferred" | "alternate" | "fallback" | "impossible";
 }
 
 export interface EngineSituationPressure {
@@ -3189,9 +3360,14 @@ export interface EngineSituationPressure {
   title: string;
   current: number;
   max: number;
+  intervalMinutes: number;
   nextAdvanceAtMinutes: number;
   lastAdvancedAtMinutes: number | null;
-  defaultDevelopmentId: string;
+  defaultDevelopment: {
+    id: string;
+    title: string;
+    description: string;
+  };
   defaultDevelopmentApplied: boolean;
 }
 
@@ -3204,15 +3380,34 @@ export interface EngineSituationCriticalObject {
 }
 
 export interface EngineSituationOutcome {
-  choice: EngineSituationChoice;
+  outcomeId: string;
+  title: string;
   committedAtMinutes: number;
   sourceCommandId: string;
   reactivityTier: EngineSituationReactivityTier;
 }
 
+export type EngineSituationOutcomeRequirement =
+  | { kind: "revelation_revealed"; revelationId: string }
+  | { kind: "role_status"; roleId: string; statuses: EngineSituationRole["status"][] }
+  | { kind: "critical_object_state"; state: "intact" | "destroyed" | "actor-owned" }
+  | { kind: "pressure_at_least"; value: number };
+
+export interface EngineSituationOutcomeDefinition {
+  id: string;
+  key: string;
+  title: string;
+  terminalStatus: "resolved" | "walked-away";
+  reactivityTier: EngineSituationReactivityTier;
+  requirements: EngineSituationOutcomeRequirement[];
+}
+
 export interface EngineSituation {
   id: string;
-  templateId: EngineSituationTemplateId;
+  definitionKey: string;
+  title: string;
+  summary: string;
+  definitionHash: string;
   status: EngineSituationStatus;
   currentLocationId: string;
   visitedLocationIds: string[];
@@ -3220,9 +3415,11 @@ export interface EngineSituation {
   truths: EngineSituationTruth[];
   revelations: EngineSituationRevelation[];
   clues: EngineSituationClue[];
-  role: EngineSituationRole;
+  actors: EngineSituationActor[];
+  roles: EngineSituationRole[];
   pressure: EngineSituationPressure;
-  criticalObject: EngineSituationCriticalObject;
+  criticalObject: EngineSituationCriticalObject | null;
+  outcomes: EngineSituationOutcomeDefinition[];
   outcome: EngineSituationOutcome | null;
   sourceRandomEventId: string | null;
   revision: number;
@@ -3243,17 +3440,21 @@ export interface EngineSituation {
 
 export interface EngineSituationProjection {
   id: string;
-  templateId: EngineSituationTemplateId;
+  definitionKey: string;
+  title: string;
   status: EngineSituationStatus;
   currentLocationId: string;
   visitedLocationIds: string[];
   nodes: EngineSituationNode[];
   truths: Array<Pick<EngineSituationTruth, "id" | "title" | "visibility"> & { description?: string; discovered: boolean }>;
   revelations: Array<Pick<EngineSituationRevelation, "id" | "title" | "status">>;
-  clues: Array<Omit<EngineSituationClue, "factId">>;
-  role: Omit<EngineSituationRole, "preferredRef"> & { preferredAvailable: boolean };
-  pressure: Omit<EngineSituationPressure, "nextAdvanceAtMinutes">;
-  criticalObject: EngineSituationCriticalObject;
+  clues: Array<Omit<EngineSituationClue, "factId" | "finding"> & { finding?: string }>;
+  roles: Array<Pick<EngineSituationRole, "id" | "capability" | "status">>;
+  pressure: Omit<EngineSituationPressure, "nextAdvanceAtMinutes" | "defaultDevelopment"> & {
+    defaultDevelopment: EngineSituationPressure["defaultDevelopment"] | null;
+  };
+  criticalObject: EngineSituationCriticalObject | null;
+  outcomes: Array<Pick<EngineSituationOutcomeDefinition, "id" | "title" | "terminalStatus" | "reactivityTier"> & { available: boolean }>;
   outcome: EngineSituationOutcome | null;
   sourceRandomEventId: string | null;
   revision: number;

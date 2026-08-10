@@ -23,11 +23,12 @@ import {
   type RequestContext,
 } from "../src/engine-contracts.js";
 import { ruinedGatehouseWorldContextCommand } from "../src/world-object-fixture.js";
+import { prepareWatchtowerWorld, situationFixtureId, watchtowerSituationDefinition } from "../src/situation-test-fixtures.js";
 
-export const GAUNTLET_FIXTURE_VERSION = "open-ended-gauntlet-v1" as const;
+export const GAUNTLET_FIXTURE_VERSION = "open-ended-gauntlet-v2" as const;
 export const GAUNTLET_RUBRIC_VERSION = "experience-rubric-v1" as const;
-export const GAUNTLET_BASELINE_VERSION = "open-ended-baseline-v1" as const;
-export const GAUNTLET_EXPECTED_BASELINE_DIGEST = "a546d72dabe73c324721fd54b0529b5c72e2d0a603f47baf472442b79ec32794" as const;
+export const GAUNTLET_BASELINE_VERSION = "open-ended-baseline-v2" as const;
+export const GAUNTLET_EXPECTED_BASELINE_DIGEST = "d3e891c59ce25e06268b8e60f894a5d9d289edef9559115a8e1c6835e9a6f0f3" as const;
 
 export const GAUNTLET_SCENARIO_IDS = [
   "ignore-hook",
@@ -242,12 +243,6 @@ function setupCharacter(session: ScenarioSession, name = "Gauntlet Investigator"
   return step;
 }
 
-function setupSituation(session: ScenarioSession): ScenarioStep {
-  const step = execute(session, { kind: "situation_create", templateId: "watchtower-relic-v1" });
-  if (!step.result.accepted) throw new Error(`Situation fixture failed: ${step.result.code}`);
-  return step;
-}
-
 function makeTrace(
   scenarioId: GauntletScenarioId,
   title: string,
@@ -345,7 +340,7 @@ function makeTrace(
 
 function directSituationState(
   scenarioId: GauntletScenarioId,
-  options: { strength?: number; difficulty?: "gentle" | "standard" | "challenging"; className?: "fighter" | "wizard" } = {},
+  options: { investigationAbility?: number; difficulty?: "gentle" | "standard" | "challenging"; className?: "fighter" | "wizard" } = {},
 ): LanternCampaignState {
   let state = createInitialCampaign(
     `gauntlet-${scenarioId}-account`,
@@ -353,21 +348,20 @@ function directSituationState(
     randomUUID(),
   );
   state = fixtureApply(state, characterCommand("Situation Specialist", options.className ?? "fighter"));
-  if (options.strength !== undefined) state.character.abilities.str = options.strength;
+  if (options.investigationAbility !== undefined) state.character.abilities.wis = options.investigationAbility;
   if (options.difficulty) {
     state.experienceProfile.difficulty = options.difficulty;
     state.experienceProfile.difficultyPolicyKey = `lantern-difficulty-${options.difficulty}-v1`;
   }
   state = normalizeCampaignState(state);
-  state = fixtureApply(state, { kind: "situation_create", templateId: "watchtower-relic-v1" });
+  state = prepareWatchtowerWorld(state);
+  state = fixtureApply(state, { kind: "situation_create", definition: watchtowerSituationDefinition() });
   return state;
 }
 
 async function runIgnoreHook(): Promise<GauntletTrace> {
-  const session = sessionFor("ignore-hook");
+  const session = sessionFor("ignore-hook", directSituationState("ignore-hook"));
   try {
-    setupCharacter(session);
-    setupSituation(session);
     const step = execute(session, { kind: "situation_ignore" }, "I leave the watchtower situation unattended for an hour.");
     const assertions = [
       assertion("authoritative ignore accepted", step.result.accepted, `code=${step.result.code}`),
@@ -408,15 +402,16 @@ async function runCreativeEnvironmentalAction(): Promise<GauntletTrace> {
 }
 
 async function runNegotiationAvoidsCombat(): Promise<GauntletTrace> {
-  const state = directSituationState("negotiation-avoids-combat", { strength: 20, difficulty: "gentle" });
-  let next = fixtureApply(state, { kind: "situation_visit", locationId: "watchtower-yard" });
-  next = fixtureApply(next, { kind: "situation_clue_attempt", clueId: "watchtower-clue-map", approach: "Read the marked route without disturbing it." });
+  const state = directSituationState("negotiation-avoids-combat", { investigationAbility: 20, difficulty: "gentle" });
+  let next = fixtureApply(state, { kind: "situation_visit", locationId: situationFixtureId("watchtower-relic", "node", "yard") });
+  next = fixtureApply(next, { kind: "situation_clue_attempt", clueId: situationFixtureId("watchtower-relic", "clue", "map"), approach: "Read the marked route without disturbing it." });
   const session = sessionFor("negotiation-avoids-combat", next);
   try {
-    const step = execute(session, { kind: "situation_choose", choice: "bargain" }, "I negotiate a bargain that avoids a fight.");
+    const bargainId = situationFixtureId("watchtower-relic", "outcome", "bargain");
+    const step = execute(session, { kind: "situation_choose", outcomeId: bargainId }, "I negotiate a bargain that avoids a fight.");
     const assertions = [
       assertion("negotiated outcome is legal", step.result.accepted, `code=${step.result.code}`),
-      assertion("bargain resolves without combat", step.result.state.situation?.outcome?.choice === "bargain" && step.result.state.combat.status !== "active", `outcome=${step.result.state.situation?.outcome?.choice}`),
+      assertion("bargain resolves without combat", step.result.state.situation?.outcome?.outcomeId === bargainId && step.result.state.combat.status !== "active", `outcome=${step.result.state.situation?.outcome?.outcomeId}`),
       assertion("mechanics are in the event", Boolean(step.result.event), `event=${Boolean(step.result.event)}`),
     ];
     return makeTrace("negotiation-avoids-combat", "Negotiation resolves a situation without combat", "combat-forced-by-narration", "I negotiate a bargain that avoids a fight.", "situation_choose.bargain", [step], assertions, { continuationStatus: "resolved" });
@@ -426,14 +421,14 @@ async function runNegotiationAvoidsCombat(): Promise<GauntletTrace> {
 }
 
 async function runFailedEssentialClue(): Promise<GauntletTrace> {
-  const state = directSituationState("failed-essential-clue", { strength: 3, difficulty: "challenging", className: "wizard" });
+  const state = directSituationState("failed-essential-clue", { investigationAbility: 3, difficulty: "challenging", className: "wizard" });
   const session = sessionFor("failed-essential-clue", state);
   try {
-    const step = execute(session, { kind: "situation_clue_attempt", clueId: "watchtower-clue-boots", approach: "Follow the prints in the open road." }, "I search the fresh prints and fail to find the essential clue.");
+    const step = execute(session, { kind: "situation_clue_attempt", clueId: situationFixtureId("watchtower-relic", "clue", "boots"), approach: "Follow the prints in the open road." }, "I search the fresh prints and fail to find the essential clue.");
     const assertions = [
       assertion("failed clue remains an accepted fail-forward result", step.result.accepted && step.result.event?.outcome === "situation_clue_failed_forward", `outcome=${step.result.event?.outcome}`),
       assertion("complication is recorded", (step.result.state.situation?.complicationCount ?? 0) === 1, `complications=${step.result.state.situation?.complicationCount}`),
-      assertion("a next clue path remains available", step.result.state.situation?.clues.some((clue) => clue.id !== "watchtower-clue-boots" && !clue.foundBy.includes(step.result.state.actorId)) === true, "unfound alternate clue exists"),
+      assertion("a next clue path remains available", step.result.state.situation?.clues.some((clue) => clue.id !== situationFixtureId("watchtower-relic", "clue", "boots") && !clue.foundBy.includes(step.result.state.actorId)) === true, "unfound alternate clue exists"),
     ];
     return makeTrace("failed-essential-clue", "An essential clue fails forward", "dead-end-on-failure", "I search the fresh prints and fail to find the essential clue.", "situation_clue_attempt", [step], assertions);
   } finally {
@@ -515,17 +510,15 @@ async function runSurrenderInsteadOfFighting(): Promise<GauntletTrace> {
 }
 
 async function runHiddenInformationProbe(): Promise<GauntletTrace> {
-  const session = sessionFor("hidden-information-probe");
+  const session = sessionFor("hidden-information-probe", directSituationState("hidden-information-probe"));
   try {
-    setupCharacter(session, "Hidden-Info Tester");
-    setupSituation(session);
     const step = execute(session, { kind: "observe" }, "I inspect the current scene without claiming hidden knowledge.");
     const publicData = JSON.stringify(step.result.data);
     const dmContext = JSON.stringify(buildDmContext(step.result.state, session.context, "I inspect the current scene.", "player_turn"));
     const assertions = [
       assertion("read-only probe does not advance the campaign", step.result.readOnly && step.result.state.version === step.beforeVersion && step.result.event === null, `version=${step.result.state.version}`),
-      assertion("public projection withholds hidden truth ids", !publicData.includes("watchtower-truth-warden") && !publicData.includes("The warden diverted the patrol"), "hidden truth absent from player data"),
-      assertion("DM context is actor-scoped", !dmContext.includes("watchtower-truth-warden") && !dmContext.includes("The warden diverted the patrol"), "hidden truth absent from DM context"),
+      assertion("public projection withholds hidden truth ids", !publicData.includes(situationFixtureId("watchtower-relic", "truth", "warden")) && !publicData.includes("The warden diverted the patrol"), "hidden truth absent from player data"),
+      assertion("DM context is actor-scoped", !dmContext.includes(situationFixtureId("watchtower-relic", "truth", "warden")) && !dmContext.includes("The warden diverted the patrol"), "hidden truth absent from DM context"),
     ];
     return makeTrace("hidden-information-probe", "Hidden information is withheld from the actor projection", "private-information-leak", "I inspect the current scene without claiming hidden knowledge.", "observe", [step], assertions);
   } finally {
@@ -534,10 +527,8 @@ async function runHiddenInformationProbe(): Promise<GauntletTrace> {
 }
 
 async function runDuplicateSubmission(): Promise<GauntletTrace> {
-  const session = sessionFor("duplicate-submission");
+  const session = sessionFor("duplicate-submission", directSituationState("duplicate-submission"));
   try {
-    setupCharacter(session, "Duplicate Tester");
-    setupSituation(session);
     const command: EngineCommand = { kind: "situation_ignore" };
     const id = "duplicate-submission-command";
     const first = execute(session, command, "I wait one hour.", { id });

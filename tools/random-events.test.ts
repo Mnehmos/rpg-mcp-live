@@ -13,8 +13,8 @@ vi.mock("node:crypto", async (importOriginal) => {
 
 import type { EngineCommand, EngineWorldContext, LanternCampaignState, RequestContext } from "../src/engine-contracts.js";
 import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "../src/engine-domain.js";
-import { instantiateWatchtowerSituation } from "../src/engine-situations.js";
 import { LanternEngineStore } from "../src/engine-store.js";
+import { prepareWatchtowerWorld, watchtowerSituationDefinition } from "../src/situation-test-fixtures.js";
 
 function contextFor(state: LanternCampaignState, capabilities: RequestContext["capabilities"] = ["player", "dm"]): RequestContext {
   return {
@@ -101,7 +101,7 @@ describe("issue #22 random-event regression fixtures", () => {
     expect(result.state.combat.status).toBe("none");
   });
 
-  it("records contextual selection, provenance, and the reviewed situation seed", () => {
+  it("records contextual selection without auto-authoring a situation, then accepts explicit authored provenance", () => {
     const result = travel(seededState(), 1, 4);
     expect(result.accepted).toBe(true);
     const event = result.state.time.randomEvents.at(-1)!;
@@ -111,32 +111,38 @@ describe("issue #22 random-event regression fixtures", () => {
       occurrenceRoll: 1,
       selectionRoll: 4,
       selectedEntryId: "roadside-sign",
-      createdSituationIds: [result.state.situation?.id],
+      createdSituationIds: [],
     });
-    expect(event.createdFactIds).toHaveLength(8);
+    expect(event.createdFactIds).toHaveLength(0);
     expect(event.sourceEventId).not.toBe(event.id);
-    expect(result.state.situation?.provenance.sourceRandomEvent?.id).toBe(event.id);
+    expect(result.state.situation).toBeNull();
     expect(result.state.combat.status).toBe("none");
+
+    const prepared = prepareWatchtowerWorld(result.state);
+    const command: EngineCommand = { kind: "situation_create", definition: watchtowerSituationDefinition(), sourceRandomEventId: event.id };
+    const authored = resolveEngineCommand(prepared, contextFor(prepared), "authored-event-situation", command, "situation_create");
+    expect(authored.accepted).toBe(true);
+    expect(authored.state.situation?.provenance.sourceRandomEvent?.id).toBe(event.id);
+    expect(authored.state.time.randomEvents.find((candidate) => candidate.id === event.id)?.createdSituationIds).toEqual([authored.state.situation?.id]);
   });
 
-  it("reuses existing actor and object identities instead of duplicating them", () => {
-    const state = seededState();
-    const existing = instantiateWatchtowerSituation(state, "seed-situation", state.version);
-    state.worldContext = existing.worldContext;
+  it("does not duplicate or claim existing actor and object identities", () => {
+    const state = prepareWatchtowerWorld(seededState());
     const result = travel(normalizeCampaignState(state), 1, 4);
     const event = result.state.time.randomEvents.at(-1)!;
-    expect(event.reusedEntityIds).toEqual(expect.arrayContaining(["watchtower-warden", "watchtower-relic"]));
+    expect(event.reusedEntityIds).toEqual([]);
     expect(event.instantiatedEntityIds).toEqual([]);
     expect(result.state.worldContext?.npcs.filter((npc) => npc.id === "watchtower-warden")).toHaveLength(1);
     expect(result.state.worldContext?.objects.filter((object) => object.id === "watchtower-relic")).toHaveLength(1);
   });
 
-  it("instantiates the reviewed actor and object once when neither exists", () => {
+  it("never instantiates an actor or object merely because a table entry was selected", () => {
     const result = travel(seededState(), 1, 4);
     const event = result.state.time.randomEvents.at(-1)!;
-    expect(event.instantiatedEntityIds).toEqual(expect.arrayContaining(["watchtower-warden", "watchtower-relic"]));
+    expect(event.instantiatedEntityIds).toEqual([]);
     expect(event.reusedEntityIds).toEqual([]);
-    expect(new Set(event.instantiatedEntityIds).size).toBe(event.instantiatedEntityIds.length);
+    expect(result.state.worldContext?.npcs).toEqual([]);
+    expect(result.state.worldContext?.objects).toEqual([]);
   });
 
   it("replays a retried command without rerolling or changing the committed event", () => {
@@ -215,12 +221,13 @@ describe("issue #22 random-event regression fixtures", () => {
 
   it("rejects narrator substitution when a committed event did not authorize the situation", () => {
     const travelResult = travel(seededState(), 100);
-    const before = JSON.stringify(travelResult.state);
+    const prepared = prepareWatchtowerWorld(travelResult.state);
+    const before = JSON.stringify(prepared);
     const eventId = travelResult.state.time.randomEvents.at(-1)!.id;
-    const command: EngineCommand = { kind: "situation_create", templateId: "watchtower-relic-v1", sourceRandomEventId: eventId };
+    const command: EngineCommand = { kind: "situation_create", definition: watchtowerSituationDefinition(), sourceRandomEventId: eventId };
     const rejected = resolveEngineCommand(
-      travelResult.state,
-      contextFor(travelResult.state, ["player", "dm"]),
+      prepared,
+      contextFor(prepared, ["player", "dm"]),
       "narrator-substitution",
       command,
       "situation_create",
