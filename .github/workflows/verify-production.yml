@@ -1,14 +1,16 @@
 name: Verify production deployment and publish release
 
-# Railway native GitHub autodeploy owns production. This workflow runs after
-# Railway reports successful deployment of the production ref, verifies both
-# services, and records the release; it never calls Railway's deployment API.
+# Railway native GitHub autodeploy owns production. This workflow starts when
+# Railway reports the deployment and waits for either its aggregate success or
+# both service commit statuses. It verifies both services and records the
+# release; it never calls Railway's deployment API.
 on:
   deployment_status:
 
 permissions:
   contents: read
   deployments: read
+  statuses: read
 
 concurrency:
   group: verify-production-${{ github.event.deployment.sha }}
@@ -20,9 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: production
-    # Railway records the connected GitHub deployment ref as the full SHA.
+    # Railway records the connected GitHub deployment ref as the full SHA. The
+    # integration can leave this deployment in_progress after both service
+    # commit statuses are green, so the job must start on non-terminal states.
     if: >
-      github.event.deployment_status.state == 'success' &&
+      (github.event.deployment_status.state == 'success' ||
+       github.event.deployment_status.state == 'in_progress' ||
+       github.event.deployment_status.state == 'queued') &&
       github.event.deployment.environment == 'RPG MCP Live / production' &&
       github.event.deployment.ref == github.event.deployment.sha &&
       github.event.deployment.creator.login == 'railway-app[bot]'
@@ -49,15 +55,55 @@ jobs:
           test "$DEPLOYMENT_REF" = "$SHA"
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
-      - name: Confirm native Railway deployment status
+      - name: Wait for native Railway deployment or service statuses
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
-            --jq '[.[] | select(.creator.login == "railway-app[bot]")][0].state // ""')
-          test "$state" = "success"
-          echo "RAILWAY_DEPLOYMENT_IDS=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
-          echo "Railway native production deployment $DEPLOYMENT_ID succeeded for $SHA."
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/native-railway-evidence"
+          mkdir -p "$evidence_dir"
+          for attempt in $(seq 1 60); do
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID" \
+              > "$evidence_dir/deployment.json"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses?per_page=100" \
+              > "$evidence_dir/deployment-statuses.json"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
+              > "$evidence_dir/commit-statuses.json"
+
+            set +e
+            result=$(node tools/ci/native-railway-evidence.mjs check \
+              --deployment "$evidence_dir/deployment.json" \
+              --deployment-statuses "$evidence_dir/deployment-statuses.json" \
+              --commit-statuses "$evidence_dir/commit-statuses.json" \
+              --sha "$SHA" \
+              --environment "$DEPLOYMENT_ENVIRONMENT" \
+              --deployment-id "$DEPLOYMENT_ID")
+            result_status=$?
+            set -e
+
+            if [ "$result_status" -eq 0 ]; then
+              printf '%s\n' "$result" > native-railway-evidence.json
+              echo "RAILWAY_DEPLOYMENT_IDS=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
+              echo "Railway native production deployment $DEPLOYMENT_ID is verified for $SHA."
+              exit 0
+            fi
+            if [ "$result_status" -eq 1 ]; then
+              echo "::error::Native Railway production evidence is invalid or failed"
+              exit 1
+            fi
+            if [ "$result_status" -ne 2 ]; then
+              echo "::error::Native Railway production evidence checker failed unexpectedly"
+              exit 1
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "::error::Native Railway production did not reach a verified state"
+              exit 1
+            fi
+            echo "Native Railway production is not ready (attempt $attempt/60); waiting 10 seconds."
+            sleep 10
+          done
 
       - name: Read engine health
         env:
@@ -193,6 +239,7 @@ jobs:
           name: production-release-evidence-${{ env.SHA }}
           path: |
             deployment-manifest.json
+            native-railway-evidence.json
             engine-health.json
             web-health.json
           retention-days: 30
