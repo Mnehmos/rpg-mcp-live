@@ -12,6 +12,11 @@ import type {
   CompiledEffectProgram,
   NormalizedCreature,
 } from "./content/schema.js";
+import {
+  contentProposalSchema,
+  runtimeContentKeySchema,
+  type RuntimeContentState,
+} from "./content/runtime-compiler.js";
 
 export const engineAbilitySchema = z.enum(["str", "dex", "con", "int", "wis", "cha"]);
 export type EngineAbility = z.infer<typeof engineAbilitySchema>;
@@ -869,6 +874,14 @@ export const engineWorldContextCommandSchema = engineWorldContextArgsSchema.exte
 }).strict();
 export type EngineWorldContextCommand = z.infer<typeof engineWorldContextCommandSchema>;
 
+export const engineContentCompileCommandSchema = z.object({
+  kind: z.literal("content_compile"),
+  proposal: contentProposalSchema,
+  createInstance: z.boolean().default(true),
+  instanceKey: runtimeContentKeySchema.optional(),
+}).strict();
+export type EngineContentCompileCommand = z.infer<typeof engineContentCompileCommandSchema>;
+
 export const engineToolNameSchema = z.enum([
   "campaign_context",
   "capability_load",
@@ -878,6 +891,7 @@ export const engineToolNameSchema = z.enum([
   "challenge_attempt",
   "content_search",
   "content_get",
+  "content_compile",
   "rules_reference",
   "character_options",
   "world_context",
@@ -1538,6 +1552,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("observe") }).strict(),
   z.object({ kind: z.literal("listen") }).strict(),
   engineWorldContextCommandSchema,
+  engineContentCompileCommandSchema,
   z
     .object({
       kind: z.literal("player_note_add"),
@@ -3153,6 +3168,8 @@ export interface LanternCampaignState {
   time: EngineTimeState;
   social?: EngineSocialState;
   worldContext: EngineWorldContext | null;
+  /** Strict, inert runtime content definitions and separately persisted instances. */
+  runtimeContent: RuntimeContentState;
   proceduralNotices: EngineProceduralNotice[];
   worldFacts: EngineWorldFact[];
   actorKnowledge: EngineKnowledgeRecord[];
@@ -3218,6 +3235,7 @@ export interface EngineSessionView {
   social: EngineSocialProjection;
   characterCreated: boolean;
   worldContext: EngineWorldContextView | null;
+  runtimeContent: RuntimeContentState;
   proceduralNotices: EngineProceduralNoticeView[];
   playerNotes: EngineNote[];
   log: EngineMessage[];

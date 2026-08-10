@@ -22,6 +22,7 @@ export const engineCoreToolNames = [
   "observe",
   "character_sheet",
   "world_context",
+  "content_compile",
   "player_notes",
   "player_note_add",
   "roll_check",
