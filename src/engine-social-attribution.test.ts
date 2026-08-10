@@ -61,6 +61,16 @@ function socialState(): LanternCampaignState {
         memories: [],
       },
       {
+        id: "marcus",
+        name: "Marcus",
+        description: "A veteran guard who can act for the prisoner.",
+        disposition: "unfriendly",
+        goals: ["keep the gate secure"],
+        socialDc: 12,
+        relationshipScore: 0,
+        memories: [],
+      },
+      {
         id: "arena-sentries",
         name: "Arena Sentries",
         description: "The sentries decide who passes through the gate.",
@@ -86,7 +96,7 @@ function legacyResponse(message: Record<string, unknown>): Response {
   return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) } as Response;
 }
 
-async function resolveWithModelNarration(modelText: string) {
+async function resolveWithModelNarration(modelText: string, actingNpcIds = ["titus"]) {
   const state = socialState();
   const context = contextFor(state);
   const directory = mkdtempSync(join(tmpdir(), "lantern-social-attribution-model-"));
@@ -96,19 +106,19 @@ async function resolveWithModelNarration(modelText: string) {
     .mockResolvedValueOnce(legacyResponse({
       role: "assistant",
       content: null,
-      tool_calls: [{
-        id: "social-tool",
+      tool_calls: actingNpcIds.map((actingNpcId, index) => ({
+        id: `social-tool-${index}`,
         type: "function",
         function: {
           name: "social_check",
           arguments: JSON.stringify({
             npcId: "arena-sentries",
-            actingNpcId: "titus",
+            actingNpcId,
             ability: "cha",
-            goal: "Tell Titus to explain what happened and turn the sentries against Ledrus.",
+            goal: `Have ${actingNpcId} act for the prisoner at the gate.`,
           }),
         },
-      }],
+      })),
     }))
     .mockResolvedValueOnce(legacyResponse({
       role: "assistant",
@@ -292,5 +302,17 @@ describe("social check actor attribution", () => {
     expect(result.narrationSource).toBe("rules");
     expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
     expect(result.narration.text).not.toContain("Titus rolled");
+  });
+
+  it("rejects possessive NPC roll claims and covers every mediated check in one turn", async () => {
+    const result = await resolveWithModelNarration(
+      "Titus's Persuasion roll succeeds, then Marcus's check opens the gate.",
+      ["titus", "marcus"],
+    );
+
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
+    expect(result.narration.text).toContain("Marcus acts for Mnehmos toward Arena Sentries");
+    expect(result.narration.text).not.toContain("Titus's Persuasion roll");
   });
 });

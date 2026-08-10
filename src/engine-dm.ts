@@ -1255,22 +1255,47 @@ function mediatedCheckAttributionText(attribution: EngineSocialCheckAttribution)
   return `${attribution.actingActorName} acts for ${attribution.rollingActorName} toward ${attribution.targetName}; the check uses ${attribution.modifierSourceActorName}'s modifiers.`;
 }
 
-function mediatedCheckAttribution(result: EngineCommandResult): EngineSocialCheckAttribution | null {
-  const effectAttribution = result.event?.effects
+function mediatedCheckAttributions(result: EngineCommandResult): EngineSocialCheckAttribution[] {
+  const effectAttributions = result.event?.effects
     ?.map((effect) => effect.check?.attribution)
-    .find((attribution): attribution is EngineSocialCheckAttribution => attribution?.mode === "npc-mediated");
-  return effectAttribution
-    ?? (result.event?.check?.attribution?.mode === "npc-mediated" ? result.event.check.attribution : null);
+    .filter((attribution): attribution is EngineSocialCheckAttribution => attribution?.mode === "npc-mediated")
+    ?? [];
+  if (effectAttributions.length > 0) return effectAttributions;
+  return result.event?.check?.attribution?.mode === "npc-mediated"
+    ? [result.event.check.attribution]
+    : [];
 }
 
 function narrationContradictsMediatedCheck(text: string, attribution: EngineSocialCheckAttribution): boolean {
   const actor = attribution.actingActorName.trim().toLocaleLowerCase("en-US").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const source = attribution.modifierSourceActorName.trim().toLocaleLowerCase("en-US");
   const normalized = text.toLocaleLowerCase("en-US");
-  const actorClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:rolled|rolls|is rolling|made|makes|attempts|performs)\\b[^.!?]{0,40}\\b(?:check|roll)\\b`, "i");
+  const actorClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs)\\b[^.!?]{0,60}\\b(?:check|roll)\\b`, "i");
+  const possessiveClaim = new RegExp(`\\b${actor}(?:['’]s)\\b[^.!?]{0,80}\\b(?:check|roll|modifier)\\b`, "i");
+  const pronounModifierClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:uses?|used|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "i");
   return actorClaim.test(normalized)
+    || possessiveClaim.test(normalized)
+    || pronounModifierClaim.test(normalized)
     || (source !== attribution.actingActorName.trim().toLocaleLowerCase("en-US")
-      && normalized.includes(`${attribution.actingActorName.trim().toLocaleLowerCase("en-US")}'s modifier`));
+      && new RegExp(`\\b${actor}(?:['’]s)?\\b[^.!?]{0,40}\\bmodifiers?\\b`, "i").test(normalized));
+}
+
+function appendMissingMediatedAttributions(
+  narration: NarrationEnvelope,
+  attributions: EngineSocialCheckAttribution[],
+  requireAuthoritativeLabel: boolean,
+): NarrationEnvelope {
+  const additions = attributions
+    .map((attribution) => {
+      const text = mediatedCheckAttributionText(attribution);
+      const marker = "Authoritative check record: " + text;
+      const present = requireAuthoritativeLabel ? narration.text.includes(marker) : narration.text.includes(text);
+      return present ? null : marker;
+    })
+    .filter((addition): addition is string => addition !== null);
+  return additions.length > 0
+    ? { ...narration, text: `${narration.text.trim()}\n\n${additions.join("\n\n")}` }
+    : narration;
 }
 
 function preserveMediatedCheckAttribution(
@@ -1278,15 +1303,19 @@ function preserveMediatedCheckAttribution(
   narration: NarrationEnvelope,
   experienceProfile: LanternCampaignState["experienceProfile"],
 ): { narration: NarrationEnvelope; source: "llm" | "rules" } {
-  const attribution = mediatedCheckAttribution(result);
+  const attributions = mediatedCheckAttributions(result);
   const sanitized = sanitizeNarrationForProfile(narration, experienceProfile);
-  if (!attribution) return { narration: sanitized, source: "llm" };
-  if (narrationContradictsMediatedCheck(sanitized.text, attribution)) {
-    return { narration: committedRulesNarration(result), source: "rules" };
+  if (attributions.length === 0) return { narration: sanitized, source: "llm" };
+  if (attributions.some((attribution) => narrationContradictsMediatedCheck(sanitized.text, attribution))) {
+    return {
+      narration: appendMissingMediatedAttributions(committedRulesNarration(result), attributions, false),
+      source: "rules",
+    };
   }
-  const authoritative = "Authoritative check record: " + mediatedCheckAttributionText(attribution);
-  if (sanitized.text.includes(authoritative)) return { narration: sanitized, source: "llm" };
-  return { narration: { ...sanitized, text: `${sanitized.text.trim()}\n\n${authoritative}` }, source: "llm" };
+  return {
+    narration: appendMissingMediatedAttributions(sanitized, attributions, true),
+    source: "llm",
+  };
 }
 
 function committedMoveText(data: unknown): string {
