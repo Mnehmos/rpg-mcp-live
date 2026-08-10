@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { RequestContext } from "./engine-contracts.js";
+import type { ModelUsageTelemetry } from "./usage-ledger.js";
 import { openAiSdkFetch as sdkFetch } from "./test-openai-stream.js";
 
 const options = {
@@ -145,7 +146,11 @@ describe("Lantern OpenRouter tool loop", () => {
       actorId: "actor-a",
       capabilities: ["player", "dm"],
     };
-    const dm = new LanternDungeonMaster(store, options);
+    const purposes: string[] = [];
+    const dm = new LanternDungeonMaster(store, {
+      ...options,
+      onCompletionTelemetry: (event) => purposes.push(event.purpose ?? "missing"),
+    });
     const result = await dm.resolveTurn(
       context,
       state,
@@ -174,6 +179,7 @@ describe("Lantern OpenRouter tool loop", () => {
         },
       },
     });
+    expect(purposes).toEqual(expect.arrayContaining(["player_turn", "narration"]));
     const systemPrompt = firstRequest.messages[0]?.content;
     expect(systemPrompt).toContain("creative director");
     expect(systemPrompt).toContain("combat_start");
@@ -261,7 +267,16 @@ describe("Lantern OpenRouter tool loop", () => {
     };
     const clientCommandId = randomUUID();
     const playerText = "I quietly retrieve the fallen key without alerting Titus.";
-    const dm = new LanternDungeonMaster(store, options);
+    const dm = new LanternDungeonMaster(store, {
+      ...options,
+      onCompletionTelemetry: (event) => {
+        store.recordModelUsage({
+          ...event,
+          requestedModel: event.model,
+          latencyMs: event.durationMs,
+        } as ModelUsageTelemetry);
+      },
+    });
     const result = await dm.resolveTurn(context, state, clientCommandId, 0, playerText);
 
     const rollText = result.session.log.filter((message) => message.kind === "roll").at(-1)?.text;
@@ -278,6 +293,7 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(replay).toMatchObject({ replayed: true, narrationSource: "rules" });
     expect(replay.narration.text).toBe(result.narration.text);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(store.getModelUsageSummary({ clientCommandId }).requestCount).toBe(2);
     store.close();
   });
 
@@ -794,7 +810,11 @@ describe("Lantern OpenRouter tool loop", () => {
       actorId: state.actorId,
       capabilities: ["player", "dm"],
     };
-    const dm = new LanternDungeonMaster(store, options);
+    const purposes: string[] = [];
+    const dm = new LanternDungeonMaster(store, {
+      ...options,
+      onCompletionTelemetry: (event) => purposes.push(event.purpose ?? "missing"),
+    });
     const commandId = randomUUID();
     const result = await dm.startOpening(
       context,
@@ -812,6 +832,7 @@ describe("Lantern OpenRouter tool loop", () => {
       content: expect.stringContaining("proposedFacts.0.kind"),
     });
     expect(repairRequest.messages.at(-1)?.content).toContain("discover_location");
+    expect(purposes).toEqual(["opening", "narration", "narration_repair"]);
     expect(result.narrationSource).toBe("llm");
     expect(result.narration.text).toContain("guard has not noticed");
     expect(result.narration.text).not.toContain("proposedFacts");
