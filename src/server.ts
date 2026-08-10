@@ -407,6 +407,21 @@ app.get("/api/campaigns/:campaignId/events", async (request, response) => {
   }
 });
 
+// Bounded, resumable event-stream consumer for the browser and future UI
+// projections. The acknowledgement cursor is client-owned and read-only.
+app.get("/api/campaigns/:campaignId/events/stream", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  try {
+    const after = typeof request.query.after === "string" ? request.query.after : undefined;
+    const limit = typeof request.query.limit === "string" ? Number(request.query.limit) : undefined;
+    const page = await engineClient.getCampaignEventStream(userId, userId, request.params.campaignId, { after, limit });
+    response.json(page);
+  } catch (error) {
+    sendWebEngineError(response, error);
+  }
+});
+
 app.post("/api/campaigns/:campaignId/commands", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;

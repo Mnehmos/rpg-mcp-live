@@ -5,6 +5,15 @@ import Database from "better-sqlite3";
 import type { NarrationEnvelope } from "./ai-contracts.js";
 import type { Open5ePackDescriptor } from "./content/pack.js";
 import { cloneCampaign, normalizeCampaignState, toSessionView } from "./engine-domain.js";
+import {
+  ENGINE_EVENT_STREAM_DEFAULT_PAGE_SIZE,
+  ENGINE_EVENT_STREAM_MAX_PAGE_SIZE,
+  ENGINE_EVENT_STREAM_SCHEMA_REVISION,
+  cursorForEngineEvent,
+  decodeEngineEventStreamCursor,
+  type EngineEventStreamPage,
+  type EngineEventStreamQuery,
+} from "./engine-event-stream.js";
 import type {
   CreateCampaignContext,
   EngineCampaignDeletionResult,
@@ -267,6 +276,9 @@ export class LanternEngineStore {
         ");",
       ].join("\n")
     );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS engine_events_campaign_order_idx ON engine_events (account_id, campaign_id, version, created_at, event_id);"
+    );
     ensureModelUsageTable(this.db);
   }
 
@@ -407,6 +419,50 @@ export class LanternEngineStore {
       "SELECT event_json FROM engine_events WHERE account_id = ? AND campaign_id = ? ORDER BY version, created_at, event_id"
     ).all(context.accountId, context.campaignId) as EventRow[];
     return rows.map((row) => JSON.parse(row.event_json) as EngineEvent);
+  }
+
+  /**
+   * Return one bounded, ordered page over the immutable event table. The
+   * cursor is client-owned and only advances after the consumer acknowledges
+   * the page, so reconnecting with the last cursor cannot replay a mutation.
+   */
+  public listCampaignEventStream(
+    context: RequestContext,
+    query: EngineEventStreamQuery
+  ): EngineEventStreamPage<EngineEvent> {
+    this.getCampaign(context);
+    const after = decodeEngineEventStreamCursor(query.after, context.campaignId);
+    const requestedLimit = Number.isFinite(query.limit) ? Math.trunc(query.limit) : ENGINE_EVENT_STREAM_DEFAULT_PAGE_SIZE;
+    const pageSize = Math.min(Math.max(requestedLimit, 1), ENGINE_EVENT_STREAM_MAX_PAGE_SIZE);
+    const rows = (after
+      ? this.db.prepare(
+          "SELECT event_json FROM engine_events WHERE account_id = ? AND campaign_id = ? AND (version > ? OR (version = ? AND (created_at > ? OR (created_at = ? AND event_id > ?)))) ORDER BY version, created_at, event_id LIMIT ?"
+        ).all(
+          context.accountId,
+          context.campaignId,
+          after.version,
+          after.version,
+          after.createdAt,
+          after.createdAt,
+          after.eventId,
+          pageSize + 1
+        )
+      : this.db.prepare(
+          "SELECT event_json FROM engine_events WHERE account_id = ? AND campaign_id = ? ORDER BY version, created_at, event_id LIMIT ?"
+        ).all(context.accountId, context.campaignId, pageSize + 1)) as EventRow[];
+    const events = rows.map((row) => JSON.parse(row.event_json) as EngineEvent);
+    const hasMore = events.length > pageSize;
+    const visibleEvents = events.slice(0, pageSize);
+    const nextCursor = visibleEvents.length
+      ? cursorForEngineEvent(context.campaignId, visibleEvents[visibleEvents.length - 1])
+      : query.after;
+    return {
+      schemaRevision: ENGINE_EVENT_STREAM_SCHEMA_REVISION,
+      campaignId: context.campaignId,
+      events: visibleEvents,
+      nextCursor,
+      hasMore,
+    };
   }
 
   public getStoredCommand(accountId: string, clientCommandId: string): StoredEngineCommand | null {

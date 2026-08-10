@@ -16,6 +16,11 @@ import type { OrchestrationDecisionRequest, OrchestrationState } from "./engine-
 import type { Open5eCharacterOptions } from "./open5e-rules.js";
 import type { Open5eContentCatalog } from "./content/catalog.js";
 import type { ResolvedEngineEventEvidence } from "./content/registry.js";
+import type {
+  EngineEventStreamEvidence,
+  EngineEventStreamPage,
+  EngineEventStreamQuery,
+} from "./engine-event-stream.js";
 
 export interface EngineClientOptions {
   baseUrl: string;
@@ -156,6 +161,28 @@ export class LanternEngineClient {
       { accountId, actorId }
     );
     return result.data.events;
+  }
+
+  /**
+   * Read one acknowledged/resumable page from the canonical engine event
+   * stream. The web service is the bounded internal consumer for the browser
+   * and future projections; it never writes gameplay state here.
+   */
+  public async getCampaignEventStream(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    query: Partial<EngineEventStreamQuery> = {}
+  ): Promise<EngineEventStreamPage<EngineEventStreamEvidence>> {
+    const params = new URLSearchParams();
+    if (query.after) params.set("after", query.after);
+    params.set("limit", String(query.limit ?? 50));
+    const result = await this.request<EngineEventStreamPage<EngineEventStreamEvidence>>(
+      "/v1/campaigns/" + encodeURIComponent(campaignId) + "/events/stream?" + params.toString(),
+      { method: "GET" },
+      { accountId, actorId }
+    );
+    return result.data;
   }
 
   public async deleteCampaign(
