@@ -8,6 +8,13 @@ export function pendingCommandStorageKey(userId) {
   return `lantern.pendingCommand.${normalizedUserId || "anonymous"}`;
 }
 
+export function isPendingCommandForCampaign(record, campaignId) {
+  const normalizedCampaignId = String(campaignId || "").trim();
+  const normalizedRecordCampaignId = String(record?.campaignId || "").trim();
+  const normalizedCommandId = String(record?.clientCommandId || "").trim();
+  return Boolean(normalizedCampaignId && normalizedRecordCampaignId === normalizedCampaignId && normalizedCommandId);
+}
+
 export function campaignSessionUrl(campaignId) {
   const normalizedCampaignId = String(campaignId || "").trim();
   return normalizedCampaignId
