@@ -27,6 +27,7 @@ import type {
   EngineCommandResult,
   EngineEvent,
   EngineMessage,
+  EngineNpcTickCommand,
   EnginePersistedCommand,
   EngineResolution,
   LanternCampaignState,
@@ -147,6 +148,21 @@ export interface ReservePlayerTurnInput {
   playerText: string;
 }
 
+export interface ReserveNpcAgencyCommandInput {
+  context: RequestContext;
+  clientCommandId: string;
+  expectedCampaignVersion: number;
+  command: EngineNpcTickCommand;
+  tool: EngineResolution["tool"];
+  npcId: string;
+}
+
+export interface NpcAgencyCommandReservation {
+  result: EngineCommandResult | null;
+  shouldInvokeProvider: boolean;
+  recoveredAfterRestart: boolean;
+}
+
 interface CommandRequestRecord {
   campaignId?: unknown;
   clientCommandId?: unknown;
@@ -178,6 +194,19 @@ function playerTurnReservationJson(input: ReservePlayerTurnInput, reservationOwn
   });
 }
 
+function npcAgencyReservationJson(input: ReserveNpcAgencyCommandInput, reservationOwnerId: string): string {
+  return JSON.stringify({
+    campaignId: input.context.campaignId,
+    clientCommandId: input.clientCommandId,
+    expectedCampaignVersion: input.expectedCampaignVersion,
+    command: input.command,
+    tool: input.tool,
+    playerText: null,
+    reservation: "npc_agency",
+    reservationOwnerId,
+  });
+}
+
 function matchesPlayerTurnReservation(
   requestJson: string,
   input: Pick<ReservePlayerTurnInput, "context" | "clientCommandId" | "expectedCampaignVersion" | "playerText">,
@@ -189,6 +218,21 @@ function matchesPlayerTurnReservation(
     && request.clientCommandId === input.clientCommandId
     && request.expectedCampaignVersion === input.expectedCampaignVersion
     && request.playerText === input.playerText
+    && (!reservationOwnerId || request.reservationOwnerId === reservationOwnerId);
+}
+
+function matchesNpcAgencyReservation(
+  requestJson: string,
+  input: Pick<ReserveNpcAgencyCommandInput, "context" | "clientCommandId" | "expectedCampaignVersion" | "command" | "tool">,
+  reservationOwnerId?: string,
+): boolean {
+  const request = parseCommandRequest(requestJson);
+  return request?.reservation === "npc_agency"
+    && request.campaignId === input.context.campaignId
+    && request.clientCommandId === input.clientCommandId
+    && request.expectedCampaignVersion === input.expectedCampaignVersion
+    && request.tool === input.tool
+    && JSON.stringify(request.command) === JSON.stringify(input.command)
     && (!reservationOwnerId || request.reservationOwnerId === reservationOwnerId);
 }
 
@@ -280,6 +324,18 @@ export class LanternEngineStore {
         "  event_json TEXT NOT NULL,",
         "  created_at TEXT NOT NULL,",
         "  UNIQUE (account_id, client_command_id)",
+        ");",
+        "CREATE TABLE IF NOT EXISTS engine_npc_provider_triggers (",
+        "  account_id TEXT NOT NULL,",
+        "  campaign_id TEXT NOT NULL,",
+        "  npc_id TEXT NOT NULL,",
+        "  trigger_id TEXT NOT NULL,",
+        "  client_command_id TEXT NOT NULL,",
+        "  reservation_owner_id TEXT NOT NULL,",
+        "  status TEXT NOT NULL,",
+        "  created_at TEXT NOT NULL,",
+        "  updated_at TEXT NOT NULL,",
+        "  PRIMARY KEY (account_id, campaign_id, npc_id, trigger_id)",
         ");",
       ].join("\n")
     );
@@ -402,6 +458,9 @@ export class LanternEngineStore {
       const deletedCommands = this.db
         .prepare("DELETE FROM engine_commands WHERE account_id = ? AND campaign_id = ?")
         .run(context.accountId, context.campaignId).changes;
+      this.db
+        .prepare("DELETE FROM engine_npc_provider_triggers WHERE account_id = ? AND campaign_id = ?")
+        .run(context.accountId, context.campaignId);
       const deletedCampaign = this.db
         .prepare("DELETE FROM engine_campaigns WHERE account_id = ? AND campaign_id = ?")
         .run(context.accountId, context.campaignId).changes;
@@ -545,6 +604,133 @@ export class LanternEngineStore {
     return transaction();
   }
 
+  /**
+   * Reserve an asynchronous NPC choice before contacting the provider.
+   * A different process may recover an abandoned reservation, but it must use
+   * deterministic fallback instead of issuing a second provider request.
+   */
+  public reserveNpcAgencyCommand(input: ReserveNpcAgencyCommandInput): NpcAgencyCommandReservation {
+    const requestJson = npcAgencyReservationJson(input, this.reservationOwnerId);
+    const transaction = this.db.transaction((): NpcAgencyCommandReservation => {
+      const existing = this.db
+        .prepare(
+          "SELECT account_id, campaign_id, client_command_id, request_json, status, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
+        )
+        .get(input.context.accountId, input.clientCommandId) as CommandRow | undefined;
+
+      if (existing) {
+        const request = parseCommandRequest(existing.request_json);
+        const matchesRequest = request?.campaignId === input.context.campaignId
+          && request?.clientCommandId === input.clientCommandId
+          && request?.expectedCampaignVersion === input.expectedCampaignVersion
+          && request?.tool === input.tool
+          && JSON.stringify(request.command) === JSON.stringify(input.command);
+        if (!matchesRequest) throw new EngineCommandIdReuseError();
+        if (existing.status === "resolved" && existing.result_json) {
+          return {
+            result: { ...(JSON.parse(existing.result_json) as EngineCommandResult), replayed: true },
+            shouldInvokeProvider: false,
+            recoveredAfterRestart: false,
+          };
+        }
+        if (existing.status !== "processing") throw new EngineCommandInProgressError();
+        if (request?.reservation === "npc_agency" && request.reservationOwnerId !== this.reservationOwnerId) {
+          this.db
+            .prepare(
+              "UPDATE engine_commands SET request_json = ?, created_at = ? WHERE account_id = ? AND client_command_id = ?"
+            )
+            .run(requestJson, new Date().toISOString(), input.context.accountId, input.clientCommandId);
+          return { result: null, shouldInvokeProvider: false, recoveredAfterRestart: true };
+        }
+        throw new EngineCommandInProgressError();
+      }
+
+      const current = this.getCampaign(input.context);
+      if (current.version !== input.expectedCampaignVersion) {
+        throw new EngineVersionConflictError(current, input.expectedCampaignVersion);
+      }
+      const triggerReservation = this.db
+        .prepare(
+          "SELECT reservation_owner_id, status FROM engine_npc_provider_triggers WHERE account_id = ? AND campaign_id = ? AND npc_id = ? AND trigger_id = ?"
+        )
+        .get(
+          input.context.accountId,
+          input.context.campaignId,
+          input.npcId,
+          input.command.triggerId,
+        ) as { reservation_owner_id: string; status: string } | undefined;
+      if (triggerReservation?.status === "reserved" && triggerReservation.reservation_owner_id === this.reservationOwnerId) {
+        throw new EngineCommandInProgressError();
+      }
+      const now = new Date().toISOString();
+      const shouldInvokeProvider = !triggerReservation;
+      if (triggerReservation) {
+        this.db
+          .prepare(
+            "UPDATE engine_npc_provider_triggers SET client_command_id = ?, reservation_owner_id = ?, status = 'consumed', updated_at = ? WHERE account_id = ? AND campaign_id = ? AND npc_id = ? AND trigger_id = ?"
+          )
+          .run(
+            input.clientCommandId,
+            this.reservationOwnerId,
+            now,
+            input.context.accountId,
+            input.context.campaignId,
+            input.npcId,
+            input.command.triggerId,
+          );
+      } else {
+        this.db
+          .prepare(
+            "INSERT INTO engine_npc_provider_triggers (account_id, campaign_id, npc_id, trigger_id, client_command_id, reservation_owner_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?)"
+          )
+          .run(
+            input.context.accountId,
+            input.context.campaignId,
+            input.npcId,
+            input.command.triggerId,
+            input.clientCommandId,
+            this.reservationOwnerId,
+            now,
+            now,
+          );
+      }
+      this.db
+        .prepare(
+          "INSERT INTO engine_commands (account_id, campaign_id, client_command_id, request_json, status, created_at) VALUES (?, ?, ?, ?, 'processing', ?)"
+        )
+        .run(
+          input.context.accountId,
+          input.context.campaignId,
+          input.clientCommandId,
+          requestJson,
+          now
+        );
+      return {
+        result: null,
+        shouldInvokeProvider,
+        recoveredAfterRestart: Boolean(triggerReservation),
+      };
+    });
+
+    return transaction();
+  }
+
+  /** Mark the durable trigger lease consumed before attempting its state commit. */
+  public markNpcAgencyProviderAttempted(input: Pick<ReserveNpcAgencyCommandInput, "context" | "clientCommandId" | "command" | "npcId">): void {
+    this.db
+      .prepare(
+        "UPDATE engine_npc_provider_triggers SET status = 'consumed', updated_at = ? WHERE account_id = ? AND campaign_id = ? AND npc_id = ? AND trigger_id = ? AND client_command_id = ?"
+      )
+      .run(
+        new Date().toISOString(),
+        input.context.accountId,
+        input.context.campaignId,
+        input.npcId,
+        input.command.triggerId,
+        input.clientCommandId,
+      );
+  }
+
   public executeCommand(input: ExecuteEngineCommandInput): EngineCommandResult {
     const requestJson = JSON.stringify({
       campaignId: input.context.campaignId,
@@ -571,8 +757,24 @@ export class LanternEngineStore {
           expectedCampaignVersion: input.expectedCampaignVersion,
           playerText: input.playerText ?? "",
         };
-        const isReservation = existing.request_json !== requestJson
+        const isPlayerReservation = existing.request_json !== requestJson
           && matchesPlayerTurnReservation(existing.request_json, reservationInput, this.reservationOwnerId);
+        const npcReservationInput: Pick<
+          ReserveNpcAgencyCommandInput,
+          "context" | "clientCommandId" | "expectedCampaignVersion" | "command" | "tool"
+        > | null = input.command.kind === "npc_tick"
+          ? {
+              context: input.context,
+              clientCommandId: input.clientCommandId,
+              expectedCampaignVersion: input.expectedCampaignVersion,
+              command: input.command,
+              tool: input.tool,
+            }
+          : null;
+        const isNpcReservation = existing.request_json !== requestJson
+          && Boolean(npcReservationInput)
+          && matchesNpcAgencyReservation(existing.request_json, npcReservationInput!, this.reservationOwnerId);
+        const isReservation = isPlayerReservation || isNpcReservation;
         if (existing.request_json !== requestJson) {
           if (!isReservation) {
             throw new EngineCommandIdReuseError();

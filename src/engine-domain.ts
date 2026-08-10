@@ -133,6 +133,7 @@ import type {
   EngineNpcActionOffer,
   EngineNpcAgencyAction,
   EngineNpcAgencyState,
+  EngineNpcProviderSelection,
   EngineNpcGoal,
   EngineNpcInvocation,
   EngineNpcPendingAction,
@@ -1493,6 +1494,13 @@ function normalizeNpcInvocation(value: unknown): EngineNpcInvocation[] {
       npcId: raw.npcId,
       provider: raw.provider === "openrouter" ? "openrouter" as const : "deterministic" as const,
       model: typeof raw.model === "string" ? raw.model : "npc-policy-v1",
+      providerRequestId: typeof raw.providerRequestId === "string" ? raw.providerRequestId : null,
+      status: raw.status === "success"
+        || raw.status === "timeout_before_output"
+        || raw.status === "interrupted_after_output"
+        || raw.status === "invalid_response"
+        ? raw.status
+        : raw.provider === "openrouter" ? "provider_error" as const : "success" as const,
       inputTokens: typeof raw.inputTokens === "number" ? Math.max(0, Math.trunc(raw.inputTokens)) : 0,
       cacheTokens: typeof raw.cacheTokens === "number" ? Math.max(0, Math.trunc(raw.cacheTokens)) : 0,
       reasoningTokens: typeof raw.reasoningTokens === "number" ? Math.max(0, Math.trunc(raw.reasoningTokens)) : 0,
@@ -1502,6 +1510,7 @@ function normalizeNpcInvocation(value: unknown): EngineNpcInvocation[] {
       outcome: raw.outcome === "selected" || raw.outcome === "circuit_open" || raw.outcome === "rejected" ? raw.outcome : "fallback" as const,
       fallback: raw.fallback !== false,
       selectedOfferId: action,
+      rationale: typeof raw.rationale === "string" ? raw.rationale.slice(0, 240) : null,
       budget: {
         maxInputTokens: typeof raw.budget?.maxInputTokens === "number" ? Math.max(0, Math.trunc(raw.budget.maxInputTokens)) : NPC_AGENCY_CONFIG.maxInputTokens,
         maxOutputTokens: typeof raw.budget?.maxOutputTokens === "number" ? Math.max(0, Math.trunc(raw.budget.maxOutputTokens)) : NPC_AGENCY_CONFIG.maxOutputTokens,
@@ -3491,6 +3500,11 @@ export function resolveOrchestrationDecision(
   );
 }
 
+export interface EngineInternalAuthority {
+  sceneMoveBindingValidated?: boolean;
+  npcAgencySelection?: EngineNpcProviderSelection;
+}
+
 export function resolveEngineCommand(
   state: LanternCampaignState,
   context: RequestContext,
@@ -3498,7 +3512,7 @@ export function resolveEngineCommand(
   command: EngineCommand,
   tool: EngineToolName | "declare" | "listen",
   playerText?: string,
-  internalAuthority?: { sceneMoveBindingValidated?: boolean },
+  internalAuthority?: EngineInternalAuthority,
 ): EngineResolution {
   if (
     state.character.lifecycleState === "dead"
@@ -3601,7 +3615,7 @@ export function resolveEngineCommand(
     case "social_action":
       return resolveSocialAction(state, context, clientCommandId, command, tool);
     case "npc_tick":
-      return resolveNpcTick(state, context, clientCommandId, command, tool);
+      return resolveNpcTick(state, context, clientCommandId, command, tool, internalAuthority?.npcAgencySelection);
     case "merchant_trade":
       return resolveMerchantTrade(state, context, clientCommandId, command, tool);
     case "quest_create":
@@ -5863,40 +5877,139 @@ function npcLegalOffers(
   return offers;
 }
 
+export interface NpcAgencyChoicePreparation {
+  npcId: string;
+  npcName: string;
+  trigger: EngineNpcTickCommand["trigger"];
+  triggerId: string;
+  offers: EngineNpcActionOffer[];
+  fallbackOfferId: EngineNpcAgencyAction;
+  promptContext: {
+    actorId: string;
+    actorType: EngineNpcAgencyState["actorType"];
+    locationRef: string;
+    schedule: EngineNpcScheduleEntry[];
+    goals: EngineNpcGoal[];
+    resources: { actionPoints: number; copper: number; itemIds: string[] };
+    health: { hp: number; maxHp: number; lifecycleState: EngineNpcAgencyState["lifecycleState"] };
+    facts: EngineWorldFact[];
+    knowledge: EngineKnowledgeRecord[];
+    social: EngineSocialProjection;
+  };
+}
+
+export type NpcAgencyChoicePreparationResult =
+  | { ok: true; value: NpcAgencyChoicePreparation }
+  | { ok: false; code: string; message: string };
+
+/**
+ * Derive the complete actor-safe, finite provider request without mutating
+ * campaign state. The commit path calls the same function again, so a model
+ * response can never make a stale or newly-illegal offer authoritative.
+ */
+export function prepareNpcAgencyChoice(
+  state: LanternCampaignState,
+  command: EngineNpcTickCommand,
+): NpcAgencyChoicePreparationResult {
+  const candidates = state.worldContext?.npcs ?? [];
+  const npc = command.npcId
+    ? candidates.find((candidate) => candidate.id === command.npcId)
+    : candidates.find((candidate) => Boolean(candidate.agency));
+  if (!npc) {
+    return {
+      ok: false,
+      code: command.npcId ? "npc_not_found" : "npc_agency_unavailable",
+      message: "The requested NPC does not have a persisted agency state.",
+    };
+  }
+  const agency = npc.agency;
+  if (!agency) return { ok: false, code: "npc_agency_unavailable", message: "NPC agency must be explicitly configured before a tick can run." };
+  if (npc.custody) return { ok: false, code: "custody_restricted", message: "That actor is under guard custody and cannot take an autonomous action." };
+  if (agency.completedTriggerIds.includes(command.triggerId)) {
+    return { ok: false, code: "npc_trigger_replayed", message: "That authoritative NPC trigger has already been processed." };
+  }
+  const currentDay = Math.floor(state.time.gameTime.totalMinutes / ONE_DAY_MINUTES);
+  if (agency.circuitState === "open") {
+    return { ok: false, code: "npc_circuit_open", message: "NPC agency is open-circuited for this session; deterministic fallback is not retried." };
+  }
+  if ((agency.invocationDay === currentDay ? agency.invocationsToday : 0) >= NPC_AGENCY_CONFIG.maxInvocationsPerDay) {
+    return { ok: false, code: "npc_invocation_budget_exhausted", message: "The NPC invocation budget for this campaign day is exhausted." };
+  }
+  if (agency.lifecycleState !== "conscious" || agency.hp <= 0) {
+    return { ok: false, code: "npc_incapacitated", message: "A dead or incapacitated NPC cannot take an agency action." };
+  }
+
+  const offers = npcLegalOffers(state, npc);
+  const fallbackOfferId = command.offerId ?? offers[0]?.id ?? "no_op";
+  const promptProjection = actorKnowledgeProjection(npc.id, state);
+  const promptSocial = {
+    ...promptProjection.social,
+    rumors: promptProjection.social.rumors.filter((rumor) => rumor.targetId === npc.id),
+  };
+  const promptKnowledge = promptProjection.knowledge.filter((record) =>
+    !record.stale && record.tier !== "withheld" && record.tier !== "stale"
+  );
+  return {
+    ok: true,
+    value: {
+      npcId: npc.id,
+      npcName: npc.name,
+      trigger: command.trigger,
+      triggerId: command.triggerId,
+      offers,
+      fallbackOfferId,
+      promptContext: {
+        actorId: npc.id,
+        actorType: agency.actorType,
+        locationRef: agency.locationRef,
+        schedule: agency.schedule,
+        goals: agency.goals,
+        resources: {
+          actionPoints: agency.resources.actionPoints,
+          copper: agency.resources.copper,
+          itemIds: agency.resources.inventory.filter((item) => item.quantity > 0).map((item) => item.id),
+        },
+        health: { hp: agency.hp, maxHp: agency.maxHp, lifecycleState: agency.lifecycleState },
+        facts: promptProjection.facts,
+        knowledge: promptKnowledge,
+        social: promptSocial,
+      },
+    },
+  };
+}
+
 function resolveNpcTick(
   state: LanternCampaignState,
   context: RequestContext,
   clientCommandId: string,
   command: EngineNpcTickCommand,
   tool: EngineToolName | "declare" | "listen",
+  providerSelection?: EngineNpcProviderSelection,
 ): EngineResolution {
-  const candidates = state.worldContext?.npcs ?? [];
-  const npc = command.npcId
-    ? candidates.find((candidate) => candidate.id === command.npcId)
-    : candidates.find((candidate) => Boolean(candidate.agency));
-  if (!npc) return rejection(state, tool, command.npcId ? "npc_not_found" : "npc_agency_unavailable", "The requested NPC does not have a persisted agency state.");
-  const agency = npc.agency;
-  if (!agency) return rejection(state, tool, "npc_agency_unavailable", "NPC agency must be explicitly configured before a tick can run.");
-  if (agency.completedTriggerIds.includes(command.triggerId)) return rejection(state, tool, "npc_trigger_replayed", "That authoritative NPC trigger has already been processed.");
+  const preparation = prepareNpcAgencyChoice(state, command);
+  if (!preparation.ok) return rejection(state, tool, preparation.code, preparation.message);
+  const prepared = preparation.value;
+  const npc = state.worldContext!.npcs.find((candidate) => candidate.id === prepared.npcId)!;
+  const agency = npc.agency!;
   const currentDay = Math.floor(state.time.gameTime.totalMinutes / ONE_DAY_MINUTES);
-  if (agency.circuitState === "open") return rejection(state, tool, "npc_circuit_open", "NPC agency is open-circuited for this session; deterministic fallback is not retried.");
-  if ((agency.invocationDay === currentDay ? agency.invocationsToday : 0) >= NPC_AGENCY_CONFIG.maxInvocationsPerDay) {
-    return rejection(state, tool, "npc_invocation_budget_exhausted", "The NPC invocation budget for this campaign day is exhausted.");
-  }
-  if (agency.lifecycleState !== "conscious" || agency.hp <= 0) return rejection(state, tool, "npc_incapacitated", "A dead or incapacitated NPC cannot take an agency action.");
-
-  const offers = npcLegalOffers(state, npc);
-  const selectedOfferId = command.offerId ?? offers[0]?.id ?? "no_op";
+  const offers = prepared.offers;
+  const providerSelectionBound = command.provider === "openrouter"
+    && providerSelection?.triggerId === command.triggerId
+    && providerSelection.npcId === npc.id
+    ? providerSelection
+    : null;
+  const providerSelectedOffer = providerSelectionBound?.selectedOfferId
+    ? offers.find((offer) => offer.id === providerSelectionBound.selectedOfferId) ?? null
+    : null;
+  const providerSucceeded = providerSelectionBound?.status === "success" && Boolean(providerSelectedOffer);
+  const selectedOfferId = providerSucceeded
+    ? providerSelectedOffer!.id
+    : providerSelectionBound
+      ? offers[0]?.id ?? "no_op"
+      : prepared.fallbackOfferId;
   const selected = offers.find((offer) => offer.id === selectedOfferId);
   if (!selected) return rejection(state, tool, "npc_offer_illegal", "The selected NPC offer is not legal in the current authoritative state.");
   const provider = command.provider ?? "deterministic";
-
-  const promptProjection = actorKnowledgeProjection(npc.id, state);
-  const promptSocial = {
-    ...promptProjection.social,
-    rumors: promptProjection.social.rumors.filter((rumor) => rumor.targetId === npc.id),
-  };
-  const promptKnowledge = promptProjection.knowledge.filter((record) => !record.stale && record.tier !== "withheld" && record.tier !== "stale");
   const now = new Date().toISOString();
   const beforeAgency = JSON.parse(JSON.stringify(agency)) as EngineNpcAgencyState;
   const beforeSocial = normalizeSocialState(state.social);
@@ -5936,22 +6049,26 @@ function resolveNpcTick(
     nextAgency.resources.copper = Math.min(100_000_000, nextAgency.resources.copper + itemValue);
     nextAgency.resources.actionPoints -= 1;
   }
+  const fallback = provider === "openrouter" ? !providerSucceeded : command.offerId === undefined;
   const invocation: EngineNpcInvocation = {
     id: `npc-invocation:${clientCommandId}`,
     triggerId: command.triggerId,
     trigger: command.trigger,
     npcId: npc.id,
     provider,
-    model: provider === "openrouter" ? "guarded-unavailable" : "npc-policy-v1",
-    inputTokens: 0,
-    cacheTokens: 0,
-    reasoningTokens: 0,
-    outputTokens: 0,
-    costUsd: 0,
-    latencyMs: 0,
-    outcome: provider === "openrouter" || command.offerId === undefined ? "fallback" : "selected",
-    fallback: provider === "openrouter" || command.offerId === undefined,
+    model: providerSelectionBound?.model ?? (provider === "openrouter" ? "guarded-unavailable" : "npc-policy-v1"),
+    providerRequestId: providerSelectionBound?.providerRequestId ?? null,
+    status: providerSelectionBound?.status ?? (provider === "openrouter" ? "provider_error" : "success"),
+    inputTokens: providerSelectionBound?.inputTokens ?? 0,
+    cacheTokens: providerSelectionBound?.cacheTokens ?? 0,
+    reasoningTokens: providerSelectionBound?.reasoningTokens ?? 0,
+    outputTokens: providerSelectionBound?.outputTokens ?? 0,
+    costUsd: providerSelectionBound?.costUsd ?? 0,
+    latencyMs: providerSelectionBound?.latencyMs ?? 0,
+    outcome: fallback ? "fallback" : "selected",
+    fallback,
     selectedOfferId,
+    rationale: providerSucceeded ? providerSelectionBound?.rationale ?? null : null,
     budget: { ...NPC_AGENCY_CONFIG },
     createdAt: now,
   };
@@ -5966,7 +6083,7 @@ function resolveNpcTick(
   nextAgency.completedTriggerIds = [...nextAgency.completedTriggerIds, command.triggerId].slice(-100);
   nextAgency.invocations = [...nextAgency.invocations, invocation].slice(-100);
   nextAgency.invocationsToday += 1;
-  nextAgency.consecutiveFailures = provider === "openrouter"
+  nextAgency.consecutiveFailures = provider === "openrouter" && fallback
     ? Math.min(NPC_AGENCY_CONFIG.maxConsecutiveFailures, nextAgency.consecutiveFailures + 1)
     : 0;
   nextAgency.circuitState = nextAgency.consecutiveFailures >= NPC_AGENCY_CONFIG.maxConsecutiveFailures ? "open" : "closed";
@@ -6000,15 +6117,7 @@ function resolveNpcTick(
       triggerId: command.triggerId,
       offers,
       selectedOfferId,
-      promptContext: {
-        actorId: npc.id,
-        locationRef: agency.locationRef,
-        schedule: agency.schedule,
-        goals: agency.goals,
-        facts: promptProjection.facts,
-        knowledge: promptKnowledge,
-        social: promptSocial,
-      },
+      promptContext: prepared.promptContext,
       invocation,
       action: selectedOfferId,
     },

@@ -3,6 +3,7 @@ import {
   narrationEnvelopeSchema,
   type NarrationEnvelope,
 } from "./ai-contracts.js";
+import { engineNpcAgencyChoiceSchema } from "./engine-contracts.js";
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type { Open5eContentResolver } from "./content/resolve.js";
@@ -10,6 +11,8 @@ import {
   cloneCampaign,
   actorKnowledgeProjection,
   deriveActionOffers,
+  NPC_AGENCY_CONFIG,
+  prepareNpcAgencyChoice,
   projectExperienceProfile,
   projectStateForActor,
   projectResolutionForActor,
@@ -29,6 +32,8 @@ import type {
   EngineCommandResult,
   EngineCapabilityFamilyId,
   EngineSocialCheckAttribution,
+  EngineNpcProviderSelection,
+  EngineNpcTickCommand,
   EngineToolName,
   EngineToolResult,
   EngineTurnEffectEvidence,
@@ -134,6 +139,13 @@ class FirstTokenTimeoutError extends Error {
   }
 }
 
+class NpcAgencyInvalidResponseError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "NpcAgencyInvalidResponseError";
+  }
+}
+
 interface NormalizedCompletionUsage {
   inputTokens: number | null;
   cachedInputTokens: number | null;
@@ -164,6 +176,31 @@ const NARRATOR_RESPONSE_CONTRACT: CompletionResponseContract = {
   name: "lantern_public_narration_draft",
   schema: narrationDraftJsonSchema,
 };
+
+const NPC_AGENCY_RESPONSE_CONTRACT: CompletionResponseContract = {
+  name: "lantern_npc_agency_choice",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["offerId", "rationale"],
+    properties: {
+      offerId: {
+        type: "string",
+        enum: ["move_to_schedule", "report_crime", "rest", "trade_resource", "no_op"],
+      },
+      rationale: { type: "string", minLength: 1, maxLength: 240 },
+    },
+  },
+};
+
+const NPC_AGENCY_SYSTEM_PROMPT = [
+  "Choose exactly one action for one independently triggered off-screen NPC.",
+  "Return only one JSON object with exactly offerId and rationale.",
+  "offerId must exactly match one ID in the supplied finite offers array.",
+  "rationale is audit-only prose of at most 240 characters.",
+  "Use only the NPC-scoped context supplied here. Do not invent facts, resources, routes, targets, mechanics, commands, dialogue, or additional actions.",
+  "The engine will independently validate and commit the choice.",
+].join(" ");
 
 const NARRATION_CONTRACT_INSTRUCTION = [
   "Return the final response as one valid JSON object with exactly three keys: text, proposedFacts, and suggestedActions.",
@@ -779,6 +816,156 @@ export class LanternDungeonMaster {
       console.warn(error instanceof Error ? "DM tool loop fallback: " + error.message : "DM tool loop fallback.");
       return this.resolveFallback(context, state, clientCommandId, expectedCampaignVersion, playerText);
     }
+  }
+
+  /**
+   * Execute one explicit off-screen NPC trigger through a finite actor-safe
+   * provider choice. Ordinary in-scene NPC portrayal never enters this path.
+   */
+  public async resolveNpcAgencyTick(
+    context: RequestContext,
+    state: LanternCampaignState,
+    clientCommandId: string,
+    expectedCampaignVersion: number,
+    command: EngineNpcTickCommand,
+    tool: EngineToolName = "npc_tick",
+  ): Promise<EngineCommandResult> {
+    const execute = (providerSelection?: EngineNpcProviderSelection): EngineCommandResult =>
+      this.store.executeCommand({
+        context,
+        clientCommandId,
+        expectedCampaignVersion,
+        command,
+        tool,
+        resolve: (current) => resolveEngineCommand(
+          current,
+          context,
+          clientCommandId,
+          command,
+          tool,
+          undefined,
+          providerSelection ? { npcAgencySelection: providerSelection } : undefined,
+        ),
+      });
+
+    if (command.provider !== "openrouter") return execute();
+    const preparation = prepareNpcAgencyChoice(state, command);
+    // Domain validation remains the source of the exact public rejection and
+    // persisted replay record; importantly, no provider is contacted first.
+    if (!preparation.ok) return execute();
+
+    const reservation = this.store.reserveNpcAgencyCommand({
+      context,
+      clientCommandId,
+      expectedCampaignVersion,
+      command,
+      tool,
+      npcId: preparation.value.npcId,
+    });
+    if (reservation.result) return reservation.result;
+
+    const priorUsage = this.store.getModelUsageSummary({ clientCommandId }).requestCount;
+    const shouldInvokeProvider = reservation.shouldInvokeProvider
+      && priorUsage === 0
+      && Boolean(this.options.apiKey);
+    const telemetry: OpenRouterCompletionTelemetry[] = [];
+    let selectedOfferId: EngineNpcProviderSelection["selectedOfferId"] = null;
+    let rationale: string | null = null;
+    let invalidResponse = false;
+
+    if (shouldInvokeProvider) {
+      const request = {
+        trigger: { id: preparation.value.triggerId, kind: preparation.value.trigger },
+        npc: {
+          id: preparation.value.npcId,
+          name: preparation.value.npcName,
+          ...preparation.value.promptContext,
+        },
+        offers: preparation.value.offers,
+      };
+      const serializedRequest = JSON.stringify(request);
+      const maxRequestBytes = NPC_AGENCY_CONFIG.maxInputTokens * 4;
+      try {
+        if (Buffer.byteLength(NPC_AGENCY_SYSTEM_PROMPT) + Buffer.byteLength(serializedRequest) > maxRequestBytes) {
+          throw new NpcAgencyInvalidResponseError("The actor-safe NPC request exceeded its configured input budget.");
+        }
+        const completion = await this.requestStreamingCompletion(
+          [
+            { role: "system", content: NPC_AGENCY_SYSTEM_PROMPT },
+            { role: "user", content: serializedRequest },
+          ],
+          false,
+          this.options.baseUrl,
+          this.options.model,
+          "primary",
+          {
+            accountId: context.accountId,
+            campaignId: context.campaignId,
+            actorId: preparation.value.npcId,
+            requestId: context.requestId,
+            clientCommandId,
+            dmRunId: `npc-agency:${randomUUID()}`,
+            purpose: "npc_agency",
+            toolsEnabled: false,
+            requestSequence: 1,
+            telemetryEvents: telemetry,
+          },
+          undefined,
+          NPC_AGENCY_RESPONSE_CONTRACT,
+          {
+            maxTokens: NPC_AGENCY_CONFIG.maxOutputTokens,
+            firstTokenTimeoutMs: NPC_AGENCY_CONFIG.timeoutMs,
+          },
+        );
+        if ((completion.tool_calls?.length ?? 0) > 0 || typeof completion.content !== "string") {
+          throw new NpcAgencyInvalidResponseError("The NPC provider returned tools or no JSON content.");
+        }
+        const parsed = engineNpcAgencyChoiceSchema.safeParse(JSON.parse(stripJsonFence(completion.content)));
+        if (!parsed.success || !preparation.value.offers.some((offer) => offer.id === parsed.data.offerId)) {
+          throw new NpcAgencyInvalidResponseError("The NPC provider selected an action outside the finite legal offer menu.");
+        }
+        selectedOfferId = parsed.data.offerId;
+        rationale = parsed.data.rationale;
+      } catch (error) {
+        invalidResponse = error instanceof NpcAgencyInvalidResponseError || error instanceof SyntaxError;
+        const event = telemetry.at(-1);
+        if (invalidResponse && event) {
+          event.outcome = "failed";
+          event.failureReason = "invalid_response";
+          event.status = "invalid_response";
+        }
+        console.warn(
+          "Bounded NPC agency provider fallback: "
+          + (error instanceof Error ? error.message : "unknown provider error")
+        );
+      }
+    }
+
+    this.store.markNpcAgencyProviderAttempted({
+      context,
+      clientCommandId,
+      command,
+      npcId: preparation.value.npcId,
+    });
+
+    const event = telemetry.at(-1);
+    const providerSelection: EngineNpcProviderSelection = {
+      triggerId: preparation.value.triggerId,
+      npcId: preparation.value.npcId,
+      selectedOfferId,
+      rationale,
+      model: event?.resolvedModel ?? event?.model ?? this.options.model,
+      providerRequestId: event?.providerRequestId ?? null,
+      status: event?.status ?? (invalidResponse ? "invalid_response" : "provider_error"),
+      inputTokens: event?.inputTokens ?? 0,
+      cacheTokens: event?.cachedInputTokens ?? 0,
+      reasoningTokens: event?.reasoningTokens ?? 0,
+      outputTokens: event?.outputTokens ?? 0,
+      costUsd: (event?.costMicrousd ?? 0) / 1_000_000,
+      latencyMs: event?.durationMs ?? 0,
+    };
+    this.flushCompletionTelemetry(telemetry, "npc_agency");
+    return execute(providerSelection);
   }
 
   private async releaseCommittedNarration(
@@ -1420,6 +1607,18 @@ export class LanternDungeonMaster {
       toolName === "player_note_add" ? { ...args, source: "dm" } : args
     );
     if (!command) return executeReadTool(currentState, toolName, args, this.resolverFor(currentState));
+    if (command.kind === "npc_tick" && command.provider === "openrouter") {
+      return {
+        tool: toolName,
+        readOnly: false,
+        accepted: false,
+        code: "npc_agency_requires_trigger_boundary",
+        message: "A separate NPC model choice is available only at an independently triggered off-screen server boundary; portray present NPCs directly in this scene.",
+        data: null,
+        campaignVersion: currentState.version,
+        provisional: false,
+      };
+    }
 
     const bindingError = validateSceneMoveBinding(command, stagedEffects, assistantVisibleEffectCount);
     if (bindingError) {
@@ -1608,6 +1807,7 @@ export class LanternDungeonMaster {
     telemetryContext?: Omit<CompletionTelemetryContext, "nextRequestSequence"> & { requestSequence: number },
     tools?: readonly EngineToolDefinition[],
     responseContract: CompletionResponseContract = PLANNER_RESPONSE_CONTRACT,
+    limits?: { maxTokens?: number; firstTokenTimeoutMs?: number },
   ): Promise<CompletionMessage> {
     const startedAt = Date.now();
     let firstOutputAt: number | null = null;
@@ -1630,6 +1830,7 @@ export class LanternDungeonMaster {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stream: ReturnType<typeof client.chat.completions.stream> | undefined;
+    const timeoutMs = Math.max(0, Math.trunc(limits?.firstTokenTimeoutMs ?? this.options.firstTokenTimeoutMs ?? 8_000));
     const markFirstOutput = (): void => {
       if (firstOutput) return;
       firstOutput = true;
@@ -1641,7 +1842,7 @@ export class LanternDungeonMaster {
       stream = client.chat.completions.stream({
         model,
         reasoning_effort: this.options.reasoningEffort,
-        max_tokens: this.options.maxTokens,
+        max_tokens: limits?.maxTokens ?? this.options.maxTokens,
         stream_options: { include_usage: true },
         provider: { require_parameters: true },
         response_format: {
@@ -1677,7 +1878,6 @@ export class LanternDungeonMaster {
       stream.on("tool_calls.function.arguments.delta", (delta) => {
         if (delta.arguments_delta || delta.name) markFirstOutput();
       });
-      const timeoutMs = Math.max(0, Math.trunc(this.options.firstTokenTimeoutMs ?? 8_000));
       timer = timeoutMs > 0
         ? setTimeout(() => {
             if (firstOutput || !stream) return;
@@ -1717,7 +1917,7 @@ export class LanternDungeonMaster {
     } catch (error) {
       if (timedOut) {
         failureReason = "ttft_timeout";
-        throw new FirstTokenTimeoutError(Math.max(0, Math.trunc(this.options.firstTokenTimeoutMs ?? 8_000)));
+        throw new FirstTokenTimeoutError(timeoutMs);
       }
       failureReason ??= firstOutput ? "stream_error_after_output" : "provider_error_before_output";
       throw error;

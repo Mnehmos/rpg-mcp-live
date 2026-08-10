@@ -10,6 +10,7 @@ export type ModelUsagePurpose =
   | "scene_build"
   | "scene_extension"
   | "world_reaction"
+  | "npc_agency"
   | "narration";
 
 export type ModelUsageSelection = "primary" | "fallback";
