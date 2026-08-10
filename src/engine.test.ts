@@ -7,10 +7,7 @@ import { loadActiveOpen5eContentPack } from "./content/pack.js";
 import { Open5eContentResolver } from "./content/resolve.js";
 import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand, toSessionView } from "./engine-domain.js";
 import { executeReadTool, lanternToolDefinitions } from "./engine-tools.js";
-import {
-  EngineVersionConflictError,
-  LanternEngineStore,
-} from "./engine-store.js";
+import { EngineVersionConflictError, LanternEngineStore } from "./engine-store.js";
 import type { CreateCampaignContext, RequestContext } from "./engine-contracts.js";
 import { currencyFromCopper } from "./open5e-rules.js";
 
@@ -79,6 +76,85 @@ describe("Lantern engine boundary", () => {
     expect(store.listCampaigns("account-a").map((entry) => entry.id)).toEqual([otherCampaign.id]);
     expect(store.getStoredCommand("account-a", commandId)).toBeNull();
     store.close();
+  });
+
+  it("commits stale reservation cleanup before returning a version conflict", () => {
+    const store = createTestStore();
+    const campaign = createCampaign(store, "account-a", "actor-a");
+    const commandContext = context("account-a", campaign.id, "actor-a");
+    const reservedId = randomUUID();
+    const playerText = "I wait for the model to finish.";
+    expect(store.reservePlayerTurn({
+      context: commandContext,
+      clientCommandId: reservedId,
+      expectedCampaignVersion: campaign.version,
+      playerText,
+    })).toBeNull();
+
+    const advancingId = randomUUID();
+    const advancingCommand = { kind: "declare" as const, goal: "Advance the campaign while the model works." };
+    store.executeCommand({
+      context: commandContext,
+      clientCommandId: advancingId,
+      expectedCampaignVersion: campaign.version,
+      command: advancingCommand,
+      tool: "declare",
+      playerText: "Advance the campaign while the model works.",
+      resolve: (state) => resolveEngineCommand(state, commandContext, advancingId, advancingCommand, "declare"),
+    });
+
+    const reservedCommand = { kind: "declare" as const, goal: playerText };
+    expect(() => store.executeCommand({
+      context: commandContext,
+      clientCommandId: reservedId,
+      expectedCampaignVersion: campaign.version,
+      command: reservedCommand,
+      tool: "declare",
+      playerText,
+      resolve: (state) => resolveEngineCommand(state, commandContext, reservedId, reservedCommand, "declare", playerText),
+    })).toThrow(EngineVersionConflictError);
+    expect(store.getStoredCommand(commandContext.accountId, reservedId)).toBeNull();
+    store.close();
+  });
+
+  it("reclaims an abandoned player-turn reservation after an engine restart", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lantern-engine-restart-"));
+    const databasePath = join(directory, "engine.db");
+    const firstStore = new LanternEngineStore(databasePath);
+    const campaign = createCampaign(firstStore, "account-a", "actor-a");
+    const commandContext = context("account-a", campaign.id, "actor-a");
+    const clientCommandId = randomUUID();
+    const playerText = "I continue after the engine restarts.";
+    expect(firstStore.reservePlayerTurn({
+      context: commandContext,
+      clientCommandId,
+      expectedCampaignVersion: campaign.version,
+      playerText,
+    })).toBeNull();
+    expect(firstStore.getStoredCommand(commandContext.accountId, clientCommandId)).toMatchObject({ status: "processing" });
+    firstStore.close();
+
+    const restartedStore = new LanternEngineStore(databasePath);
+    expect(restartedStore.reservePlayerTurn({
+      context: commandContext,
+      clientCommandId,
+      expectedCampaignVersion: campaign.version,
+      playerText,
+    })).toBeNull();
+    expect(restartedStore.getStoredCommand(commandContext.accountId, clientCommandId)).toMatchObject({ status: "processing" });
+    const command = { kind: "declare" as const, goal: playerText };
+    const result = restartedStore.executeCommand({
+      context: commandContext,
+      clientCommandId,
+      expectedCampaignVersion: campaign.version,
+      command,
+      tool: "declare",
+      playerText,
+      resolve: (state) => resolveEngineCommand(state, commandContext, clientCommandId, command, "declare", playerText),
+    });
+    expect(result.replayed).toBe(false);
+    expect(restartedStore.getStoredCommand(commandContext.accountId, clientCommandId)).toMatchObject({ status: "resolved" });
+    restartedStore.close();
   });
 
   it("rejects stale or cross-actor campaign deletion without changing the campaign", () => {

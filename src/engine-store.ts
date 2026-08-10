@@ -139,6 +139,7 @@ interface CommandRequestRecord {
   tool?: unknown;
   playerText?: unknown;
   reservation?: unknown;
+  reservationOwnerId?: unknown;
 }
 
 function parseCommandRequest(requestJson: string): CommandRequestRecord | null {
@@ -150,26 +151,29 @@ function parseCommandRequest(requestJson: string): CommandRequestRecord | null {
   }
 }
 
-function playerTurnReservationJson(input: ReservePlayerTurnInput): string {
+function playerTurnReservationJson(input: ReservePlayerTurnInput, reservationOwnerId: string): string {
   return JSON.stringify({
     campaignId: input.context.campaignId,
     clientCommandId: input.clientCommandId,
     expectedCampaignVersion: input.expectedCampaignVersion,
     playerText: input.playerText,
     reservation: "player_turn",
+    reservationOwnerId,
   });
 }
 
 function matchesPlayerTurnReservation(
   requestJson: string,
-  input: Pick<ReservePlayerTurnInput, "context" | "clientCommandId" | "expectedCampaignVersion" | "playerText">
+  input: Pick<ReservePlayerTurnInput, "context" | "clientCommandId" | "expectedCampaignVersion" | "playerText">,
+  reservationOwnerId?: string,
 ): boolean {
   const request = parseCommandRequest(requestJson);
   return request?.reservation === "player_turn"
     && request.campaignId === input.context.campaignId
     && request.clientCommandId === input.clientCommandId
     && request.expectedCampaignVersion === input.expectedCampaignVersion
-    && request.playerText === input.playerText;
+    && request.playerText === input.playerText
+    && (!reservationOwnerId || request.reservationOwnerId === reservationOwnerId);
 }
 
 function appendPlayerTurn(
@@ -213,6 +217,7 @@ function appendPlayerTurn(
 
 export class LanternEngineStore {
   private readonly db: Database.Database;
+  private readonly reservationOwnerId = randomUUID();
 
   public constructor(databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true });
@@ -426,7 +431,7 @@ export class LanternEngineStore {
    * trigger a second model resolution with a new client command ID.
    */
   public reservePlayerTurn(input: ReservePlayerTurnInput): EngineCommandResult | null {
-    const requestJson = playerTurnReservationJson(input);
+    const requestJson = playerTurnReservationJson(input, this.reservationOwnerId);
     const transaction = this.db.transaction((): EngineCommandResult | null => {
       const existing = this.db
         .prepare(
@@ -435,18 +440,22 @@ export class LanternEngineStore {
         .get(input.context.accountId, input.clientCommandId) as CommandRow | undefined;
 
       if (existing) {
-        if (!matchesPlayerTurnReservation(existing.request_json, input)) {
-          const request = parseCommandRequest(existing.request_json);
-          if (
-            request?.campaignId !== input.context.campaignId
-            || request?.clientCommandId !== input.clientCommandId
-            || request?.playerText !== input.playerText
-          ) {
-            throw new EngineCommandIdReuseError();
-          }
-        }
+        const request = parseCommandRequest(existing.request_json);
+        const matchesRequest = request?.campaignId === input.context.campaignId
+          && request?.clientCommandId === input.clientCommandId
+          && request?.playerText === input.playerText;
+        if (!matchesRequest) throw new EngineCommandIdReuseError();
         if (existing.status === "resolved" && existing.result_json) {
           return { ...(JSON.parse(existing.result_json) as EngineCommandResult), replayed: true };
+        }
+        if (existing.status !== "processing") throw new EngineCommandInProgressError();
+        if (request?.reservation === "player_turn" && request.reservationOwnerId !== this.reservationOwnerId) {
+          this.db
+            .prepare(
+              "UPDATE engine_commands SET request_json = ?, created_at = ? WHERE account_id = ? AND client_command_id = ?"
+            )
+            .run(requestJson, new Date().toISOString(), input.context.accountId, input.clientCommandId);
+          return null;
         }
         throw new EngineCommandInProgressError();
       }
@@ -483,7 +492,8 @@ export class LanternEngineStore {
       playerText: input.playerText ?? null,
     });
 
-    const transaction = this.db.transaction((): EngineCommandResult => {
+    let staleReservationConflict: EngineVersionConflictError | null = null;
+    const transaction = this.db.transaction((): EngineCommandResult | null => {
       const existing = this.db
         .prepare(
           "SELECT account_id, campaign_id, client_command_id, request_json, status, result_json FROM engine_commands WHERE account_id = ? AND client_command_id = ?"
@@ -499,7 +509,7 @@ export class LanternEngineStore {
           playerText: input.playerText ?? "",
         };
         const isReservation = existing.request_json !== requestJson
-          && matchesPlayerTurnReservation(existing.request_json, reservationInput);
+          && matchesPlayerTurnReservation(existing.request_json, reservationInput, this.reservationOwnerId);
         if (existing.request_json !== requestJson) {
           if (!isReservation) {
             throw new EngineCommandIdReuseError();
@@ -515,6 +525,8 @@ export class LanternEngineStore {
             this.db
               .prepare("DELETE FROM engine_commands WHERE account_id = ? AND client_command_id = ?")
               .run(input.context.accountId, input.clientCommandId);
+            staleReservationConflict = new EngineVersionConflictError(current, input.expectedCampaignVersion);
+            return null;
           }
           throw new EngineVersionConflictError(current, input.expectedCampaignVersion);
         }
@@ -587,7 +599,10 @@ export class LanternEngineStore {
       return result;
     });
 
-    return transaction();
+    const result = transaction();
+    if (staleReservationConflict) throw staleReservationConflict;
+    if (!result) throw new Error("The engine command did not produce a result.");
+    return result;
   }
 
   public updateCommandNarration(
