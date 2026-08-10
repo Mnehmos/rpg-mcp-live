@@ -427,7 +427,7 @@ const inventoryItemJsonSchema = {
     },
     {
       type: "object",
-      description: "A campaign-authored item only when Open5e has no suitable definition. The DM owns its fiction; the supplied typed fields become authoritative.",
+      description: "A campaign-authored item only when Open5e has no suitable definition. Supplied typed fields become authoritative after validation.",
       properties: {
         id: { type: "string" },
         name: { type: "string" },
@@ -588,7 +588,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "content_compile",
-    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. A mundane item already established by released narration, current world context, or an actor-safe world fact may use materialization plus a stable instanceKey to create one linked world object; the engine verifies and hashes that evidence, derives the object definition, and returns its canonical id. Equivalent stable item definitions are reused. For an executable spell, provide only synthesis {primitiveContentKey: exact reviewed open5e spell key, modification: damage-only}; the engine derives and persists the bounded single-target damage effect from that primitive. Definitions, instances, relationships, and state remain separate; unknown fields and unreviewed mechanics are rejected.",
+    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. A mundane item already established by released narration, current world context, or an actor-safe world fact may use materialization plus a stable instanceKey to create one linked world object; validation hashes that evidence, derives the object definition, and returns its canonical id. Equivalent stable item definitions are reused. For an executable spell, provide only synthesis {primitiveContentKey: exact reviewed open5e spell key, modification: damage-only}; validation derives and persists the bounded single-target damage effect from that primitive. Definitions, instances, relationships, and state remain separate; unknown fields and unreviewed mechanics are rejected.",
     runtimeContentCompileJsonSchema,
   ),
   tool(
@@ -689,7 +689,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "challenge_attempt",
-    "Ask the engine to adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; do not invent a DC or consequence. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, seize-held-object-v1, stealth-perception-v1, and search-hidden-fact-v1.",
+    "Adjudicate a reviewed challenge. The server decides automatic, impossible, or uncertain feasibility, the final DC, bounded outcomes, costs, and retry policy; no caller-authored DC or consequence is accepted. Supported first-slice challenge ids include ordinary-unlocked-door-v1, multi-ton-stone-gate-v1, barred-door-v1, seize-held-object-v1, stealth-perception-v1, and search-hidden-fact-v1.",
     {
       type: "object",
       properties: {
@@ -709,7 +709,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       additionalProperties: false,
     }
   ),
-  tool("player_notes", "Read durable notes about the player, including notes the player wrote and facts the DM explicitly recorded. Read-only.", {}),
+  tool("player_notes", "Read durable player-authored notes and explicitly recorded campaign facts. Read-only.", {}),
   tool(
     "player_note_add",
     "Record a durable fact, goal, preference, promise, or other note only when the player explicitly states or clearly confirms it. Do not invent private facts.",
@@ -721,11 +721,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
     }
   ),
   tool("npc_context", "Read NPCs currently established in the current context, including goals, disposition, relationship score, and memories. Read-only.", {}),
-  tool("merchant_catalog", "Read authoritative merchant catalogs, stock, and prices established by the DM in the current context. Read-only.", {}),
-  tool("observe", "Read the current DM-authored world context if one exists, plus encounter status. Read-only.", {}),
+  tool("merchant_catalog", "Read authoritative merchant catalogs, stock, and prices established in the current context. Read-only.", {}),
+  tool("observe", "Read the current authored world context if one exists, plus encounter status. Read-only.", {}),
   tool(
     "move",
-    "Move along an exit returned by the current world_context. The DM must establish the next context after movement.",
+    "Move through one currently available persisted exit. Returns the committed destination and movement evidence.",
     {
       type: "object",
       properties: { destinationId: { type: "string", description: "The exit id from the current world context." } },
@@ -767,7 +767,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "social_check",
-    "Resolve a social ability or skill check against an NPC established in the current context. The DM authors the NPC and goal; the engine owns the d20, modifier, DC, and relationship update. If another established NPC speaks or acts for the player, set actingNpcId; the player remains the roller and modifier source until reviewed NPC actor mechanics exist.",
+    "Resolve meaningful social uncertainty against an NPC established in the current context. Provide the intended goal and actingNpcId when another established NPC acts for the player. The server owns the d20, modifier, DC, attribution, and relationship update; the player remains the roller until reviewed NPC actor mechanics exist.",
     {
       type: "object",
       properties: { npcId: { type: "string" }, actingNpcId: { type: "string", description: "Optional established NPC who speaks or acts for the player; this does not replace the player as roller." }, ability: { type: "string", enum: ["str", "dex", "con", "int", "wis", "cha"] }, skill: { type: "string" }, goal: { type: "string" } },
@@ -793,7 +793,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "merchant_trade",
-    "Resolve an immediate purchase, sale, or explicit offer against a DM-authored merchant catalog. Stolen-property recognition, fence pricing, heat, ownership, and the final outcome are server-owned. No pending merchant deliberation is stored: use the tool only when the deal is ready to resolve.",
+    "Resolve an immediate purchase, sale, or explicit offer against an authored merchant catalog. Stolen-property recognition, fence pricing, heat, ownership, and the final outcome are server-owned. No pending merchant deliberation is stored; submit only a deal ready to resolve.",
     {
       type: "object",
       properties: { merchantId: { type: "string" }, itemId: { type: "string" }, side: { type: "string", enum: ["buy", "sell", "offer"] }, quantity: { type: "integer", minimum: 1 }, offerUnitPriceCopper: { type: "integer", minimum: 0 } },
@@ -823,7 +823,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "quest_create",
-    "Create a DM-authored quest with a concrete objective and reward. The engine persists it and later applies its reward atomically.",
+    "Create an authored quest with a concrete objective and reward. Persistence and later reward application are atomic.",
     {
       type: "object",
       properties: { title: { type: "string" }, objective: { type: "string" }, rewardXp: { type: "integer", minimum: 0 }, rewardCopper: { type: "integer", minimum: 0 }, giverNpcId: { type: "string" }, deadline: { type: "string" }, deadlineAtMinutes: { type: "integer", minimum: 0 }, graph: { type: "object", description: "Closed typed objectives, predicates, branches, and optional bounded clock for an authoritative quest graph." } },
@@ -843,7 +843,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "quest_update",
-    "Update progress or status for a DM-authored quest. The engine persists the journal entry and completion state.",
+    "Update progress or status for an authored quest and persist its journal entry and completion state.",
     {
       type: "object",
       properties: { questId: { type: "string" }, status: { type: "string", enum: ["active", "completed", "failed", "abandoned", "expired"] }, objective: { type: "string" }, progress: { type: "integer", minimum: 0, maximum: 100 } },
@@ -853,7 +853,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "improvise",
-    "Apply a DM-authored rule-of-cool stunt or effect. The engine records the creative description and applies only the typed mechanical consequence (damage, healing, condition, advantage, movement, or duration). Advantage/disadvantage may target one bounded check category; fictional is explicitly non-mechanical.",
+    "Apply an authored rule-of-cool stunt or effect. The creative description is recorded, while only the typed mechanical consequence is applied (damage, healing, condition, advantage, movement, or duration). Advantage/disadvantage may target one bounded check category; fictional is explicitly non-mechanical.",
     {
       type: "object",
       properties: { title: { type: "string" }, description: { type: "string" }, effectType: { type: "string", enum: ["fictional", "advantage", "disadvantage", "condition", "damage", "healing", "movement", "summoning"] }, targetId: { type: "string" }, amount: { type: "integer", minimum: 0 }, durationRounds: { type: "integer", minimum: 1 }, condition: { type: "string" }, checkCategory: { type: "string", enum: ["attack-roll", "ability-check", "saving-throw"] } },
@@ -863,7 +863,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "campaign_beat",
-    "Commit a proactive DM story beat: a new pressure, immediate situation, and concrete choices. This is the campaign driver, not a room or fixed scene graph.",
+    "Commit a proactive story beat: a new pressure, immediate situation, and concrete choices. This is a campaign driver, not a room or fixed scene graph.",
     {
       type: "object",
       properties: { title: { type: "string" }, description: { type: "string" }, pressure: { type: "string" }, choices: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 6 } },
@@ -913,7 +913,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       additionalProperties: false,
     }
   ),
-  tool("character_update", "Update player-authored character identity and sheet details. The DM may also populate durable personality, appearance, backstory, allies, treasure, inspiration, and temporary hit points.", { type: "object", properties: { name: { type: "string" }, background: { type: "string", description: "Legacy campaigns only." }, alignment: { type: "string", description: "Legacy campaigns only." }, description: { type: "string" }, abilityScores: { type: "object", description: "Legacy campaigns only." }, details: { type: "object", description: "Character sheet details such as appearance, personalityTraits, ideals, bonds, flaws, backstory, allies, treasure, inspiration, and temporaryHp." } }, additionalProperties: false }),
+  tool("character_update", "Update player-authored character identity and durable sheet details such as personality, appearance, backstory, allies, treasure, inspiration, and temporary hit points.", { type: "object", properties: { name: { type: "string" }, background: { type: "string", description: "Legacy campaigns only." }, alignment: { type: "string", description: "Legacy campaigns only." }, description: { type: "string" }, abilityScores: { type: "object", description: "Legacy campaigns only." }, details: { type: "object", description: "Character sheet details such as appearance, personalityTraits, ideals, bonds, flaws, backstory, allies, treasure, inspiration, and temporaryHp." } }, additionalProperties: false }),
   tool("inventory", "Read authoritative items, quantities, gold, and carry weight. Read-only.", {}),
   tool(
     "inventory_transfer",
@@ -989,10 +989,10 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("situation_visit", "Visit a connected location in the active situation; stable node identity and traversal order are engine-owned.", { type: "object", properties: { locationId: { type: "string" } }, required: ["locationId"], additionalProperties: false }),
   tool("situation_clue_attempt", "Attempt one clue using the existing server-owned check and retry policy. The model supplies only an approach; the engine owns the roll, DC, discovery, and fail-forward complication.", { type: "object", properties: { clueId: { type: "string" }, approach: { type: "string" } }, required: ["clueId", "approach"], additionalProperties: false }),
   tool("situation_ignore", "Advance one fixed reviewed time boundary while leaving the active situation unattended; authoritative pressure advances only when its time boundary is due.", {}),
-  tool("situation_choose", "Commit one currently available declarative outcome by the exact id returned from situation_context. The engine validates revelation, role, pressure, and critical-object requirements; the DM portrays the resulting fiction.", { type: "object", properties: { outcomeId: { type: "string" } }, required: ["outcomeId"], additionalProperties: false }),
+  tool("situation_choose", "Commit one currently available declarative outcome by the exact id returned from situation_context. Validates revelation, role, pressure, and critical-object requirements and returns committed outcome evidence.", { type: "object", properties: { outcomeId: { type: "string" } }, required: ["outcomeId"], additionalProperties: false }),
   tool(
     "combat_start",
-    "Start a DM-authored encounter using installed Open5e creature content keys. Search creatures first; never supply or invent stats.",
+    "Start an authored encounter using installed Open5e creature content keys. Search creatures first; never supply or invent stats.",
     {
       type: "object",
       properties: {
@@ -1078,7 +1078,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "custody_action",
-    "Record a typed surrender, guard release, or escape. Never narrate restraint without this tool; include every established actor being restrained and the established guard id. If the player escaped while companions remain captive, include those outstanding companion ids when requesting the source guard's release.",
+    "Commit a typed surrender, guard release, or escape. Include every established restrained actor and the established guard id. If the player escaped while companions remain captive, include those outstanding companion ids when requesting the source guard's release.",
     {
       type: "object",
       properties: {
@@ -1148,7 +1148,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       properties: {
         spellKey: { type: "string", description: "Exact open5e:spell or runtime:spell key from the character spell list." },
         slotLevel: { type: "integer", minimum: 1, maximum: 9, description: "Optional slot level. Omit to use the lowest legal available slot." },
-        targetIds: { type: "array", items: { type: "string" }, maxItems: 20, description: "Combatant ids selected by the DM as affected targets." },
+        targetIds: { type: "array", items: { type: "string" }, maxItems: 20, description: "Established combatant ids selected as affected targets." },
         reactionId: { type: "string", description: "Pending reaction id when resolving Shield through cast_spell." },
       },
       required: ["spellKey"],
@@ -1249,11 +1249,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("death_save", "Resolve one death save while the character is unconscious at 0 HP.", {}),
   tool(
     "loot",
-    "Resolve a defeated encounter's DM-authored items and currency, optionally claiming one authored quest reward. The engine transfers the supplied content atomically and never invents loot.",
+    "Resolve a defeated encounter's authored items and currency, optionally claiming one authored quest reward. Supplied content transfers atomically; no loot is invented.",
     {
       type: "object",
       properties: {
-        corpseId: { type: "string", description: "Existing corpse/remains id for a DM-authorized exactly-once transfer." },
+        corpseId: { type: "string", description: "Existing corpse/remains id for an authorized exactly-once transfer." },
         items: { type: "array", items: inventoryItemJsonSchema, maxItems: 50 },
         rewardXp: { type: "integer", minimum: 0 },
         rewardCopper: { type: "integer", minimum: 0 },
