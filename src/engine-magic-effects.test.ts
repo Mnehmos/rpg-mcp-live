@@ -215,7 +215,11 @@ describe("generic magic effects kernel", () => {
     // End the encounter through the normal player/enemy turn transitions.
     state = first.state;
     state.character.abilities.dex = 100;
-    state.character.hp = state.character.maxHp;
+    // Keep the fixture focused on turn transitions and pact recovery; a
+    // random level-one critical must not down the character before the
+    // player attack assertion.
+    state.character.maxHp = 100;
+    state.character.hp = 100;
     state.combat.enemies[0]!.hp = 1;
     state.combat.enemies[0]!.alive = true;
     state = apply(state, { kind: "end_turn" }).state;
