@@ -240,12 +240,16 @@ export class LanternDungeonMaster {
         ),
       });
       if (!toolLoop.narration) {
-        return {
-          ...committed,
-          narration: rulesNarration(
+        const fallback = sanitizeNarrationForProfile(
+          rulesNarration(
             committed.message,
             "The opening is committed; the prose provider did not complete its first narration."
           ),
+          committed.state.experienceProfile,
+        );
+        return {
+          ...committed,
+          narration: fallback,
           narrationSource: "rules",
         };
       }
@@ -266,12 +270,16 @@ export class LanternDungeonMaster {
       };
     } catch (error) {
       if (committed) {
-        return {
-          ...committed,
-          narration: rulesNarration(
+        const fallback = sanitizeNarrationForProfile(
+          rulesNarration(
             committed.message,
             "The opening is committed. The DM prose provider needs a moment, so the table keeps the authored situation."
           ),
+          committed.state.experienceProfile,
+        );
+        return {
+          ...committed,
+          narration: fallback,
           narrationSource: "rules",
         };
       }
@@ -341,7 +349,10 @@ export class LanternDungeonMaster {
       }
 
       if (!toolLoop.narration) {
-        const fallback = committedRulesNarration(committed);
+        const fallback = sanitizeNarrationForProfile(
+          committedRulesNarration(committed),
+          committed.state.experienceProfile,
+        );
         return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
           ...committed,
           narration: fallback,
@@ -365,7 +376,10 @@ export class LanternDungeonMaster {
       };
     } catch (error) {
       if (committed) {
-        const fallback = committedRulesNarration(committed);
+        const fallback = sanitizeNarrationForProfile(
+          committedRulesNarration(committed),
+          committed.state.experienceProfile,
+        );
         return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules")
           ?? { ...committed, narration: fallback, narrationSource: "rules" };
       }
@@ -755,7 +769,10 @@ export class LanternDungeonMaster {
       resolve: (current) =>
         resolveEngineCommand(current, context, clientCommandId, selected.command, selected.tool, playerText),
     });
-    const fallback = committedRulesNarration(result);
+    const fallback = sanitizeNarrationForProfile(
+      committedRulesNarration(result),
+      result.state.experienceProfile,
+    );
     return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
       ...result,
       narration: fallback,
@@ -1268,18 +1285,19 @@ function mediatedCheckAttributions(result: EngineCommandResult): EngineSocialChe
 
 function narrationContradictsMediatedCheck(text: string, attribution: EngineSocialCheckAttribution): boolean {
   const actor = attribution.actingActorName.trim().toLocaleLowerCase("en-US").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const actorBoundary = `(?<![\\p{L}\\p{N}_])${actor}(?![\\p{L}\\p{N}_])`;
   const source = attribution.modifierSourceActorName.trim().toLocaleLowerCase("en-US");
   const normalized = text.toLocaleLowerCase("en-US");
-  const actorClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs|got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,60}\\b(?:check|roll|score|result|total)\\b`, "i");
-  const numericScoreClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,40}\\b(?:got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,20}\\b\\d+(?:\\.\\d+)?\\b`, "i");
-  const possessiveClaim = new RegExp(`\\b${actor}(?:['’]s)\\b[^.!?]{0,80}\\b(?:check|roll|modifier)\\b`, "i");
-  const pronounModifierClaim = new RegExp(`\\b${actor}\\b[^.!?]{0,80}\\b(?:uses?|used|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "i");
+  const actorClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs|got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,60}\\b(?:check|roll|score|result|total)\\b`, "iu");
+  const numericScoreClaim = new RegExp(`${actorBoundary}[^.!?]{0,40}\\b(?:got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,20}\\b\\d+(?:\\.\\d+)?\\b`, "iu");
+  const possessiveClaim = new RegExp(`${actorBoundary}(?:['’]s)(?![\\p{L}\\p{N}_])[^.!?]{0,80}\\b(?:check|roll|modifier)\\b`, "iu");
+  const pronounModifierClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:uses?|used|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "iu");
   return actorClaim.test(normalized)
     || numericScoreClaim.test(normalized)
     || possessiveClaim.test(normalized)
     || pronounModifierClaim.test(normalized)
     || (source !== attribution.actingActorName.trim().toLocaleLowerCase("en-US")
-      && new RegExp(`\\b${actor}(?:['’]s)?\\b[^.!?]{0,40}\\bmodifiers?\\b`, "i").test(normalized));
+      && new RegExp(`${actorBoundary}(?:['’]s)?[^.!?]{0,40}\\bmodifiers?\\b`, "iu").test(normalized));
 }
 
 function appendMissingMediatedAttributions(

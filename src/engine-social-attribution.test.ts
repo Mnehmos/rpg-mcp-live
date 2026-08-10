@@ -100,6 +100,7 @@ async function resolveWithModelNarration(
   modelText: string,
   actingNpcIds = ["titus"],
   configureState?: (state: LanternCampaignState) => void,
+  providerFailure = false,
 ) {
   const state = socialState();
   configureState?.(state);
@@ -107,8 +108,7 @@ async function resolveWithModelNarration(
   const directory = mkdtempSync(join(tmpdir(), "lantern-social-attribution-model-"));
   const store = new LanternEngineStore(join(directory, "engine.db"));
   store.createCampaign(context, state);
-  const fetchMock = vi.fn()
-    .mockResolvedValueOnce(legacyResponse({
+  const fetchMock = vi.fn().mockResolvedValueOnce(legacyResponse({
       role: "assistant",
       content: null,
       tool_calls: actingNpcIds.map((actingNpcId, index) => ({
@@ -124,11 +124,15 @@ async function resolveWithModelNarration(
           }),
         },
       })),
-    }))
-    .mockResolvedValueOnce(legacyResponse({
+    }));
+  if (providerFailure) {
+    fetchMock.mockRejectedValueOnce(new Error("provider timeout after social commit"));
+  } else {
+    fetchMock.mockResolvedValueOnce(legacyResponse({
       role: "assistant",
       content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions: [] }),
     }));
+  }
   vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
   try {
@@ -329,6 +333,20 @@ describe("social check actor attribution", () => {
     expect(result.narration.text).not.toContain("Titus got a 19");
   });
 
+  it("guards non-ASCII acting NPC names", async () => {
+    const result = await resolveWithModelNarration(
+      "\u00c9lodie rolled the check using her modifiers.",
+      ["titus"],
+      (state) => {
+        const titus = state.worldContext?.npcs.find((npc) => npc.id === "titus");
+        if (titus) titus.name = "\u00c9lodie";
+      },
+    );
+
+    expect(result.narrationSource).toBe("rules");
+    expect(result.narration.text).not.toContain("\u00c9lodie rolled");
+  });
+
   it("keeps the authoritative suffix inside the narration contract limit", async () => {
     const result = await resolveWithModelNarration("A".repeat(6_000));
 
@@ -362,6 +380,18 @@ describe("social check actor attribution", () => {
       (state) => { state.experienceProfile.excludedThemes = ["Arena Sentries"]; },
     );
 
+    expect(result.narration.text).toBe("Let's fade to black and continue with a safer thread.");
+  });
+
+  it("sanitizes a rules fallback after a provider timeout", async () => {
+    const result = await resolveWithModelNarration(
+      "",
+      ["titus"],
+      (state) => { state.experienceProfile.excludedThemes = ["Arena Sentries"]; },
+      true,
+    );
+
+    expect(result.narrationSource).toBe("rules");
     expect(result.narration.text).toBe("Let's fade to black and continue with a safer thread.");
   });
 });
