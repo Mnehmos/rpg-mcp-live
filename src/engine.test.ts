@@ -113,6 +113,7 @@ describe("Lantern engine boundary", () => {
         "rules_reference",
         "character_options",
         "world_context",
+        "procedural_notice",
         "challenge_attempt",
         "player_notes",
         "player_note_add",
@@ -157,7 +158,7 @@ describe("Lantern engine boundary", () => {
         "tutorial_advance",
       ])
     );
-    expect(names).toHaveLength(72);
+    expect(names).toHaveLength(73);
 
     const store = createTestStore();
     const campaign = createCampaign(store, "account-a", "actor-a");

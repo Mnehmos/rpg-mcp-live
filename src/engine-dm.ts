@@ -116,6 +116,7 @@ export function buildDmContext(
     contentPolicy: state.contentPolicy,
     experienceProfile: projectExperienceProfile(state.experienceProfile),
     worldContext: projection.worldContext,
+    proceduralNotices: projection.proceduralNotices,
     knowledge: projection.knowledge,
     informationTiers: projection.informationTiers,
     playerNotes: state.playerNotes,
@@ -356,6 +357,7 @@ export class LanternDungeonMaster {
             : "There is no fixed location, room, scene number, or shared map. When the fiction needs a current context, author it from the campaign and persist it with world_context.",
           "When the fiction establishes a meaningful place or situation, use world_context so the current context persists. It may be a town, ship, wilderness, battlefield, or anything else the story calls for.",
           "When the player travels or the current place changes, update world_context; do not force the campaign through a preset route.",
+          "Formal notices are typed state, not prose. When the fiction introduces a sealed letter, warrant, order, docket, clerk notice, or similar procedure, call procedural_notice with player-safe operative terms before narrating it. Keep restricted records out of every notice field. Use authorize then deliver for the prescribed clerk step; after delivery, call request_copy or request_clarification when asked. A denied request must still expose the minimum operative projection and a concrete next event; never leave the player in a wait/return loop or claim a read-back without the typed tool result.",
           "If public recentLog or the current features already establish a mundane object that is absent from worldContext.objects, do not refuse the player's action. In the same atomic turn, preserve the current context and upsert one stable object through world_context, using definition.sourceRef for the public evidence and definition.tags for ordinary aliases, then continue the original action. Never materialize from private or rejected text, and never add unsupported magic or mechanics.",
           "Use player_note_add only for durable facts, goals, preferences, promises, or other information the player explicitly states or clearly confirms.",
           "Treat the character sheet details as durable canon. When the player establishes appearance, personality, ideals, bonds, flaws, backstory, allies, faction, treasure, inspiration, or temporary hit points, use character_update so the sheet stays current; never rename the player character without consent.",
@@ -400,6 +402,7 @@ export class LanternDungeonMaster {
 
     let repairPending = false;
     let repairAttempted = false;
+    let noticeRepairAttempted = false;
     let safeNarrationCandidate: string | null = null;
     const objectIntent = detectObjectTurnIntent(initialState, playerText);
     let objectRepairAttempted = false;
@@ -443,7 +446,22 @@ export class LanternDungeonMaster {
           }
         }
         const validation = validateNarration(content);
-        if (validation.success) return { narration: validation.data, stagedEffects };
+        if (validation.success) {
+          const noticeRepair = proceduralNoticeRepair(playerText, content, currentState, stagedEffects);
+          if (noticeRepair) {
+            if (!noticeRepairAttempted) {
+              noticeRepairAttempted = true;
+              messages.push({ role: "assistant", content: content || null });
+              messages.push({ role: "user", content: noticeRepair });
+              continue;
+            }
+            return {
+              narration: rulesNarration("The formal procedure is waiting for an authoritative notice record before it can govern your next action."),
+              stagedEffects,
+            };
+          }
+          return { narration: validation.data, stagedEffects };
+        }
         safeNarrationCandidate ??= validation.safeText;
 
         if (!repairAttempted) {
@@ -759,6 +777,31 @@ function narrationRepairInstruction(issues: string[]): string {
     "Correct the response now. Do not call tools and do not add commentary.",
     NARRATION_CONTRACT_INSTRUCTION,
   ].join(" ");
+}
+
+function proceduralNoticeRepair(
+  playerText: string,
+  narrationText: string,
+  state: LanternCampaignState,
+  effects: StagedEngineTurnEffect[],
+): string | null {
+  const combined = `${playerText} ${narrationText}`;
+  const formalNoticeMentioned = /\b(?:sealed\s+(?:notice|letter)|clerk\s+notice|formal\s+(?:order|notice)|warrant|docket|operative\s+terms|response\s+window|read[- ]back)\b/i.test(combined);
+  const noticeEffects = effects.filter((effect) => effect.command.kind === "procedural_notice");
+  const hasNotice = state.proceduralNotices.length > 0 || noticeEffects.length > 0;
+  if (formalNoticeMentioned && !hasNotice) {
+    return "A formal procedural notice was mentioned without authoritative state. Call procedural_notice with action upsert and complete player-safe operative terms before producing narration. Do not include restricted records in any term.";
+  }
+  const requestKind = /\b(?:copy|photocopy|exact\s+(?:read|wording)|read[- ]back)\b/i.test(playerText)
+    ? "request_copy"
+    : /\b(?:clarif(?:y|ication)|what\s+(?:does|are)|which\s+facts|what\s+can\s+I\s+respond)\b/i.test(playerText)
+      ? "request_clarification"
+      : null;
+  const delivered = state.proceduralNotices.some((notice) => notice.status === "delivered" || notice.status === "resolved");
+  if (requestKind && delivered && !noticeEffects.some((effect) => effect.command.kind === "procedural_notice" && effect.command.action === requestKind)) {
+    return `The player requested a ${requestKind === "request_copy" ? "copy/read-back" : "clarification"} of an already delivered notice. Call procedural_notice with ${requestKind} and the existing noticeId before narrating; a denied request must still return the typed operative projection.`;
+  }
+  return null;
 }
 
 type ObjectTurnIntent = {

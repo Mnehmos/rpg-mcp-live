@@ -1009,6 +1009,41 @@ import {
     }).join("") : '<p class="notes-empty">Notes you and the DM choose to keep.</p>';
   }
 
+  function renderProceduralNotices(notices) {
+    var list = Array.isArray(notices) ? notices : [];
+    var card = $("#procedural-notice-card");
+    var node = $("#procedural-notices");
+    if (!card || !node) return;
+    card.hidden = list.length === 0;
+    setText("#procedural-notice-count", list.length, "0");
+    node.innerHTML = list.map(function (notice) {
+      var status = titleCase(String(notice.status || "sealed"));
+      var terms = notice.terms;
+      var content = '<article class="procedural-notice-entry"><div class="note-entry-meta"><strong>' + escapeHtml(notice.title || "Procedural notice") + '</strong><span>' + escapeHtml(status) + '</span></div>';
+      if (!terms) {
+        content += '<p class="notes-empty">The operative terms remain sealed until the authorized delivery step.</p>';
+      } else {
+        content += '<dl class="procedural-notice-terms">'
+          + '<div><dt>Authorized action</dt><dd>' + escapeHtml(terms.authorizedAction) + '</dd></div>'
+          + '<div><dt>Who it governs</dt><dd>' + escapeHtml(terms.actorScope) + '</dd></div>'
+          + '<div><dt>Evidence allowed</dt><dd>' + escapeHtml((terms.admissibleEvidence || []).join("; ")) + '</dd></div>'
+          + '<div><dt>Evidence excluded</dt><dd>' + escapeHtml((terms.excludedEvidence || []).join("; ")) + '</dd></div>'
+          + '<div><dt>Response window</dt><dd>' + escapeHtml(terms.responseWindow) + '</dd></div>'
+          + '<div><dt>Attendance</dt><dd>' + escapeHtml(terms.attendance) + '</dd></div>'
+          + '<div><dt>Custody effect</dt><dd>' + escapeHtml(terms.custodyEffect) + '</dd></div>'
+          + '<div><dt>What changes next</dt><dd>' + escapeHtml(terms.nextChange) + '</dd></div>'
+          + '</dl>';
+      }
+      var attempts = Array.isArray(notice.attempts) ? notice.attempts : [];
+      if (attempts.length) {
+        content += '<div class="procedural-notice-attempts">' + attempts.slice(-4).map(function (attempt) {
+          return '<span class="notice-attempt ' + escapeHtml(attempt.outcome || "") + '">' + escapeHtml(titleCase(attempt.kind || "request")) + ': ' + escapeHtml(attempt.reason || attempt.outcome || "recorded") + '</span>';
+        }).join("") + '</div>';
+      }
+      return content + '</article>';
+    }).join("");
+  }
+
   function formatNoteDate(value) {
     if (!value) return "";
     var date = new Date(value);
@@ -1316,6 +1351,7 @@ import {
     renderNotes(session.playerNotes || snapshot.playerNotes || []);
     renderBeat(session.currentBeat || snapshot.currentBeat || null);
     renderQuests(session.quests || snapshot.quests || []);
+    renderProceduralNotices(session.proceduralNotices || snapshot.proceduralNotices || []);
     renderCombat(combat);
     var narrationActions = payload && payload.narration && Array.isArray(payload.narration.suggestedActions)
       ? payload.narration.suggestedActions

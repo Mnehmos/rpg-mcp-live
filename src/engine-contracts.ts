@@ -212,6 +212,140 @@ export const engineWorldFactPatchOperationsSchema = z.object({
 );
 export type EngineWorldFactPatchOperations = z.infer<typeof engineWorldFactPatchOperationsSchema>;
 
+export const proceduralNoticeStatusSchema = z.enum(["sealed", "authorized", "delivered", "resolved", "withdrawn"]);
+export type EngineProceduralNoticeStatus = z.infer<typeof proceduralNoticeStatusSchema>;
+
+const proceduralNoticeTextSchema = z.string().trim().min(1).max(1_000);
+const proceduralNoticePolicySchema = z.object({
+  allowed: z.boolean(),
+  denialReason: proceduralNoticeTextSchema.optional(),
+}).strict().superRefine((policy, context) => {
+  if (!policy.allowed && !policy.denialReason) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["denialReason"], message: "A denied notice request needs a player-safe reason." });
+  }
+});
+
+export const engineProceduralNoticeTermsSchema = z.object({
+  authorizedAction: proceduralNoticeTextSchema,
+  actorScope: proceduralNoticeTextSchema,
+  admissibleEvidence: z.array(proceduralNoticeTextSchema).max(8),
+  excludedEvidence: z.array(proceduralNoticeTextSchema).max(8),
+  responseWindow: proceduralNoticeTextSchema,
+  deadlineAtMinutes: z.number().int().nonnegative().nullable().optional(),
+  attendance: proceduralNoticeTextSchema,
+  custodyEffect: proceduralNoticeTextSchema,
+  nextChange: proceduralNoticeTextSchema,
+  copy: proceduralNoticePolicySchema,
+  clarification: proceduralNoticePolicySchema,
+}).strict().superRefine((terms, context) => {
+  const restrictedPattern = /\b(?:private|restricted|secret|confidential|sealed\s+(?:statement|record|testimony))\b/i;
+  const checkText = (value: string, path: (string | number)[]) => {
+    if (restrictedPattern.test(value)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path, message: "Notice terms must describe player-safe procedure, not restricted records." });
+    }
+  };
+  checkText(terms.authorizedAction, ["authorizedAction"]);
+  checkText(terms.actorScope, ["actorScope"]);
+  terms.admissibleEvidence.forEach((value, index) => checkText(value, ["admissibleEvidence", index]));
+  terms.excludedEvidence.forEach((value, index) => checkText(value, ["excludedEvidence", index]));
+  checkText(terms.responseWindow, ["responseWindow"]);
+  checkText(terms.attendance, ["attendance"]);
+  checkText(terms.custodyEffect, ["custodyEffect"]);
+  checkText(terms.nextChange, ["nextChange"]);
+  if (terms.copy.denialReason) checkText(terms.copy.denialReason, ["copy", "denialReason"]);
+  if (terms.clarification.denialReason) checkText(terms.clarification.denialReason, ["clarification", "denialReason"]);
+});
+export type EngineProceduralNoticeTerms = z.infer<typeof engineProceduralNoticeTermsSchema>;
+
+export const engineProceduralNoticeInputSchema = z.object({
+  id: worldContextEntityIdSchema,
+  title: proceduralNoticeTextSchema,
+  terms: engineProceduralNoticeTermsSchema,
+}).strict();
+export type EngineProceduralNoticeInput = z.infer<typeof engineProceduralNoticeInputSchema>;
+
+export const proceduralNoticeActionSchema = z.enum([
+  "upsert",
+  "authorize",
+  "deliver",
+  "request_copy",
+  "request_clarification",
+  "resolve",
+  "withdraw",
+]);
+export type ProceduralNoticeAction = z.infer<typeof proceduralNoticeActionSchema>;
+
+export const engineProceduralNoticeCommandSchema = z.object({
+  kind: z.literal("procedural_notice"),
+  action: proceduralNoticeActionSchema,
+  noticeId: worldContextEntityIdSchema.optional(),
+  notice: engineProceduralNoticeInputSchema.optional(),
+  requestText: proceduralNoticeTextSchema.optional(),
+}).strict().superRefine((command, context) => {
+  if (command.action === "upsert" && !command.notice) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Upserting a procedural notice requires typed player-safe terms." });
+  }
+  if (command.action !== "upsert" && command.notice) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: "Only upserting a procedural notice may supply notice terms." });
+  }
+  if (command.action !== "upsert" && !command.noticeId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["noticeId"], message: "A procedural notice action requires a notice id." });
+  }
+});
+export type EngineProceduralNoticeCommand = z.infer<typeof engineProceduralNoticeCommandSchema>;
+
+export interface EngineProceduralNoticeAttempt {
+  id: string;
+  kind: "copy" | "clarification";
+  outcome: "granted" | "denied";
+  requestText: string | null;
+  reason: string;
+  sourceCommandId: string;
+  sourceVersion: number;
+  occurredAt: string;
+}
+
+const proceduralNoticeAttemptSchema = z.object({
+  id: worldContextEntityIdSchema,
+  kind: z.enum(["copy", "clarification"]),
+  outcome: z.enum(["granted", "denied"]),
+  requestText: proceduralNoticeTextSchema.nullable(),
+  reason: proceduralNoticeTextSchema,
+  sourceCommandId: worldContextEntityIdSchema,
+  sourceVersion: z.number().int().nonnegative(),
+  occurredAt: z.string().datetime(),
+}).strict();
+
+export const engineProceduralNoticeSchema = engineProceduralNoticeInputSchema.extend({
+  status: proceduralNoticeStatusSchema,
+  attempts: z.array(proceduralNoticeAttemptSchema).max(20),
+  revision: z.number().int().positive(),
+  authorizedAtVersion: z.number().int().nonnegative().nullable(),
+  deliveredAtVersion: z.number().int().nonnegative().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  provenance: z.object({ sourceCommandId: worldContextEntityIdSchema, sourceVersion: z.number().int().nonnegative() }).strict(),
+}).strict();
+
+export interface EngineProceduralNotice extends EngineProceduralNoticeInput {
+  status: EngineProceduralNoticeStatus;
+  attempts: EngineProceduralNoticeAttempt[];
+  revision: number;
+  authorizedAtVersion: number | null;
+  deliveredAtVersion: number | null;
+  createdAt: string;
+  updatedAt: string;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+  };
+}
+
+export interface EngineProceduralNoticeView extends Omit<EngineProceduralNotice, "terms"> {
+  /** Operative terms are withheld until the prescribed delivery step. */
+  terms: EngineProceduralNoticeTerms | null;
+}
+
 export const engineWorldObjectStateSchema = z.enum([
   "intact",
   "damaged",
@@ -729,6 +863,7 @@ export const engineToolNameSchema = z.enum([
   "rules_reference",
   "character_options",
   "world_context",
+  "procedural_notice",
   "player_notes",
   "player_note_add",
   "npc_context",
@@ -1635,6 +1770,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
   engineProjectCommandSchema,
   z.object({ kind: z.literal("tutorial_advance") }).strict(),
   z.object({ kind: z.literal("declare"), goal: z.string().trim().min(1).max(2_000) }).strict(),
+  engineProceduralNoticeCommandSchema,
 ]);
 export type EngineCommand = z.infer<typeof engineCommandSchema>;
 
@@ -1956,6 +2092,7 @@ export interface PublicProjection {
   actorId: string;
   informationTiers: InformationTier[];
   worldContext: EngineWorldContextView | null;
+  proceduralNotices: EngineProceduralNoticeView[];
   facts: EngineWorldFact[];
   knowledge: EngineKnowledgeRecord[];
   social: EngineSocialProjection;
@@ -2939,6 +3076,7 @@ export interface LanternCampaignState {
   time: EngineTimeState;
   social?: EngineSocialState;
   worldContext: EngineWorldContext | null;
+  proceduralNotices: EngineProceduralNotice[];
   worldFacts: EngineWorldFact[];
   actorKnowledge: EngineKnowledgeRecord[];
   playerNotes: EngineNote[];
@@ -3002,6 +3140,7 @@ export interface EngineSessionView {
   social: EngineSocialProjection;
   characterCreated: boolean;
   worldContext: EngineWorldContextView | null;
+  proceduralNotices: EngineProceduralNoticeView[];
   playerNotes: EngineNote[];
   log: EngineMessage[];
   availableActions: string[];
