@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand } from "./engine-domain.js";
 import { buildDmContext, LanternDungeonMaster } from "./engine-dm.js";
-import { LanternEngineStore } from "./engine-store.js";
+import { EngineCommandInProgressError, LanternEngineStore } from "./engine-store.js";
 import { mkdtempSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -50,6 +50,77 @@ describe("Lantern OpenRouter tool loop", () => {
         stateVersion: state.version,
       }),
     ]));
+  });
+
+  it("reserves a player turn before asynchronous model work can be observed", async () => {
+    let releaseFirstCompletion!: () => void;
+    const firstCompletion = new Promise<void>((resolve) => { releaseFirstCompletion = resolve; });
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await firstCompletion;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "tool-observe",
+                  type: "function",
+                  function: { name: "observe", arguments: "{}" },
+                }],
+              },
+            }],
+          }),
+        };
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({ text: "The table holds its breath.", proposedFacts: [], suggestedActions: [] }),
+            },
+          }],
+        }),
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-reservation", "actor-reservation");
+    store.createCampaign({
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I wait for the table to reveal its next sign.";
+    const dm = new LanternDungeonMaster(store, options);
+    const firstRequest = dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(store.getStoredCommand(state.accountId, clientCommandId)).toMatchObject({ status: "processing" });
+    await expect(dm.resolveTurn(context, state, clientCommandId, state.version, playerText))
+      .rejects.toThrow(EngineCommandInProgressError);
+
+    releaseFirstCompletion();
+    const result = await firstRequest;
+    expect(result.replayed).toBe(false);
+    expect(store.getStoredCommand(state.accountId, clientCommandId)).toMatchObject({ status: "resolved" });
+    store.close();
   });
 
   it("reads context, commits one authoritative tool, and narrates the committed result", async () => {
