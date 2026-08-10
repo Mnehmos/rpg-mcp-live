@@ -144,7 +144,8 @@ describe("DM broad-search provenance", () => {
         }),
       ))
       .mockResolvedValueOnce(narration("You find a red-striped cloak, but no way out."))
-      .mockResolvedValueOnce(narration("You find a red-striped cloak, but no way out."));
+      .mockResolvedValueOnce(narration("You find a red-striped cloak, but no way out."))
+      .mockRejectedValueOnce(new Error("public narrator rejected the uncommitted reward"));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     const state = searchState("account-search-absent", "actor-search-absent");
@@ -158,7 +159,7 @@ describe("DM broad-search provenance", () => {
       playerText,
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check"]);
     expect(result.narrationSource).toBe("rules");
     expect(result.narration.text).not.toMatch(/cloak|bundle|hatch/i);
@@ -191,6 +192,7 @@ describe("DM broad-search provenance", () => {
         }),
       ))
       .mockResolvedValueOnce(narration("The search turns up the authored arena-worker cloak, and a low wooden hatch lies beside it."))
+      .mockResolvedValueOnce(narration("You find the authored arena-worker cloak."))
       .mockResolvedValueOnce(narration("You find the authored arena-worker cloak."));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
@@ -205,7 +207,7 @@ describe("DM broad-search provenance", () => {
       playerText,
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["roll_check", "content_compile"]);
     const found = result.state.worldContext?.objects.find((object) => object.id === cloakId);
     const definitionId = result.state.runtimeContent.instances.find((instance) => instance.id === cloakId)?.definitionId;
@@ -240,7 +242,7 @@ describe("DM broad-search provenance", () => {
     );
     expect(replay.replayed).toBe(true);
     expect(replay.narration.text).toBe(result.narration.text);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     store.close();
   });
 

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { suggestedActionSchema, type NarrationEnvelope } from "./ai-contracts.js";
 
 /**
  * The production room is deliberately a small, engine-owned boundary.  It
@@ -116,13 +117,18 @@ const timestampSchema = z.string().datetime({ offset: true });
 export const dmRunUsageSchema = z.object({
   provider: z.string().trim().min(1).max(120),
   model: z.string().trim().min(1).max(200),
-  inputTokens: z.number().int().nonnegative(),
-  outputTokens: z.number().int().nonnegative(),
-  totalTokens: z.number().int().nonnegative(),
-  costUsd: z.number().nonnegative(),
+  inputTokens: z.number().int().nonnegative().nullable(),
+  outputTokens: z.number().int().nonnegative().nullable(),
+  totalTokens: z.number().int().nonnegative().nullable(),
+  costUsd: z.number().nonnegative().nullable(),
   latencyMs: z.number().int().nonnegative(),
 }).strict().superRefine((usage, context) => {
-  if (usage.totalTokens !== usage.inputTokens + usage.outputTokens) {
+  if (
+    usage.inputTokens !== null
+    && usage.outputTokens !== null
+    && usage.totalTokens !== null
+    && usage.totalTokens !== usage.inputTokens + usage.outputTokens
+  ) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["totalTokens"], message: "Total tokens must equal input plus output tokens." });
   }
 });
@@ -262,7 +268,7 @@ export type NarrationBeatKind = z.infer<typeof narrationBeatKindSchema>;
 export const narrationBeatSchema = z.object({
   id: refIdSchema,
   kind: narrationBeatKindSchema,
-  text: z.string().trim().min(1).max(4_000),
+  text: z.string().trim().min(1).max(6_000),
   entityRefs: z.array(refIdSchema).max(30),
   publicFactRefs: z.array(refIdSchema).max(30),
   committedEventRefs: z.array(refIdSchema).max(30),
@@ -270,6 +276,38 @@ export const narrationBeatSchema = z.object({
   interruptible: z.boolean(),
 }).strict();
 export type NarrationBeat = z.infer<typeof narrationBeatSchema>;
+
+export const narrationDraftBeatSchema = narrationBeatSchema.omit({ id: true, revealRequests: true }).strict();
+export type NarrationDraftBeat = z.infer<typeof narrationDraftBeatSchema>;
+
+export const narrationDraftSchema = z.object({
+  beats: z.array(narrationDraftBeatSchema).min(1).max(8),
+  suggestedActions: z.array(suggestedActionSchema).max(5),
+}).strict().superRefine((draft, context) => {
+  const combinedLength = draft.beats.reduce((total, beat) => total + beat.text.length, 0)
+    + Math.max(0, draft.beats.length - 1) * 2;
+  if (combinedLength > 6_000) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["beats"],
+      message: "Combined narration text cannot exceed 6000 characters.",
+    });
+  }
+});
+export type NarrationDraft = z.infer<typeof narrationDraftSchema>;
+
+function providerJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(providerJsonSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, child]) => {
+      if (key === "$schema") return [];
+      return [[key === "oneOf" ? "anyOf" : key, providerJsonSchema(child)]];
+    })
+  );
+}
+
+export const narrationDraftJsonSchema = providerJsonSchema(z.toJSONSchema(narrationDraftSchema));
 
 export const narrationSequenceIrSchema = z.object({
   id: refIdSchema,
@@ -298,6 +336,81 @@ export type PublicNarrationSequence = Omit<NarrationSequenceIR, "sourceRunId" | 
 export function projectNarrationSequenceForActor(sequence: NarrationSequenceIR): PublicNarrationSequence {
   const { sourceRunId: _sourceRunId, narratorRunId: _narratorRunId, ...publicSequence } = sequence;
   return publicSequence;
+}
+
+export interface CompileNarrationDraftInput {
+  draft: NarrationDraft;
+  projection: ActorSceneProjection;
+  sourceRunId: string;
+  narratorRunId: string;
+  sequenceId?: string;
+  now?: string;
+}
+
+export interface CompiledNarrationDraft {
+  sequence: NarrationSequenceIR;
+  narration: NarrationEnvelope;
+}
+
+/**
+ * Compile a completed narrator draft into the public release contract.
+ * Sequence and beat IDs are engine-owned; the model may only propose text and
+ * references that already exist in the actor-safe projection.
+ */
+export function compileNarrationDraft(input: CompileNarrationDraftInput): CompiledNarrationDraft {
+  const draft = narrationDraftSchema.parse(input.draft);
+  const now = input.now ?? new Date().toISOString();
+  // Public sequence identity must not encode either private run identity.
+  const sequenceId = input.sequenceId ?? `narration:${randomUUID()}`;
+  const candidate = narrationSequenceIrSchema.parse({
+    id: sequenceId,
+    sceneId: input.projection.sceneId,
+    sceneRevision: input.projection.revision,
+    campaignVersion: input.projection.campaignVersion,
+    sourceRunId: input.sourceRunId,
+    narratorRunId: input.narratorRunId,
+    committedEventIds: [...new Set(draft.beats.flatMap((beat) => beat.committedEventRefs))],
+    beats: draft.beats.map((beat, index) => ({
+      id: `${sequenceId}:beat:${index + 1}`,
+      ...beat,
+      revealRequests: [],
+    })),
+    status: "candidate",
+    createdAt: now,
+    releasedAt: null,
+  });
+  const sequence = releaseNarrationSequence(candidate, input.projection, now);
+  return {
+    sequence,
+    narration: {
+      text: sequence.beats.map((beat) => beat.text).join("\n\n"),
+      proposedFacts: [],
+      suggestedActions: draft.suggestedActions,
+    },
+  };
+}
+
+/** Compatibility parser for already-reviewed envelope fixtures and providers. */
+export function narrationDraftFromEnvelope(
+  narration: NarrationEnvelope,
+  projection: ActorSceneProjection
+): NarrationDraft {
+  if (narration.proposedFacts.length > 0) {
+    throw new ProductionRoomValidationError([
+      "The public narrator cannot propose uncommitted campaign facts.",
+    ]);
+  }
+  return narrationDraftSchema.parse({
+    beats: [{
+      kind: projection.committedEventIds.length > 0 ? "consequence" : "establishing",
+      text: narration.text,
+      entityRefs: [],
+      publicFactRefs: [],
+      committedEventRefs: [...projection.committedEventIds],
+      interruptible: true,
+    }],
+    suggestedActions: narration.suggestedActions,
+  });
 }
 
 export interface SceneValidationResult {
@@ -663,8 +776,53 @@ export interface ProductionRoomState {
   processedOperationIds: string[];
 }
 
+export interface ProductionRoomLiveRelease {
+  plannerRun: DmRun;
+  narratorRun: DmRun;
+  sequence: NarrationSequenceIR;
+}
+
 export function emptyProductionRoomState(): ProductionRoomState {
   return { activeScene: null, runs: [], releasedSequences: [], playback: [], processedOperationIds: [] };
+}
+
+/** Persist one normal-turn release without exposing either private run. */
+export function recordProductionRoomLiveRelease(
+  state: ProductionRoomState,
+  release: ProductionRoomLiveRelease,
+  operationId: string
+): ProductionRoomState {
+  const current = parseProductionRoomState(state);
+  if (current.processedOperationIds.includes(operationId)) return current;
+  const sequence = narrationSequenceIrSchema.parse(release.sequence);
+  if (sequence.status !== "released") {
+    throw new ProductionRoomValidationError(["Only a released normal-turn narration sequence may persist."]);
+  }
+  if (sequence.sourceRunId !== release.plannerRun.id || sequence.narratorRunId !== release.narratorRun.id) {
+    throw new ProductionRoomValidationError(["The released sequence does not belong to its planner and narrator runs."]);
+  }
+  const runs = [...current.runs];
+  for (const run of [release.plannerRun, release.narratorRun]) {
+    const parsed = dmRunSchema.parse(run);
+    const existing = runs.find((candidate) => candidate.id === parsed.id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(parsed)) {
+      throw new ProductionRoomValidationError([`DM run ${parsed.id} conflicts with a persisted run.`]);
+    }
+    if (!existing) runs.push(parsed);
+  }
+  const releasedSequences = current.releasedSequences.some((candidate) => candidate.id === sequence.id)
+    ? current.releasedSequences
+    : [...current.releasedSequences, sequence];
+  const playback = current.playback.some((candidate) => candidate.sequenceId === sequence.id)
+    ? current.playback
+    : [...current.playback, initialPlayback(sequence)];
+  return parseProductionRoomState({
+    ...current,
+    runs,
+    releasedSequences,
+    playback,
+    processedOperationIds: [...current.processedOperationIds, operationId].slice(-500),
+  });
 }
 
 export function createDmRun(input: Omit<DmRun, "id" | "status" | "privateEventRefs" | "publicEventRefs" | "committedEventIds" | "outputHash" | "completedAt" | "releasedAt"> & { id?: string }): DmRun {

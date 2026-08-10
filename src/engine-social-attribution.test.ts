@@ -127,12 +127,19 @@ async function resolveWithModelNarration(
       })),
     }));
   if (providerFailure) {
-    fetchMock.mockRejectedValueOnce(new Error("provider timeout after social commit"));
+    fetchMock
+      .mockRejectedValueOnce(new Error("provider timeout after social commit"))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
   } else {
-    fetchMock.mockResolvedValueOnce(legacyResponse({
-      role: "assistant",
-      content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions }),
-    }));
+    fetchMock
+      .mockResolvedValueOnce(legacyResponse({
+        role: "assistant",
+        content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions }),
+      }))
+      .mockResolvedValueOnce(legacyResponse({
+        role: "assistant",
+        content: JSON.stringify({ text: modelText, proposedFacts: [], suggestedActions }),
+      }));
   }
   vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
@@ -145,7 +152,7 @@ async function resolveWithModelNarration(
       state.version,
       "I tell Titus to explain what happened and turn the sentries against Ledrus.",
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     return result;
   } finally {
     store.close();
@@ -273,7 +280,8 @@ describe("social check actor attribution", () => {
           },
         }],
       }))
-      .mockRejectedValueOnce(new Error("provider timeout after social commit"));
+      .mockRejectedValueOnce(new Error("provider timeout after social commit"))
+      .mockRejectedValueOnce(new Error("public narrator unavailable"));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     try {
@@ -289,7 +297,7 @@ describe("social check actor attribution", () => {
       expect(result.narration.text).toContain("Titus acts for Mnehmos toward Arena Sentries");
       expect(result.narration.text).toContain("Mnehmos's modifiers");
       expect(result.event?.effects?.[0]?.check?.attribution).toMatchObject({ mode: "npc-mediated", actingActorId: "titus" });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });

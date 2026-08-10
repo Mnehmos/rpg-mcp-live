@@ -12,16 +12,21 @@ import {
   ProductionRoomValidationError,
   buildRuinedGatehouseBlueprint,
   buildSafeNarrationFallback,
+  compileNarrationDraft,
   commitSceneSnapshot,
+  completeDmRun,
+  createDmRun,
   createProductionRoomToolRegistry,
   emptyProductionRoomState,
   hashBlueprint,
   initialPlayback,
   openSceneInput,
+  narrationDraftFromEnvelope,
   parseProductionRoomState,
   playNextBeat,
   promoteSceneDetail,
   projectSceneForActor,
+  recordProductionRoomLiveRelease,
   releaseNarrationSequence,
   serializeProductionRoomState,
   validateDetailPromotion,
@@ -145,6 +150,100 @@ describe("DM production room boundary", () => {
     const fallback = buildSafeNarrationFallback(projection, runId, "fallback-narrator", "2026-08-08T18:00:04.000Z");
     expect(fallback.status).toBe("released");
     expect(fallback.beats[0]?.publicFactRefs).toEqual([]);
+  });
+
+  it("compiles only actor-safe narrator refs and rejects uncommitted public prose", () => {
+    const projection = projectSceneForActor(snapshot(), "actor-a");
+    const compiled = compileNarrationDraft({
+      sourceRunId: runId,
+      narratorRunId: "narrator-safe-1",
+      projection,
+      now: baseTime,
+      draft: {
+        beats: [{
+          kind: "consequence",
+          text: "The wounded guard points from the locked chest toward the north road.",
+          entityRefs: ["gatehouse-wounded-guard", "gatehouse-locked-chest", "gatehouse-exit-north"],
+          publicFactRefs: ["gatehouse-guard-partial-truth"],
+          committedEventRefs: ["event-gatehouse-enter"],
+          interruptible: true,
+        }],
+        suggestedActions: [],
+      },
+    });
+    expect(compiled.sequence.status).toBe("released");
+    expect(compiled.narration.text).toContain("wounded guard");
+    expect(() => compileNarrationDraft({
+      sourceRunId: runId,
+      narratorRunId: "narrator-unsafe-1",
+      projection,
+      draft: {
+        beats: [{
+          kind: "consequence",
+          text: "A private tool_call reveals the hidden ambush.",
+          entityRefs: ["gatehouse-hidden-clue"],
+          publicFactRefs: ["gatehouse-chest-clue-fact"],
+          committedEventRefs: ["event-not-committed"],
+          interruptible: true,
+        }],
+        suggestedActions: [],
+      },
+    })).toThrow(ProductionRoomValidationError);
+    expect(() => narrationDraftFromEnvelope({
+      text: "A new enemy appears.",
+      proposedFacts: [{ kind: "introduce_npc", npcId: "retroactive-enemy", name: "Enemy", disposition: "hostile" }],
+      suggestedActions: [],
+    }, projection)).toThrow(ProductionRoomValidationError);
+  });
+
+  it("persists one private planner/narrator pair and idempotent public replay metadata", () => {
+    const projection = projectSceneForActor(snapshot(), "actor-a");
+    const planner = completeDmRun(createDmRun({
+      id: "planner-live-1",
+      kind: "intent_interpretation",
+      accountId: "account-a",
+      campaignId: "campaign-a",
+      actorId: "actor-a",
+      baseCampaignVersion: 4,
+      baseSceneRevision: 1,
+      usage: { provider: "openrouter", model: "test", inputTokens: null, outputTokens: null, totalTokens: null, costUsd: null, latencyMs: 12 },
+      createdAt: baseTime,
+    }), "private planner output", "committed", baseTime);
+    const narrator = completeDmRun(createDmRun({
+      id: "narrator-live-1",
+      kind: "narration",
+      accountId: "account-a",
+      campaignId: "campaign-a",
+      actorId: "actor-a",
+      baseCampaignVersion: 4,
+      baseSceneRevision: 1,
+      usage: { provider: "openrouter", model: "test", inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0, latencyMs: 7 },
+      createdAt: baseTime,
+    }), "public narrator draft", "released", baseTime);
+    const compiled = compileNarrationDraft({
+      sourceRunId: planner.id,
+      narratorRunId: narrator.id,
+      projection,
+      now: baseTime,
+      draft: {
+        beats: [{ kind: "consequence", text: "The committed scene changes.", entityRefs: [], publicFactRefs: [], committedEventRefs: ["event-gatehouse-enter"], interruptible: true }],
+        suggestedActions: [],
+      },
+    });
+    const once = recordProductionRoomLiveRelease(emptyProductionRoomState(), {
+      plannerRun: planner,
+      narratorRun: narrator,
+      sequence: compiled.sequence,
+    }, "command-live-1");
+    const replay = recordProductionRoomLiveRelease(once, {
+      plannerRun: planner,
+      narratorRun: narrator,
+      sequence: compiled.sequence,
+    }, "command-live-1");
+    expect(replay.runs).toHaveLength(2);
+    expect(replay.releasedSequences).toHaveLength(1);
+    expect(replay.playback).toHaveLength(1);
+    expect(replay.processedOperationIds).toEqual(["command-live-1"]);
   });
 
   it("rejects hidden, absent, stale, and uncommitted narration references", () => {

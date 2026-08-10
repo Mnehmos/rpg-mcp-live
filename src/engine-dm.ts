@@ -59,6 +59,21 @@ import {
 import type { OpenRouterCompletionTelemetry, OpenRouterOptions } from "./openrouter.js";
 import type { ModelUsagePurpose, ModelUsageStatus } from "./usage-ledger.js";
 import { CORE_DM_DOCTRINE } from "./engine-dm-doctrine.js";
+import {
+  actorSceneProjectionSchema,
+  compileNarrationDraft,
+  completeDmRun,
+  createDmRun,
+  narrationDraftFromEnvelope,
+  narrationDraftJsonSchema,
+  narrationDraftSchema,
+  type ActorSceneProjection,
+  type DmRun,
+  type DmRunKind,
+  type DmRunUsage,
+  type NarrationDraft,
+  type ProductionRoomLiveRelease,
+} from "./engine-production-room.js";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -81,8 +96,12 @@ interface CompletionMessage {
 }
 
 interface ToolLoopResult {
+  /** Private planner prose. It is retained only as a hash and is never published. */
   narration: NarrationEnvelope | null;
   stagedEffects: StagedEngineTurnEffect[];
+  plannerRunId: string;
+  plannerStartedAt: string;
+  telemetry: OpenRouterCompletionTelemetry[];
 }
 
 export type DmLoopMode = "player_turn" | "opening";
@@ -115,6 +134,28 @@ interface NormalizedCompletionUsage {
   totalTokens: number | null;
   costMicrousd: number | null;
 }
+
+interface CompletionResponseContract {
+  name: string;
+  schema: unknown;
+}
+
+interface NarratorRunResult {
+  draft: NarrationDraft;
+  runId: string;
+  startedAt: string;
+  telemetry: OpenRouterCompletionTelemetry[];
+}
+
+const PLANNER_RESPONSE_CONTRACT: CompletionResponseContract = {
+  name: "lantern_private_planner_completion",
+  schema: narrationEnvelopeJsonSchema,
+};
+
+const NARRATOR_RESPONSE_CONTRACT: CompletionResponseContract = {
+  name: "lantern_public_narration_draft",
+  schema: narrationDraftJsonSchema,
+};
 
 const NARRATION_CONTRACT_INSTRUCTION = [
   "Return the final response as one valid JSON object with exactly three keys: text, proposedFacts, and suggestedActions.",
@@ -243,6 +284,177 @@ export function buildDmContext(
   };
 }
 
+export function buildPublicNarratorPrompt(): string {
+  return [
+    CORE_DM_DOCTRINE,
+    "You are the public narrator for one already-committed Lantern turn. You have no tools and no authority to change campaign state.",
+    "Use only the actor-safe packet below. The committed result and cited event IDs are authoritative. Never contradict a roll, modifier, resource change, location, relationship, object state, or known fact.",
+    "Return one JSON object with exactly beats and suggestedActions. beats contains 1 to 8 ordered objects with exactly kind, text, entityRefs, publicFactRefs, committedEventRefs, and interruptible.",
+    "kind is establishing, sensory, npc, dialogue, mechanical, consequence, or question. Every entity/fact/event ref must be copied exactly from the actor-safe packet. Use empty ref arrays when a beat makes no such claim.",
+    "A mechanical or consequence beat must cite at least one committed event. Do not propose facts, expose hidden state, mention tools/prompts/context/schema/retries, or ask the player to wait for internal work.",
+    "The primary prose is the game: portray present NPCs, state what the character perceives, honor the committed consequence, and leave a changed or conclusively answered situation. Exact mechanics may appear secondarily.",
+    "suggestedActions contains 0 to 5 optional objects with exactly id, label, and a first-person prompt. Freeform play always remains available.",
+  ].join(" ");
+}
+
+function uniqueById<T extends { id: string }>(values: T[]): T[] {
+  return [...new Map(values.map((value) => [value.id, value])).values()];
+}
+
+/** Build the only scene/reference vocabulary visible to the public narrator. */
+export function buildCommittedNarratorProjection(
+  result: EngineCommandResult,
+  context: RequestContext
+): ActorSceneProjection {
+  const state = result.state;
+  const viewpointActorId = state.party?.activeViewpointActorId ?? context.actorId;
+  const knowledge = actorKnowledgeProjection(viewpointActorId, state);
+  const world = knowledge.worldContext;
+  const situation = state.situation
+    ? projectSituationForActor(state.situation, state, viewpointActorId)
+    : null;
+  const entities = uniqueById([
+    {
+      id: state.character.id,
+      kind: "actor" as const,
+      label: state.character.name || "Player character",
+      visibility: "public" as const,
+      detailClass: "authoritative_interactable" as const,
+    },
+    ...(world?.npcs ?? []).map((npc) => ({
+      id: npc.id,
+      kind: "actor" as const,
+      label: npc.name,
+      visibility: "public" as const,
+      detailClass: "authoritative_interactable" as const,
+    })),
+    ...(world?.objects ?? []).map((object) => ({
+      id: object.id,
+      kind: "object" as const,
+      label: object.definition.name,
+      visibility: "public" as const,
+      state: object.state,
+      detailClass: "authoritative_interactable" as const,
+    })),
+    ...(world?.exits ?? []).map((exit) => ({
+      id: exit.id,
+      kind: "exit" as const,
+      label: exit.label,
+      visibility: "public" as const,
+      detailClass: "authoritative_interactable" as const,
+    })),
+  ]);
+  const eventIds = result.event ? [result.event.id] : [];
+  const sceneRevision = Math.max(
+    1,
+    situation?.revision ?? state.orchestration?.activeScene?.revision ?? state.version,
+  );
+  return actorSceneProjectionSchema.parse({
+    sceneId: situation?.id ?? state.orchestration?.activeScene?.sceneId ?? world?.id ?? `campaign:${state.id}`,
+    revision: sceneRevision,
+    campaignVersion: state.version,
+    actorId: context.actorId,
+    locationId: situation?.currentLocationId ?? world?.id ?? `campaign:${state.id}`,
+    mode: state.combat.status === "active" ? "encounter" : world?.npcs.length ? "social" : "exploration",
+    immediateQuestion: "What concrete situation follows from the player's committed action?",
+    entities,
+    visibleFactRefs: knowledge.facts.map((fact) => fact.id),
+    revealedClueRefs: situation?.clues.filter((clue) => clue.visibility === "public").map((clue) => clue.id) ?? [],
+    pressureRefs: situation && situation.status === "active" ? [situation.pressure.id] : [],
+    hazardRefs: [],
+    affordanceRefs: [],
+    committedEventIds: eventIds,
+  });
+}
+
+function buildCommittedNarratorContext(
+  result: EngineCommandResult,
+  context: RequestContext,
+  playerText: string,
+  projection: ActorSceneProjection,
+): Record<string, unknown> {
+  const publicResult = projectResolutionForActor(result, context.actorId);
+  const publicState = publicResult.state;
+  return {
+    playerIntent: playerText,
+    scene: projection,
+    committedResult: {
+      tool: publicResult.tool,
+      accepted: publicResult.accepted,
+      code: publicResult.code,
+      message: publicResult.message,
+      data: publicResult.data,
+      event: publicResult.event,
+    },
+    experienceProfile: projectExperienceProfile(publicState.experienceProfile),
+    recentPublicLog: publicState.log.slice(-8),
+    legalActionOffers: deriveActionOffers(publicState).filter((offer) => offer.reasonUnavailable === null),
+  };
+}
+
+function knownSum(
+  events: readonly OpenRouterCompletionTelemetry[],
+  select: (event: OpenRouterCompletionTelemetry) => number | null | undefined,
+): number | null {
+  if (events.length === 0) return null;
+  const values = events.map(select);
+  return values.some((value) => value === null || value === undefined)
+    ? null
+    : values.reduce<number>((total, value) => total + (value ?? 0), 0);
+}
+
+function dmRunUsage(
+  events: readonly OpenRouterCompletionTelemetry[],
+  options: OpenRouterOptions,
+): DmRunUsage {
+  const last = events.at(-1);
+  const costMicrousd = knownSum(events, (event) => event.costMicrousd);
+  return {
+    provider: last?.provider ?? "openrouter",
+    model: last?.resolvedModel ?? last?.model ?? options.model,
+    inputTokens: knownSum(events, (event) => event.inputTokens),
+    outputTokens: knownSum(events, (event) => event.outputTokens),
+    totalTokens: knownSum(events, (event) => event.totalTokens),
+    costUsd: costMicrousd === null ? null : costMicrousd / 1_000_000,
+    latencyMs: events.reduce((total, event) => total + event.durationMs, 0),
+  };
+}
+
+function completedRun(
+  input: {
+    id: string;
+    kind: DmRunKind;
+    status: "committed" | "released";
+    startedAt: string;
+    output: string;
+    telemetry: OpenRouterCompletionTelemetry[];
+    baseState: LanternCampaignState;
+    context: RequestContext;
+    eventIds: string[];
+  },
+  options: OpenRouterOptions,
+): DmRun {
+  const run = createDmRun({
+    id: input.id,
+    kind: input.kind,
+    accountId: input.context.accountId,
+    campaignId: input.context.campaignId,
+    actorId: input.context.actorId,
+    baseCampaignVersion: input.baseState.version,
+    baseSceneRevision: input.baseState.situation?.revision
+      ?? input.baseState.orchestration?.activeScene?.revision
+      ?? null,
+    usage: dmRunUsage(input.telemetry, options),
+    createdAt: input.startedAt,
+  });
+  const completed = completeDmRun(run, input.output, input.status);
+  return {
+    ...completed,
+    committedEventIds: [...input.eventIds],
+    publicEventRefs: [...input.eventIds],
+  };
+}
+
 interface ProvisionalToolResult extends EngineToolResult {
   stagedEffect?: StagedEngineTurnEffect;
   loadedCapabilityFamily?: EngineCapabilityFamilyId;
@@ -318,35 +530,14 @@ export class LanternDungeonMaster {
           toolLoop.stagedEffects
         ),
       });
-      if (!toolLoop.narration) {
-        const fallback = sanitizeNarrationForProfile(
-          rulesNarration(
-            committed.message,
-            "The opening is committed; the prose provider did not complete its first narration."
-          ),
-          committed.state.experienceProfile,
-        );
-        return {
-          ...committed,
-          narration: fallback,
-          narrationSource: "rules",
-        };
-      }
-      const preservedNarration = preserveMediatedCheckAttribution(
-        committed,
-        toolLoop.narration,
-        committed.state.experienceProfile,
-      );
-      return this.store.updateCommandNarration(
+      return await this.releaseCommittedNarration(
         context,
+        state,
+        committed,
         clientCommandId,
-        preservedNarration.narration,
-        preservedNarration.source,
-      ) ?? {
-        ...committed,
-        narration: preservedNarration.narration,
-        narrationSource: preservedNarration.source,
-      };
+        "Open the campaign with a concrete first situation.",
+        toolLoop,
+      );
     } catch (error) {
       if (committed) {
         const fallback = sanitizeNarrationForProfile(
@@ -420,32 +611,14 @@ export class LanternDungeonMaster {
         );
       }
 
-      if (!toolLoop.narration) {
-        const fallback = sanitizeNarrationForProfile(
-          committedRulesNarration(committed),
-          committed.state.experienceProfile,
-        );
-        return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
-          ...committed,
-          narration: fallback,
-          narrationSource: "rules",
-        };
-      }
-      const preservedNarration = preserveMediatedCheckAttribution(
-        committed,
-        toolLoop.narration,
-        committed.state.experienceProfile,
-      );
-      return this.store.updateCommandNarration(
+      return await this.releaseCommittedNarration(
         context,
+        state,
+        committed,
         clientCommandId,
-        preservedNarration.narration,
-        preservedNarration.source,
-      ) ?? {
-        ...committed,
-        narration: preservedNarration.narration,
-        narrationSource: preservedNarration.source,
-      };
+        playerText,
+        toolLoop,
+      );
     } catch (error) {
       if (committed) {
         const fallback = sanitizeNarrationForProfile(
@@ -458,6 +631,202 @@ export class LanternDungeonMaster {
       console.warn(error instanceof Error ? "DM tool loop fallback: " + error.message : "DM tool loop fallback.");
       return this.resolveFallback(context, state, clientCommandId, expectedCampaignVersion, playerText);
     }
+  }
+
+  private async releaseCommittedNarration(
+    context: RequestContext,
+    baseState: LanternCampaignState,
+    committed: EngineCommandResult,
+    clientCommandId: string,
+    playerText: string,
+    planner: ToolLoopResult,
+  ): Promise<EngineCommandResult> {
+    try {
+      const projection = buildCommittedNarratorProjection(committed, context);
+      const narrator = await this.runPublicNarrator(
+        context,
+        committed,
+        clientCommandId,
+        playerText,
+        projection,
+      );
+      if (
+        projection.committedEventIds.length > 0
+        && !narrator.draft.beats.some((beat) =>
+          beat.committedEventRefs.some((eventId) => projection.committedEventIds.includes(eventId))
+        )
+      ) {
+        throw new Error("The public narrator did not bind its result to the committed turn event.");
+      }
+
+      // Validate every model-proposed reference before applying profile and
+      // attribution safeguards to the final public text.
+      const validatedDraft = compileNarrationDraft({
+        draft: narrator.draft,
+        projection,
+        sourceRunId: planner.plannerRunId,
+        narratorRunId: narrator.runId,
+      });
+      const preserved = preserveMediatedCheckAttribution(
+        committed,
+        validatedDraft.narration,
+        committed.state.experienceProfile,
+      );
+      if (preserved.source !== "llm") {
+        throw new Error("The public narrator contradicted committed check attribution.");
+      }
+
+      const entityRefs = [...new Set(narrator.draft.beats.flatMap((beat) => beat.entityRefs))];
+      const publicFactRefs = [...new Set(narrator.draft.beats.flatMap((beat) => beat.publicFactRefs))];
+      const committedEventRefs = [...new Set(narrator.draft.beats.flatMap((beat) => beat.committedEventRefs))];
+      const finalDraft = narrationDraftSchema.parse({
+        beats: [{
+          kind: committedEventRefs.length > 0 ? "consequence" : "establishing",
+          text: preserved.narration.text,
+          entityRefs,
+          publicFactRefs,
+          committedEventRefs,
+          interruptible: true,
+        }],
+        suggestedActions: preserved.narration.suggestedActions,
+      });
+      const compiled = compileNarrationDraft({
+        draft: finalDraft,
+        projection,
+        sourceRunId: planner.plannerRunId,
+        narratorRunId: narrator.runId,
+      });
+      const eventIds = [...projection.committedEventIds];
+      const plannerRun = completedRun({
+        id: planner.plannerRunId,
+        kind: "intent_interpretation",
+        status: "committed",
+        startedAt: planner.plannerStartedAt,
+        output: JSON.stringify({
+          privateDraft: planner.narration,
+          effects: planner.stagedEffects.map((effect) => ({ tool: effect.tool, command: effect.command })),
+        }),
+        telemetry: planner.telemetry,
+        baseState,
+        context,
+        eventIds,
+      }, this.options);
+      const narratorRun = completedRun({
+        id: narrator.runId,
+        kind: "narration",
+        status: "released",
+        startedAt: narrator.startedAt,
+        output: JSON.stringify(narrator.draft),
+        telemetry: narrator.telemetry,
+        baseState: committed.state,
+        context,
+        eventIds,
+      }, this.options);
+      const release: ProductionRoomLiveRelease = {
+        plannerRun,
+        narratorRun,
+        sequence: compiled.sequence,
+      };
+      return this.store.updateCommandNarration(
+        context,
+        clientCommandId,
+        compiled.narration,
+        "llm",
+        release,
+      ) ?? {
+        ...committed,
+        narration: compiled.narration,
+        narrationSource: "llm",
+      };
+    } catch (error) {
+      console.warn(
+        "DM public narration release fallback: "
+        + (error instanceof Error ? error.message : "unknown narrator error")
+      );
+      const fallback = sanitizeNarrationForProfile(
+        appendMissingMediatedAttributions(
+          committedRulesNarration(committed),
+          mediatedCheckAttributions(committed),
+          false,
+        ),
+        committed.state.experienceProfile,
+      );
+      return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
+        ...committed,
+        narration: fallback,
+        narrationSource: "rules",
+      };
+    }
+  }
+
+  private async runPublicNarrator(
+    context: RequestContext,
+    committed: EngineCommandResult,
+    clientCommandId: string,
+    playerText: string,
+    projection: ActorSceneProjection,
+  ): Promise<NarratorRunResult> {
+    const runId = `dm-run:${randomUUID()}`;
+    const startedAt = new Date().toISOString();
+    const telemetry: OpenRouterCompletionTelemetry[] = [];
+    let requestSequence = 0;
+    const messages: ChatMessage[] = [
+      { role: "system", content: buildPublicNarratorPrompt() },
+      {
+        role: "user",
+        content: JSON.stringify(buildCommittedNarratorContext(
+          committed,
+          context,
+          playerText,
+          projection,
+        )),
+      },
+    ];
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const requestTelemetry: OpenRouterCompletionTelemetry[] = [];
+      let assistant: CompletionMessage;
+      try {
+        assistant = await this.requestCompletion(messages, false, {
+          accountId: context.accountId,
+          campaignId: context.campaignId,
+          actorId: context.actorId,
+          requestId: context.requestId,
+          clientCommandId,
+          dmRunId: runId,
+          purpose: attempt === 0 ? "narration" : "narration_repair",
+          toolsEnabled: false,
+          nextRequestSequence: () => ++requestSequence,
+          telemetryEvents: requestTelemetry,
+        }, undefined, NARRATOR_RESPONSE_CONTRACT);
+      } finally {
+        telemetry.push(...requestTelemetry);
+        this.flushCompletionTelemetry(
+          requestTelemetry,
+          attempt === 0 ? "narration" : "narration_repair",
+        );
+      }
+      const content = typeof assistant.content === "string" ? assistant.content.trim() : "";
+      try {
+        if ((assistant.tool_calls?.length ?? 0) > 0) {
+          throw new Error("The public narrator attempted to call a tool.");
+        }
+        const parsed = JSON.parse(stripJsonFence(content)) as unknown;
+        const draft = narrationDraftSchema.safeParse(parsed);
+        const compatible = draft.success
+          ? draft.data
+          : narrationDraftFromEnvelope(narrationEnvelopeSchema.parse(parsed), projection);
+        return { draft: compatible, runId, startedAt, telemetry };
+      } catch (error) {
+        if (attempt === 1) throw error;
+        messages.push({ role: "assistant", content: content || null });
+        messages.push({
+          role: "user",
+          content: "The narration draft failed its strict public schema or used an invalid reference. Return a corrected object only; do not add facts, tools, commentary, or markdown.",
+        });
+      }
+    }
+    throw new Error("The public narrator did not produce a validated draft.");
   }
 
   private async runToolLoop(
@@ -473,6 +842,18 @@ export class LanternDungeonMaster {
     let currentState = cloneCampaign(initialState);
     const stagedEffects: StagedEngineTurnEffect[] = [];
     const dmRunId = `dm-run:${randomUUID()}`;
+    const plannerStartedAt = new Date().toISOString();
+    const plannerTelemetry: OpenRouterCompletionTelemetry[] = [];
+    const finishPlanner = (
+      narration: NarrationEnvelope | null,
+      effects: StagedEngineTurnEffect[] = stagedEffects,
+    ): ToolLoopResult => ({
+      narration,
+      stagedEffects: effects,
+      plannerRunId: dmRunId,
+      plannerStartedAt,
+      telemetry: plannerTelemetry,
+    });
     let requestSequence = 0;
     const loadedCapabilityFamilies = new Set<EngineCapabilityFamilyId>();
     const availableToolDefinitions = (): readonly EngineToolDefinition[] =>
@@ -517,24 +898,23 @@ export class LanternDungeonMaster {
           telemetryEvents,
         }, availableToolDefinitions());
       } catch (error) {
+        plannerTelemetry.push(...telemetryEvents);
         this.flushCompletionTelemetry(telemetryEvents, repairPending ? "narration_repair" : mode);
         if (repairPending) {
           console.warn(
             "DM narration contract repair request failed; using safe text-only fallback: "
               + (error instanceof Error ? error.message : "unknown provider error")
           );
-          return {
-            narration: safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null,
-            stagedEffects,
-          };
+          return finishPlanner(safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null);
         }
-        if (stagedEffects.length > 0) return { narration: null, stagedEffects };
+        if (stagedEffects.length > 0) return finishPlanner(null);
         throw error;
       }
       const toolCalls = assistant.tool_calls ?? [];
+      plannerTelemetry.push(...telemetryEvents);
       this.flushCompletionTelemetry(
         telemetryEvents,
-        repairPending ? "narration_repair" : toolCalls.length > 0 ? mode : "narration"
+        repairPending ? "narration_repair" : mode
       );
       if (!toolCalls.length) {
         const content = typeof assistant.content === "string" ? assistant.content.trim() : "";
@@ -547,10 +927,10 @@ export class LanternDungeonMaster {
               messages.push({ role: "user", content: repair });
               continue;
             }
-            return {
-              narration: null,
-              stagedEffects: stagedEffects.filter((effect) => objectIntent.kind !== "held-transfer" || heldContest(effect)?.outcome !== "success"),
-            };
+            return finishPlanner(
+              null,
+              stagedEffects.filter((effect) => objectIntent.kind !== "held-transfer" || heldContest(effect)?.outcome !== "success"),
+            );
           }
         }
         const validation = validateNarration(content);
@@ -564,7 +944,7 @@ export class LanternDungeonMaster {
                 messages.push({ role: "user", content: searchRepair });
                 continue;
               }
-              return { narration: null, stagedEffects };
+              return finishPlanner(null);
             }
           }
           const noticeRepair = proceduralNoticeRepair(playerText, content, currentState, stagedEffects);
@@ -575,12 +955,9 @@ export class LanternDungeonMaster {
               messages.push({ role: "user", content: noticeRepair });
               continue;
             }
-            return {
-              narration: rulesNarration("The formal procedure is waiting for an authoritative notice record before it can govern your next action."),
-              stagedEffects,
-            };
+            return finishPlanner(rulesNarration("The formal procedure is waiting for an authoritative notice record before it can govern your next action."));
           }
-          return { narration: validation.data, stagedEffects };
+          return finishPlanner(validation.data);
         }
         safeNarrationCandidate ??= validation.safeText;
 
@@ -602,10 +979,7 @@ export class LanternDungeonMaster {
           "DM narration contract repair failed; using safe text-only fallback: "
             + validation.issues.join("; ").slice(0, 1_000)
         );
-        return {
-          narration: safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null,
-          stagedEffects,
-        };
+        return finishPlanner(safeNarrationCandidate ? rulesNarration(safeNarrationCandidate) : null);
       }
 
       repairPending = false;
@@ -667,7 +1041,7 @@ export class LanternDungeonMaster {
       ) {
         stagedEffects.length = 0;
         currentState = cloneCampaign(initialState);
-        if (intentRepairAttempted) return { narration: null, stagedEffects };
+        if (intentRepairAttempted) return finishPlanner(null);
         intentRepairAttempted = true;
         messages.push({
           role: "user",
@@ -684,7 +1058,7 @@ export class LanternDungeonMaster {
       }
     }
 
-    if (stagedEffects.length > 0) return { narration: null, stagedEffects };
+    if (stagedEffects.length > 0) return finishPlanner(null);
     throw new Error("The DM exceeded the tool-call turn budget.");
   }
 
@@ -921,6 +1295,7 @@ export class LanternDungeonMaster {
     allowTools: boolean,
     telemetryContext?: CompletionTelemetryContext,
     tools?: readonly EngineToolDefinition[],
+    responseContract: CompletionResponseContract = PLANNER_RESPONSE_CONTRACT,
   ): Promise<CompletionMessage> {
     try {
       return await this.requestStreamingCompletion(
@@ -934,6 +1309,7 @@ export class LanternDungeonMaster {
           requestSequence: telemetryContext.nextRequestSequence(),
         } : undefined,
         tools,
+        responseContract,
       );
     } catch (error) {
       if (!(error instanceof FirstTokenTimeoutError) || !this.options.fallbackModel) throw error;
@@ -949,6 +1325,7 @@ export class LanternDungeonMaster {
           requestSequence: telemetryContext.nextRequestSequence(),
         } : undefined,
         tools,
+        responseContract,
       );
     }
   }
@@ -983,6 +1360,7 @@ export class LanternDungeonMaster {
     selection: "primary" | "fallback",
     telemetryContext?: Omit<CompletionTelemetryContext, "nextRequestSequence"> & { requestSequence: number },
     tools?: readonly EngineToolDefinition[],
+    responseContract: CompletionResponseContract = PLANNER_RESPONSE_CONTRACT,
   ): Promise<CompletionMessage> {
     const startedAt = Date.now();
     let firstOutputAt: number | null = null;
@@ -1022,9 +1400,9 @@ export class LanternDungeonMaster {
         response_format: {
           type: "json_schema",
           json_schema: {
-            name: "lantern_narration",
+            name: responseContract.name,
             strict: true,
-            schema: narrationEnvelopeJsonSchema,
+            schema: responseContract.schema,
           },
         },
         ...(allowTools

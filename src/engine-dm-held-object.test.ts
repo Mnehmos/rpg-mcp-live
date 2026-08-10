@@ -118,14 +118,16 @@ describe("DM held-object reconciliation", () => {
         call("steal-key-ring", "interact", { targetId: canonicalKeyRingId, affordance: "steal", goal: "Take the key ring from Ledrus." }),
       ))
       .mockResolvedValueOnce(narration("The contest is settled: the key ring is now in your hand."))
+      .mockResolvedValueOnce(narration("The contest is settled: the key ring is now carried by the acting character."))
       .mockResolvedValueOnce(narration("The hatch remains shut for the moment."))
       .mockResolvedValueOnce(toolResponse(call("unlock-hatch", "interact", { targetId: "service-hatch", sourceId: canonicalKeyRingId, affordance: "unlock", goal: "Use the key ring to unlock the service hatch." })))
+      .mockResolvedValueOnce(narration("The key ring turns the lock, and the service hatch clicks open."))
       .mockResolvedValueOnce(narration("The key ring turns the lock, and the service hatch clicks open."));
     vi.stubGlobal("fetch", openAiSdkFetch(fetchMock));
 
     const dm = new LanternDungeonMaster(store, options);
     const transfer = await dm.resolveTurn(context, state, transferCommandId, state.version, transferText);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(transfer.event?.effects?.map((effect) => effect.tool)).toEqual(["social_check", "content_compile", "interact"]);
     expect(transfer.state.worldContext?.objects).toEqual(expect.arrayContaining([expect.objectContaining({
       id: canonicalKeyRingId,
@@ -143,13 +145,16 @@ describe("DM held-object reconciliation", () => {
     const replay = await restartedDm.resolveTurn(context, state, transferCommandId, state.version, transferText);
     expect(replay.replayed).toBe(true);
     expect(replay.event).toEqual(transfer.event);
+    expect(replay.narrationSequence).toEqual(transfer.narrationSequence);
+    expect(replay.state.productionRoom?.runs).toHaveLength(2);
+    expect(replay.state.productionRoom?.releasedSequences).toHaveLength(1);
     expect(replay.state.runtimeContent.definitions).toHaveLength(1);
     expect(replay.state.runtimeContent.instances).toHaveLength(1);
     expect(replay.state.worldContext?.objects.filter((entry) => entry.id === canonicalKeyRingId)).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
 
     const unlock = await restartedDm.resolveTurn(context, replay.state, randomUUID(), replay.state.version, "I use Ledrus's key ring to unlock the service hatch.");
-    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock).toHaveBeenCalledTimes(9);
     expect(unlock.event?.effects?.map((effect) => effect.tool)).toEqual(["interact"]);
     expect(unlock.state.worldContext?.objects).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: canonicalKeyRingId, ownerRef: { kind: "actor", id: state.actorId }, state: "carried" }),
