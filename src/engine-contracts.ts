@@ -1366,6 +1366,19 @@ export interface EngineAdjudicationAttempt extends EngineAdjudicationDecision {
   total?: number;
 }
 
+export interface EngineSocialCheckAttribution {
+  actionOwnerActorId: string;
+  rollingActorId: string;
+  rollingActorName: string;
+  actingActorId: string;
+  actingActorName: string;
+  targetId: string;
+  targetName: string;
+  modifierSourceActorId: string;
+  modifierSourceActorName: string;
+  mode: "direct" | "npc-mediated";
+}
+
 export interface EngineCheckEvidence {
   kind: "ability-check" | "opposed-check";
   actorId: string;
@@ -1385,6 +1398,7 @@ export interface EngineCheckEvidence {
   opponentSkill?: string;
   opponentModifier?: number;
   opponentTotal?: number;
+  attribution?: EngineSocialCheckAttribution;
   informationPolicy: "public" | "withheld";
   formulaRevision: string;
 }
@@ -1508,6 +1522,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("social_check"),
       npcId: z.string().trim().min(1).max(120),
+      actingNpcId: z.string().trim().min(1).max(120).optional(),
       ability: engineAbilitySchema,
       skill: z.string().trim().min(1).max(80).optional(),
       goal: z.string().trim().min(1).max(2_000),

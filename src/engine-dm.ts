@@ -27,6 +27,7 @@ import { materializeInventoryItem } from "./open5e-rules.js";
 import type {
   EngineCommand,
   EngineCommandResult,
+  EngineSocialCheckAttribution,
   EngineToolName,
   EngineToolResult,
   LanternCampaignState,
@@ -239,28 +240,46 @@ export class LanternDungeonMaster {
         ),
       });
       if (!toolLoop.narration) {
-        return {
-          ...committed,
-          narration: rulesNarration(
+        const fallback = sanitizeNarrationForProfile(
+          rulesNarration(
             committed.message,
             "The opening is committed; the prose provider did not complete its first narration."
           ),
+          committed.state.experienceProfile,
+        );
+        return {
+          ...committed,
+          narration: fallback,
           narrationSource: "rules",
         };
       }
-      const narration = sanitizeNarrationForProfile(
+      const preservedNarration = preserveMediatedCheckAttribution(
+        committed,
         toolLoop.narration,
-        committed.state.experienceProfile
+        committed.state.experienceProfile,
       );
-      return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
+      return this.store.updateCommandNarration(
+        context,
+        clientCommandId,
+        preservedNarration.narration,
+        preservedNarration.source,
+      ) ?? {
+        ...committed,
+        narration: preservedNarration.narration,
+        narrationSource: preservedNarration.source,
+      };
     } catch (error) {
       if (committed) {
-        return {
-          ...committed,
-          narration: rulesNarration(
+        const fallback = sanitizeNarrationForProfile(
+          rulesNarration(
             committed.message,
             "The opening is committed. The DM prose provider needs a moment, so the table keeps the authored situation."
           ),
+          committed.state.experienceProfile,
+        );
+        return {
+          ...committed,
+          narration: fallback,
           narrationSource: "rules",
         };
       }
@@ -330,21 +349,37 @@ export class LanternDungeonMaster {
       }
 
       if (!toolLoop.narration) {
-        const fallback = committedRulesNarration(committed);
+        const fallback = sanitizeNarrationForProfile(
+          committedRulesNarration(committed),
+          committed.state.experienceProfile,
+        );
         return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
           ...committed,
           narration: fallback,
           narrationSource: "rules",
         };
       }
-      const narration = sanitizeNarrationForProfile(
+      const preservedNarration = preserveMediatedCheckAttribution(
+        committed,
         toolLoop.narration,
-        committed.state.experienceProfile
+        committed.state.experienceProfile,
       );
-      return this.store.updateCommandNarration(context, clientCommandId, narration) ?? committed;
+      return this.store.updateCommandNarration(
+        context,
+        clientCommandId,
+        preservedNarration.narration,
+        preservedNarration.source,
+      ) ?? {
+        ...committed,
+        narration: preservedNarration.narration,
+        narrationSource: preservedNarration.source,
+      };
     } catch (error) {
       if (committed) {
-        const fallback = committedRulesNarration(committed);
+        const fallback = sanitizeNarrationForProfile(
+          committedRulesNarration(committed),
+          committed.state.experienceProfile,
+        );
         return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules")
           ?? { ...committed, narration: fallback, narrationSource: "rules" };
       }
@@ -403,7 +438,7 @@ export class LanternDungeonMaster {
           "For spell choices, search the installed spells and use exact content keys. Use learn_spell for known cantrips, known-caster repertoires, and wizard spellbooks; use prepare_spell for prepared casters and wizard prepared spells; use cast_spell for resolution.",
           "The spell engine owns class-list eligibility, level limits, spellbook and preparation capacity, slots, action economy, concentration, range, target count, attacks, saves, damage dice, damage type, and creature defenses. If a spell or upcast returns content_tier_insufficient, do not substitute a guessed mechanical effect.",
           "After an encounter, use loot with the items, currency, and XP you are awarding. Include questId only when this defeated encounter completes that authored quest. The engine never supplies fixed demo loot.",
-          "For social contests use social_check. For a new quest use quest_create; graph-quest branches advance only through quest_transition from committed predicates, while legacy flat quests may use quest_update. For a proactive story turn use campaign_beat, and for a rule-of-cool stunt use improvise with a typed mechanical effect when one exists.",
+          "For social contests use social_check. If an established NPC speaks or acts for the player (for example, the player tells Titus to address the guards), pass that NPC as actingNpcId; the engine keeps the player as the roller and modifier source, and the committed result will say so. Never narrate an NPC as having rolled unless a reviewed NPC actor mechanic explicitly exists. For a new quest use quest_create; graph-quest branches advance only through quest_transition from committed predicates, while legacy flat quests may use quest_update. For a proactive story turn use campaign_beat, and for a rule-of-cool stunt use improvise with a typed mechanical effect when one exists.",
           "For an established world object, use interact with its typed affordance and stable targetId; the engine owns object state, material prerequisites, ownership, and consequences. For an object held or guarded by an NPC, call challenge_attempt with seize-held-object-v1, that holder's opponentId, and sceneId exactly worldContext.id + ':' + targetId. Then call interact affordance=take or steal only after success. One contest authorizes only that target; a failed contest preserves possession. Do not invent a final object state in prose. Use legacy interact only for non-mechanical features.",
           "For travel, use the reviewed travel tool with route/destination references and normal or fast pace; the engine owns elapsed time, navigation, supplies, watches, weather, random events, deadlines, and world clocks. Use project only with the reviewed project id; never author time, distance, rolls, supplies, or completion in prose.",
           "For the reviewed watchtower situation, use situation_context, situation_create, situation_visit, situation_clue_attempt, situation_ignore, and situation_choose. The engine owns clues, discoveries, pressure, fallback roles, object loss, and outcomes; never invent those commitments in narration.",
@@ -734,7 +769,10 @@ export class LanternDungeonMaster {
       resolve: (current) =>
         resolveEngineCommand(current, context, clientCommandId, selected.command, selected.tool, playerText),
     });
-    const fallback = committedRulesNarration(result);
+    const fallback = sanitizeNarrationForProfile(
+      committedRulesNarration(result),
+      result.state.experienceProfile,
+    );
     return this.store.updateCommandNarration(context, clientCommandId, fallback, "rules") ?? {
       ...result,
       narration: fallback,
@@ -1216,15 +1254,145 @@ function committedCheckText(data: unknown, scene?: string): string | null {
   if (data === null || typeof data !== "object" || typeof (data as { success?: unknown }).success !== "boolean") {
     return null;
   }
-  const check = data as { success: boolean; goal?: unknown };
+  const check = data as { success: boolean; goal?: unknown; attribution?: EngineSocialCheckAttribution };
   const goal = typeof check.goal === "string" ? check.goal.trim().replace(/[.!?]+$/, "") : "";
   const outcome = check.success ? "The attempt succeeds" : "The attempt falls short";
   const location = scene ? " in " + scene : "";
   const purpose = goal ? ": " + goal : "";
+  const attribution = check.attribution?.mode === "npc-mediated"
+    ? mediatedCheckAttributionText(check.attribution) + " "
+    : "";
   const consequence = check.success
     ? "The outcome now stands in the scene."
     : "The setback now stands, and the situation continues from there.";
-  return `${outcome}${location}${purpose}. ${consequence}`;
+  return `${attribution}${outcome}${location}${purpose}. ${consequence}`;
+}
+
+function mediatedCheckAttributionText(attribution: EngineSocialCheckAttribution): string {
+  return `${attribution.actingActorName} acts for ${attribution.rollingActorName} toward ${attribution.targetName}; the check uses ${attribution.modifierSourceActorName}'s modifiers.`;
+}
+
+function mediatedCheckAttributions(result: EngineCommandResult): EngineSocialCheckAttribution[] {
+  const effectAttributions = result.event?.effects
+    ?.map((effect) => effect.check?.attribution)
+    .filter((attribution): attribution is EngineSocialCheckAttribution => attribution?.mode === "npc-mediated")
+    ?? [];
+  if (effectAttributions.length > 0) return effectAttributions;
+  return result.event?.check?.attribution?.mode === "npc-mediated"
+    ? [result.event.check.attribution]
+    : [];
+}
+
+function narrationContradictsMediatedCheck(text: string, attribution: EngineSocialCheckAttribution): boolean {
+  const actor = attribution.actingActorName.trim().toLocaleLowerCase("en-US").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const actorBoundary = `(?<![\\p{L}\\p{N}_])${actor}(?![\\p{L}\\p{N}_])`;
+  const normalized = text.toLocaleLowerCase("en-US");
+  const actorClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:rolled|rolls|rolling|made|makes|attempted|attempts|performed|performs|got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,60}\\b(?:check|roll|score|result|total)\\b`, "iu");
+  const numericScoreClaim = new RegExp(`${actorBoundary}[^.!?]{0,40}\\b(?:got|gets|scored|scores|achieved|achieves|totaled|totals)\\b[^.!?]{0,20}\\b\\d+(?:\\.\\d+)?\\b`, "iu");
+  const possessiveClaim = new RegExp(`${actorBoundary}(?:['’]s)(?![\\p{L}\\p{N}_])[^.!?]{0,80}\\b(?:check|roll|modifier)\\b`, "iu");
+  const pronounModifierClaim = new RegExp(`${actorBoundary}[^.!?]{0,80}\\b(?:uses?|used|using|has|gets?|takes?)\\b[^.!?]{0,40}\\b(?:his|her|their)\\b[^.!?]{0,20}\\bmodifiers?\\b`, "iu");
+  return actorClaim.test(normalized)
+    || numericScoreClaim.test(normalized)
+    || possessiveClaim.test(normalized)
+    || pronounModifierClaim.test(normalized);
+}
+
+function appendMissingMediatedAttributions(
+  narration: NarrationEnvelope,
+  attributions: EngineSocialCheckAttribution[],
+  requireAuthoritativeLabel: boolean,
+): NarrationEnvelope {
+  const missing = attributions
+    .map((attribution) => {
+      const text = mediatedCheckAttributionText(attribution);
+      const marker = "Authoritative check record: " + text;
+      const present = requireAuthoritativeLabel ? narration.text.includes(marker) : narration.text.includes(text);
+      return present ? null : attribution;
+    })
+    .filter((attribution): attribution is EngineSocialCheckAttribution => attribution !== null);
+  if (missing.length === 0) return narration;
+  const fullSuffix = missing
+    .map((attribution) => "Authoritative check record: " + mediatedCheckAttributionText(attribution))
+    .join("\n\n");
+  const compactSuffix = missing
+    .map((attribution, index) => `Authoritative mediated check ${index + 1}: ${compactActorName(attribution.actingActorName)} acts for ${compactActorName(attribution.rollingActorName)} toward ${compactActorName(attribution.targetName)}; modifiers: ${compactActorName(attribution.modifierSourceActorName)}.`)
+    .join("\n");
+  const suffix = fullSuffix.length <= 6_000 ? fullSuffix : compactSuffix.length <= 6_000
+    ? compactSuffix
+    : `Authoritative mediated checks: ${missing.length} committed checks; the player remained the roller and modifier source for each.`;
+  const prefixSeparator = "\n\n";
+  const availablePrefixLength = Math.max(0, 6_000 - prefixSeparator.length - suffix.length);
+  const prefix = narration.text.trim().slice(0, availablePrefixLength).trimEnd();
+  return {
+    ...narration,
+    text: prefix ? `${prefix}${prefixSeparator}${suffix}` : suffix,
+  };
+}
+
+function compactActorName(name: string): string {
+  const normalized = name.trim();
+  return normalized.length <= 48 ? normalized : normalized.slice(0, 45) + "...";
+}
+
+function removeMediatedSuggestedActionClaims(
+  narration: NarrationEnvelope,
+  attributions: EngineSocialCheckAttribution[],
+): NarrationEnvelope {
+  return {
+    ...narration,
+    suggestedActions: narration.suggestedActions.filter((action) =>
+      !attributions.some((attribution) => suggestedActionContradictsMediatedCheck(`${action.label} ${action.prompt}`, attribution))
+    ),
+  };
+}
+
+function suggestedActionContradictsMediatedCheck(
+  text: string,
+  attribution: EngineSocialCheckAttribution,
+): boolean {
+  if (narrationContradictsMediatedCheck(text, attribution)) return true;
+  const normalized = text.toLocaleLowerCase("en-US");
+  const rollWords = "(?:roll|rolled|rolling|make|made|attempt|attempted|perform|performed)";
+  const pronounDirectedRoll = new RegExp(
+    `\\b(?:have|let|ask|tell|make|allow)\\s+(?:him|her|them)\\b[^.!?]{0,100}\\b${rollWords}\\b`,
+    "iu",
+  );
+  const rollForPronoun = new RegExp(
+    `\\b${rollWords}\\b[^.!?]{0,100}\\b(?:for|as)\\s+(?:him|her|them)\\b`,
+    "iu",
+  );
+  const pronounModifierOwnership = new RegExp(
+    `\\b${rollWords}\\b[^.!?]{0,100}\\b(?:his|her|their)\\b[^.!?]{0,30}\\bmodifiers?\\b`,
+    "iu",
+  );
+  return pronounDirectedRoll.test(normalized)
+    || rollForPronoun.test(normalized)
+    || pronounModifierOwnership.test(normalized);
+}
+
+function preserveMediatedCheckAttribution(
+  result: EngineCommandResult,
+  narration: NarrationEnvelope,
+  experienceProfile: LanternCampaignState["experienceProfile"],
+): { narration: NarrationEnvelope; source: "llm" | "rules" } {
+  const attributions = mediatedCheckAttributions(result);
+  const sanitized = sanitizeNarrationForProfile(narration, experienceProfile);
+  if (attributions.length === 0) return { narration: sanitized, source: "llm" };
+  if (attributions.some((attribution) => narrationContradictsMediatedCheck(sanitized.text, attribution))) {
+    const fallback = appendMissingMediatedAttributions(committedRulesNarration(result), attributions, false);
+    return {
+      narration: sanitizeNarrationForProfile(fallback, experienceProfile),
+      source: "rules",
+    };
+  }
+  const completed = appendMissingMediatedAttributions(sanitized, attributions, true);
+  return {
+    narration: removeMediatedSuggestedActionClaims(
+      sanitizeNarrationForProfile(completed, experienceProfile),
+      attributions,
+    ),
+    source: "llm",
+  };
 }
 
 function committedMoveText(data: unknown): string {
