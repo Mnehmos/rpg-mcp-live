@@ -447,7 +447,54 @@ describe("DM consequence binding", () => {
         sourceActorId: "mara-wharfkeeper",
       }))
       .mockResolvedValueOnce(narrationResponse("Mara answers the questions directly."))
-      .mockResolvedValueOnce(narrationResponse("Mara folds her arms. 'I heard the bell below the stair at the last low tide. I keep people clear when the water rises.'"));
+      .mockResolvedValueOnce(narrationResponse("Mara watches the river. The landing remains quiet."))
+      .mockImplementationOnce(async (_input, init) => {
+        const request = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+        const narratorContext = JSON.parse(request.messages[1]!.content) as {
+          scene: { committedEventIds: string[] };
+        };
+        const eventId = narratorContext.scene.committedEventIds[0]!;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: JSON.stringify({
+                  beats: [
+                    {
+                      kind: "dialogue",
+                      text: "Mara folds her arms. 'The bell rings at the last low tide.'",
+                      entityRefs: ["mara-wharfkeeper"],
+                      publicFactRefs: [],
+                      committedEventRefs: [eventId],
+                      interruptible: true,
+                    },
+                    {
+                      kind: "dialogue",
+                      text: "'I heard the bell below the stair,' she says.",
+                      entityRefs: ["mara-wharfkeeper"],
+                      publicFactRefs: [],
+                      committedEventRefs: [],
+                      interruptible: true,
+                    },
+                    {
+                      kind: "dialogue",
+                      text: "'The stair is barred because the water rises without warning.'",
+                      entityRefs: ["mara-wharfkeeper"],
+                      publicFactRefs: [],
+                      committedEventRefs: [],
+                      interruptible: true,
+                    },
+                  ],
+                  suggestedActions: [],
+                }),
+              },
+            }],
+          }),
+        };
+      });
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -467,7 +514,10 @@ describe("DM consequence binding", () => {
     expect(result.session.log.some((message) => message.kind === "roll")).toBe(false);
     expect(result.state.actorKnowledge.some((record) => record.actorId === state.actorId && record.factId === truthId)).toBe(true);
     expect(result.narration.text).toContain("heard the bell below the stair");
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const narratorRepairRequest = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body));
+    expect(narratorRepairRequest.messages.at(-1)?.content).toContain("intent-1 (question)");
+    expect(narratorRepairRequest.messages.at(-1)?.content).toContain("intent-3 (question)");
     store.close();
   });
 

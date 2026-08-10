@@ -45,6 +45,39 @@ function providerNarration(
   };
 }
 
+function providerNarrationDraft(
+  beats: Array<{
+    kind: "establishing" | "sensory" | "npc" | "dialogue" | "mechanical" | "consequence" | "question";
+    text: string;
+    entityRefs?: string[];
+    publicFactRefs?: string[];
+    committedEventRefs?: string[];
+  }>,
+) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: JSON.stringify({
+            beats: beats.map((beat) => ({
+              kind: beat.kind,
+              text: beat.text,
+              entityRefs: beat.entityRefs ?? [],
+              publicFactRefs: beat.publicFactRefs ?? [],
+              committedEventRefs: beat.committedEventRefs ?? [],
+              interruptible: true,
+            })),
+            suggestedActions: [],
+          }),
+        },
+      }],
+    }),
+  };
+}
+
 describe("Lantern OpenRouter tool loop", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -807,6 +840,237 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it("discards a partial entry plan and commits entry plus search atomically", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-load-exploration",
+                type: "function",
+                function: { name: "capability_load", arguments: JSON.stringify({ familyId: "exploration" }) },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-partial-entry",
+                type: "function",
+                function: { name: "move", arguments: JSON.stringify({ destinationId: "ferry-office" }) },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "tool-complete-entry",
+                  type: "function",
+                  function: { name: "move", arguments: JSON.stringify({ destinationId: "ferry-office" }) },
+                },
+                {
+                  id: "tool-complete-search",
+                  type: "function",
+                  function: {
+                    name: "improvise",
+                    arguments: JSON.stringify({
+                      title: "The shuttered office searched",
+                      description: "The desk and walls yield no ledger or lamp, but fresh rectangular dust marks show where both were removed.",
+                      effectType: "fictional",
+                    }),
+                  },
+                },
+              ],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                text: "You enter the shuttered office and search it without finding the missing ledger or lamp.",
+                proposedFacts: [],
+                suggestedActions: [],
+              }),
+            },
+          }],
+        }),
+      })
+      .mockImplementationOnce(async (_input, init) => {
+        const request = JSON.parse(String(init?.body)) as {
+          messages: Array<{ content: string }>;
+        };
+        const narratorContext = JSON.parse(request.messages[1]!.content) as {
+          scene: { committedEventIds: string[] };
+        };
+        const eventId = narratorContext.scene.committedEventIds[0]!;
+        return providerNarrationDraft([
+          {
+            kind: "establishing",
+            text: "You shoulder through the shuttered ferry-office door.",
+            committedEventRefs: [eventId],
+          },
+          {
+            kind: "sensory",
+            text: "Your search finds no ledger or lamp; clean rectangles in the dust show both were removed recently.",
+            committedEventRefs: [eventId],
+          },
+        ]);
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-entry-search", "actor-entry-search");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "ferry-yard",
+      title: "Ashmere Ferry Yard",
+      description: "A shuttered office stands above the muddy landing.",
+      features: ["shuttered ferry office"],
+      exits: [{ id: "ferry-office", label: "Enter the shuttered ferry office" }],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I enter the shuttered ferry office and explicitly search the desk and walls for ledger, lamp, or use evidence.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["move", "improvise"]);
+    expect(result.state.version).toBe(state.version + 1);
+    expect(result.narration.text).toContain("search finds no ledger or lamp");
+    const repairRequest = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
+    expect(repairRequest.messages.at(-1)?.content).toContain("intent-2 (search)");
+    expect(repairRequest.messages.at(-1)?.content).toContain("entire provisional plan was discarded");
+
+    const replay = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+    expect(replay.replayed).toBe(true);
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    store.close();
+  });
+
+  it("repairs a generic recap until every coordinated NPC question has a dialogue beat", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(providerNarration("Mara waits beside the river while the stair remains barred."))
+      .mockResolvedValueOnce(providerNarration("The river moves past Mara. Paths onward remain open."))
+      .mockImplementationOnce(async (_input, init) => {
+        const request = JSON.parse(String(init?.body)) as {
+          messages: Array<{ content: string }>;
+        };
+        const narratorContext = JSON.parse(request.messages[1]!.content) as {
+          scene: { committedEventIds: string[] };
+        };
+        const eventId = narratorContext.scene.committedEventIds[0]!;
+        return providerNarrationDraft([
+          {
+            kind: "dialogue",
+            text: "'I will not help you,' Mara says.",
+            committedEventRefs: [eventId],
+          },
+          {
+            kind: "dialogue",
+            text: "'Of course I am afraid.'",
+          },
+          {
+            kind: "dialogue",
+            text: "'Yes. Leave, and let the landing stay quiet.'",
+          },
+        ]);
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-mara-questions", "actor-mara-questions");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "ashmere-landing",
+      title: "Ashmere Landing",
+      description: "Mara watches the river beside a barred stair.",
+      features: ["river", "barred stair"],
+      exits: [],
+      npcs: [{
+        id: "mara",
+        name: "Mara",
+        description: "A wary ferrymaster keeping watch over the landing.",
+        disposition: "unfriendly",
+        goals: ["Keep the landing quiet"],
+        socialDc: 12,
+        relationshipScore: 0,
+        memories: [],
+      }],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(), accountId: state.accountId, actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(), accountId: state.accountId, campaignId: state.id,
+      actorId: state.actorId, capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I ask Mara whether she will help, whether she is afraid, and whether she wants me to leave.",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.tool).toBe("declare");
+    expect(result.narrationSource).toBe("llm");
+    expect(result.narration.text).toContain("will not help");
+    expect(result.narration.text).toContain("afraid");
+    expect(result.narration.text).toContain("Leave");
+    const repairRequest = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
+    expect(repairRequest.messages.at(-1)?.content).toContain("intent-1 (question)");
+    expect(repairRequest.messages.at(-1)?.content).toContain("intent-3 (question)");
+    store.close();
+  });
+
   it("repairs valid JSON narration that exposes internal orchestration text", async () => {
     const fetchMock = vi
       .fn()
@@ -907,8 +1171,7 @@ describe("Lantern OpenRouter tool loop", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(repeatedMove)
-      .mockResolvedValueOnce(repeatedMove)
-      .mockResolvedValueOnce(providerNarration("The cauldrons remain loud, but you hold your ground and keep watching the workers."));
+      .mockResolvedValueOnce(repeatedMove);
     vi.stubGlobal("fetch", sdkFetch(fetchMock));
 
     const store = createStore();
@@ -947,10 +1210,12 @@ describe("Lantern OpenRouter tool loop", () => {
       playerText,
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.tool).toBe("declare");
     expect(result.event?.effects).toBeUndefined();
     expect(result.state.worldContext?.id).toBe("kitchen-arch");
+    expect(result.narration.text).toContain("does not resolve as one complete turn");
+    expect(result.narration.text).toContain("the situation does not change");
     expect(result.narration.text).not.toMatch(/toward Slip|DM must establish|The DM establishes/i);
     store.close();
   });
