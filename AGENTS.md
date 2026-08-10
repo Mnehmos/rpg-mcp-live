@@ -15,6 +15,12 @@ For the active `ship-lantern-epic-1-fast-kiss` goal, these rules take precedence
 
 `rpg-mcp-live` is the **hosted Lantern product**: a two-service TypeScript app (public web + private engine) that runs on Railway. It is **not** the upstream reference MCP server (`mnehmos.rpg.mcp`).
 
+## Product constitution
+
+[`docs/THE-SAND-REMEMBERS.md`](docs/THE-SAND-REMEMBERS.md) is the normative product doctrine. Law Zero is **the game moves**: player intent → meaningful stakes → authoritative resolution → atomic commit → DM narration → changed situation. Protect state trust, procedural trust, and momentum trust. No orphaned mechanics; no orphaned fiction.
+
+The compact per-turn model projection lives in `src/engine-dm-doctrine.ts`. Keep the full manifesto out of routine prompts; capability procedures remain capability-scoped.
+
 ## Two-service architecture
 
 | Service  | Entry point              | Start command                  | Health endpoint |
