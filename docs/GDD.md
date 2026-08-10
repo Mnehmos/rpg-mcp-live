@@ -10,6 +10,12 @@ Lantern Table is a browser-first, one-player tabletop RPG. The player brings a c
 
 The player should feel like they are sitting at a living table: simple input, immediate consequence, persistent campaign. Sophistication belongs in the world response and content; the state machine stays narrow and verifiable.
 
+## Product constitution
+
+[The Sand Remembers](./THE-SAND-REMEMBERS.md) is Lantern's normative product constitution. It protects three equal obligations: state trust (the world remembers), procedural trust (rules and rolls remain honest), and momentum trust (the world meaningfully reacts). The compact model-facing projection lives in `src/engine-dm-doctrine.ts`; the full manifesto is design doctrine, not per-turn prompt bulk.
+
+Its release invariant is: **no orphaned mechanics; no orphaned fiction.** No roll exists without stakes, no result ends without a concrete consequence, and no durable narrated consequence exists without committed state.
+
 ## Player-owned lifecycle
 
 The player does not enter a pre-authored Lantern character. They own the campaign and create the character who will experience it:
@@ -32,11 +38,11 @@ choose a campaign
   -> optionally observe the current DM-authored context
   -> say what the character does
   -> web authenticates the turn
-  -> DM reads context and assembles an ordered typed plan
-  -> engine resolves one atomic authoritative turn
-  -> show the mechanical result
-  -> narrate the consequence
-  -> continue from the committed state
+  -> DM understands intent and frames meaningful stakes
+  -> engine resolves authoritative uncertainty
+  -> engine validates and commits the consequence atomically
+  -> DM narrates the committed consequence
+  -> player faces a meaningfully changed situation
 ~~~
 
 The product is chat-first. A player can type “I study the lantern for a hidden mechanism,” but the DM cannot turn that sentence directly into a database mutation. The web service forwards player intent; the engine interprets, validates, resolves, commits, and then narrates.
