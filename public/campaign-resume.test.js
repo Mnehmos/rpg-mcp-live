@@ -4,6 +4,7 @@ import {
   campaignSessionUrl,
   isCurrentCampaignSelection,
   isCurrentRequest,
+  nextRequestSequence,
   retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
@@ -32,6 +33,8 @@ describe("authenticated campaign resume", () => {
     expect(retryDelayMs(1)).toBe(400);
     expect(retryDelayMs(3)).toBe(1200);
     expect(retryDelayMs(0)).toBe(400);
+    expect(nextRequestSequence(4)).toBe(5);
+    expect(nextRequestSequence("bad")).toBe(1);
   });
 
   it("ignores stale refreshes and superseded campaign selections", () => {
