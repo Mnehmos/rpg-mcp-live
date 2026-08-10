@@ -181,7 +181,11 @@ describe("generic magic effects kernel", () => {
     expect(accepted.data).toMatchObject({ acBefore: 0, hitAfter: false, reactionId: pending!.id });
     expect(accepted.state.combat.pendingReaction).toBeNull();
     expect(accepted.state.character.spellcasting!.slots["1"]).toBe(beforeSlot - 1);
-    expect(accepted.state.combat.turnBudget.reaction.spent).toBe(true);
+    // A reaction stays spent until the player's next turn. If this was the
+    // final enemy, resolving it advances to that turn and refreshes the slot.
+    expect(accepted.state.combat.turnBudget.reaction.spent).toBe(
+      accepted.state.combat.activeActorId !== accepted.state.actorId,
+    );
     expect(normalizeCampaignState(JSON.parse(JSON.stringify(accepted.state))).character.ac).toBe(accepted.state.character.ac);
 
     const duplicate = apply(accepted.state, {
