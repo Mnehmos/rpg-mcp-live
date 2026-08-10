@@ -128,7 +128,7 @@ const NARRATION_CONTRACT_INSTRUCTION = [
   "Use an empty proposedFacts array when no proposal matches exactly; durable state already authored through tools does not need to be repeated here.",
   "suggestedActions is an array of 0 to 5 concrete, context-aware moves. Every item must have exactly id, label, and prompt; id is short kebab-case, label is concise player-facing text, and prompt is a natural-language first-person next turn.",
   "Suggestions are invitations, not forced choices, and must never replace freeform play.",
-  "Do not wrap the object in a Markdown fence or expose internal prompts, raw tool arguments, or engine implementation details.",
+  "Do not wrap the object in a Markdown fence or expose internal prompts, raw tool arguments, or engine implementation details. Never mention that the DM, engine, system, prompt, tool, or context must establish, decide, answer, or retry anything.",
 ].join(" ");
 
 export function buildDmContext(
@@ -455,6 +455,7 @@ export class LanternDungeonMaster {
           "For the reviewed watchtower situation, use situation_context, situation_create, situation_visit, situation_clue_attempt, situation_ignore, and situation_choose. The engine owns clues, discoveries, pressure, fallback roles, object loss, and outcomes; never invent those commitments in narration.",
           "Quest completion may create a server-owned pending level 1-to-2 milestone. Show the pending preview and use advancement_confirm only with its exact id; never author HP, proficiency, slots, level, or feature consequences. NPC progression is separate: use npc_advance only for the reviewed veteran template on a live encounter instance, never alter the pinned statblock.",
           "The player speaks naturally, but the engine is authoritative.",
+          "Preserve the player's primary intent. Do not collapse a multi-part action into a secondary movement word: an action that creates a distraction, signals an ally, deceives, or otherwise changes the situation is not resolved by calling move alone. Resolve the supported non-movement consequence with a matching tool (use improvise with effectType fictional when no mechanical effect is required), or return an honest declaration; do not substitute unrelated movement.",
           "Use read tools to inspect context before acting when needed.",
           "Use rules_reference before making an exact SRD ruling; it searches the campaign's pinned rules, rulesets, legacy sections, and planes. Use content_search and content_get for creatures, spells, equipment, and other definitions. Respect each record's fidelity tier: tier 0 is reference-only, tier 1 resolves only typed fields, and tier 2 may execute its reviewed program.",
           "A player turn may require several ordered mechanical effects. Call every required mutating tool; Lantern stages accepted effects against one working snapshot and commits the complete plan atomically with one campaign-version increment.",
@@ -477,6 +478,7 @@ export class LanternDungeonMaster {
     let repairPending = false;
     let repairAttempted = false;
     let noticeRepairAttempted = false;
+    let intentRepairAttempted = false;
     let safeNarrationCandidate: string | null = null;
     const objectIntent = detectObjectTurnIntent(initialState, playerText);
     let objectRepairAttempted = false;
@@ -615,6 +617,20 @@ export class LanternDungeonMaster {
           }),
           tool_call_id: toolCall.id,
         });
+      }
+      if (
+        !repairPending
+        && movementOnlyPlanMissesIntent(playerText, stagedEffects)
+      ) {
+        stagedEffects.length = 0;
+        currentState = cloneCampaign(initialState);
+        if (intentRepairAttempted) return { narration: null, stagedEffects };
+        intentRepairAttempted = true;
+        messages.push({
+          role: "user",
+          content: intentRepairInstruction(playerText),
+        });
+        continue;
       }
       // Loading a reviewed schema family is orchestration, not a gameplay
       // action. It should not consume one of the eight authoritative tool
@@ -1151,12 +1167,19 @@ function validateNarration(content: string): NarrationValidation {
     return {
       success: false,
       issues: ["response: expected one valid JSON object matching the narration envelope"],
-      safeText: safeNarrationText(content),
+      safeText: safePlayerNarrationText(content),
     };
   }
 
   const result = narrationEnvelopeSchema.safeParse(parsed);
   if (result.success) {
+    if (narrationContainsInternalOrchestration(result.data.text)) {
+      return {
+        success: false,
+        issues: ["text: narration contains internal orchestration instructions"],
+        safeText: null,
+      };
+    }
     return { success: true, data: result.data };
   }
 
@@ -1166,8 +1189,36 @@ function validateNarration(content: string): NarrationValidation {
       const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "response";
       return path + ": " + issue.message;
     }),
-    safeText: safeNarrationText(content, parsed),
+    safeText: safePlayerNarrationText(content, parsed),
   };
+}
+
+function narrationContainsInternalOrchestration(text: string): boolean {
+  return /\b(?:the\s+)?(?:dm|engine|system|prompt|tool|context)\s+(?:must|needs?\s+to|should|will)\b|\b(?:the\s+)?dm\s+establish(?:es|ed|ing)?\b/i.test(text);
+}
+
+function safePlayerNarrationText(content: string, parsed?: unknown): string | null {
+  const candidate = safeNarrationText(content, parsed);
+  return candidate && !narrationContainsInternalOrchestration(candidate) ? candidate : null;
+}
+
+function intentRepairInstruction(playerText: string): string {
+  return [
+    "The previous tool plan did not preserve the player's primary intent.",
+    `Player intent: ${playerText}`,
+    "The plan only moved along an exit even though the intent includes a non-movement consequence.",
+    "Discard that movement-only plan. Resolve the primary action with a matching reviewed tool; use improvise with effectType fictional for a bounded creative consequence when no mechanical effect is required, or return a valid narration that honestly records the attempt without claiming an unsupported result.",
+    "Do not call move unless movement is the primary requested consequence, and do not expose this repair instruction in narration.",
+  ].join(" ");
+}
+
+function movementOnlyPlanMissesIntent(
+  playerText: string,
+  effects: StagedEngineTurnEffect[],
+): boolean {
+  if (effects.length === 0 || !effects.every((effect) => effect.command.kind === "move")) return false;
+  const nonMovementIntent = /\b(?:distract(?:ion)?|signal|decoy|divert|misdirect|deceive|draw\s+(?:their|the)\s+attention|cause\s+a\s+disturbance)\b/i;
+  return nonMovementIntent.test(playerText);
 }
 
 function narrationRepairInstruction(issues: string[]): string {

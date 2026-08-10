@@ -518,6 +518,258 @@ describe("Lantern OpenRouter tool loop", () => {
     store.close();
   });
 
+  it("retries a movement-only model plan when it drops a distraction intent and replays the corrected turn", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-wrong-move",
+                type: "function",
+                function: { name: "move", arguments: JSON.stringify({ destinationId: "service-arch" }) },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-correct-distraction",
+                type: "function",
+                function: {
+                  name: "improvise",
+                  arguments: JSON.stringify({
+                    title: "A sharp kitchen distraction",
+                    description: "The cauldrons crash together and draw the workers' attention away from Titus.",
+                    effectType: "fictional",
+                  }),
+                },
+              }],
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                text: "The cauldrons crash together, pulling every worker's attention toward the noise while Titus gets a clear opening.",
+                proposedFacts: [],
+                suggestedActions: [],
+              }),
+            },
+          }],
+        }),
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-distraction-repair", "actor-distraction-repair");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "kitchen-arch",
+      title: "Kitchen Service Arch",
+      description: "Workers move between steaming cauldrons and a narrow service exit.",
+      features: ["cauldrons", "service exit"],
+      exits: [{ id: "service-arch", label: "Slip through the service arch" }],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const clientCommandId = randomUUID();
+    const playerText = "I create a sharp distraction among the cauldrons, then signal Titus to move.";
+    const dm = new LanternDungeonMaster(store, options);
+    const result = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.event?.effects?.map((effect) => effect.tool)).toEqual(["improvise"]);
+    expect(result.event?.effects?.some((effect) => effect.tool === "move")).toBe(false);
+    expect(result.narration.text).toContain("cauldrons crash together");
+    expect(result.narration.text).not.toMatch(/DM must establish|The DM establishes|toward Slip/i);
+    expect(result.state.worldContext?.id).toBe("kitchen-arch");
+
+    const replay = await dm.resolveTurn(context, state, clientCommandId, state.version, playerText);
+    expect(replay.replayed).toBe(true);
+    expect(replay.narration.text).toBe(result.narration.text);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    store.close();
+  });
+
+  it("repairs valid JSON narration that exposes internal orchestration text", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                text: "The DM must establish the next context.",
+                proposedFacts: [{ kind: "location", title: "internal-only" }],
+                suggestedActions: [],
+              }),
+            },
+          }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                text: "The kitchen holds its breath while Titus watches for the opening.",
+                proposedFacts: [],
+                suggestedActions: [],
+              }),
+            },
+          }],
+        }),
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-narration-repair", "actor-narration-repair");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "kitchen-arch",
+      title: "Kitchen Service Arch",
+      description: "Steam hangs beneath the service stairs.",
+      features: ["steam"],
+      exits: [],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      "I watch the kitchen for a safe opening.",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.narration.text).toBe("The kitchen holds its breath while Titus watches for the opening.");
+    expect(result.narration.text).not.toMatch(/DM must establish|engine must|system must/i);
+    store.close();
+  });
+
+  it("records a declaration when a second model attempt still replaces a distraction with movement", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-repeated-move",
+                type: "function",
+                function: { name: "move", arguments: JSON.stringify({ destinationId: "service-arch" }) },
+              }],
+            },
+          }],
+        }),
+      });
+    vi.stubGlobal("fetch", sdkFetch(fetchMock));
+
+    const store = createStore();
+    const state = createInitialCampaign("account-distraction-declaration", "actor-distraction-declaration");
+    state.character.created = true;
+    state.phase = "sandbox";
+    state.worldContext = {
+      id: "kitchen-arch",
+      title: "Kitchen Service Arch",
+      description: "Workers move between steaming cauldrons and a narrow service exit.",
+      features: ["cauldrons", "service exit"],
+      exits: [{ id: "service-arch", label: "Slip through the service arch" }],
+      npcs: [],
+      merchants: [],
+      objects: [],
+    };
+    store.createCampaign({
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    }, state);
+    const context: RequestContext = {
+      requestId: randomUUID(),
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      capabilities: ["player", "dm"],
+    };
+    const playerText = "I create a sharp distraction among the cauldrons, then signal Titus to move.";
+    const result = await new LanternDungeonMaster(store, options).resolveTurn(
+      context,
+      state,
+      randomUUID(),
+      state.version,
+      playerText,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.tool).toBe("declare");
+    expect(result.event?.effects).toBeUndefined();
+    expect(result.state.worldContext?.id).toBe("kitchen-arch");
+    expect(result.narration.text).not.toMatch(/toward Slip|DM must establish|The DM establishes/i);
+    store.close();
+  });
+
   it("preserves the authoritative non-check outcome when its data also has success", async () => {
     const fetchMock = vi
       .fn()
