@@ -235,7 +235,7 @@ app.get("/v1/campaigns/:campaignId/commands/:clientCommandId", (request, respons
       return;
     }
     const result = projectResolutionForActor(stored.result, context.actorId);
-    response.json({ status: "resolved", campaignVersion: result.session.version, result });
+    response.json({ status: "resolved", campaignVersion: state.version, result });
   } catch (error) {
     sendError(response, error);
   }

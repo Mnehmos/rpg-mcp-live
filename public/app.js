@@ -7,6 +7,7 @@ import {
   settleComposer,
   updateComposerCounter,
 } from "./turn-composer.js";
+import { isStaleCommandStatus } from "./command-status.js";
 
 (function () {
   "use strict";
@@ -1667,6 +1668,16 @@ import {
         "/api/campaigns/" + encodeURIComponent(campaignId) + "/commands/" + encodeURIComponent(clientCommandId)
       ).then(function (result) {
         if (result.response.ok && result.data.status === "resolved" && result.data.result) {
+          if (isStaleCommandStatus(result.data)) {
+            return refreshSession().then(function (current) {
+              var currentVersion = Number(result.data.campaignVersion);
+              if (current && current.session && Number(current.session.version) >= currentVersion) {
+                return { resolved: true, result: current };
+              }
+              if (attempts >= maxAttempts) return { resolved: false, pending: true };
+              return waitForNextPoll().then(poll);
+            });
+          }
           return { resolved: true, result: result.data.result };
         }
         if (attempts >= maxAttempts) return { resolved: false, pending: true };
