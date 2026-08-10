@@ -37,6 +37,43 @@ function assertSha(sha) {
   if (!SHA_PATTERN.test(sha ?? "")) throw new Error("Expected a full 40-character SHA");
 }
 
+export function isRailwayServiceStatusEvent(event) {
+  return Boolean(
+    event?.state === "success" &&
+      event?.sender?.login === RAILWAY_BOT &&
+      RAILWAY_SERVICE_CONTEXTS.includes(event.context) &&
+      SHA_PATTERN.test(event.sha ?? "")
+  );
+}
+
+export function statusEventMatchesEnvironment(event, expectedEnvironmentId) {
+  return Boolean(
+    isRailwayServiceStatusEvent(event) &&
+      expectedEnvironmentId &&
+      environmentId(event.target_url) === expectedEnvironmentId
+  );
+}
+
+export function selectNativeDeployment(
+  deployments,
+  expectedSha,
+  expectedEnvironment,
+  expectedEnvironmentId,
+) {
+  assertSha(expectedSha);
+  return newest(
+    flattenPages(deployments).filter(
+      (deployment) =>
+        deployment?.sha === expectedSha &&
+        deployment?.ref === expectedSha &&
+        deployment?.environment === expectedEnvironment &&
+        deployment?.creator?.login === RAILWAY_BOT &&
+        (!expectedEnvironmentId ||
+          deployment?.payload?.environmentId === expectedEnvironmentId)
+    )
+  );
+}
+
 function environmentId(url) {
   try {
     return new URL(url).searchParams.get("environmentId");
@@ -184,12 +221,33 @@ function readJson(path) {
 
 function main() {
   const [command, ...tokens] = process.argv.slice(2);
-  if (command !== "check") {
+  if (command !== "check" && command !== "resolve") {
     throw new Error(
-      "Usage: native-railway-evidence.mjs check --deployment <path> --deployment-statuses <path> --commit-statuses <path> --sha <sha> --environment <environment> --deployment-id <id>"
+      "Usage: native-railway-evidence.mjs <check|resolve> --deployment <path> --deployment-statuses <path> --commit-statuses <path> --deployments <path> --sha <sha> --environment <environment> --deployment-id <id> [--target-url <url>]"
     );
   }
   const args = parseArgs(tokens);
+  if (command === "resolve") {
+    const targetEnvironmentId = args["target-url"]
+      ? environmentId(args["target-url"])
+      : undefined;
+    if (args["target-url"] && !targetEnvironmentId) {
+      process.exitCode = 2;
+      return;
+    }
+    const deployment = selectNativeDeployment(
+      readJson(args.deployments),
+      args.sha,
+      args.environment,
+      targetEnvironmentId,
+    );
+    if (!deployment) {
+      process.exitCode = 2;
+      return;
+    }
+    process.stdout.write(`${JSON.stringify(deployment)}\n`);
+    return;
+  }
   const result = evaluateNativeRailwayEvidence({
     deployment: readJson(args.deployment),
     deploymentStatuses: readJson(args["deployment-statuses"]),

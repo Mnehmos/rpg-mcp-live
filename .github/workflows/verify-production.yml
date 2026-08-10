@@ -1,11 +1,12 @@
 name: Verify production deployment and publish release
 
-# Railway native GitHub autodeploy owns production. This workflow starts when
-# Railway reports the deployment and waits for either its aggregate success or
-# both service commit statuses. It verifies both services and records the
-# release; it never calls Railway's deployment API.
+# Railway native GitHub autodeploy owns production. This workflow runs after
+# aggregate deployment success or a Railway service commit-status success
+# event. It never starts a long-lived verifier on a nonterminal deployment
+# event, because Railway Wait for CI would otherwise deadlock the deployment.
 on:
   deployment_status:
+  status:
 
 permissions:
   contents: read
@@ -13,7 +14,7 @@ permissions:
   statuses: read
 
 concurrency:
-  group: verify-production-${{ github.event.deployment.sha }}
+  group: verify-production-${{ github.event.deployment.sha || github.event.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -22,25 +23,78 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: production
-    # Railway records the connected GitHub deployment ref as the full SHA. The
-    # integration can leave this deployment in_progress after both service
-    # commit statuses are green, so the job must start on non-terminal states.
+    # A status event is only an eligibility signal; the first step resolves an
+    # exact production deployment. A status from the other environment becomes
+    # a successful no-op rather than a failed verifier.
     if: >
-      (github.event.deployment_status.state == 'success' ||
-       github.event.deployment_status.state == 'in_progress' ||
-       github.event.deployment_status.state == 'queued') &&
-      github.event.deployment.environment == 'RPG MCP Live / production' &&
-      github.event.deployment.ref == github.event.deployment.sha &&
-      github.event.deployment.creator.login == 'railway-app[bot]'
+      (github.event_name == 'deployment_status' &&
+       github.event.deployment_status.state == 'success' &&
+       github.event.deployment.environment == 'RPG MCP Live / production' &&
+       github.event.deployment.ref == github.event.deployment.sha &&
+       github.event.deployment.creator.login == 'railway-app[bot]') ||
+      (github.event_name == 'status' &&
+       github.event.state == 'success' &&
+       github.event.sender.login == 'railway-app[bot]' &&
+       (github.event.context == 'RPG MCP Live - lantern-engine' ||
+        github.event.context == 'RPG MCP Live - rpg-mcp-live'))
     env:
-      SHA: ${{ github.event.deployment.sha }}
-      DEPLOYMENT_ID: ${{ github.event.deployment.id }}
-      DEPLOYMENT_ENVIRONMENT: ${{ github.event.deployment.environment }}
-      DEPLOYMENT_REF: ${{ github.event.deployment.ref }}
-      DEPLOYMENT_CREATOR: ${{ github.event.deployment.creator.login }}
+      SHA: ${{ github.event.deployment.sha || github.event.sha }}
+      DEPLOYMENT_ID: ${{ github.event.deployment.id || '' }}
+      DEPLOYMENT_ENVIRONMENT: ${{ github.event.deployment.environment || 'RPG MCP Live / production' }}
+      DEPLOYMENT_REF: ${{ github.event.deployment.ref || '' }}
+      DEPLOYMENT_CREATOR: ${{ github.event.deployment.creator.login || '' }}
+      STATUS_TARGET_URL: ${{ github.event.target_url || '' }}
+      EXPECTED_ENVIRONMENT: RPG MCP Live / production
 
     steps:
+      - name: Resolve exact native production deployment for event
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/native-railway-evidence"
+          mkdir -p "$evidence_dir"
+          if [ "$GITHUB_EVENT_NAME" = "deployment_status" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID" \
+              > "$evidence_dir/deployment.json"
+          else
+            if [ -z "$STATUS_TARGET_URL" ]; then
+              echo "SKIP=true" >> "$GITHUB_ENV"
+              echo "Railway status event has no target URL; treating it as an unrelated event."
+              exit 0
+            fi
+            gh api --method GET --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/deployments" \
+              -f sha="$SHA" -f environment="$EXPECTED_ENVIRONMENT" -f per_page=100 \
+              > "$evidence_dir/deployments.json"
+            set +e
+            deployment=$(node tools/ci/native-railway-evidence.mjs resolve \
+              --deployments "$evidence_dir/deployments.json" \
+              --sha "$SHA" \
+              --environment "$EXPECTED_ENVIRONMENT" \
+              --target-url "$STATUS_TARGET_URL")
+            resolve_status=$?
+            set -e
+            if [ "$resolve_status" -eq 2 ]; then
+              echo "SKIP=true" >> "$GITHUB_ENV"
+              echo "No native production deployment exists for status-event SHA $SHA; this event belongs to another environment."
+              exit 0
+            fi
+            if [ "$resolve_status" -ne 0 ]; then
+              echo "::error::Could not resolve the native production deployment"
+              exit 1
+            fi
+            printf '%s\n' "$deployment" > "$evidence_dir/deployment.json"
+          fi
+
+          echo "SKIP=false" >> "$GITHUB_ENV"
+          echo "DEPLOYMENT_ID=$(jq -r '.id' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
+          echo "DEPLOYMENT_ENVIRONMENT=$(jq -r '.environment' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
+          echo "DEPLOYMENT_REF=$(jq -r '.ref' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
+          echo "DEPLOYMENT_CREATOR=$(jq -r '.creator.login' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
+
       - name: Checkout the Railway deployment SHA
+        if: env.SKIP != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SHA }}
@@ -48,6 +102,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify Railway deployment identity
+        if: env.SKIP != 'true'
         run: |
           test "${#SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$SHA"
@@ -56,6 +111,7 @@ jobs:
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
       - name: Wait for native Railway deployment or service statuses
+        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -106,6 +162,7 @@ jobs:
           done
 
       - name: Read engine health
+        if: env.SKIP != 'true'
         env:
           ENGINE_PRODUCTION_URL: ${{ vars.ENGINE_PRODUCTION_URL }}
         run: |
@@ -124,6 +181,7 @@ jobs:
           exit 1
 
       - name: Read web health and engine reachability
+        if: env.SKIP != 'true'
         env:
           WEB_PRODUCTION_URL: ${{ vars.WEB_PRODUCTION_URL }}
         run: |
@@ -144,6 +202,7 @@ jobs:
           exit 1
 
       - name: Create or verify SHA-bound release evidence
+        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ secrets.PRODUCTION_PROMOTION_TOKEN }}
         run: |
@@ -236,6 +295,7 @@ jobs:
           fi
 
       - name: Upload production release evidence
+        if: env.SKIP != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: production-release-evidence-${{ env.SHA }}
