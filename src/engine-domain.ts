@@ -4107,9 +4107,10 @@ function runtimeItemKind(category: RuntimeItemDefinition["category"]): EngineIte
   }
 }
 
-const RUNTIME_ARCANE_SYNTHESIS_POLICY_REVISION = "runtime-arcane-synthesis-v1" as const;
+const RUNTIME_ARCANE_SYNTHESIS_POLICY_REVISION = "runtime-arcane-synthesis-v2" as const;
 type EngineSpellRecord = NonNullable<ReturnType<typeof getOpen5eSpell>>;
 type RuntimeSpellDamageEffect = Extract<CompiledSpellEffect, { effectKind: "damage" }>;
+type RuntimeSpellHealingEffect = Extract<CompiledSpellEffect, { effectKind: "healing" }>;
 
 function titleCaseRuntimeSpellSchool(value: string): string {
   return value.length === 0 ? value : `${value[0]!.toLocaleUpperCase("en-US")}${value.slice(1)}`;
@@ -4137,9 +4138,16 @@ function runtimeSpellRecordFromContent(
     candidate.kind === "spell" && candidate.id === contentKey
   );
   const execution = definition?.execution;
-  if (!definition || !execution || execution.effect.effectKind !== "damage") return null;
+  if (!definition || !execution) return null;
   if (packHash !== undefined && packHash !== execution.policyRevision) return null;
-  const effect = execution.effect as RuntimeSpellDamageEffect;
+  const effect = execution.effect;
+  const legacy = execution.policyRevision === "runtime-arcane-synthesis-v1";
+  const rangeKind = legacy ? "distance" : execution.rangeKind;
+  const rangeText = rangeKind === "self"
+    ? "Self"
+    : rangeKind === "touch"
+      ? "Touch"
+      : `${execution.rangeFeet} feet`;
   const school = definition.school;
   const normalized: NormalizedSpell = {
     kind: "spell",
@@ -4165,10 +4173,10 @@ function runtimeSpellRecordFromContent(
     higherLevel: "",
     targetType: execution.targetType,
     targetCount: execution.targetCount,
-    range: { text: `${execution.rangeFeet} feet`, distance: execution.rangeFeet, unit: "feet" },
+    range: { text: rangeText, distance: execution.rangeFeet, unit: "feet" },
     ritual: false,
     castingTime: execution.castingTime,
-    reactionCondition: null,
+    reactionCondition: legacy ? null : execution.reactionCondition,
     components: {
       verbal: true,
       somatic: true,
@@ -4177,11 +4185,11 @@ function runtimeSpellRecordFromContent(
       materialCostGp: null,
       materialConsumed: false,
     },
-    savingThrowAbility: null,
-    attackRoll: effect.resolution === "spell-attack",
+    savingThrowAbility: legacy ? null : execution.savingThrowAbility,
+    attackRoll: effect.effectKind === "damage" && effect.resolution === "spell-attack",
     damageRoll: null,
-    damageTypes: [effect.damageType],
-    duration: "instantaneous",
+    damageTypes: effect.effectKind === "damage" ? [effect.damageType] : [],
+    duration: legacy ? "instantaneous" : execution.duration,
     area: { shape: null, size: null, unit: "feet" },
     concentration: false,
     classes: [],
@@ -4205,8 +4213,15 @@ function resolveSpellRecord(
   return getOpen5eSpell(contentKey, packHash) ?? runtimeSpellRecord(state, contentKey, packHash);
 }
 
+function runtimeSpellPrimitiveEvidence(state: LanternCampaignState, contentKey: string): string[] {
+  const definition = state.runtimeContent.definitions.find((candidate): candidate is RuntimeSpellDefinition =>
+    candidate.kind === "spell" && candidate.id === contentKey
+  );
+  return definition?.execution ? [definition.execution.primitiveContentKey] : [];
+}
+
 function damageExpressionAverage(
-  expression: RuntimeSpellDamageEffect["baseDamage"]
+  expression: RuntimeSpellDamageEffect["baseDamage"] | RuntimeSpellHealingEffect["baseHealing"]
 ): number {
   return expression.kind === "flat"
     ? expression.amount
@@ -4221,10 +4236,25 @@ function runtimeSpellSynthesisError(
   return { code, message, ...(data ? { data } : {}) };
 }
 
+function runtimeSpellRangeKind(spell: NormalizedSpell): "self" | "touch" | "distance" {
+  const range = spell.range.text.trim().toLocaleLowerCase("en-US");
+  if (range === "self") return "self";
+  if (range === "touch") return "touch";
+  return "distance";
+}
+
+function runtimeSpellExpectedEffectKind(
+  modification: "damage-only" | "healing-only" | "bounded-modifier-only",
+): CompiledSpellEffect["effectKind"] {
+  if (modification === "damage-only") return "damage";
+  if (modification === "healing-only") return "healing";
+  return "stat-modifier";
+}
+
 /**
- * Admit one deliberately small vertical slice: a single reviewed, single-
- * target spell-attack damage primitive. All level/range/target/damage values
- * are copied from that primitive and checked against the synthesis budget.
+ * Admit the complete first synthesis slice by copying one reviewed #2/#4
+ * primitive into a persisted runtime spell. The proposal selects an effect
+ * family; every mechanical value remains server-derived and budget-checked.
  */
 function compileRuntimeArcaneSpell(
   state: LanternCampaignState,
@@ -4250,50 +4280,100 @@ function compileRuntimeArcaneSpell(
     };
   }
   const effect = primitive.effect;
-  if (!effect || effect.effectKind !== "damage") {
+  if (!effect) {
     return {
       ok: false,
       error: runtimeSpellSynthesisError(
         "synthesis_primitive_not_executable",
-        "That primitive has no reviewed executable damage effect.",
+        "That primitive has no reviewed executable spell effect.",
         { primitiveContentKey: primitive.contentKey },
       ),
     };
   }
+  const expectedEffectKind = runtimeSpellExpectedEffectKind(proposal.synthesis.modification);
+  if (effect.effectKind !== expectedEffectKind) {
+    return {
+      ok: false,
+      error: runtimeSpellSynthesisError(
+        "synthesis_modification_mismatch",
+        "The requested synthesis category does not match the reviewed primitive effect.",
+        {
+          primitiveContentKey: primitive.contentKey,
+          requestedModification: proposal.synthesis.modification,
+          reviewedEffectKind: effect.effectKind,
+        },
+      ),
+    };
+  }
+  const rangeKind = runtimeSpellRangeKind(primitive.definition);
+  const validDelivery = effect.effectKind !== "damage"
+    || effect.resolution !== "saving-throw"
+    || primitive.definition.savingThrowAbility !== null;
+  const validCastingTime = effect.effectKind === "stat-modifier"
+    ? primitive.definition.castingTime === "reaction"
+      && effect.modifier.trigger === "incoming-attack-would-hit"
+      && primitive.definition.reactionCondition !== null
+    : primitive.definition.castingTime === "action" || primitive.definition.castingTime === "bonus-action";
   if (
-    effect.resolution !== "spell-attack"
-    || primitive.definition.targetType !== "creature"
+    primitive.definition.targetType !== "creature"
     || primitive.definition.targetCount !== 1
-    || !["action", "bonus-action"].includes(primitive.definition.castingTime)
+    || primitive.definition.area.shape !== null
+    || !validCastingTime
+    || !validDelivery
     || primitive.definition.concentration
-    || primitive.definition.range.distance <= 0
+    || primitive.definition.ritual
+    || primitive.definition.range.distance < 0
     || primitive.definition.range.distance > 120
   ) {
     return {
       ok: false,
       error: runtimeSpellSynthesisError(
         "synthesis_primitive_out_of_scope",
-        "This first synthesis slice admits only one non-concentration, single-creature spell attack within 120 feet.",
+        "Arcane synthesis admits one non-area, non-concentration creature target within 120 feet, using a reviewed action, bonus action, save, attack, or incoming-hit reaction delivery.",
         { primitiveContentKey: primitive.contentKey },
       ),
     };
   }
-  const expressions = [
+  const damageOverBudget = effect.effectKind === "damage" && [
     effect.baseDamage,
     ...Object.values(effect.slotLevelVariants),
     ...Object.values(effect.playerLevelVariants),
-  ];
-  const overBudget = expressions.some((expression) =>
+  ].some((expression) =>
     (expression.kind === "dice" && (expression.diceCount > 4 || expression.dieSides > 10))
     || damageExpressionAverage(expression) > 20
   );
-  if (overBudget || primitive.definition.level > 1) {
+  const healingOverBudget = effect.effectKind === "healing" && (
+    (effect.baseHealing.kind === "dice" && (
+      effect.baseHealing.diceCount > 1
+      || effect.baseHealing.dieSides > 8
+      || effect.baseHealing.bonus > 0
+    ))
+    || damageExpressionAverage(effect.baseHealing) > 10
+    || Object.values(effect.slotLevelVariants).some((expression) =>
+      (expression.kind === "dice" && (expression.diceCount > 9 || expression.dieSides > 8))
+      || damageExpressionAverage(expression) > 45
+    )
+  );
+  const modifierOverBudget = effect.effectKind === "stat-modifier" && (
+    effect.modifier.stat !== "armor-class"
+    || effect.modifier.amount <= 0
+    || effect.modifier.amount > 5
+    || effect.modifier.duration.kind !== "turn-boundary"
+    || effect.modifier.duration.offsetTurns > 1
+  );
+  if (damageOverBudget || healingOverBudget || modifierOverBudget || primitive.definition.level > 1) {
     return {
       ok: false,
       error: runtimeSpellSynthesisError(
         "synthesis_power_budget_exceeded",
         "The reviewed primitive exceeds the first arcane-synthesis power budget.",
-        { primitiveContentKey: primitive.contentKey, maxSpellLevel: 1, maxAverageDamage: 20 },
+        {
+          primitiveContentKey: primitive.contentKey,
+          maxSpellLevel: 1,
+          maxAverageDamage: 20,
+          maxBaseHealing: 10,
+          maxArmorClassModifier: 5,
+        },
       ),
     };
   }
@@ -4301,9 +4381,13 @@ function compileRuntimeArcaneSpell(
     primitiveContentKey: primitive.contentKey,
     policyRevision: RUNTIME_ARCANE_SYNTHESIS_POLICY_REVISION,
     castingTime: primitive.definition.castingTime,
+    rangeKind,
     rangeFeet: primitive.definition.range.distance,
     targetType: "creature",
     targetCount: 1,
+    savingThrowAbility: primitive.definition.savingThrowAbility,
+    reactionCondition: primitive.definition.reactionCondition,
+    duration: effect.effectKind === "stat-modifier" ? primitive.definition.duration : "instantaneous",
     effect,
   });
   const authoritativeSchool = primitive.definition.school.sourceKey;
@@ -4324,7 +4408,11 @@ function compileRuntimeArcaneSpell(
       school: authoritativeSchool,
       level: primitive.definition.level,
       executionTier: 2,
-      capabilities: ["spell", "damage", "runtime-synthesis"],
+      capabilities: [
+        "spell",
+        effect.effectKind === "stat-modifier" ? "modifier" : effect.effectKind,
+        "runtime-synthesis",
+      ],
       execution,
     }),
   };
@@ -9519,7 +9607,16 @@ function resolveCastSpell(
   }
 
   if (spell.effect.effectKind === "healing") {
-    return resolveHealingSpell(state, context, clientCommandId, command, tool, spell, spellcasting);
+    return resolveHealingSpell(
+      state,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      spell,
+      spellcasting,
+      synthesisEvidenceContentKeys,
+    );
   }
   if (spell.effect.effectKind === "stat-modifier") {
     return resolveShieldCast(state, context, clientCommandId, command, tool, spell, spellcasting);
@@ -9716,7 +9813,8 @@ function resolveHealingSpell(
   command: Extract<EngineCommand, { kind: "cast_spell" }>,
   tool: EngineToolName | "declare" | "listen",
   spell: NonNullable<ReturnType<typeof getOpen5eSpell>>,
-  spellcasting: NonNullable<EngineCharacter["spellcasting"]>
+  spellcasting: NonNullable<EngineCharacter["spellcasting"]>,
+  synthesisEvidenceContentKeys: string[] = [],
 ): EngineResolution {
   const effect = spell.effect;
   if (!effect || effect.effectKind !== "healing") {
@@ -9795,7 +9893,8 @@ function resolveHealingSpell(
     "spell_healing",
     rolls,
     modifiers,
-    changes
+    changes,
+    synthesisEvidenceContentKeys,
   );
 }
 
@@ -9809,7 +9908,7 @@ function resolveShieldCast(
   _spellcasting: NonNullable<EngineCharacter["spellcasting"]>
 ): EngineResolution {
   if (!state.combat.pendingReaction) {
-    return rejection(state, tool, "reaction_trigger_required", "Shield can only be cast in response to a server-offered incoming hit.");
+    return rejection(state, tool, "reaction_trigger_required", `${spell.definition.name} can only be cast in response to a server-offered incoming hit.`);
   }
   return resolveReactionResponse(
     state,
@@ -9862,7 +9961,7 @@ function resolveReactionResponse(
       clientCommandId,
       command,
       tool,
-      `You decline Shield. ${pending.attackName} hits for ${damage} ${pending.damageType.toLocaleLowerCase("en-US")} damage.${turnSuffix}`,
+      `You decline the offered reaction. ${pending.attackName} hits for ${damage} ${pending.damageType.toLocaleLowerCase("en-US")} damage.${turnSuffix}`,
       {
         reactionId: pending.id,
         decision: "decline",
@@ -9884,10 +9983,10 @@ function resolveReactionResponse(
   if (!spellKey || !pending.eligibleReactionIds.includes(spellKey)) {
     return rejection(state, tool, "reaction_not_eligible", "The selected reaction spell was not offered for this incoming hit.");
   }
-  const spell = getOpen5eSpell(spellKey);
+  const spell = eligibleIncomingHitReactions(state).find((candidate) => candidate.contentKey === spellKey) ?? null;
   const spellcasting = state.character.spellcasting;
   if (!spell || !spell.effect || spell.effect.effectKind !== "stat-modifier") {
-    return rejection(state, tool, "unsupported_effect", "Only a reviewed Shield stat modifier can resolve this reaction.");
+    return rejection(state, tool, "unsupported_effect", "Only a reviewed incoming-hit stat modifier can resolve this reaction.");
   }
   if (spell.effect.modifier.trigger !== pending.trigger || spell.definition.castingTime !== "reaction") {
     return rejection(state, tool, "reaction_not_eligible", "That spell is not a reviewed incoming-hit reaction.");
@@ -9952,7 +10051,7 @@ function resolveReactionResponse(
     damage = rollStoredReactionDamage(pending, rolls);
     applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
   }
-  next.combat.lastAction = `reaction:${pending.id}:shield`;
+  next.combat.lastAction = `reaction:${pending.id}:spell`;
   const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
   return commit(
     next,
@@ -9960,7 +10059,7 @@ function resolveReactionResponse(
     clientCommandId,
     command,
     tool,
-    `Shield resolves: AC rises from ${acBefore} to ${acAfter}; the stored attack ${hitAfter ? "still hits" : "misses"}${hitAfter ? ` for ${damage} ${pending.damageType.toLocaleLowerCase("en-US")} damage` : ""}.${turnSuffix}`,
+    `${spell.definition.name} resolves: AC rises from ${acBefore} to ${acAfter}; the stored attack ${hitAfter ? "still hits" : "misses"}${hitAfter ? ` for ${damage} ${pending.damageType.toLocaleLowerCase("en-US")} damage` : ""}.${turnSuffix}`,
     {
       reactionId: pending.id,
       decision: "accept",
@@ -9979,7 +10078,7 @@ function resolveReactionResponse(
     rolls,
     modifiers,
     changes,
-    [spell.contentKey, pending.sourceActionKey]
+    [spell.contentKey, ...runtimeSpellPrimitiveEvidence(state, spell.contentKey), pending.sourceActionKey]
   );
 }
 
@@ -10028,23 +10127,29 @@ function hasPinnedSpell(references: EngineSpellReference[], contentKey: string, 
   return references.some((reference) => reference.contentKey === contentKey && reference.packHash === packHash);
 }
 
-function eligibleShieldReaction(state: LanternCampaignState): NonNullable<ReturnType<typeof getOpen5eSpell>> | null {
+function eligibleIncomingHitReactions(state: LanternCampaignState): EngineSpellRecord[] {
   const spellcasting = state.character.spellcasting;
-  if (!spellcasting || state.combat.turnBudget.reaction.spent) return null;
-  const spell = getOpen5eSpell("open5e:spell:5e-2014:srd-2014:srd_shield");
-  if (!spell || !spell.effect || spell.effect.effectKind !== "stat-modifier") return null;
+  if (!spellcasting || state.combat.turnBudget.reaction.spent) return [];
   const progression = getOpen5eSpellProgression(state.character.className);
-  if (!progression) return null;
-  const references = spell.definition.level === 0 || progression.selectionMode === "known"
-    ? spellcasting.knownSpells
-    : spellcasting.preparedSpells;
-  const slotSelection = selectSpellSlot(spell.definition.level, undefined, spellcasting.slots);
-  return spell.definition.castingTime === "reaction"
-    && spell.effect.modifier.trigger === "incoming-attack-would-hit"
-    && hasPinnedSpell(references, spell.contentKey, spell.packHash)
-    && !("code" in slotSelection)
-    ? spell
-    : null;
+  if (!progression) return [];
+  const references = [...spellcasting.knownSpells, ...spellcasting.preparedSpells]
+    .filter((reference, index, all) =>
+      all.findIndex((candidate) => candidate.contentKey === reference.contentKey && candidate.packHash === reference.packHash) === index
+    );
+  return references
+    .map((reference) => resolveSpellRecord(state, reference.contentKey, reference.packHash))
+    .filter((spell): spell is EngineSpellRecord => {
+      if (!spell?.effect || spell.effect.effectKind !== "stat-modifier") return false;
+      const availableReferences = spell.definition.level === 0 || progression.selectionMode === "known"
+        ? spellcasting.knownSpells
+        : spellcasting.preparedSpells;
+      const slotSelection = selectSpellSlot(spell.definition.level, undefined, spellcasting.slots);
+      return spell.definition.castingTime === "reaction"
+        && spell.effect.modifier.trigger === "incoming-attack-would-hit"
+        && hasPinnedSpell(availableReferences, spell.contentKey, spell.packHash)
+        && !("code" in slotSelection);
+    })
+    .sort((left, right) => left.contentKey.localeCompare(right.contentKey));
 }
 
 function highestAvailableSlotLevel(slotMaximums: Record<string, number>): number {
@@ -11201,8 +11306,8 @@ function resolveAdvanceTurn(
   let outcome = "enemy_miss";
 
   if (hit) {
-    const shield = eligibleShieldReaction(state);
-    if (shield) {
+    const reactions = eligibleIncomingHitReactions(state);
+    if (reactions.length > 0) {
       const pending: EnginePendingReaction = {
         version: 1,
         id: randomUUID(),
@@ -11224,7 +11329,7 @@ function resolveAdvanceTurn(
         damageDieSides: attack.damage.dieSides,
         damageBonus: attack.damage.bonus,
         damageType: attack.damage.typeName,
-        eligibleReactionIds: [shield.contentKey],
+        eligibleReactionIds: reactions.map((spell) => spell.contentKey),
         status: "offered",
         resumeToken: randomUUID(),
       };
@@ -11237,7 +11342,7 @@ function resolveAdvanceTurn(
         clientCommandId,
         command,
         tool,
-        `${enemyView.name} hits with ${attack.name}; Shield may be cast before damage resolves.`,
+        `${enemyView.name} hits with ${attack.name}; an eligible reaction spell may be cast before damage resolves.`,
         {
           reactionId: pending.id,
           pendingReaction: pending,
@@ -11249,7 +11354,13 @@ function resolveAdvanceTurn(
         rolls,
         modifiers,
         changes,
-        [attack.contentKey, shield.contentKey]
+        [
+          attack.contentKey,
+          ...reactions.flatMap((spell) => [
+            spell.contentKey,
+            ...runtimeSpellPrimitiveEvidence(state, spell.contentKey),
+          ]),
+        ]
       );
     }
     const diceCount = attack.damage.diceCount * (critical ? 2 : 1);
