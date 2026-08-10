@@ -598,7 +598,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "content_compile",
-    "Compile a strict campaign-scoped item, location, or spell proposal into inert runtime content, or update one canonical location exit through exitPatch. Definitions, instances, typed exits, and containment relationships are persisted separately; unknown fields and unreviewed mechanics are rejected.",
+    "Compile a strict campaign-scoped item, location, or spell proposal into canonical runtime content, or update one canonical location exit through exitPatch. Mundane item instances enter the normal inventory ownership/container rules; derived items retain explicit source and recipe provenance. Definitions, instances, typed exits, and containment relationships are persisted separately; unknown fields and unreviewed mechanics are rejected.",
     runtimeContentCompileJsonSchema,
   ),
   tool(

@@ -15,7 +15,7 @@ const context = {
 };
 
 describe("strict runtime content compiler", () => {
-  it("compiles an inert item with separate definition and instance ids", () => {
+  it("compiles a typed item with separate definition and instance ids", () => {
     const result = compileRuntimeContent({
       kind: "item",
       key: "bronze-key",
@@ -40,6 +40,96 @@ describe("strict runtime content compiler", () => {
       compilerRevision: "runtime-content-v1",
       policyRevision: "runtime-content-policy-v1",
     });
+  });
+
+  it("keeps pre-derivation item definitions readable during reload", () => {
+    const result = compileRuntimeContent({
+      kind: "item",
+      key: "legacy-key",
+      name: "Legacy key",
+      description: "A definition written before derivation provenance existed.",
+      tags: ["mundane"],
+      category: "tool",
+      material: "bronze",
+      weight: 0.1,
+      affordances: ["inspect"],
+    }, context);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const legacyDefinition = { ...result.definition };
+    delete (legacyDefinition as { derivation?: unknown }).derivation;
+    const normalized = normalizeRuntimeContentState({
+      definitions: [legacyDefinition],
+      instances: result.instance ? [result.instance] : [],
+      relationships: [],
+    });
+    expect(normalized.definitions).toHaveLength(1);
+    expect(normalized.definitions[0]).toMatchObject({ id: result.definition.id, derivation: null });
+  });
+
+  it("compiles derived item provenance without admitting mechanical fields", () => {
+    const result = compileRuntimeContent({
+      kind: "item",
+      key: "silver-key",
+      name: "Silver-coated key",
+      description: "A key with an explicitly recorded coating recipe.",
+      tags: ["mundane"],
+      category: "tool",
+      material: "metal",
+      weight: 0.1,
+      affordances: ["inspect", "take"],
+      derivation: {
+        sourceDefinitionIds: ["runtime:item:bronze-key-abc"],
+        sourceInstanceIds: ["runtime:instance:item:bronze-key-default"],
+        recipeKey: "silver-coating",
+        modification: "Apply a reviewed silver coating.",
+      },
+    }, { ...context, source: "derived", sourceRefs: ["command-2", "runtime:item:bronze-key-abc"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.definition.kind !== "item") return;
+    expect(result.definition.derivation).toMatchObject({
+      sourceDefinitionIds: ["runtime:item:bronze-key-abc"],
+      recipeKey: "silver-coating",
+    });
+    expect(result.definition.provenance.source).toBe("derived");
+    expect(result.definition.executionTier).toBe(0);
+    expect(contentProposalSchema.safeParse({
+      kind: "item",
+      key: "unsafe-derived",
+      name: "Unsafe derived item",
+      description: "Attempted unsupported mechanics.",
+      tags: [],
+      category: "tool",
+      material: "metal",
+      weight: 1,
+      affordances: ["take"],
+      derivation: {
+        sourceDefinitionIds: ["runtime:item:bronze-key-abc"],
+        recipeKey: "unsafe-recipe",
+        modification: "Add a 10d6 attack.",
+      },
+      damageDice: "10d6",
+    }).success).toBe(false);
+  });
+
+  it("requires a stable key for derived proposals", () => {
+    const invalid = contentProposalSchema.safeParse({
+      kind: "item",
+      name: "Unnamed derived key",
+      description: "A derived item without a stable identity.",
+      tags: [],
+      category: "tool",
+      material: "metal",
+      weight: 1,
+      affordances: ["take"],
+      derivation: {
+        sourceDefinitionIds: ["runtime:item:bronze-key-abc"],
+        recipeKey: "coating",
+        modification: "Apply a coating.",
+      },
+    });
+    expect(invalid.success).toBe(false);
   });
 
   it("compiles a location parent relationship outside the definition", () => {

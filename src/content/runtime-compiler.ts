@@ -3,9 +3,10 @@ import { z } from "zod";
 
 /**
  * The runtime content compiler is deliberately smaller than the rules engine.
- * It accepts descriptive proposals and produces inert, campaign-scoped
- * definitions.  Executable mechanics are reviewed by the child issues and are
- * therefore not part of this first compiler revision.
+ * It accepts descriptive proposals and produces typed, campaign-scoped
+ * definitions. Executable mechanics are reviewed by the child issues and are
+ * therefore not part of this compiler revision; mundane item instances are
+ * bridged into the existing inventory kernel by the engine boundary.
  */
 
 export const runtimeContentKeySchema = z
@@ -18,6 +19,27 @@ export const runtimeContentKeySchema = z
 const runtimeContentNameSchema = z.string().trim().min(1).max(160);
 const runtimeContentDescriptionSchema = z.string().trim().min(1).max(4_000);
 const runtimeContentTagsSchema = z.array(z.string().trim().min(1).max(80)).max(12);
+const runtimeItemAffordancesSchema = z.array(z.enum(["inspect", "take", "give", "drop", "use"])).max(8).default([]);
+
+/**
+ * A derived item is a new definition with explicit recipe provenance. The
+ * source records are references only; no mechanical field is accepted here,
+ * so the existing item policy remains the sole authority for execution.
+ */
+export const runtimeItemDerivationSchema = z.object({
+  sourceDefinitionIds: z.array(z.string().trim().min(1).max(180)).min(1).max(4),
+  sourceInstanceIds: z.array(z.string().trim().min(1).max(220)).max(4).default([]),
+  recipeKey: runtimeContentKeySchema,
+  modification: z.string().trim().min(1).max(400),
+}).strict().superRefine((derivation, context) => {
+  if (new Set(derivation.sourceDefinitionIds).size !== derivation.sourceDefinitionIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceDefinitionIds"], message: "Derived item source definitions must be unique." });
+  }
+  if (new Set(derivation.sourceInstanceIds).size !== derivation.sourceInstanceIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceInstanceIds"], message: "Derived item source instances must be unique." });
+  }
+});
+export type RuntimeItemDerivation = z.infer<typeof runtimeItemDerivationSchema>;
 
 const runtimeContentProposalBase = {
   name: runtimeContentNameSchema,
@@ -33,8 +55,13 @@ export const runtimeItemProposalSchema = z.object({
   material: z.string().trim().min(1).max(80),
   weight: z.number().nonnegative().max(100_000),
   valueCopper: z.number().int().nonnegative().max(100_000_000).optional(),
-  affordances: z.array(z.enum(["inspect", "take", "give", "drop", "use"])).max(8).default([]),
-}).strict();
+  affordances: runtimeItemAffordancesSchema,
+  derivation: runtimeItemDerivationSchema.optional(),
+}).strict().superRefine((proposal, context) => {
+  if (proposal.derivation && !proposal.key) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["key"], message: "A derived item must declare a stable key." });
+  }
+});
 export type RuntimeItemProposal = z.infer<typeof runtimeItemProposalSchema>;
 
 export const runtimeLocationExitStateSchema = z.object({
@@ -161,7 +188,10 @@ export const runtimeItemDefinitionSchema = z.object({
   material: z.string().trim().min(1).max(80),
   weight: z.number().nonnegative().max(100_000),
   valueCopper: z.number().int().nonnegative().max(100_000_000).nullable(),
-  affordances: runtimeItemProposalSchema.shape.affordances,
+  affordances: runtimeItemAffordancesSchema,
+  // Default preserves #131 item definitions written before derived-item
+  // provenance was added to the persisted schema.
+  derivation: runtimeItemDerivationSchema.nullable().default(null),
 }).strict();
 export type RuntimeItemDefinition = z.infer<typeof runtimeItemDefinitionSchema>;
 
@@ -193,7 +223,7 @@ export type RuntimeContentDefinition = z.infer<typeof runtimeContentDefinitionSc
 
 const runtimeInstanceStateSchema = z.object({
   status: z.enum(["available", "active", "known"]),
-  quantity: z.number().int().positive().max(1_000_000).optional(),
+  quantity: z.number().int().nonnegative().max(1_000_000).optional(),
 }).strict();
 
 export const runtimeContentInstanceSchema = z.object({
@@ -326,6 +356,7 @@ export function compileRuntimeContent(proposal: unknown, context: RuntimeContent
       executionTier: 0,
       capabilities: ["inventory"],
       valueCopper: value.valueCopper ?? null,
+      derivation: value.derivation ?? null,
     });
   } else if (value.kind === "location") {
     const { occupants: _occupants, objects: _objects, ...locationValue } = value;
