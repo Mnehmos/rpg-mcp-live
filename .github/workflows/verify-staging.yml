@@ -47,6 +47,12 @@ jobs:
       EXPECTED_ENVIRONMENT: RPG MCP Live / staging
 
     steps:
+      - name: Checkout verifier tools at the event SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+
       - name: Resolve exact native staging deployment for event
         env:
           GH_TOKEN: ${{ github.token }}
@@ -92,13 +98,6 @@ jobs:
           echo "DEPLOYMENT_ENVIRONMENT=$(jq -r '.environment' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
           echo "DEPLOYMENT_REF=$(jq -r '.ref' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
           echo "DEPLOYMENT_CREATOR=$(jq -r '.creator.login' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
-
-      - name: Checkout the Railway deployment SHA
-        if: env.SKIP != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.SHA }}
-          persist-credentials: false
 
       - name: Verify Railway deployment identity
         if: env.SKIP != 'true'
