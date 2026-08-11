@@ -87,6 +87,7 @@ const ALL_COMMAND_KINDS = [
   "advancement_confirm",
   "npc_advance",
   "death_save",
+  "remains_action",
   "loot",
   "rest",
   "project",
@@ -158,6 +159,48 @@ function createdState(className: "fighter" | "wizard" = "fighter"): LanternCampa
   const result = resolveEngineCommand(state, context, randomUUID(), command, "character_create");
   if (!result.accepted) throw new Error(`Fixture character creation failed: ${result.code}`);
   return result.state;
+}
+
+function remainsState(): LanternCampaignState {
+  const state = createdState();
+  const remainsId = "invariant-remains";
+  state.corpses = [{
+    id: remainsId,
+    formerActorId: "invariant-fallen-actor",
+    formerActorName: "Invariant Fallen Actor",
+    formerActorSpecies: "Human",
+    locationRef: null,
+    inventory: [{
+      id: "invariant-remains-item",
+      quantity: 1,
+      authoredDefinition: { name: "Invariant remains item", kind: "misc", weight: 0.1 },
+      ownerRef: { kind: "world", id: remainsId },
+      provenance: { kind: "authored", sourceId: "fixture:invariant-remains-item" },
+    }],
+    status: "lootable",
+    decay: {
+      profileId: "ordinary-remains-v1",
+      environment: "clear",
+      state: "fresh",
+      createdAtMinutes: state.time.gameTime.totalMinutes,
+      decaysAtMinutes: state.time.gameTime.totalMinutes + 4_320,
+      transitionedAtMinutes: null,
+    },
+    harvest: {
+      profileId: null,
+      status: "ineligible",
+      resourceItemId: null,
+      harvestedAtMinutes: null,
+      sourceCommandId: null,
+    },
+    cleanup: { status: "present", removedAtMinutes: null, sourceCommandId: null },
+    provenance: {
+      sourceCommandId: "fixture:invariant-remains",
+      sourceVersion: state.version,
+      occurredAt: "2026-08-11T00:00:00.000Z",
+    },
+  }];
+  return normalizeCampaignState(state);
 }
 
 function custodyState(): LanternCampaignState {
@@ -523,6 +566,7 @@ const invalidFixtures: readonly InvalidFixture[] = [
   { kind: "advancement_confirm", tool: "advancement_confirm", expectedCode: "advancement_not_pending", state: createdState, rawCommand: () => ({ kind: "advancement_confirm", pendingId: "missing-pending" }) },
   { kind: "npc_advance", tool: "npc_advance", expectedCode: "no_active_combat", state: createdState, rawCommand: () => ({ kind: "npc_advance", combatantId: "missing-combatant", templateId: "veteran" }) },
   { kind: "death_save", tool: "death_save", expectedCode: "not_unconscious", state: createdState, rawCommand: () => ({ kind: "death_save" }) },
+  { kind: "remains_action", tool: "remains_action", expectedCode: "remains_not_found", state: createdState, rawCommand: () => ({ kind: "remains_action", remainsId: "missing-remains", action: "harvest" }) },
   { kind: "loot", tool: "loot", expectedCode: "encounter_active", state: createdState, rawCommand: () => ({ kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }) },
   { kind: "rest", tool: "rest", expectedCode: "combat_active", state: activeCombatState, rawCommand: () => ({ kind: "rest", restType: "long" }) },
   { kind: "project", tool: "project", expectedCode: "project_unreviewed", state: initialState, rawCommand: () => ({ kind: "project", action: "start", projectId: "unreviewed" }) },
@@ -645,6 +689,7 @@ const replayFixtures: readonly ReplayFixture[] = [
   { kind: "advancement_confirm", tool: "advancement_confirm", build: () => { const state = pendingAdvancementState(); return { state, command: parseCommand({ kind: "advancement_confirm", pendingId: state.pendingAdvancement!.id }) }; } },
   { kind: "npc_advance", tool: "npc_advance", build: () => { const state = activeCombatState(); return { state, command: parseCommand({ kind: "npc_advance", combatantId: state.combat.enemies[0]!.id, templateId: "veteran" }) }; } },
   { kind: "death_save", tool: "death_save", build: () => ({ state: unconsciousState(), command: parseCommand({ kind: "death_save" }) }) },
+  { kind: "remains_action", tool: "remains_action", build: () => ({ state: remainsState(), command: parseCommand({ kind: "remains_action", remainsId: "invariant-remains", action: "loot", itemId: "invariant-remains-item" }) }) },
   { kind: "loot", tool: "loot", build: () => ({ state: endedCombatState(), command: parseCommand({ kind: "loot", items: [], rewardXp: 0, rewardCopper: 0 }) }) },
   { kind: "rest", tool: "rest", build: () => ({ state: createdState(), command: parseCommand({ kind: "rest", restType: "long" }) }) },
   { kind: "project", tool: "project", build: () => ({ state: initialState(), command: parseCommand({ kind: "project", action: "start", projectId: "research-v1" }) }) },
@@ -656,7 +701,7 @@ describe("generic engine invariant census", () => {
   beforeEach(() => { deterministicRandomInt.mockClear(); });
 
   it("keeps the census registry aligned with every EngineCommand family", () => {
-    expect(ALL_COMMAND_KINDS).toHaveLength(62);
+    expect(ALL_COMMAND_KINDS).toHaveLength(63);
     expect(new Set([...invalidFixtures, ...controlFixtures].map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     expect(new Set(replayFixtures.map((fixture) => fixture.kind))).toEqual(new Set(ALL_COMMAND_KINDS));
     for (const fixture of [...invalidFixtures, ...controlFixtures]) {

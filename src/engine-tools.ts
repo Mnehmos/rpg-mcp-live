@@ -380,6 +380,18 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     attackKey: z.string().trim().min(1).max(240).optional(),
   }).strict(),
   death_save: noArguments,
+  remains_action: z.object({
+    remainsId: z.string().trim().min(1).max(120),
+    action: z.enum(["loot", "harvest", "cleanup"]),
+    itemId: z.string().trim().min(1).max(120).optional(),
+  }).strict().superRefine((args, context) => {
+    if (args.action === "loot" && !args.itemId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["itemId"], message: "One existing item id is required for remains loot." });
+    }
+    if (args.action !== "loot" && args.itemId) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["itemId"], message: "Harvest and cleanup derive their result without an item id." });
+    }
+  }),
   loot: z
     .object({
       corpseId: z.string().trim().min(1).max(120).optional(),
@@ -1356,6 +1368,20 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool("death_save", "Resolve one death save while the character is unconscious at 0 HP.", {}),
   tool(
+    "remains_action",
+    "Act on one existing remains record. Loot names one existing item id; harvest and cleanup are fully server-derived. Decay, eligibility, yield, critical-object policy, ownership, and cleanup outcomes cannot be supplied by the caller.",
+    {
+      type: "object",
+      properties: {
+        remainsId: { type: "string", description: "Stable remains id from campaign_context." },
+        action: { type: "string", enum: ["loot", "harvest", "cleanup"] },
+        itemId: { type: "string", description: "Required only for loot; must identify one item already held by these remains." },
+      },
+      required: ["remainsId", "action"],
+      additionalProperties: false,
+    }
+  ),
+  tool(
     "loot",
     "Resolve a defeated encounter's authored items and currency, optionally claiming one authored quest reward. Supplied content transfers atomically; no loot is invented.",
     {
@@ -1707,6 +1733,13 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
       });
     case "death_save":
       return { kind: "death_save" };
+    case "remains_action":
+      return engineCommandSchema.parse({
+        kind: "remains_action",
+        remainsId: args.remainsId,
+        action: args.action,
+        itemId: args.itemId,
+      });
     case "loot":
       return engineCommandSchema.parse({
         kind: "loot",

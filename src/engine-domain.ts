@@ -1266,6 +1266,20 @@ const GAME_CALENDAR_ID = "lantern-standard-v1";
 const ONE_DAY_MINUTES = 24 * 60;
 const SHORT_REST_MINUTES = 60;
 const LONG_REST_MINUTES = 8 * 60;
+const REMAINS_DECAY_PROFILE = "ordinary-remains-v1" as const;
+const REVIEWED_REMAINS_HARVEST_PROFILE = "dragonborn-scale-v1" as const;
+
+function remainsDecayMinutes(weather: EngineSurvivalState["weather"]): number {
+  if (weather === "storm") return ONE_DAY_MINUTES;
+  if (weather === "rain") return 2 * ONE_DAY_MINUTES;
+  return 3 * ONE_DAY_MINUTES;
+}
+
+function remainsHarvestProfile(species: string | null): typeof REVIEWED_REMAINS_HARVEST_PROFILE | null {
+  return species?.trim().toLocaleLowerCase("en-US") === "dragonborn"
+    ? REVIEWED_REMAINS_HARVEST_PROFILE
+    : null;
+}
 
 function gameTimeAt(totalMinutes: number): EngineGameTime {
   const total = Math.max(0, Math.trunc(totalMinutes));
@@ -2070,7 +2084,11 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     normalizedOrchestration.hooks = migratedHooks;
     (next as LanternCampaignState).orchestration = normalizedOrchestration;
   }
-  next.corpses = normalizeCorpses((next as LanternCampaignState & { corpses?: unknown }).corpses);
+  next.corpses = normalizeCorpses(
+    (next as LanternCampaignState & { corpses?: unknown }).corpses,
+    next.time.gameTime.totalMinutes,
+    next.time.survival.weather,
+  );
   next.advancementPolicy = normalizeAdvancementPolicy((next as LanternCampaignState & { advancementPolicy?: unknown }).advancementPolicy);
   next.pendingAdvancement = normalizePendingAdvancement((next as LanternCampaignState & { pendingAdvancement?: unknown }).pendingAdvancement);
   if (!next.tutorialStep && next.tutorialStep !== 0) next.tutorialStep = 0;
@@ -2118,6 +2136,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   }
   next.situation = normalizeSituation((next as LanternCampaignState & { situation?: unknown }).situation, next);
   next.character = recalculateProgressionOnLoad(normalizeCharacter(next.character));
+  reconcileRemainsWorldObjects(next);
   reconcileWorldObjectInventory(next);
   next.combat = normalizeCombat(
     next.combat,
@@ -2331,7 +2350,11 @@ function normalizePartyState(value: unknown, state: LanternCampaignState): Engin
   };
 }
 
-function normalizeCorpses(value: unknown): EngineCorpse[] {
+function normalizeCorpses(
+  value: unknown,
+  nowMinutes: number,
+  currentWeather: EngineSurvivalState["weather"],
+): EngineCorpse[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
@@ -2349,19 +2372,94 @@ function normalizeCorpses(value: unknown): EngineCorpse[] {
     const corpseId = raw.id;
     const formerActorId = raw.formerActorId;
     const formerActorName = raw.formerActorName;
+    const formerActorSpecies = typeof raw.formerActorSpecies === "string" && raw.formerActorSpecies.trim()
+      ? raw.formerActorSpecies.trim()
+      : null;
+    const rawDecay = raw.decay;
+    const environment = rawDecay?.environment === "rain" || rawDecay?.environment === "storm"
+      ? rawDecay.environment
+      : rawDecay?.environment === "clear"
+        ? "clear"
+        : currentWeather;
+    const createdAtMinutes = rawDecay?.profileId === REMAINS_DECAY_PROFILE
+      && typeof rawDecay.createdAtMinutes === "number"
+      && Number.isFinite(rawDecay.createdAtMinutes)
+      ? Math.max(0, Math.trunc(rawDecay.createdAtMinutes))
+      : nowMinutes;
+    const defaultDecayAtMinutes = createdAtMinutes + remainsDecayMinutes(environment);
+    const decaysAtMinutes = rawDecay?.profileId === REMAINS_DECAY_PROFILE
+      && typeof rawDecay.decaysAtMinutes === "number"
+      && Number.isFinite(rawDecay.decaysAtMinutes)
+      && rawDecay.decaysAtMinutes >= createdAtMinutes
+      ? Math.trunc(rawDecay.decaysAtMinutes)
+      : defaultDecayAtMinutes;
+    const decayState = rawDecay?.profileId === REMAINS_DECAY_PROFILE && rawDecay.state === "decayed"
+      ? "decayed" as const
+      : "fresh" as const;
+    const transitionedAtMinutes = decayState === "decayed"
+      && typeof rawDecay?.transitionedAtMinutes === "number"
+      && Number.isFinite(rawDecay.transitionedAtMinutes)
+      ? Math.max(decaysAtMinutes, Math.trunc(rawDecay.transitionedAtMinutes))
+      : null;
+    const profileId = remainsHarvestProfile(formerActorSpecies);
+    const rawHarvest = raw.harvest;
+    const harvested = profileId !== null
+      && rawHarvest?.profileId === profileId
+      && rawHarvest.status === "harvested"
+      && typeof rawHarvest.resourceItemId === "string"
+      && rawHarvest.resourceItemId.length > 0
+      && typeof rawHarvest.harvestedAtMinutes === "number"
+      && typeof rawHarvest.sourceCommandId === "string";
+    const rawCleanup = raw.cleanup;
+    const removed = decayState === "decayed"
+      && rawCleanup?.status === "removed"
+      && typeof rawCleanup.removedAtMinutes === "number"
+      && typeof rawCleanup.sourceCommandId === "string";
+    const inventory = Array.isArray(raw.inventory)
+      ? raw.inventory.map((item) => ({
+          ...normalizeInventoryItem(item),
+          equipped: false,
+          ownerRef: { kind: "world" as const, id: corpseId },
+        }))
+      : [];
     return [{
       id: corpseId,
       formerActorId,
       formerActorName,
+      formerActorSpecies,
       locationRef: typeof raw.locationRef === "string" ? raw.locationRef : null,
-      inventory: Array.isArray(raw.inventory)
-        ? raw.inventory.map((item) => ({
-            ...normalizeInventoryItem(item),
-            equipped: false,
-            ownerRef: { kind: "world" as const, id: corpseId },
-          }))
-        : [],
-      status: raw.status as EngineCorpse["status"],
+      inventory,
+      status: inventory.length > 0 ? "lootable" : "looted",
+      decay: {
+        profileId: REMAINS_DECAY_PROFILE,
+        environment,
+        state: decayState,
+        createdAtMinutes,
+        decaysAtMinutes,
+        transitionedAtMinutes,
+      },
+      harvest: harvested
+        ? {
+            profileId,
+            status: "harvested",
+            resourceItemId: rawHarvest.resourceItemId,
+            harvestedAtMinutes: Math.max(0, Math.trunc(rawHarvest.harvestedAtMinutes!)),
+            sourceCommandId: rawHarvest.sourceCommandId,
+          }
+        : {
+            profileId,
+            status: profileId ? "eligible" : "ineligible",
+            resourceItemId: null,
+            harvestedAtMinutes: null,
+            sourceCommandId: null,
+          },
+      cleanup: removed
+        ? {
+            status: "removed",
+            removedAtMinutes: Math.max(decaysAtMinutes, Math.trunc(rawCleanup.removedAtMinutes!)),
+            sourceCommandId: rawCleanup.sourceCommandId,
+          }
+        : { status: "present", removedAtMinutes: null, sourceCommandId: null },
       provenance: {
         sourceCommandId: raw.provenance.sourceCommandId,
         sourceVersion: Math.max(0, Math.trunc(raw.provenance.sourceVersion)),
@@ -3689,12 +3787,13 @@ function resolveEngineCommandCore(
     && command.kind !== "quest_create"
     && command.kind !== "quest_transition"
     && command.kind !== "quest_update"
+    && command.kind !== "remains_action"
   ) {
     return rejection(state, tool, "actor_dead", "A dead character cannot act, rest, cast, or receive ordinary healing.");
   }
   if (
     state.character.lifecycleState === "stable"
-    && ["combat_action", "combat_move", "tactical_zone_create", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "npc_tick", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
+    && ["combat_action", "combat_move", "tactical_zone_create", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "npc_tick", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "remains_action", "project"].includes(command.kind)
   ) {
     return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
   }
@@ -3884,6 +3983,8 @@ function resolveEngineCommandCore(
       return resolveNpcAdvance(state, context, clientCommandId, command, tool);
     case "death_save":
       return resolveDeathSave(state, context, clientCommandId, command, tool);
+    case "remains_action":
+      return resolveRemainsAction(state, context, clientCommandId, command, tool);
     case "loot":
       return resolveLoot(state, context, clientCommandId, command, tool);
     case "rest":
@@ -7743,6 +7844,18 @@ function resolveWorldObjectAffordance(
   const object = world?.objects.find((candidate) => candidate.id === command.targetId);
   if (!world) return rejection(state, tool, "world_context_required", "There is no authoritative world context for that object interaction.");
   if (!object) return rejection(state, tool, "object_not_found", "That world object is not established in the current context.");
+  const holdingRemains = state.corpses.find((remains) => remains.inventory.some((item) => item.id === object.id));
+  if (holdingRemains) {
+    return rejection(
+      state,
+      tool,
+      holdingRemains.cleanup.status === "removed" ? "object_removed_with_remains" : "object_in_remains",
+      holdingRemains.cleanup.status === "removed"
+        ? "That object was removed with its remains and is no longer available in the scene."
+        : "That object is held by remains; recover it through remains_action.",
+      { objectId: object.id, remainsId: holdingRemains.id },
+    );
+  }
   const topology = worldObjectTopologyValidation(world.objects, world.id, state.actorId);
   if (topology) return rejection(state, tool, topology.code, topology.message);
   if (!object.definition.affordances.includes(command.affordance)) {
@@ -14719,6 +14832,177 @@ function resolveDeathSave(
   );
 }
 
+function resolveRemainsAction(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "remains_action" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  const remains = state.corpses.find((candidate) => candidate.id === command.remainsId);
+  if (!remains) return rejection(state, tool, "remains_not_found", "Those remains are not present in this campaign.");
+  if (remains.cleanup.status === "removed") {
+    return rejection(state, tool, "remains_removed", "Those remains have already been removed from the scene.");
+  }
+  if (state.combat.status === "active") {
+    return rejection(state, tool, "combat_active", "Remains cannot be looted, harvested, or cleaned up during an active encounter.");
+  }
+
+  if (command.action === "cleanup") {
+    if (!context.capabilities.includes("dm")) {
+      return rejection(state, tool, "dm_required", "Only the DM may commit remains cleanup.");
+    }
+    if (remains.decay.state !== "decayed") {
+      return rejection(state, tool, "remains_not_decayed", "These remains have not reached their reviewed cleanup state.");
+    }
+    const protectedItem = remains.inventory.find((item) => {
+      const object = state.worldContext?.objects.find((candidate) => candidate.id === item.id);
+      if (object) {
+        return object.definition.criticalPolicy.kind !== "ordinary_consequence"
+          || !object.definition.criticalPolicy.canLose;
+      }
+      return normalizedItemProperties(item).includes("critical");
+    });
+    if (protectedItem) {
+      const protectedObject = state.worldContext?.objects.find((object) => object.id === protectedItem.id);
+      const protectedName = protectedObject?.definition.name
+        ?? protectedItem.authoredDefinition?.name
+        ?? "A critical item";
+      return rejection(
+        state,
+        tool,
+        "critical_object_requires_recovery",
+        `${protectedName} must be recovered through its declared critical-object policy before cleanup.`,
+        { objectId: protectedItem.id },
+      );
+    }
+    const next = cloneCampaign(state);
+    const nextRemains = next.corpses.find((candidate) => candidate.id === command.remainsId)!;
+    nextRemains.cleanup = {
+      status: "removed",
+      removedAtMinutes: Math.max(
+        next.time.gameTime.totalMinutes,
+        nextRemains.decay.transitionedAtMinutes ?? nextRemains.decay.decaysAtMinutes,
+      ),
+      sourceCommandId: clientCommandId,
+    };
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `${remains.formerActorName}'s decayed remains are removed from the scene.`,
+      { remains: nextRemains },
+      "remains_cleaned_up",
+      [],
+      [],
+      [{ path: `/corpses/${remains.id}/cleanup`, before: remains.cleanup, after: nextRemains.cleanup }],
+    );
+  }
+
+  if (state.character.lifecycleState !== "conscious" || state.character.hp <= 0) {
+    return rejection(state, tool, "actor_unavailable", "Only a conscious living character can loot or harvest remains.");
+  }
+  if (remains.decay.state !== "fresh") {
+    return rejection(state, tool, "remains_decayed", "These remains have decayed beyond looting or reviewed harvesting.");
+  }
+
+  if (command.action === "loot") {
+    if (!command.itemId) return rejection(state, tool, "item_required", "One existing remains item id is required.");
+    const item = remains.inventory.find((candidate) => candidate.id === command.itemId);
+    if (!item) return rejection(state, tool, "remains_item_not_found", "That item is not held by these remains.");
+    if (remains.inventory.some((candidate) => candidate.containerRef === item.id)) {
+      return rejection(state, tool, "remains_container_not_empty", "Recover a container's contents before recovering the container.");
+    }
+    if (state.character.inventory.some((candidate) => candidate.id === item.id)) {
+      return rejection(state, tool, "duplicate_item_instance", "Remains recovery would duplicate an existing item instance.");
+    }
+    const next = cloneCampaign(state);
+    const nextRemains = next.corpses.find((candidate) => candidate.id === command.remainsId)!;
+    const nextItemIndex = nextRemains.inventory.findIndex((candidate) => candidate.id === command.itemId);
+    const [removed] = nextRemains.inventory.splice(nextItemIndex, 1);
+    const recovered = withActorOwnership(removed!, next.character.id, { kind: "loot", sourceId: clientCommandId });
+    addInventory(next.character.inventory, recovered);
+    const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+    if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+    const worldChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+    transferWorldObjectFromRemains(next, recovered.id, clientCommandId, worldChanges);
+    nextRemains.status = nextRemains.inventory.length > 0 ? "lootable" : "looted";
+    if (nextRemains.status === "looted") nextRemains.lootedAt = new Date().toISOString();
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `You recover ${materializeInventoryItem(recovered).name} from ${remains.formerActorName}'s remains.`,
+      { remains: nextRemains, item: materializeInventoryItem(recovered), inventory: materializeInventory(next.character.inventory) },
+      "remains_item_looted",
+      [],
+      [],
+      [
+        { path: `/corpses/${remains.id}`, before: remains, after: nextRemains },
+        { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
+        ...worldChanges,
+      ],
+    );
+  }
+
+  if (remains.harvest.status === "ineligible" || remains.harvest.profileId !== REVIEWED_REMAINS_HARVEST_PROFILE) {
+    return rejection(state, tool, "remains_harvest_ineligible", "These remains have no reviewed harvest profile.");
+  }
+  if (remains.harvest.status === "harvested") {
+    return rejection(state, tool, "remains_harvested", "The reviewed resource has already been harvested from these remains.");
+  }
+  const resourceItemId = `harvest:${remains.id}:${REVIEWED_REMAINS_HARVEST_PROFILE}`;
+  if (state.character.inventory.some((candidate) => candidate.id === resourceItemId)) {
+    return rejection(state, tool, "duplicate_item_instance", "The reviewed harvest resource already exists in inventory.");
+  }
+  const harvestedItem: EngineInventoryItem = {
+    id: resourceItemId,
+    quantity: 1,
+    authoredDefinition: {
+      name: "Preserved dragonborn scale",
+      kind: "misc",
+      weight: 0.1,
+      description: "An inert scale recovered through the reviewed dragonborn remains profile.",
+      properties: ["harvested-resource", "dragonborn-scale", `recipe:${REVIEWED_REMAINS_HARVEST_PROFILE}`],
+      mechanicsTier: 0,
+    },
+    ownerRef: { kind: "actor", id: state.character.id },
+    provenance: { kind: "harvest", sourceId: remains.id },
+  };
+  const next = cloneCampaign(state);
+  const nextRemains = next.corpses.find((candidate) => candidate.id === command.remainsId)!;
+  addInventory(next.character.inventory, harvestedItem);
+  const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
+  if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+  nextRemains.harvest = {
+    profileId: REVIEWED_REMAINS_HARVEST_PROFILE,
+    status: "harvested",
+    resourceItemId,
+    harvestedAtMinutes: next.time.gameTime.totalMinutes,
+    sourceCommandId: clientCommandId,
+  };
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `You recover one preserved dragonborn scale from ${remains.formerActorName}'s remains.`,
+    { remains: nextRemains, item: materializeInventoryItem(harvestedItem), inventory: materializeInventory(next.character.inventory) },
+    "remains_harvested",
+    [],
+    [],
+    [
+      { path: `/corpses/${remains.id}/harvest`, before: remains.harvest, after: nextRemains.harvest },
+      { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
+    ],
+  );
+}
+
 function resolveLoot(
   state: LanternCampaignState,
   context: RequestContext,
@@ -14841,6 +15125,8 @@ function resolveCorpseLoot(
   if (state.character.lifecycleState === "dead") return rejection(state, tool, "actor_dead", "A dead character cannot receive corpse loot.");
   const corpse = state.corpses.find((candidate) => candidate.id === command.corpseId);
   if (!corpse) return rejection(state, tool, "corpse_not_found", "That corpse is not present in this campaign.");
+  if (corpse.cleanup.status === "removed") return rejection(state, tool, "remains_removed", "Those remains have already been removed from the scene.");
+  if (corpse.decay.state !== "fresh") return rejection(state, tool, "remains_decayed", "These remains have decayed beyond ordinary recovery.");
   if (corpse.status !== "lootable") return rejection(state, tool, "corpse_looted", "That corpse has already been looted.");
   const duplicate = corpse.inventory.some((item) => state.character.inventory.some((candidate) => candidate.id === item.id));
   if (duplicate) return rejection(state, tool, "duplicate_item_instance", "Corpse recovery would duplicate an existing item instance.");
@@ -14851,6 +15137,8 @@ function resolveCorpseLoot(
   for (const item of recovered) addInventory(next.character.inventory, item);
   const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
   if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
+  const worldChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+  for (const item of recovered) transferWorldObjectFromRemains(next, item.id, clientCommandId, worldChanges);
   nextCorpse.inventory = [];
   nextCorpse.status = "looted";
   nextCorpse.lootedAt = new Date().toISOString();
@@ -14870,6 +15158,7 @@ function resolveCorpseLoot(
     [
       { path: `/corpses/${corpse.id}`, before: beforeCorpse, after: nextCorpse },
       { path: "/character/inventory", before: beforeInventory, after: next.character.inventory },
+      ...worldChanges,
     ],
   );
 }
@@ -14976,6 +15265,18 @@ function advanceGameTime(
     }
   }
   next.time.gameTime = after;
+  const remainsStateChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
+  for (const remains of next.corpses) {
+    if (remains.decay.state !== "fresh" || remains.decay.decaysAtMinutes > after.totalMinutes) continue;
+    const beforeDecay = structuredClone(remains.decay);
+    remains.decay.state = "decayed";
+    remains.decay.transitionedAtMinutes = remains.decay.decaysAtMinutes;
+    remainsStateChanges.push({
+      path: `/corpses/${remains.id}/decay`,
+      before: beforeDecay,
+      after: structuredClone(remains.decay),
+    });
+  }
   const beforeControlledActors = sourceState.controlledActors;
   for (const actor of next.controlledActors) {
     if (actor.status !== "active" || actor.expiresAtMinutes === null || actor.expiresAtMinutes > after.totalMinutes) continue;
@@ -14993,7 +15294,10 @@ function advanceGameTime(
       }
     }
   }
-  const questStateChanges = applyQuestDeadlineTransitions(next, sourceState, after, sourceCommandId);
+  const questStateChanges = [
+    ...remainsStateChanges,
+    ...applyQuestDeadlineTransitions(next, sourceState, after, sourceCommandId),
+  ];
   if (sourceState.situation && next.situation) {
     const beforeSituation = next.situation;
     const advancedSituation = advanceSituationPressure(next.situation, before.totalMinutes, after.totalMinutes);
@@ -16375,19 +16679,81 @@ function normalizeCharacter(character: EngineCharacter): EngineCharacter {
   return hydrated;
 }
 
+function transferWorldObjectsToRemains(
+  state: LanternCampaignState,
+  itemIds: ReadonlySet<string>,
+  sourceCommandId: string,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  if (!state.worldContext || itemIds.size === 0) return;
+  for (const object of state.worldContext.objects) {
+    if (!itemIds.has(object.id)) continue;
+    const before = structuredClone(object);
+    object.ownerRef = { kind: "world", id: state.worldContext.id };
+    object.containerRef = null;
+    object.state = object.definition.criticalPolicy.canHide ? "hidden" : "intact";
+    object.revision += 1;
+    object.provenance = {
+      sourceCommandId,
+      sourceVersion: state.version,
+      occurredAt: new Date().toISOString(),
+    };
+    changes.push({ path: `/worldContext/objects/${object.id}`, before, after: structuredClone(object) });
+  }
+}
+
+function transferWorldObjectFromRemains(
+  state: LanternCampaignState,
+  itemId: string,
+  sourceCommandId: string,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  const object = state.worldContext?.objects.find((candidate) => candidate.id === itemId);
+  if (!object || !state.worldContext || object.ownerRef.kind !== "world" || object.ownerRef.id !== state.worldContext.id) return;
+  const before = structuredClone(object);
+  object.ownerRef = { kind: "actor", id: state.character.id };
+  object.containerRef = null;
+  object.state = "carried";
+  object.revision += 1;
+  object.provenance = {
+    sourceCommandId,
+    sourceVersion: state.version,
+    occurredAt: new Date().toISOString(),
+  };
+  changes.push({ path: `/worldContext/objects/${object.id}`, before, after: structuredClone(object) });
+}
+
 function transitionActorToDead(
   state: LanternCampaignState,
   sourceCommandId: string,
   source: "damage" | "death-save",
   changes: Array<{ path: string; before: unknown; after: unknown }>,
 ): EngineCorpse {
-  const existing = state.corpses.find((corpse) => corpse.formerActorId === state.character.id && corpse.status === "lootable");
+  const existing = state.corpses.find((corpse) =>
+    corpse.formerActorId === state.character.id
+    && corpse.status === "lootable"
+    && corpse.cleanup.status === "present"
+  );
   if (existing) {
+    const beforeExisting = structuredClone(existing);
     const beforeInventory = state.character.inventory;
     const beforeLifecycle = state.character.lifecycleState;
     const beforeDeathRecord = state.character.deathRecord;
     const beforeCorpseId = state.character.corpseId;
-    for (const item of beforeInventory) removeRuntimeSource(state, `item:${item.id}`, changes);
+    const transferredIds = new Set(beforeInventory.map((item) => item.id));
+    for (const item of beforeInventory) {
+      removeRuntimeSource(state, `item:${item.id}`, changes);
+      if (!existing.inventory.some((candidate) => candidate.id === item.id)) {
+        existing.inventory.push({
+          ...item,
+          ownerRef: { kind: "world", id: existing.id },
+          equipped: false,
+          slot: undefined,
+        });
+      }
+    }
+    existing.status = existing.inventory.length > 0 ? "lootable" : "looted";
+    transferWorldObjectsToRemains(state, transferredIds, sourceCommandId, changes);
     state.character.inventory = [];
     if (beforeInventory.length > 0) changes.push({ path: "/character/inventory", before: beforeInventory, after: [] });
     state.character.lifecycleState = "dead";
@@ -16410,6 +16776,9 @@ function transitionActorToDead(
     state.combat.status = "ended";
     state.combat.activeActorId = null;
     state.combat.pendingReaction = null;
+    if (JSON.stringify(beforeExisting) !== JSON.stringify(existing)) {
+      changes.push({ path: `/corpses/${existing.id}`, before: beforeExisting, after: structuredClone(existing) });
+    }
     return existing;
   }
   const corpseId = randomUUID();
@@ -16425,11 +16794,29 @@ function transitionActorToDead(
     id: corpseId,
     formerActorId: state.character.id,
     formerActorName: state.character.name || "The fallen character",
+    formerActorSpecies: state.character.species || null,
     locationRef: state.worldContext?.id ?? null,
     inventory,
-    status: "lootable",
+    status: inventory.length > 0 ? "lootable" : "looted",
+    decay: {
+      profileId: REMAINS_DECAY_PROFILE,
+      environment: state.time.survival.weather,
+      state: "fresh",
+      createdAtMinutes: state.time.gameTime.totalMinutes,
+      decaysAtMinutes: state.time.gameTime.totalMinutes + remainsDecayMinutes(state.time.survival.weather),
+      transitionedAtMinutes: null,
+    },
+    harvest: {
+      profileId: remainsHarvestProfile(state.character.species || null),
+      status: remainsHarvestProfile(state.character.species || null) ? "eligible" : "ineligible",
+      resourceItemId: null,
+      harvestedAtMinutes: null,
+      sourceCommandId: null,
+    },
+    cleanup: { status: "present", removedAtMinutes: null, sourceCommandId: null },
     provenance: { sourceCommandId, sourceVersion: state.version, occurredAt },
   };
+  transferWorldObjectsToRemains(state, new Set(inventory.map((item) => item.id)), sourceCommandId, changes);
   const beforeCorpses = state.corpses;
   state.corpses = [...state.corpses, corpse];
   changes.push({ path: "/corpses", before: beforeCorpses, after: state.corpses });
@@ -17624,12 +18011,25 @@ function syncWorldObjectInventory(
 
 function reconcileWorldObjectInventory(state: LanternCampaignState): void {
   const world = state.worldContext;
-  if (!world) return;
+  if (!world || state.character.lifecycleState === "dead") return;
   for (const object of world.objects) {
     if (object.ownerRef.kind !== "actor" || object.ownerRef.id !== state.actorId) continue;
     if (object.state !== "carried" && object.state !== "equipped") continue;
     if (state.character.inventory.some((item) => item.id === object.id)) continue;
     state.character.inventory.push(worldObjectInventoryItem(object, state.character.id));
+  }
+}
+
+function reconcileRemainsWorldObjects(state: LanternCampaignState): void {
+  if (!state.worldContext) return;
+  for (const remains of state.corpses) {
+    for (const item of remains.inventory) {
+      const object = state.worldContext.objects.find((candidate) => candidate.id === item.id);
+      if (!object) continue;
+      object.ownerRef = { kind: "world", id: state.worldContext.id };
+      object.containerRef = null;
+      object.state = object.definition.criticalPolicy.canHide ? "hidden" : "intact";
+    }
   }
 }
 
