@@ -1072,6 +1072,7 @@ export const engineToolNameSchema = z.enum([
   "reaction_response",
   "combat_action",
   "combat_move",
+  "tactical_zone_create",
   "end_turn",
   "controlled_actor_create",
   "controlled_actor_command",
@@ -1422,6 +1423,27 @@ export const engineTacticalAreaAimSchema = z.object({
 }).strict();
 export type EngineTacticalAreaAim = z.infer<typeof engineTacticalAreaAimSchema>;
 
+export const engineTacticalZoneDefinitionKeySchema = z.enum([
+  "hindering-circle-v1",
+  "guiding-aura-v1",
+]);
+export type EngineTacticalZoneDefinitionKey = z.infer<typeof engineTacticalZoneDefinitionKeySchema>;
+
+export const engineTacticalZoneCreateCommandSchema = z.object({
+  kind: z.literal("tactical_zone_create"),
+  definitionKey: engineTacticalZoneDefinitionKeySchema,
+  geometryRevision: z.number().int().nonnegative(),
+  center: engineTacticalPositionSchema.optional(),
+}).strict().superRefine((command, context) => {
+  if (command.definitionKey === "hindering-circle-v1" && !command.center) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["center"], message: "The stationary circle requires one center cell." });
+  }
+  if (command.definitionKey === "guiding-aura-v1" && command.center) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["center"], message: "The source-following aura derives its center from the player." });
+  }
+});
+export type EngineTacticalZoneCreateCommand = z.infer<typeof engineTacticalZoneCreateCommandSchema>;
+
 export interface EngineTacticalGeometry {
   frameId: string;
   revision: number;
@@ -1458,6 +1480,44 @@ export interface EngineTacticalAreaSnapshot {
   cells: EngineTacticalPosition[];
   targetIds: string[];
   programContentKey: string;
+}
+
+export type EngineTacticalZoneEndReason = "expired" | "source-dead" | "encounter-ended";
+
+export interface EngineTacticalZone {
+  version: 1;
+  id: string;
+  definitionKey: EngineTacticalZoneDefinitionKey;
+  source: {
+    actorId: string;
+    ref: string;
+  };
+  anchor:
+    | { kind: "stationary"; position: EngineTacticalPosition }
+    | { kind: "actor"; actorId: string };
+  shape: {
+    kind: "circle";
+    radiusFeet: 10;
+  };
+  geometryRevision: number;
+  duration: {
+    kind: "rounds";
+    amount: 3;
+    startedRound: number;
+    expiresAtRound: number;
+  };
+  currentCenter: EngineTacticalPosition;
+  affectedActorIds: string[];
+  activeEffectIds: string[];
+  status: "active" | "expired" | "removed";
+  endedReason: EngineTacticalZoneEndReason | null;
+  revision: number;
+  provenance: {
+    sourceCommandId: string;
+    sourceVersion: number;
+    rulesVersion: string;
+    definitionRevision: "tactical-zones-v1";
+  };
 }
 
 export interface EnginePathTriggerResolution {
@@ -1501,6 +1561,7 @@ export interface EngineCombatTacticalState {
   actorPosition: EngineTacticalPosition;
   actorFootprint: EngineTacticalFootprint;
   lastPlan: EngineMovementPlan | null;
+  zones: EngineTacticalZone[];
 }
 
 export const engineEncounterLifecycleProfileSchema = z.literal("guards-surrender-v1");
@@ -2154,6 +2215,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       path: z.array(engineTacticalPositionSchema).max(400).optional(),
     })
     .strict(),
+  engineTacticalZoneCreateCommandSchema,
   z.object({ kind: z.literal("end_turn") }).strict(),
   engineControlledActorCreateCommandSchema,
   engineControlledActorCommandSchema,

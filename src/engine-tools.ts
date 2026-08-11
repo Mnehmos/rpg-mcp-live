@@ -19,6 +19,7 @@ import {
   engineTacticalAreaAimSchema,
   engineTacticalGeometryInputSchema,
   engineTacticalPositionSchema,
+  engineTacticalZoneDefinitionKeySchema,
   engineToolNameSchema,
   engineSocialActionCommandSchema,
   engineNpcTickCommandSchema,
@@ -351,6 +352,18 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     destination: engineTacticalPositionSchema,
     path: z.array(engineTacticalPositionSchema).max(400).optional(),
   }).strict(),
+  tactical_zone_create: z.object({
+    definitionKey: engineTacticalZoneDefinitionKeySchema,
+    geometryRevision: z.number().int().nonnegative(),
+    center: engineTacticalPositionSchema.optional(),
+  }).strict().superRefine((value, context) => {
+    if (value.definitionKey === "hindering-circle-v1" && !value.center) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["center"], message: "The stationary circle requires one center cell." });
+    }
+    if (value.definitionKey === "guiding-aura-v1" && value.center) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["center"], message: "The source-following aura derives its center from the player." });
+    }
+  }),
   end_turn: noArguments,
   advancement_confirm: z.object({ pendingId: z.string().trim().min(1).max(120) }).strict(),
   npc_advance: z.object({
@@ -1254,6 +1267,35 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       additionalProperties: false,
     }
   ),
+  tool(
+    "tactical_zone_create",
+    "Create one reviewed persistent tactical producer. Choose only a fixed definition and current geometry revision; the engine owns its circle, radius, duration, effect, source, target membership, and cleanup.",
+    {
+      type: "object",
+      properties: {
+        definitionKey: {
+          type: "string",
+          enum: ["hindering-circle-v1", "guiding-aura-v1"],
+          description: "Exact reviewed zone definition. Hindering circle is stationary; guiding aura follows the player.",
+        },
+        geometryRevision: { type: "integer", minimum: 0 },
+        center: {
+          type: "object",
+          description: "Required only for hindering-circle-v1. Omit for guiding-aura-v1.",
+          properties: {
+            frameId: { type: "string" },
+            x: { type: "integer" },
+            y: { type: "integer" },
+            z: { type: "integer", description: "Persistent tactical zones are limited to z=0 in this slice." },
+          },
+          required: ["frameId", "x", "y", "z"],
+          additionalProperties: false,
+        },
+      },
+      required: ["definitionKey", "geometryRevision"],
+      additionalProperties: false,
+    }
+  ),
   tool("end_turn", "Explicitly end the player's combat turn and offer the opposition its turn.", {}),
   tool(
     "advancement_confirm",
@@ -1531,6 +1573,13 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         geometryRevision: args.geometryRevision,
         destination: args.destination,
         path: args.path,
+      });
+    case "tactical_zone_create":
+      return engineCommandSchema.parse({
+        kind: "tactical_zone_create",
+        definitionKey: args.definitionKey,
+        geometryRevision: args.geometryRevision,
+        center: args.center,
       });
     case "end_turn":
       return engineCommandSchema.parse({ kind: "end_turn" });

@@ -89,6 +89,9 @@ import type {
   EngineTacticalObstacle,
   EngineTacticalPosition,
   EngineTacticalTerrain,
+  EngineTacticalZone,
+  EngineTacticalZoneDefinitionKey,
+  EngineTacticalZoneEndReason,
   EngineCombatTacticalState,
   EngineControlledActor,
   EngineControlledActorAttack,
@@ -2759,6 +2762,18 @@ export function deriveActionOffers(state: LanternCampaignState): EngineActionOff
     [],
     remainingMovement > 0 ? null : "No movement remains this turn.",
   ));
+  const availableZoneDefinitions = Object.keys(REVIEWED_TACTICAL_ZONE_DEFINITIONS).filter((definitionKey) =>
+    !state.combat.tactical.zones.some((zone) => zone.status === "active" && zone.definitionKey === definitionKey)
+  );
+  offers.push(actionOffer(
+    state,
+    "tactical_zone_create",
+    "Create one reviewed persistent circle or source-following aura.",
+    "action",
+    { action: 1 },
+    availableZoneDefinitions,
+    actionReason ?? (availableZoneDefinitions.length ? null : "Both reviewed tactical zone definitions are already active."),
+  ));
   offers.push(actionOffer(state, "combat_action:attack", "Attack a living enemy with the equipped weapon.", "action", { action: 1 }, enemyTargets, actionReason ?? targetReason));
   offers.push(actionOffer(
     state,
@@ -3527,6 +3542,28 @@ export function resolveEngineCommand(
   playerText?: string,
   internalAuthority?: EngineInternalAuthority,
 ): EngineResolution {
+  const beforeZoneIssue = tacticalZoneStateIssue(state);
+  if (beforeZoneIssue) return rejection(state, tool, beforeZoneIssue.code, beforeZoneIssue.message);
+  const resolution = resolveEngineCommandCore(state, context, clientCommandId, command, tool, playerText, internalAuthority);
+  if (resolution.accepted && !resolution.readOnly) {
+    const afterZoneIssue = tacticalZoneStateIssue(resolution.state);
+    if (afterZoneIssue) return rejection(state, tool, afterZoneIssue.code, afterZoneIssue.message);
+  }
+  return reconcileZonesInResolution(
+    resolution,
+    clientCommandId,
+  );
+}
+
+function resolveEngineCommandCore(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: EngineCommand,
+  tool: EngineToolName | "declare" | "listen",
+  playerText?: string,
+  internalAuthority?: EngineInternalAuthority,
+): EngineResolution {
   if (
     state.character.lifecycleState === "dead"
     && command.kind !== "observe"
@@ -3546,7 +3583,7 @@ export function resolveEngineCommand(
   }
   if (
     state.character.lifecycleState === "stable"
-    && ["combat_action", "combat_move", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "npc_tick", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
+    && ["combat_action", "combat_move", "tactical_zone_create", "cast_spell", "move", "travel", "interact", "social_check", "social_action", "npc_tick", "merchant_trade", "equip_item", "unequip_item", "drop_item", "inventory_transfer", "improvise", "loot", "project"].includes(command.kind)
   ) {
     return rejection(state, tool, "actor_stable", "A stable character remains unconscious until healed.");
   }
@@ -3583,6 +3620,7 @@ export function resolveEngineCommand(
       "combat_start",
       "combat_action",
       "combat_move",
+      "tactical_zone_create",
       "cast_spell",
       "spawn_creature",
       "encounter_decision",
@@ -3668,6 +3706,8 @@ export function resolveEngineCommand(
       return resolveCombatAction(state, context, clientCommandId, command, tool);
     case "combat_move":
       return resolveCombatMove(state, context, clientCommandId, command, tool);
+    case "tactical_zone_create":
+      return resolveTacticalZoneCreate(state, context, clientCommandId, command, tool);
     case "end_turn":
       return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
     case "controlled_actor_create":
@@ -8379,6 +8419,43 @@ const MAX_TACTICAL_CELLS = 40_000;
 type TacticalCell = { x: number; y: number };
 type TacticalIssue = { code: string; message: string };
 
+interface ReviewedTacticalZoneDefinition {
+  key: EngineTacticalZoneDefinitionKey;
+  name: string;
+  anchorKind: "stationary" | "actor";
+  radiusFeet: 10;
+  durationRounds: 3;
+  operations: EngineEffectOperation[];
+  stackingKey: string;
+}
+
+const REVIEWED_TACTICAL_ZONE_DEFINITIONS: Record<EngineTacticalZoneDefinitionKey, ReviewedTacticalZoneDefinition> = {
+  "hindering-circle-v1": {
+    key: "hindering-circle-v1",
+    name: "Hindering circle",
+    anchorKind: "stationary",
+    radiusFeet: 10,
+    durationRounds: 3,
+    operations: [{ kind: "disadvantage", category: "ability-check" }],
+    stackingKey: "tactical-zone:hindering-circle:ability-check",
+  },
+  "guiding-aura-v1": {
+    key: "guiding-aura-v1",
+    name: "Guiding aura",
+    anchorKind: "actor",
+    radiusFeet: 10,
+    durationRounds: 3,
+    operations: [{ kind: "advantage", category: "ability-check" }],
+    stackingKey: "tactical-zone:guiding-aura:ability-check",
+  },
+};
+
+function reviewedTacticalZoneDefinition(value: string): ReviewedTacticalZoneDefinition | null {
+  return value === "hindering-circle-v1" || value === "guiding-aura-v1"
+    ? REVIEWED_TACTICAL_ZONE_DEFINITIONS[value]
+    : null;
+}
+
 export function fiveESimpleDistanceFeet(
   from: EngineTacticalPosition,
   to: EngineTacticalPosition,
@@ -8435,6 +8512,7 @@ function buildCombatTacticalState(
       actorPosition: { ...actorPosition },
       actorFootprint: footprint,
       lastPlan: null,
+      zones: [],
     },
   };
 }
@@ -8635,6 +8713,50 @@ function tacticalAimIssue(position: EngineTacticalPosition, geometry: EngineTact
   return null;
 }
 
+export function deriveTacticalCircleCells(
+  geometry: EngineTacticalGeometry,
+  center: EngineTacticalPosition,
+  radiusFeet: number,
+): EngineTacticalPosition[] | TacticalIssue {
+  const centerIssue = tacticalAimIssue(center, geometry);
+  if (centerIssue) return centerIssue;
+  if (!Number.isInteger(radiusFeet) || radiusFeet < TACTICAL_CELL_FEET || radiusFeet % TACTICAL_CELL_FEET !== 0) {
+    return { code: "unsupported_tactical_area", message: "Tactical circles require a reviewed whole-cell radius measured in feet." };
+  }
+  const cells: EngineTacticalPosition[] = [];
+  for (let y = geometry.bounds.minY; y <= geometry.bounds.maxY; y += 1) {
+    for (let x = geometry.bounds.minX; x <= geometry.bounds.maxX; x += 1) {
+      const cell = { frameId: geometry.frameId, x, y, z: 0 };
+      if (fiveESimpleDistanceFeet(center, cell) <= radiusFeet) cells.push(cell);
+    }
+  }
+  return cells;
+}
+
+function tacticalActorIdsInCells(
+  geometry: EngineTacticalGeometry,
+  primaryActor: { id: string; position: EngineTacticalPosition; footprint: EngineTacticalFootprint; eligible: boolean },
+  enemies: EngineCombatant[],
+  controlledActors: EngineControlledActor[],
+  cells: EngineTacticalPosition[],
+): string[] {
+  const includedCells = new Set(cells.map(cellKey));
+  return [
+    ...(primaryActor.eligible && positionCells(primaryActor.position, primaryActor.footprint).some((cell) => includedCells.has(cellKey(cell)))
+      ? [primaryActor.id]
+      : []),
+    ...enemies
+      .filter((enemy) => enemy.alive && positionCells(enemy.position, enemy.footprint).some((cell) => includedCells.has(cellKey(cell))))
+      .map((enemy) => enemy.id),
+    ...controlledActors
+      .filter((actor) => actor.status === "active"
+        && actor.hp > 0
+        && actor.position.frameId === geometry.frameId
+        && positionCells(actor.position, actor.footprint).some((cell) => includedCells.has(cellKey(cell))))
+      .map((actor) => actor.id),
+  ];
+}
+
 export function deriveTacticalAreaSnapshot(
   geometry: EngineTacticalGeometry,
   casterId: string,
@@ -8677,45 +8799,40 @@ export function deriveTacticalAreaSnapshot(
     return { code: "invalid_tactical_area_direction", message: "Cone and line aims must choose one cardinal or diagonal grid direction." };
   }
 
-  const directionX = Math.sign(deltaX);
-  const directionY = Math.sign(deltaY);
-  const directionLength = Math.hypot(directionX, directionY) || 1;
-  const unitX = directionX / directionLength;
-  const unitY = directionY / directionLength;
-  const cells: EngineTacticalPosition[] = [];
-  for (let y = geometry.bounds.minY; y <= geometry.bounds.maxY; y += 1) {
-    for (let x = geometry.bounds.minX; x <= geometry.bounds.maxX; x += 1) {
-      const cell = { frameId: geometry.frameId, x, y, z: 0 };
-      let included = false;
-      if (operation.shape === "sphere") {
-        included = fiveESimpleDistanceFeet(aim, cell) <= operation.size;
-      } else {
+  const circleCells = operation.shape === "sphere"
+    ? deriveTacticalCircleCells(geometry, aim, operation.size)
+    : null;
+  if (circleCells && "code" in circleCells) return circleCells;
+  const cells: EngineTacticalPosition[] = circleCells ?? [];
+  if (operation.shape !== "sphere") {
+    const directionX = Math.sign(deltaX);
+    const directionY = Math.sign(deltaY);
+    const directionLength = Math.hypot(directionX, directionY) || 1;
+    const unitX = directionX / directionLength;
+    const unitY = directionY / directionLength;
+    for (let y = geometry.bounds.minY; y <= geometry.bounds.maxY; y += 1) {
+      for (let x = geometry.bounds.minX; x <= geometry.bounds.maxX; x += 1) {
+        const cell = { frameId: geometry.frameId, x, y, z: 0 };
         const relativeX = x - casterPosition.x;
         const relativeY = y - casterPosition.y;
         const forward = relativeX * unitX + relativeY * unitY;
         const lateral = Math.abs(relativeX * unitY - relativeY * unitX);
         const withinLength = forward > 0
           && fiveESimpleDistanceFeet(casterPosition, cell) <= operation.size;
-        included = operation.shape === "line"
+        const included = operation.shape === "line"
           ? withinLength && lateral <= 0.5
           : withinLength && lateral <= forward / 2 + 0.5;
+        if (included) cells.push(cell);
       }
-      if (included) cells.push(cell);
     }
   }
-  const includedCells = new Set(cells.map(cellKey));
-  const targetIds = [
-    ...(positionCells(casterPosition, casterFootprint).some((cell) => includedCells.has(cellKey(cell))) ? [casterId] : []),
-    ...enemies
-    .filter((enemy) => enemy.alive && positionCells(enemy.position, enemy.footprint).some((cell) => includedCells.has(cellKey(cell))))
-    .map((enemy) => enemy.id),
-    ...controlledActors
-    .filter((actor) => actor.status === "active"
-      && actor.hp > 0
-      && actor.position.frameId === geometry.frameId
-      && positionCells(actor.position, actor.footprint).some((cell) => includedCells.has(cellKey(cell))))
-    .map((actor) => actor.id),
-  ];
+  const targetIds = tacticalActorIdsInCells(
+    geometry,
+    { id: casterId, position: casterPosition, footprint: casterFootprint, eligible: true },
+    enemies,
+    controlledActors,
+    cells,
+  );
   return {
     geometryRevision: geometry.revision,
     frameId: geometry.frameId,
@@ -8729,6 +8846,267 @@ export function deriveTacticalAreaSnapshot(
     targetIds,
     programContentKey: program.contentKey,
   };
+}
+
+interface TacticalZoneTransition {
+  zoneId: string;
+  definitionKey: EngineTacticalZoneDefinitionKey;
+  revision: number;
+  center: EngineTacticalPosition;
+  enteredActorIds: string[];
+  leftActorIds: string[];
+  affectedActorIds: string[];
+  status: EngineTacticalZone["status"];
+  endedReason: EngineTacticalZoneEndReason | null;
+}
+
+interface TacticalZoneReconcileResult {
+  beforeZones: EngineTacticalZone[];
+  beforeEffects: EngineEffectInstance[];
+  transitions: TacticalZoneTransition[];
+}
+
+function tacticalZoneStateIssue(state: LanternCampaignState): TacticalIssue | null {
+  for (const zone of state.combat.tactical.zones) {
+    if (zone.status !== "active") continue;
+    const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
+    if (zone.geometryRevision !== state.combat.tactical.geometry.revision) {
+      return { code: "stale_tactical_geometry", message: "An active tactical zone references stale geometry; the command cannot mutate state." };
+    }
+    if (zone.source.actorId !== state.actorId || zone.source.ref !== `actor:${state.actorId}`) {
+      return { code: "invalid_tactical_zone_source", message: "An active tactical zone has an invalid source; the command cannot mutate state." };
+    }
+    if (
+      !definition
+      || zone.shape.kind !== "circle"
+      || zone.shape.radiusFeet !== definition.radiusFeet
+      || zone.duration.kind !== "rounds"
+      || zone.duration.amount !== definition.durationRounds
+      || zone.duration.expiresAtRound !== zone.duration.startedRound + definition.durationRounds
+      || (definition.anchorKind === "stationary" && (zone.anchor.kind !== "stationary" || Boolean(tacticalAimIssue(zone.anchor.position, state.combat.tactical.geometry))))
+      || (definition.anchorKind === "actor" && (zone.anchor.kind !== "actor" || zone.anchor.actorId !== state.actorId))
+      || Boolean(tacticalAimIssue(zone.currentCenter, state.combat.tactical.geometry))
+    ) {
+      return { code: "invalid_tactical_zone_shape", message: "An active tactical zone has an invalid reviewed shape or anchor; the command cannot mutate state." };
+    }
+  }
+  return null;
+}
+
+function tacticalZoneEffectSourceRef(zoneId: string): string {
+  return `tactical-zone:${zoneId}`;
+}
+
+function sameSortedStrings(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function removeActiveTacticalZoneEffects(state: LanternCampaignState, zoneId: string): void {
+  const sourceRef = tacticalZoneEffectSourceRef(zoneId);
+  state.effects = state.effects.map((effect) => effect.status === "active" && effect.sourceRef === sourceRef
+    ? { ...effect, status: "removed" as const }
+    : effect);
+}
+
+function reconcileTacticalZones(
+  state: LanternCampaignState,
+  sourceCommandId: string,
+): TacticalZoneReconcileResult {
+  const beforeZones = state.combat.tactical.zones.map((zone) => structuredClone(zone));
+  const beforeEffects = state.effects.map((effect) => structuredClone(effect));
+  const transitions: TacticalZoneTransition[] = [];
+  if (state.combat.tactical.zones.length === 0) return { beforeZones, beforeEffects, transitions };
+
+  state.combat.tactical.zones = state.combat.tactical.zones.map((zone) => {
+    if (zone.status !== "active") return zone;
+    const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
+    let endedReason: EngineTacticalZoneEndReason | null = null;
+    if (zone.source.actorId !== state.actorId || state.character.lifecycleState === "dead") endedReason = "source-dead";
+    else if (state.combat.status !== "active") endedReason = "encounter-ended";
+    else if (state.combat.round >= zone.duration.expiresAtRound) endedReason = "expired";
+
+    if (endedReason) {
+      removeActiveTacticalZoneEffects(state, zone.id);
+      const terminal: EngineTacticalZone = {
+        ...zone,
+        affectedActorIds: [],
+        activeEffectIds: [],
+        status: endedReason === "expired" ? "expired" : "removed",
+        endedReason,
+        revision: zone.revision + 1,
+      };
+      transitions.push({
+        zoneId: terminal.id,
+        definitionKey: terminal.definitionKey,
+        revision: terminal.revision,
+        center: { ...terminal.currentCenter },
+        enteredActorIds: [],
+        leftActorIds: [...zone.affectedActorIds].sort(),
+        affectedActorIds: [],
+        status: terminal.status,
+        endedReason,
+      });
+      return terminal;
+    }
+
+    const center = zone.anchor.kind === "actor"
+      ? { ...state.combat.tactical.actorPosition }
+      : { ...zone.anchor.position };
+    const circleCells = deriveTacticalCircleCells(state.combat.tactical.geometry, center, definition!.radiusFeet);
+    if ("code" in circleCells) {
+      return zone;
+    }
+
+    const affectedActorIds = tacticalActorIdsInCells(
+      state.combat.tactical.geometry,
+      {
+        id: state.character.id,
+        position: state.combat.tactical.actorPosition,
+        footprint: state.combat.tactical.actorFootprint,
+        eligible: state.character.lifecycleState !== "dead",
+      },
+      state.combat.enemies,
+      state.controlledActors,
+      circleCells,
+    ).sort();
+    const previousTargets = new Set(zone.affectedActorIds);
+    const nextTargets = new Set(affectedActorIds);
+    const enteredActorIds = affectedActorIds.filter((actorId) => !previousTargets.has(actorId));
+    const leftActorIds = zone.affectedActorIds.filter((actorId) => !nextTargets.has(actorId)).sort();
+    const sourceRef = tacticalZoneEffectSourceRef(zone.id);
+    const missingEffectActorIds = affectedActorIds.filter((actorId) => !state.effects.some((effect) =>
+      effect.status === "active"
+      && effect.sourceRef === sourceRef
+      && effect.targetRefs.includes(actorId)
+    ));
+    const orphanedEffectIds = state.effects
+      .filter((effect) => effect.status === "active"
+        && effect.sourceRef === sourceRef
+        && (effect.targetRefs.length !== 1 || !nextTargets.has(effect.targetRefs[0]!)))
+      .map((effect) => effect.id);
+    const centerChanged = !positionEquals(zone.currentCenter, center);
+    const changed = centerChanged
+      || !sameSortedStrings(zone.affectedActorIds, affectedActorIds)
+      || missingEffectActorIds.length > 0
+      || orphanedEffectIds.length > 0
+      || zone.revision === 0;
+    const revision = changed ? zone.revision + 1 : zone.revision;
+
+    if (orphanedEffectIds.length > 0) {
+      state.effects = state.effects.map((effect) => effect.status === "active"
+        && orphanedEffectIds.includes(effect.id)
+        ? { ...effect, status: "removed" as const }
+        : effect);
+    }
+    for (const actorId of missingEffectActorIds) {
+      const applied = applyEffect(state.effects, {
+        id: `tactical-zone-effect:${zone.id}:${revision}:${actorId}`,
+        definitionKey: zone.definitionKey,
+        sourceRef,
+        targetRefs: [actorId],
+        operations: definition!.operations.map((operation) => ({ ...operation })),
+        startAnchor: { kind: "campaign-round", round: state.combat.round },
+        duration: { kind: "persistent" },
+        stackingKey: definition!.stackingKey,
+        stackingRule: "ignore",
+        clearedBy: ["source-removal"],
+        provenance: {
+          sourceContentKey: null,
+          sourceCommandId,
+          rulesVersion: state.rulesVersion,
+          formulaRevision: "tactical-zone-effects-v1",
+        },
+      });
+      state.effects = applied.effects;
+    }
+    const activeEffectIds = state.effects
+      .filter((effect) => effect.status === "active" && effect.sourceRef === sourceRef)
+      .map((effect) => effect.id)
+      .sort();
+    const nextZone: EngineTacticalZone = {
+      ...zone,
+      currentCenter: center,
+      affectedActorIds,
+      activeEffectIds,
+      revision,
+    };
+    if (changed || leftActorIds.length > 0) {
+      transitions.push({
+        zoneId: nextZone.id,
+        definitionKey: nextZone.definitionKey,
+        revision,
+        center: { ...center },
+        enteredActorIds,
+        leftActorIds,
+        affectedActorIds,
+        status: nextZone.status,
+        endedReason: null,
+      });
+    }
+    return nextZone;
+  });
+  return { beforeZones, beforeEffects, transitions };
+}
+
+function zoneTransitionMessage(transitions: TacticalZoneTransition[]): string {
+  return transitions.map((transition) => {
+    const definition = reviewedTacticalZoneDefinition(transition.definitionKey);
+    const name = definition?.name ?? transition.definitionKey;
+    if (transition.endedReason) return `${name} ends (${transition.endedReason}).`;
+    return transition.enteredActorIds.length || transition.leftActorIds.length
+      ? `${name} updates its affected actors from canonical positions.`
+      : `${name} follows its source.`;
+  }).join(" ");
+}
+
+function extendEventStateChange(
+  event: EngineEvent,
+  path: string,
+  before: unknown,
+  after: unknown,
+): void {
+  const existing = event.stateChanges.find((change) => change.path === path);
+  if (existing) existing.after = after;
+  else event.stateChanges.push({ path, before, after });
+}
+
+function reconcileZonesInResolution(resolution: EngineResolution, sourceCommandId: string): EngineResolution {
+  if (!resolution.accepted || resolution.readOnly || !resolution.event) return resolution;
+  const reconciled = reconcileTacticalZones(resolution.state, sourceCommandId);
+  const zonesChanged = JSON.stringify(reconciled.beforeZones) !== JSON.stringify(resolution.state.combat.tactical.zones);
+  const effectsChanged = JSON.stringify(reconciled.beforeEffects) !== JSON.stringify(resolution.state.effects);
+  if (!zonesChanged && !effectsChanged) return resolution;
+  if (zonesChanged) {
+    extendEventStateChange(
+      resolution.event,
+      "/combat/tactical/zones",
+      reconciled.beforeZones,
+      resolution.state.combat.tactical.zones,
+    );
+  }
+  if (effectsChanged) {
+    extendEventStateChange(resolution.event, "/effects", reconciled.beforeEffects, resolution.state.effects);
+  }
+  const sourceData = resolution.data && typeof resolution.data === "object" && !Array.isArray(resolution.data)
+    ? resolution.data as Record<string, unknown>
+    : {};
+  resolution.data = {
+    ...sourceData,
+    combat: combatData(resolution.state.combat),
+    tacticalZones: resolution.state.combat.tactical.zones,
+    zoneTransitions: reconciled.transitions,
+  };
+  if (reconciled.transitions.length > 0) {
+    const message = `${resolution.message} ${zoneTransitionMessage(reconciled.transitions)}`;
+    resolution.message = message;
+    resolution.narration = { ...resolution.narration, text: message };
+    const latest = resolution.state.log.at(-1);
+    if (latest) latest.text = message;
+  }
+  return resolution;
 }
 
 function positionFitsGeometry(
@@ -8954,6 +9332,94 @@ function syncDerivedCombatDistances(tactical: EngineCombatTacticalState, enemies
     const distance = fiveESimpleDistanceFeet(tactical.actorPosition, enemy.position);
     enemy.distanceFeet = Number.isFinite(distance) ? distance : Math.max(0, enemy.distanceFeet);
   }
+}
+
+function resolveTacticalZoneCreate(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "tactical_zone_create" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "Persistent tactical zones require an active encounter.");
+  if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "It is not your turn.");
+  if (hasRuntimeCondition(state, state.character.id, "unconscious")) return rejection(state, tool, "unconscious", "You are unconscious and cannot create a tactical zone.");
+  if (!state.combat.turnBudget.action.available || state.combat.turnBudget.action.spent) {
+    return rejection(state, tool, "action_spent", "Your Action is already spent this turn.");
+  }
+  const definition = reviewedTacticalZoneDefinition(command.definitionKey);
+  if (!definition) return rejection(state, tool, "unsupported_tactical_zone_definition", "That tactical zone definition is not reviewed for execution.");
+  if (command.geometryRevision !== state.combat.tactical.geometry.revision) {
+    return rejection(state, tool, "stale_tactical_geometry", "The tactical geometry changed; recreate the zone from the current revision.");
+  }
+  if (state.combat.tactical.zones.some((zone) => zone.status === "active" && zone.definitionKey === definition.key)) {
+    return rejection(state, tool, "tactical_zone_already_active", `${definition.name} is already active.`);
+  }
+  if (definition.anchorKind === "stationary" && !command.center) {
+    return rejection(state, tool, "tactical_zone_center_required", `${definition.name} requires one center cell.`);
+  }
+  if (definition.anchorKind === "actor" && command.center) {
+    return rejection(state, tool, "tactical_zone_center_server_owned", `${definition.name} follows the player and cannot accept a caller-authored center.`);
+  }
+  const center = definition.anchorKind === "stationary"
+    ? { ...command.center! }
+    : { ...state.combat.tactical.actorPosition };
+  const centerIssue = tacticalAimIssue(center, state.combat.tactical.geometry);
+  if (centerIssue) return rejection(state, tool, centerIssue.code, centerIssue.message);
+
+  const next = cloneCampaign(state);
+  const beforeAction = { ...state.combat.turnBudget.action };
+  spendTurnSlot(next.combat.turnBudget, "action");
+  const zone: EngineTacticalZone = {
+    version: 1,
+    id: randomUUID(),
+    definitionKey: definition.key,
+    source: {
+      actorId: state.actorId,
+      ref: `actor:${state.actorId}`,
+    },
+    anchor: definition.anchorKind === "stationary"
+      ? { kind: "stationary", position: center }
+      : { kind: "actor", actorId: state.actorId },
+    shape: { kind: "circle", radiusFeet: definition.radiusFeet },
+    geometryRevision: state.combat.tactical.geometry.revision,
+    duration: {
+      kind: "rounds",
+      amount: definition.durationRounds,
+      startedRound: state.combat.round,
+      expiresAtRound: state.combat.round + definition.durationRounds,
+    },
+    currentCenter: center,
+    affectedActorIds: [],
+    activeEffectIds: [],
+    status: "active",
+    endedReason: null,
+    revision: 0,
+    provenance: {
+      sourceCommandId: clientCommandId,
+      sourceVersion: state.version,
+      rulesVersion: state.rulesVersion,
+      definitionRevision: "tactical-zones-v1",
+    },
+  };
+  next.combat.tactical.zones.push(zone);
+  next.combat.lastAction = `tactical_zone:${definition.key}`;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `${definition.name} is established from reviewed tactical geometry.`,
+    { tacticalZone: zone, combat: combatData(next.combat) },
+    "tactical_zone_created",
+    [],
+    [],
+    [
+      { path: "/combat/turnBudget/action", before: beforeAction, after: next.combat.turnBudget.action },
+      { path: "/combat/tactical/zones", before: state.combat.tactical.zones, after: next.combat.tactical.zones },
+    ],
+  );
 }
 
 function resolveCombatMove(
@@ -16298,6 +16764,7 @@ function emptyTacticalState(frameId = "none"): EngineCombatTacticalState {
     actorPosition: { frameId, x: 0, y: 0, z: 0 },
     actorFootprint: { width: 1, height: 1 },
     lastPlan: null,
+    zones: [],
   };
 }
 
@@ -16528,7 +16995,98 @@ function normalizeCombatTactical(
     actorPosition,
     actorFootprint: normalizeFootprint(candidate.actorFootprint),
     lastPlan: normalizeMovementPlan(candidate.lastPlan, actorId, geometry.revision, frameId),
+    zones: normalizeTacticalZones(candidate.zones, actorId, geometry),
   };
+}
+
+function normalizeTacticalZones(
+  value: unknown,
+  actorId: string,
+  geometry: EngineTacticalGeometry,
+): EngineTacticalZone[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Partial<EngineTacticalZone>;
+    const definition = typeof raw.definitionKey === "string"
+      ? reviewedTacticalZoneDefinition(raw.definitionKey)
+      : null;
+    if (
+      raw.version !== 1
+      || !definition
+      || typeof raw.id !== "string"
+      || !raw.id.trim()
+      || !raw.source
+      || raw.source.actorId !== actorId
+      || raw.source.ref !== `actor:${actorId}`
+      || !raw.anchor
+      || !raw.shape
+      || raw.shape.kind !== "circle"
+      || raw.shape.radiusFeet !== definition.radiusFeet
+      || !Number.isInteger(raw.geometryRevision)
+      || raw.geometryRevision! < 1
+      || !raw.duration
+      || raw.duration.kind !== "rounds"
+      || raw.duration.amount !== definition.durationRounds
+      || !Number.isInteger(raw.duration.startedRound)
+      || raw.duration.startedRound < 0
+      || raw.duration.expiresAtRound !== raw.duration.startedRound + definition.durationRounds
+      || !isTacticalPosition(raw.currentCenter)
+      || raw.currentCenter.frameId !== geometry.frameId
+      || raw.currentCenter.z !== 0
+      || Boolean(tacticalAimIssue(raw.currentCenter, geometry))
+      || !Array.isArray(raw.affectedActorIds)
+      || !Array.isArray(raw.activeEffectIds)
+      || !["active", "expired", "removed"].includes(raw.status ?? "")
+      || !Number.isInteger(raw.revision)
+      || raw.revision! < 0
+      || !raw.provenance
+      || typeof raw.provenance.sourceCommandId !== "string"
+      || !Number.isInteger(raw.provenance.sourceVersion)
+      || raw.provenance.sourceVersion < 0
+      || typeof raw.provenance.rulesVersion !== "string"
+      || raw.provenance.definitionRevision !== "tactical-zones-v1"
+    ) return [];
+    if (definition.anchorKind === "stationary") {
+      if (raw.anchor.kind !== "stationary" || !isTacticalPosition(raw.anchor.position) || tacticalAimIssue(raw.anchor.position, geometry)) return [];
+    } else if (raw.anchor.kind !== "actor" || raw.anchor.actorId !== actorId) return [];
+    const endedReason = raw.endedReason === "expired"
+      || raw.endedReason === "source-dead"
+      || raw.endedReason === "encounter-ended"
+      ? raw.endedReason
+      : null;
+    if (raw.status === "active" && endedReason !== null) return [];
+    if (raw.status !== "active" && endedReason === null) return [];
+    return [{
+      version: 1,
+      id: raw.id,
+      definitionKey: definition.key,
+      source: { actorId, ref: `actor:${actorId}` },
+      anchor: raw.anchor.kind === "stationary"
+        ? { kind: "stationary", position: { ...raw.anchor.position } }
+        : { kind: "actor", actorId },
+      shape: { kind: "circle", radiusFeet: definition.radiusFeet },
+      geometryRevision: raw.geometryRevision!,
+      duration: {
+        kind: "rounds",
+        amount: definition.durationRounds,
+        startedRound: raw.duration.startedRound,
+        expiresAtRound: raw.duration.expiresAtRound,
+      },
+      currentCenter: { ...raw.currentCenter },
+      affectedActorIds: [...new Set(raw.affectedActorIds.filter((id): id is string => typeof id === "string"))].sort(),
+      activeEffectIds: [...new Set(raw.activeEffectIds.filter((id): id is string => typeof id === "string"))].sort(),
+      status: raw.status!,
+      endedReason,
+      revision: raw.revision!,
+      provenance: {
+        sourceCommandId: raw.provenance.sourceCommandId,
+        sourceVersion: raw.provenance.sourceVersion,
+        rulesVersion: raw.provenance.rulesVersion,
+        definitionRevision: "tactical-zones-v1",
+      },
+    } satisfies EngineTacticalZone];
+  });
 }
 
 function normalizeTacticalRectangle(value: unknown): EngineTacticalObstacle[] {
