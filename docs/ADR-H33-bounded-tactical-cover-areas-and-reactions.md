@@ -35,7 +35,11 @@ map or combat engine.
   for an opportunity attack. The path, reaction expenditure, attack result,
   damage, and evidence commit atomically. Enemy reactions reset only at the
   authoritative next-round boundary. Total cover prevents the opportunity
-  attack without spending that Reaction.
+  attack without spending that Reaction. Cover is measured from the occupied
+  cell immediately before the leaving segment, never from a stale path origin.
+  A would-hit opportunity attack pauses movement at that cell and enters the
+  existing pending-reaction protocol; resolving Shield or declining it keeps
+  the character's turn active so any remaining movement can be declared.
 - Stale revisions, wrong frames, invalid aims, unsupported programs, total
   cover, and invalid paths reject without spending movement, actions, spell
   slots, reactions, HP, or campaign version. Existing command idempotency and

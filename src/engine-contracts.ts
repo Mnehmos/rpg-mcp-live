@@ -1461,7 +1461,7 @@ export interface EngineTacticalAreaSnapshot {
 }
 
 export interface EnginePathTriggerResolution {
-  status: "resolved" | "reaction_spent" | "no_melee_attack" | "total_cover";
+  status: "resolved" | "reaction_pending" | "reaction_spent" | "no_melee_attack" | "total_cover";
   actionKey: string | null;
   attackContentKey: string | null;
   reactionSpent: boolean;
@@ -3124,6 +3124,8 @@ export interface EnginePendingReaction {
   damageType: string;
   eligibleReactionIds: string[];
   status: "offered" | "accepted" | "declined" | "resolved";
+  resumeMode: "finish-creature-turn" | "continue-character-turn";
+  movementTriggerId: string | null;
   resumeToken: string;
 }
 

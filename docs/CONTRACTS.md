@@ -259,10 +259,13 @@ effects accept an aim and current revision, then derive their circle, cone, or
 targets from compiled content; callers cannot provide area targets or
 mechanics. Movement resolves leaving-reach triggers in path order and consumes
 each enemy Reaction at most once per round; total cover prevents the attack
-without consuming the Reaction. Movement, reaction attacks, spell effects,
-resource spending, and event evidence share the normal atomic command boundary. Any
-stale or invalid spatial request leaves state and version unchanged. ADR-H33
-records the exact first-slice geometry and deferrals.
+without consuming the Reaction. Opportunity cover uses the occupied cell before
+the leaving segment. A would-hit opportunity attack pauses there in the shared
+pending-reaction protocol; Shield or decline resolves the stored roll and leaves
+the character turn active. Movement, reaction attacks, spell effects, resource
+spending, and event evidence share the normal atomic command boundary. Any stale
+or invalid spatial request leaves state and version unchanged. ADR-H33 records
+the exact first-slice geometry and deferrals.
 
 ## Aggregate and events
 

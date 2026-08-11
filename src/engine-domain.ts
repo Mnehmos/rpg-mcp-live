@@ -8585,12 +8585,16 @@ export function deriveTacticalCover(
   };
 }
 
-function incomingCharacterCover(state: LanternCampaignState, attacker: EngineCombatant): EngineTacticalCover {
+function incomingCharacterCover(
+  state: LanternCampaignState,
+  attacker: EngineCombatant,
+  targetPosition: EngineTacticalPosition = state.combat.tactical.actorPosition,
+): EngineTacticalCover {
   return deriveTacticalCover(
     state.combat.tactical.geometry,
     attacker.position,
     attacker.footprint,
-    state.combat.tactical.actorPosition,
+    targetPosition,
     state.combat.tactical.actorFootprint,
   );
 }
@@ -8997,7 +9001,9 @@ function resolveCombatMove(
   const modifiers: Array<{ name: string; value: number }> = [];
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   const reactionMessages: string[] = [];
+  const opportunityReactionContentKeys: string[] = [];
   let interruptedAtTriggerIndex: number | null = null;
+  let opportunityReactionOffered = false;
   for (const [index, trigger] of plan.triggers.entries()) {
     if (trigger.boundary !== "leaving-reach") continue;
     const enemy = next.combat.enemies.find((candidate) => candidate.id === trigger.enemyId && candidate.alive);
@@ -9031,7 +9037,10 @@ function resolveCombatMove(
       };
       continue;
     }
-    const cover = incomingCharacterCover(next, enemy);
+    const boundaryPosition = trigger.segmentIndex <= 1
+      ? plan.from
+      : plan.path[trigger.segmentIndex - 2] ?? plan.from;
+    const cover = incomingCharacterCover(next, enemy, boundaryPosition);
     if (cover.level === "total") {
       trigger.resolution = {
         status: "total_cover",
@@ -9050,6 +9059,7 @@ function resolveCombatMove(
     const beforeReaction = { ...enemy.reaction };
     enemy.reaction = { available: false, spent: true };
     changes.push({ path: `/combat/enemies/${enemy.id}/reaction`, before: beforeReaction, after: enemy.reaction });
+    const reactions = eligibleIncomingHitReactions(next);
     const result = resolveOneCreatureAttack(
       next,
       attack,
@@ -9059,8 +9069,61 @@ function resolveCombatMove(
       changes,
       clientCommandId,
       enemy,
-      "opportunity-attack",
+      {
+        damageSource: "opportunity-attack",
+        targetPosition: boundaryPosition,
+        deferDamage: reactions.length > 0,
+      },
     );
+    if (result.hit && reactions.length > 0) {
+      const pending: EnginePendingReaction = {
+        version: 1,
+        id: randomUUID(),
+        kind: "incoming-hit",
+        trigger: "incoming-attack-would-hit",
+        sourceCommandId: clientCommandId,
+        sourceVersion: state.version,
+        actorId: state.actorId,
+        attackerId: enemy.id,
+        targetId: state.character.id,
+        sourceActionKey: attack.actionKey,
+        attackName: attack.name,
+        attackRoll: result.attackRoll,
+        attackTotal: result.attackTotal,
+        attackBonus: attack.toHit,
+        critical: result.critical,
+        originalArmorClass: result.armorClass,
+        damageDiceCount: attack.damage.diceCount * (result.critical ? 2 : 1),
+        damageDieSides: attack.damage.dieSides,
+        damageBonus: attack.damage.bonus,
+        damageType: attack.damage.typeName,
+        eligibleReactionIds: reactions.map((spell) => spell.contentKey),
+        status: "offered",
+        resumeMode: "continue-character-turn",
+        movementTriggerId: trigger.id,
+        resumeToken: randomUUID(),
+      };
+      next.combat.pendingReaction = pending;
+      changes.push({ path: "/combat/pendingReaction", before: state.combat.pendingReaction, after: pending });
+      trigger.resolution = {
+        status: "reaction_pending",
+        actionKey: attack.actionKey,
+        attackContentKey: attack.contentKey,
+        reactionSpent: true,
+        hit: true,
+        critical: result.critical,
+        damageApplied: 0,
+        hpBefore: result.hpBefore,
+        hpAfter: result.hpAfter,
+      };
+      opportunityReactionContentKeys.push(
+        ...reactions.flatMap((spell) => [spell.contentKey, ...runtimeSpellPrimitiveEvidence(next, spell.contentKey)]),
+      );
+      reactionMessages.push(`${materializeCombatant(enemy).name}'s ${attack.name} would hit; resolve the offered reaction before continuing movement.`);
+      opportunityReactionOffered = true;
+      interruptedAtTriggerIndex = index;
+      break;
+    }
     trigger.resolution = {
       status: "resolved",
       actionKey: attack.actionKey,
@@ -9091,7 +9154,9 @@ function resolveCombatMove(
   next.combat.tactical.actorPosition = { ...plan.to };
   next.combat.tactical.lastPlan = plan;
   next.combat.turnBudget.movementFeet.spent += plan.costFeet;
-  next.combat.lastAction = "combat_move";
+  next.combat.lastAction = opportunityReactionOffered
+    ? `reaction:${next.combat.pendingReaction!.id}:offered`
+    : "combat_move";
   syncDerivedCombatDistances(next.combat.tactical, next.combat.enemies);
   return commit(
     next,
@@ -9103,8 +9168,12 @@ function resolveCombatMove(
       ? `You move ${plan.costFeet} feet through ${plan.path.length} tactical cell${plan.path.length === 1 ? "" : "s"}.`
       : "You do not leave your starting tactical cell."}`
       + (reactionMessages.length > 0 ? ` ${reactionMessages.join(" ")}` : ""),
-    { movement: plan, combat: combatData(next.combat) },
-    interruptedAtTriggerIndex === null ? "combat_moved" : "combat_move_interrupted",
+    { movement: plan, pendingReaction: next.combat.pendingReaction, combat: combatData(next.combat) },
+    opportunityReactionOffered
+      ? "combat_move_reaction_offered"
+      : interruptedAtTriggerIndex === null
+        ? "combat_moved"
+        : "combat_move_interrupted",
     rolls,
     modifiers,
     [
@@ -9117,7 +9186,10 @@ function resolveCombatMove(
         : []),
       { path: "/combat/tactical/lastPlan", before: state.combat.tactical.lastPlan, after: next.combat.tactical.lastPlan },
     ],
-    [...new Set(plan.triggers.flatMap((trigger) => trigger.resolution?.attackContentKey ? [trigger.resolution.attackContentKey] : []))],
+    [...new Set([
+      ...plan.triggers.flatMap((trigger) => trigger.resolution?.attackContentKey ? [trigger.resolution.attackContentKey] : []),
+      ...opportunityReactionContentKeys,
+    ])],
   );
 }
 
@@ -10428,6 +10500,48 @@ function resolveShieldCast(
   );
 }
 
+function completePendingMovementTrigger(
+  state: LanternCampaignState,
+  pending: EnginePendingReaction,
+  hit: boolean,
+  damageApplied: number,
+  hpBefore: number,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  if (pending.resumeMode !== "continue-character-turn" || !pending.movementTriggerId) return;
+  const trigger = state.combat.tactical.lastPlan?.triggers.find((candidate) => candidate.id === pending.movementTriggerId);
+  if (!trigger?.resolution || trigger.resolution.status !== "reaction_pending") return;
+  const before = { ...trigger.resolution };
+  trigger.resolution = {
+    status: "resolved",
+    actionKey: before.actionKey,
+    attackContentKey: before.attackContentKey,
+    reactionSpent: true,
+    hit,
+    critical: pending.critical,
+    damageApplied,
+    hpBefore,
+    hpAfter: state.character.hp,
+  };
+  changes.push({
+    path: `/combat/tactical/lastPlan/triggers/${trigger.id}/resolution`,
+    before,
+    after: trigger.resolution,
+  });
+}
+
+function pendingReactionTurnSuffix(
+  state: LanternCampaignState,
+  pending: EnginePendingReaction,
+  enemyId: string,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): string {
+  if (pending.resumeMode === "finish-creature-turn") return finishCreatureTurn(state, enemyId, changes);
+  return state.character.hp === 0
+    ? " Your movement ends here because you are unconscious."
+    : " You may continue your turn from this position.";
+}
+
 function resolveReactionResponse(
   state: LanternCampaignState,
   context: RequestContext,
@@ -10456,9 +10570,11 @@ function resolveReactionResponse(
     ];
     next.combat.pendingReaction = null;
     const damage = rollStoredReactionDamage(pending, rolls);
-    applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
+    const hpBefore = next.character.hp;
+    const applied = applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
+    completePendingMovementTrigger(next, pending, true, applied.applied, hpBefore, changes);
     next.combat.lastAction = `reaction:${pending.id}:declined`;
-    const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
+    const turnSuffix = pendingReactionTurnSuffix(next, pending, enemy.id, changes);
     return commit(
       next,
       context,
@@ -10469,6 +10585,7 @@ function resolveReactionResponse(
       {
         reactionId: pending.id,
         decision: "decline",
+        resumeMode: pending.resumeMode,
         attackTotal: pending.attackTotal,
         armorClass: pending.originalArmorClass,
         cover,
@@ -10554,12 +10671,14 @@ function resolveReactionResponse(
     { name: "armor_class_after", value: acAfter },
   ];
   let damage = 0;
+  const hpBefore = next.character.hp;
   if (hitAfter) {
     damage = rollStoredReactionDamage(pending, rolls);
     applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
   }
+  completePendingMovementTrigger(next, pending, hitAfter, damage, hpBefore, changes);
   next.combat.lastAction = `reaction:${pending.id}:spell`;
-  const turnSuffix = finishCreatureTurn(next, enemy.id, changes);
+  const turnSuffix = pendingReactionTurnSuffix(next, pending, enemy.id, changes);
   return commit(
     next,
     context,
@@ -10570,6 +10689,7 @@ function resolveReactionResponse(
     {
       reactionId: pending.id,
       decision: "accept",
+      resumeMode: pending.resumeMode,
       spell: spell.definition,
       slotLevel: selectedSlotLevel,
       attackTotal: pending.attackTotal,
@@ -11891,6 +12011,8 @@ function resolveAdvanceTurn(
         damageType: attack.damage.typeName,
         eligibleReactionIds: reactions.map((spell) => spell.contentKey),
         status: "offered",
+        resumeMode: "finish-creature-turn",
+        movementTriggerId: null,
         resumeToken: randomUUID(),
       };
       next.combat.pendingReaction = pending;
@@ -12469,6 +12591,19 @@ function consumeCompiledActionResource(
   });
 }
 
+interface CreatureAttackResolution {
+  hit: boolean;
+  message: string;
+  critical: boolean;
+  damageApplied: number;
+  hpBefore: number;
+  hpAfter: number;
+  attackRoll: number;
+  attackTotal: number;
+  armorClass: number;
+  cover: EngineTacticalCover;
+}
+
 function resolveOneCreatureAttack(
   state: LanternCampaignState,
   attack: CompiledCreatureAttack,
@@ -12478,10 +12613,14 @@ function resolveOneCreatureAttack(
   changes: Array<{ path: string; before: unknown; after: unknown }>,
   sourceCommandId: string,
   attacker: EngineCombatant,
-  damageSource = "enemy-multiattack",
-): { hit: boolean; message: string; critical: boolean; damageApplied: number; hpBefore: number; hpAfter: number } {
+  options: {
+    damageSource?: string;
+    targetPosition?: EngineTacticalPosition;
+    deferDamage?: boolean;
+  } = {},
+): CreatureAttackResolution {
   const hpBefore = state.character.hp;
-  const cover = incomingCharacterCover(state, attacker);
+  const cover = incomingCharacterCover(state, attacker, options.targetPosition);
   const armorClass = characterArmorClassWithCover(state, cover);
   const attackRoll = randomInt(1, 21);
   const modifierQuery = queryModifiers(state.effects, state.character.id, "attack-roll");
@@ -12506,7 +12645,32 @@ function resolveOneCreatureAttack(
       : []),
   );
   if (!hit) {
-    return { hit: false, message: `${attack.name} misses.`, critical, damageApplied: 0, hpBefore, hpAfter: hpBefore };
+    return {
+      hit: false,
+      message: `${attack.name} misses.`,
+      critical,
+      damageApplied: 0,
+      hpBefore,
+      hpAfter: hpBefore,
+      attackRoll: effectiveRoll,
+      attackTotal: total,
+      armorClass,
+      cover,
+    };
+  }
+  if (options.deferDamage) {
+    return {
+      hit: true,
+      message: `${attack.name} would hit.`,
+      critical,
+      damageApplied: 0,
+      hpBefore,
+      hpAfter: hpBefore,
+      attackRoll: effectiveRoll,
+      attackTotal: total,
+      armorClass,
+      cover,
+    };
   }
 
   const diceCount = attack.damage.diceCount * (critical ? 2 : 1);
@@ -12518,7 +12682,7 @@ function resolveOneCreatureAttack(
   }
   damage = Math.max(0, damage);
   modifiers.push({ name: `enemy_damage_${sequenceNumber}_bonus`, value: attack.damage.bonus });
-  const applied = applyCharacterDamage(state, damage, damageSource, sourceCommandId, changes, rolls, modifiers, critical);
+  const applied = applyCharacterDamage(state, damage, options.damageSource ?? "enemy-multiattack", sourceCommandId, changes, rolls, modifiers, critical);
   return {
     hit: true,
     message: `${attack.name} ${critical ? "critically " : ""}hits for ${damage} ${attack.damage.typeName.toLocaleLowerCase("en-US")} damage.`,
@@ -12526,6 +12690,10 @@ function resolveOneCreatureAttack(
     damageApplied: applied.applied,
     hpBefore: applied.beforeHp,
     hpAfter: applied.afterHp,
+    attackRoll: effectiveRoll,
+    attackTotal: total,
+    armorClass,
+    cover,
   };
 }
 
@@ -16449,7 +16617,7 @@ function normalizePathTrigger(value: unknown, index: number): EnginePathTrigger 
     ? candidate.resolution
     : null;
   const resolution = rawResolution
-    && ["resolved", "reaction_spent", "no_melee_attack", "total_cover"].includes(rawResolution.status)
+    && ["resolved", "reaction_pending", "reaction_spent", "no_melee_attack", "total_cover"].includes(rawResolution.status)
     ? {
         status: rawResolution.status,
         actionKey: typeof rawResolution.actionKey === "string" ? rawResolution.actionKey : null,
@@ -16526,6 +16694,8 @@ function normalizePendingReaction(value: unknown): EnginePendingReaction | null 
     damageType: candidate.damageType,
     eligibleReactionIds: candidate.eligibleReactionIds.filter((id): id is string => typeof id === "string"),
     status: candidate.status!,
+    resumeMode: candidate.resumeMode === "continue-character-turn" ? "continue-character-turn" : "finish-creature-turn",
+    movementTriggerId: typeof candidate.movementTriggerId === "string" ? candidate.movementTriggerId : null,
     resumeToken: candidate.resumeToken,
   };
 }

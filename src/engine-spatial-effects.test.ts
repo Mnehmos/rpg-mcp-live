@@ -426,6 +426,109 @@ describe("#139 server-derived spell areas", () => {
 });
 
 describe("#139 ordered movement reactions", () => {
+  it("derives opportunity cover from the exact leaving boundary instead of the path origin", () => {
+    const state = fighterEncounter(
+      [{ x: 0, y: 0 }],
+      [{ id: "origin-crate", x: 2, y: 0, width: 1, height: 1 }],
+      GOBLIN,
+      { x: 3, y: 0 },
+    );
+    expect(deriveTacticalCover(
+      state.combat.tactical.geometry,
+      state.combat.enemies[0]!.position,
+      state.combat.enemies[0]!.footprint,
+      state.combat.tactical.actorPosition,
+      state.combat.tactical.actorFootprint,
+    ).level).toBe("half");
+    const frameId = state.combat.tactical.geometry.frameId;
+    const moved = apply(state, {
+      kind: "combat_move",
+      geometryRevision: state.combat.tactical.geometry.revision,
+      destination: { frameId, x: 3, y: 2, z: 0 },
+      path: [
+        { frameId, x: 3, y: 1, z: 0 },
+        { frameId, x: 2, y: 1, z: 0 },
+        { frameId, x: 1, y: 1, z: 0 },
+        { frameId, x: 1, y: 2, z: 0 },
+        { frameId, x: 2, y: 2, z: 0 },
+        { frameId, x: 3, y: 2, z: 0 },
+      ],
+    });
+    expect(moved.accepted).toBe(true);
+    expect(moved.state.combat.tactical.lastPlan?.triggers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ boundary: "entering-reach", segmentIndex: 3 }),
+      expect.objectContaining({ boundary: "leaving-reach", segmentIndex: 4, resolution: expect.objectContaining({ status: "resolved" }) }),
+    ]));
+    const armorClassEvidence = moved.event?.modifiers.find((modifier) => modifier.name.endsWith("_armor_class"));
+    expect(armorClassEvidence).toEqual({ name: "enemy_attack_2_armor_class", value: state.character.ac });
+    expect(moved.event?.modifiers.some((modifier) => modifier.name.includes("cover_ac"))).toBe(false);
+  });
+
+  it("pauses an opportunity hit for Shield and resumes the same character turn", () => {
+    const state = wizardEncounter(SHIELD, [{ x: 1, y: 0 }]);
+    state.character.maxHp = 1_000;
+    state.character.hp = 1_000;
+    const hpBefore = state.character.hp;
+    const origin = { ...state.combat.tactical.actorPosition };
+    fixedRandomInt.mockReturnValueOnce(10);
+    const offered = apply(state, move(state, -1, 0));
+    const pending = offered.state.combat.pendingReaction;
+    expect(offered).toMatchObject({ accepted: true, event: { outcome: "combat_move_reaction_offered" } });
+    expect(pending).toMatchObject({
+      trigger: "incoming-attack-would-hit",
+      resumeMode: "continue-character-turn",
+      movementTriggerId: expect.any(String),
+      eligibleReactionIds: [SHIELD],
+    });
+    expect(offered.state.combat.tactical.actorPosition).toEqual(origin);
+    expect(offered.state.combat.tactical.lastPlan).toMatchObject({
+      to: origin,
+      path: [],
+      costFeet: 0,
+      triggers: [{ boundary: "leaving-reach", resolution: { status: "reaction_pending", reactionSpent: true } }],
+    });
+    expect(offered.state.combat.enemies[0]!.reaction).toEqual({ available: false, spent: true });
+    const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(offered.state)) as LanternCampaignState);
+    expect(restarted.combat.pendingReaction).toEqual(offered.state.combat.pendingReaction);
+    expect(restarted.combat.tactical.lastPlan).toEqual(offered.state.combat.tactical.lastPlan);
+
+    const shielded = apply(restarted, {
+      kind: "reaction_response",
+      reactionId: pending!.id,
+      decision: "accept",
+      spellKey: SHIELD,
+    });
+    expect(shielded).toMatchObject({
+      accepted: true,
+      data: { hitAfter: false, resumeMode: "continue-character-turn" },
+    });
+    expect(shielded.state.combat.activeActorId).toBe(state.actorId);
+    expect(shielded.state.character.hp).toBe(hpBefore);
+    expect(shielded.state.combat.tactical.lastPlan?.triggers[0]?.resolution).toMatchObject({
+      status: "resolved",
+      hit: false,
+      damageApplied: 0,
+    });
+    const continued = apply(shielded.state, move(shielded.state, -1, 0));
+    expect(continued.accepted).toBe(true);
+    expect(continued.state.combat.tactical.actorPosition).toMatchObject({ x: -1, y: 0 });
+    expect(continued.state.combat.tactical.lastPlan?.triggers[0]?.resolution?.status).toBe("reaction_spent");
+
+    const declined = apply(offered.state, {
+      kind: "reaction_response",
+      reactionId: pending!.id,
+      decision: "decline",
+    });
+    expect(declined).toMatchObject({ accepted: true, data: { resumeMode: "continue-character-turn" } });
+    expect(declined.state.combat.activeActorId).toBe(state.actorId);
+    expect(declined.state.character.hp).toBeLessThan(hpBefore);
+    expect(declined.state.combat.tactical.lastPlan?.triggers[0]?.resolution).toMatchObject({
+      status: "resolved",
+      hit: true,
+      damageApplied: expect.any(Number),
+    });
+  });
+
   it("resolves simultaneous leaving-reach triggers in stable enemy order and spends each reaction once", () => {
     const state = fighterEncounter([{ x: 1, y: 0 }, { x: 1, y: 1 }]);
     const moved = apply(state, move(state, -1, 0));
