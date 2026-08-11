@@ -26,6 +26,7 @@ const LEGENDARY_TAIL = "boss:adult-black-dragon:legendary:tail-attack-v1";
 const LAIR_ACID_GEYSER = "boss:adult-black-dragon:lair:acid-geyser-v1";
 const PASS = "boss:window:pass";
 const SHIELD = "open5e:spell:5e-2014:srd-2014:srd_shield";
+const FIRE_BOLT = "open5e:spell:5e-2014:srd-2014:srd_fire-bolt";
 
 function context(state: LanternCampaignState): RequestContext {
   return {
@@ -295,6 +296,51 @@ describe("reviewed boss-action timing", () => {
     expect(normalizeCampaignState(JSON.parse(JSON.stringify(subdued.state)) as LanternCampaignState).combat.lifecycle?.outcome).toBe("subdued");
   });
 
+  it("terminalizes reviewed boss defeats from spell and controlled-actor damage", () => {
+    const learned = apply(wizard(), { kind: "learn_spell", spellKey: FIRE_BOLT });
+    expect(learned.accepted).toBe(true);
+    const spellStarted = startBoss(learned.state);
+    expect(spellStarted.accepted).toBe(true);
+    const spellTarget = spellStarted.state.combat.enemies[0]!;
+    spellTarget.hp = 1;
+    queuedRolls.push(20, 1, 1);
+    const spellDefeat = apply(spellStarted.state, {
+      kind: "cast_spell",
+      spellKey: FIRE_BOLT,
+      targetIds: [spellTarget.id],
+    });
+    expect(spellDefeat.accepted).toBe(true);
+    expect(spellDefeat.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "killed",
+      objective: { status: "succeeded" },
+      bossTiming: { pendingWindow: null, lastCompletedWindow: null },
+    });
+    expect(normalizeCampaignState(structuredClone(spellDefeat.state)).combat.lifecycle?.outcome).toBe("killed");
+
+    const familiar = apply(fighter(), { kind: "controlled_actor_create", profileId: "familiar-scout-v1" });
+    expect(familiar.accepted).toBe(true);
+    const controlledStarted = startBoss(familiar.state);
+    expect(controlledStarted.accepted).toBe(true);
+    const controlledTarget = controlledStarted.state.combat.enemies[0]!;
+    controlledTarget.hp = 1;
+    queuedRolls.push(20, 1, 1);
+    const controlledDefeat = apply(controlledStarted.state, {
+      kind: "controlled_actor_command",
+      actorId: controlledStarted.state.controlledActors[0]!.id,
+      action: "attack",
+      targetId: controlledTarget.id,
+    });
+    expect(controlledDefeat.accepted).toBe(true);
+    expect(controlledDefeat.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "killed",
+      objective: { status: "succeeded" },
+      bossTiming: { pendingWindow: null, lastCompletedWindow: null },
+    });
+    expect(normalizeCampaignState(structuredClone(controlledDefeat.state)).combat.lifecycle?.outcome).toBe("killed");
+  });
+
   it("routes death-save handoffs through boss timing and terminalizes death-save death", () => {
     const makeDying = (state: LanternCampaignState) => {
       const dying = structuredClone(state);
@@ -434,6 +480,44 @@ describe("reviewed boss-action timing", () => {
       activeActorId: null,
       lifecycle: null,
       pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
+
+    const standaloneStarted = startBoss(fighter(), 20, 19);
+    expect(standaloneStarted.accepted).toBe(true);
+    const standaloneOpened = apply(standaloneStarted.state, { kind: "end_turn" });
+    expect(standaloneOpened.state.combat.lifecycle?.bossTiming?.pendingWindow).toMatchObject({
+      queue: ["legendary"],
+      legendaryResolution: "pending",
+    });
+    const standalonePassed = apply(standaloneOpened.state, { kind: "boss_action", actionRef: PASS });
+    expect(standalonePassed.accepted).toBe(true);
+    expect(standalonePassed.state.combat.lifecycle?.bossTiming).toMatchObject({
+      pendingWindow: null,
+      lastCompletedWindow: {
+        triggerActorId: standalonePassed.state.actorId,
+        resumeActorId: standalonePassed.state.combat.enemies[0]!.id,
+        legendaryResolution: "passed",
+      },
+    });
+    expect(normalizeCampaignState(structuredClone(standalonePassed.state)).combat.lifecycle?.bossTiming?.lastCompletedWindow)
+      .toEqual(standalonePassed.state.combat.lifecycle?.bossTiming?.lastCompletedWindow);
+    const reopenedStandalone = structuredClone(standalonePassed.state);
+    const completed = reopenedStandalone.combat.lifecycle!.bossTiming!.lastCompletedWindow!;
+    reopenedStandalone.combat.lifecycle!.bossTiming!.pendingWindow = {
+      id: randomUUID(),
+      triggerActorId: completed.triggerActorId,
+      resumeActorId: completed.resumeActorId,
+      queue: ["legendary"],
+      legendaryResolution: "pending",
+      openedAtVersion: reopenedStandalone.version,
+    };
+    expect(normalizeCampaignState(reopenedStandalone).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lootClaimed: true,
       lastAction: "invalid_boss_state_quarantined",
     });
   });

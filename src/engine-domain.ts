@@ -10109,6 +10109,7 @@ function compileReviewedBossTiming(
           openedAtVersion: state.version + 1,
         }
       : null,
+    lastCompletedWindow: null,
   };
 }
 
@@ -10310,6 +10311,7 @@ function prepareReviewedBossTransition(
   const currentIndex = order.indexOf(triggerActorId);
   const nextIndex = order.indexOf(resumeActorId);
   if (currentIndex < 0 || nextIndex < 0) return;
+  timing.lastCompletedWindow = null;
   const wrapped = nextIndex <= currentIndex;
   if (wrapped) {
     timing.lair.initiative.cycle += 1;
@@ -10367,6 +10369,15 @@ function completeReviewedBossWindow(
   window.queue = window.queue.slice(1);
   if (window.queue.length > 0) return;
   const resumeActorId = window.resumeActorId;
+  if (window.legendaryResolution === "pending") return;
+  timing.lastCompletedWindow = {
+    id: window.id,
+    triggerActorId: window.triggerActorId,
+    resumeActorId,
+    legendaryResolution: window.legendaryResolution,
+    openedAtVersion: window.openedAtVersion,
+    completedAtVersion: state.version + 1,
+  };
   timing.pendingWindow = null;
   if (resumeActorId === timing.sourceCombatantId) {
     timing.legendary.remaining = timing.legendary.maximum;
@@ -10823,7 +10834,10 @@ function resolveProfileDefeatOutcome(
     lifecycle.outcome = outcome;
     lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:${outcome}`;
     lifecycle.objective.status = "succeeded";
-    if (lifecycle.bossTiming) lifecycle.bossTiming.pendingWindow = null;
+    if (lifecycle.bossTiming) {
+      lifecycle.bossTiming.pendingWindow = null;
+      lifecycle.bossTiming.lastCompletedWindow = null;
+    }
     next.combat.status = "ended";
     next.combat.activeActorId = null;
     return outcome;
@@ -11392,9 +11406,17 @@ function resolveCastSpell(
 
   const defeatedAll = !next.combat.enemies.some((combatant) => combatant.alive);
   if (defeatedAll) {
-    next.combat.status = "ended";
-    next.combat.activeActorId = null;
+    const lifecycleBefore = structuredClone(state.combat.lifecycle);
+    const bossSourceId = next.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE
+      ? next.combat.lifecycle.bossTiming?.sourceCombatantId ?? null
+      : null;
+    const bossOutcome = bossSourceId ? resolveProfileDefeatOutcome(next, bossSourceId) : null;
+    if (!bossOutcome) {
+      next.combat.status = "ended";
+      next.combat.activeActorId = null;
+    }
     changes.push({ path: "/combat/status", before: "active", after: "ended" });
+    if (bossOutcome) changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
   } else if (castingTime === "action") {
     next.combat.activeActorId = firstLiveCombatantId(next.combat);
   }
@@ -12542,9 +12564,16 @@ function resolveControlledActorCommand(
       message = `${nextActor.name} ${critical ? "critically " : ""}hits ${targetView.name} for ${damage} ${nextActor.attack.damageType} damage.`;
       outcome = nextTarget.alive ? "controlled_actor_hit" : "controlled_actor_defeated";
       if (!nextTarget.alive && !next.combat.enemies.some((candidate) => candidate.alive)) {
-        next.combat.status = "ended";
-        next.combat.activeActorId = null;
+        const lifecycleBefore = structuredClone(state.combat.lifecycle);
+        const bossOutcome = next.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE
+          ? resolveProfileDefeatOutcome(next, nextTarget.id)
+          : null;
+        if (!bossOutcome) {
+          next.combat.status = "ended";
+          next.combat.activeActorId = null;
+        }
         changes.push({ path: "/combat/status", before: "active", after: "ended" });
+        if (bossOutcome) changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
       }
     } else {
       message = `${nextActor.name} misses ${targetView.name}.`;
@@ -12930,7 +12959,10 @@ function finishBossEncounterIfPlayerDied(
     state.combat.lifecycle.outcome = "player_defeated";
     state.combat.lifecycle.outcomeId = `${state.combat.encounterId ?? "encounter"}:player_defeated`;
     state.combat.lifecycle.objective.status = "failed";
-    if (state.combat.lifecycle.bossTiming) state.combat.lifecycle.bossTiming.pendingWindow = null;
+    if (state.combat.lifecycle.bossTiming) {
+      state.combat.lifecycle.bossTiming.pendingWindow = null;
+      state.combat.lifecycle.bossTiming.lastCompletedWindow = null;
+    }
   }
   if (beforeStatus !== state.combat.status) changes.push({ path: "/combat/status", before: beforeStatus, after: state.combat.status });
   if (beforeActorId !== state.combat.activeActorId) changes.push({ path: "/combat/activeActorId", before: beforeActorId, after: state.combat.activeActorId });
@@ -18163,6 +18195,59 @@ function normalizeBossTiming(
       openedAtVersion,
     };
   }
+  let lastCompletedWindow: EngineBossTiming["lastCompletedWindow"] = null;
+  const rawCompletedWindow = candidate.lastCompletedWindow;
+  if (rawCompletedWindow === undefined) return null;
+  if (rawCompletedWindow !== null) {
+    if (pendingWindow !== null || typeof rawCompletedWindow !== "object" || Array.isArray(rawCompletedWindow)) return null;
+    const resumeIndex = typeof rawCompletedWindow.resumeActorId === "string"
+      ? order.indexOf(rawCompletedWindow.resumeActorId)
+      : -1;
+    const openedAtVersion = Number.isInteger(rawCompletedWindow.openedAtVersion)
+      ? rawCompletedWindow.openedAtVersion
+      : -1;
+    const completedAtVersion = Number.isInteger(rawCompletedWindow.completedAtVersion)
+      ? rawCompletedWindow.completedAtVersion
+      : -1;
+    const resolution = rawCompletedWindow.legendaryResolution;
+    const commonCompletedValid = combatStatus === "active"
+      && lifecyclePhase === "active"
+      && typeof rawCompletedWindow.id === "string"
+      && rawCompletedWindow.id.length > 0
+      && resumeIndex >= 0
+      && rawCompletedWindow.resumeActorId === activeActorId
+      && initiative.activeIndex === resumeIndex
+      && openedAtVersion >= 1
+      && completedAtVersion > openedAtVersion
+      && completedAtVersion <= campaignVersion
+      && (resolution === "used" || resolution === "passed" || resolution === "not-offered")
+      && (resolution === "used"
+        ? lastConsumedWindowId === rawCompletedWindow.id && totalSpent > 0
+        : lastConsumedWindowId !== rawCompletedWindow.id);
+    let transitionValid = false;
+    if (commonCompletedValid && rawCompletedWindow.triggerActorId === null) {
+      transitionValid = rawCompletedWindow.resumeActorId === order[0]
+        && lairOrderIndex === 0
+        && cycle === 1
+        && usedCycle === 1
+        && !lairAvailable
+        && resolution === "not-offered";
+    } else if (commonCompletedValid && typeof rawCompletedWindow.triggerActorId === "string") {
+      const triggerIndex = order.indexOf(rawCompletedWindow.triggerActorId);
+      transitionValid = triggerIndex >= 0
+        && triggerIndex !== resumeIndex
+        && resumeIndex === (triggerIndex + 1) % order.length;
+    }
+    if (!transitionValid) return null;
+    lastCompletedWindow = {
+      id: rawCompletedWindow.id,
+      triggerActorId: rawCompletedWindow.triggerActorId,
+      resumeActorId: rawCompletedWindow.resumeActorId,
+      legendaryResolution: resolution,
+      openedAtVersion,
+      completedAtVersion,
+    };
+  }
   return {
     revision: "boss-timing-v1",
     sourceCombatantId: candidate.sourceCombatantId,
@@ -18200,6 +18285,7 @@ function normalizeBossTiming(
       },
     },
     pendingWindow,
+    lastCompletedWindow,
   };
 }
 

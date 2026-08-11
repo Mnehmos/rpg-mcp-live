@@ -1696,6 +1696,14 @@ export interface EngineBossTiming {
     legendaryResolution: "pending" | "used" | "passed" | "not-offered";
     openedAtVersion: number;
   } | null;
+  lastCompletedWindow: {
+    id: string;
+    triggerActorId: string | null;
+    resumeActorId: string;
+    legendaryResolution: "used" | "passed" | "not-offered";
+    openedAtVersion: number;
+    completedAtVersion: number;
+  } | null;
 }
 
 export interface EngineEncounterLifecycle {
