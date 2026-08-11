@@ -249,6 +249,24 @@ Successful results contain enough machine-readable evidence to verify the result
 
 Rejected results contain a stable code, a human-readable explanation, and the unchanged version/state assertion. Rejected commands do not mutate the map, combat, inventory, quests, character, or campaign version.
 
+## Tactical consequence contract
+
+The encounter's #10 frame, `five_e_simple` metric, footprints, obstacles, and
+geometry revision are the only tactical spatial authority. Cover is derived
+from canonical blocking cells for attacks in either direction. Reviewed area
+effects accept an aim and current revision, then derive their circle, cone, or
+5-foot-line cells and all living player, enemy, and active controlled-actor
+targets from compiled content; callers cannot provide area targets or
+mechanics. Movement resolves leaving-reach triggers in path order and consumes
+each enemy Reaction at most once per round; total cover prevents the attack
+without consuming the Reaction. Opportunity cover uses the occupied cell before
+the leaving segment. A would-hit opportunity attack pauses there in the shared
+pending-reaction protocol; Shield or decline resolves the stored roll and leaves
+the character turn active. Movement, reaction attacks, spell effects, resource
+spending, and event evidence share the normal atomic command boundary. Any stale
+or invalid spatial request leaves state and version unchanged. ADR-H33 records
+the exact first-slice geometry and deferrals.
+
 ## Aggregate and events
 
 The current campaign aggregate is the operational source of truth in the engine service. Immutable events are evidence for audit, replay tests, debugging, and future migration. They are not a second competing state model.

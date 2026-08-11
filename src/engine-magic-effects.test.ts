@@ -28,6 +28,13 @@ function apply(state: LanternCampaignState, command: EngineCommand) {
   return resolveEngineCommand(state, requestContext, randomUUID(), command, command.kind);
 }
 
+function areaAim(state: LanternCampaignState, x = 1, y = 0): Extract<EngineCommand, { kind: "cast_spell" }>["area"] {
+  return {
+    geometryRevision: state.combat.tactical.geometry.revision,
+    aim: { frameId: state.combat.tactical.geometry.frameId, x, y, z: 0 },
+  };
+}
+
 function clericCombat(): LanternCampaignState {
   const initial = createInitialCampaign("magic-cleric", "magic-cleric-actor");
   const created = apply(initial, {
@@ -211,7 +218,7 @@ describe("generic magic effects kernel", () => {
 
   it("recovers a Warlock pact slot on short rest before casting again", () => {
     let state = warlockCombat();
-    const first = apply(state, { kind: "cast_spell", spellKey: BURNING_HANDS, targetIds: [state.combat.enemies[0]!.id] });
+    const first = apply(state, { kind: "cast_spell", spellKey: BURNING_HANDS, targetIds: [], area: areaAim(state) });
     expect(first.accepted).toBe(true);
     expect(["spell_cast", "spell_encounter_ended"]).toContain(first.event?.outcome);
     expect(first.state.character.spellcasting!.slots["1"]).toBe(0);
@@ -248,7 +255,7 @@ describe("generic magic effects kernel", () => {
       encounterName: "Pact Kernel Again",
       creatures: [{ creatureKey: GOBLIN, count: 1, distanceFeet: 10 }],
     });
-    const second = apply(restarted.state, { kind: "cast_spell", spellKey: BURNING_HANDS, targetIds: [restarted.state.combat.enemies[0]!.id] });
+    const second = apply(restarted.state, { kind: "cast_spell", spellKey: BURNING_HANDS, targetIds: [], area: areaAim(restarted.state) });
     expect(second.accepted).toBe(true);
     expect(["spell_cast", "spell_encounter_ended"]).toContain(second.event?.outcome);
     expect(second.state.character.spellcasting!.slots["1"]).toBe(0);

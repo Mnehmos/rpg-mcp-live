@@ -233,6 +233,8 @@ describe("typed action-economy kernel", () => {
       damageType: "slashing",
       eligibleReactionIds: ["shield"],
       status: "offered",
+      resumeMode: "finish-creature-turn",
+      movementTriggerId: null,
       resumeToken: "resume-1",
     };
     const normalized = normalizeCampaignState(JSON.parse(JSON.stringify(state)));

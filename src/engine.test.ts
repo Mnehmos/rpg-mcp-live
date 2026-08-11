@@ -1518,7 +1518,7 @@ describe("Lantern engine boundary", () => {
     expect(JSON.stringify(rejected.state)).toBe(before);
   });
 
-  it("uses persisted encounter distance and area geometry for spell range and affected targets", () => {
+  it("derives reviewed spell-area targets from persisted tactical geometry", () => {
     const campaign = createInitialCampaign("account-area", "actor-area");
     const commandContext = context("account-area", campaign.id, "actor-area");
     const created = resolveEngineCommand(
@@ -1546,30 +1546,55 @@ describe("Lantern engine boundary", () => {
     const targetIds = started.state.combat.enemies.map((enemy) => enemy.id);
     expect(started.state.combat.enemies.every((enemy) => enemy.distanceFeet === 10)).toBe(true);
 
-    const distant = JSON.parse(JSON.stringify(started.state)) as typeof started.state;
-    for (const enemy of distant.combat.enemies) enemy.position = { ...enemy.position, x: distant.combat.tactical.actorPosition.x + 4 };
-    const distantBefore = JSON.stringify(distant);
-    const rejected = resolveEngineCommand(
-      distant,
-      commandContext,
-      randomUUID(),
-      { kind: "cast_spell", spellKey: burningHandsKey, targetIds },
-      "cast_spell"
-    );
-    expect(rejected).toMatchObject({ accepted: false, code: "spell_target_out_of_range" });
-    expect(JSON.stringify(rejected.state)).toBe(distantBefore);
-
-    const cast = resolveEngineCommand(
+    const before = JSON.stringify(started.state);
+    const spoofed = resolveEngineCommand(
       started.state,
       commandContext,
       randomUUID(),
       { kind: "cast_spell", spellKey: burningHandsKey, targetIds },
       "cast_spell"
     );
+    expect(spoofed).toMatchObject({ accepted: false, code: "area_targets_server_owned" });
+    expect(JSON.stringify(spoofed.state)).toBe(before);
+
+    const stale = resolveEngineCommand(
+      started.state,
+      commandContext,
+      randomUUID(),
+      {
+        kind: "cast_spell",
+        spellKey: burningHandsKey,
+        targetIds: [],
+        area: {
+          geometryRevision: started.state.combat.tactical.geometry.revision + 1,
+          aim: { frameId: started.state.combat.tactical.geometry.frameId, x: 1, y: 0, z: 0 },
+        },
+      },
+      "cast_spell"
+    );
+    expect(stale).toMatchObject({ accepted: false, code: "stale_tactical_geometry" });
+    expect(JSON.stringify(stale.state)).toBe(before);
+
+    const cast = resolveEngineCommand(
+      started.state,
+      commandContext,
+      randomUUID(),
+      {
+        kind: "cast_spell",
+        spellKey: burningHandsKey,
+        targetIds: [],
+        area: {
+          geometryRevision: started.state.combat.tactical.geometry.revision,
+          aim: { frameId: started.state.combat.tactical.geometry.frameId, x: 1, y: 0, z: 0 },
+        },
+      },
+      "cast_spell"
+    );
     expect(cast.accepted).toBe(true);
     expect(cast.state.character.spellcasting?.slots["1"]).toBe(1);
     expect(cast.data).toMatchObject({
       range: { source: { text: "Self", distance: 0, unit: "feet" }, executableFeet: 15 },
+      area: { shape: "cone", geometryRevision: 1, targetIds },
       targetResults: [{ targetId: targetIds[0] }, { targetId: targetIds[1] }],
     });
   });
