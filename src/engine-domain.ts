@@ -8887,7 +8887,12 @@ function tacticalZoneStateIssue(
       || (zone.status === "expired" && zone.endedReason !== "expired")
       || (zone.status === "removed" && zone.endedReason !== "source-dead" && zone.endedReason !== "encounter-ended")
     ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
-    if (zone.status !== "active") continue;
+    if (zone.status !== "active") {
+      if (zone.affectedActorIds.length > 0 || zone.activeEffectIds.length > 0) {
+        return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+      }
+      continue;
+    }
     const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
     if (
       activeZoneIds.has(zone.id)
@@ -17265,6 +17270,7 @@ function normalizeTacticalZones(
       || new Set(raw.affectedActorIds).size !== raw.affectedActorIds.length
       || new Set(raw.activeEffectIds).size !== raw.activeEffectIds.length
       || !["active", "expired", "removed"].includes(raw.status ?? "")
+      || (raw.status !== "active" && (raw.affectedActorIds.length > 0 || raw.activeEffectIds.length > 0))
       || !Number.isInteger(raw.revision)
       || raw.revision! < 0
       || !raw.provenance

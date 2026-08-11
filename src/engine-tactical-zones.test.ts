@@ -366,6 +366,14 @@ describe("#175 persistent tactical zones", () => {
     mismatchedRemovedReason.combat.tactical.zones[0]!.status = "removed";
     mismatchedRemovedReason.combat.tactical.zones[0]!.endedReason = "expired";
     corruptions.push({ state: mismatchedRemovedReason, code: "invalid_tactical_zone_shape" });
+    const expiredWithMembership = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    expiredWithMembership.combat.tactical.zones[0]!.status = "expired";
+    expiredWithMembership.combat.tactical.zones[0]!.endedReason = "expired";
+    corruptions.push({ state: expiredWithMembership, code: "invalid_tactical_zone_shape" });
+    const removedWithMembership = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    removedWithMembership.combat.tactical.zones[0]!.status = "removed";
+    removedWithMembership.combat.tactical.zones[0]!.endedReason = "source-dead";
+    corruptions.push({ state: removedWithMembership, code: "invalid_tactical_zone_shape" });
     for (const corruption of corruptions) {
       const corruptedBefore = JSON.stringify(corruption.state);
       const rejected = apply(corruption.state, { kind: "end_turn" });
@@ -676,6 +684,56 @@ describe("#175 persistent tactical zones", () => {
         resolve: (current) => resolveEngineCommand(current, request, commandId, command, "roll_check"),
       });
       expect(rejected).toMatchObject({ accepted: false, code: corruption.code, event: null });
+      expect(JSON.stringify(rejected.state)).toBe(before);
+      expect(reopened.listCampaignEvents(request)).toEqual([]);
+      reopened.close();
+    }
+  });
+
+  it("fails closed after restart when a terminal zone retains membership evidence", () => {
+    for (const scenario of [
+      { status: "expired" as const, endedReason: "expired" as const, retained: "actors" as const },
+      { status: "removed" as const, endedReason: "source-dead" as const, retained: "effects" as const },
+    ]) {
+      const state = encounter();
+      const created = apply(state, followingAura(state));
+      const corrupted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+      const zone = corrupted.combat.tactical.zones[0]!;
+      zone.status = scenario.status;
+      zone.endedReason = scenario.endedReason;
+      if (scenario.retained === "actors") zone.activeEffectIds = [];
+      else zone.affectedActorIds = [];
+      corrupted.effects = corrupted.effects.map((effect) => effect.sourceRef === `tactical-zone:${zone.id}`
+        ? { ...effect, status: "removed" as const }
+        : effect);
+
+      const directory = mkdtempSync(join(tmpdir(), "lantern-terminal-zone-membership-"));
+      const databasePath = join(directory, "engine.db");
+      const request = context(corrupted);
+      const store = new LanternEngineStore(databasePath);
+      store.createCampaign(
+        { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+        corrupted,
+      );
+      store.close();
+
+      const reopened = new LanternEngineStore(databasePath);
+      const loaded = reopened.getCampaign(request);
+      expect(loaded.combat.tactical.zones).toEqual([]);
+      expect(loaded.combat.tactical.zoneIntegrityIssue).toMatchObject({ code: "invalid_tactical_zone_shape" });
+      expect(loaded.effects.some((effect) => effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:"))).toBe(false);
+      const before = JSON.stringify(loaded);
+      const command = engineCommandSchema.parse({ kind: "end_turn" });
+      const commandId = randomUUID();
+      const rejected = reopened.executeCommand({
+        context: request,
+        clientCommandId: commandId,
+        expectedCampaignVersion: loaded.version,
+        command,
+        tool: "end_turn",
+        resolve: (current) => resolveEngineCommand(current, request, commandId, command, "end_turn"),
+      });
+      expect(rejected).toMatchObject({ accepted: false, code: "invalid_tactical_zone_shape", event: null });
       expect(JSON.stringify(rejected.state)).toBe(before);
       expect(reopened.listCampaignEvents(request)).toEqual([]);
       reopened.close();
