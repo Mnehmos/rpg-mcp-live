@@ -190,6 +190,7 @@ import {
   applyOrchestrationDecision,
   authorizePacingRefs,
   authorizedRandomEventRefs,
+  buildCausalityContext,
   buildResumeProjection,
   emptyOrchestrationState,
   hooksForScene,
@@ -3139,13 +3140,23 @@ export function readToolData(
   const viewpointActorId = activePartyViewpointId(state);
   const projection = actorKnowledgeProjection(viewpointActorId, state);
   switch (tool) {
-    case "campaign_context":
+    case "campaign_context": {
+      const situation = state.situation ? projectSituationForActor(state.situation, state, viewpointActorId) : null;
+      const experienceProfile = projectExperienceProfile(state.experienceProfile);
+      const orchestration = state.orchestration ?? emptyOrchestrationState();
+      const causality = buildCausalityContext({
+        state: projectStateForActor(viewpointActorId, state),
+        social: projection.social,
+        situation,
+        knownFactRefs: projection.facts.map((fact) => fact.id),
+        scene: orchestration.activeScene,
+      });
       return {
         campaignId: state.id,
         campaignVersion: state.version,
         rulesVersion: state.rulesVersion,
         campaign: state.campaign,
-        experienceProfile: projectExperienceProfile(state.experienceProfile),
+        experienceProfile,
         phase: state.phase,
         tutorialStep: state.tutorialStep,
         advancementPolicy: state.advancementPolicy,
@@ -3162,9 +3173,10 @@ export function readToolData(
         effects: state.effects.filter((effect) => effect.status === "active"),
         improvEffects: state.improvEffects,
         currentBeat: state.currentBeat,
-        situation: state.situation ? projectSituationForActor(state.situation, state, viewpointActorId) : null,
-        scene: state.orchestration?.activeScene ?? null,
-        resume: buildResumeProjection(state.orchestration ?? emptyOrchestrationState(), projectExperienceProfile(state.experienceProfile)),
+        situation,
+        scene: orchestration.activeScene,
+        causality,
+        resume: buildResumeProjection(orchestration, experienceProfile, causality),
         character: characterData(state.character, state.runtimeContent),
         combat: combatData(state.combat),
         controlledActors: projectControlledActors(state),
@@ -3172,6 +3184,7 @@ export function readToolData(
         quest: projectQuestForActor(state.quest, state, state.actorId),
         recentLog: state.log.slice(-8),
       };
+    }
     case "observe":
       return {
         worldContext: projection.worldContext,
@@ -3662,6 +3675,13 @@ export function resolveOrchestrationDecision(
   const consequenceRefs = situationProjection?.outcome
     ? [`situation-outcome:${situationProjection.id}`]
     : [];
+  const actorSocial = actorKnowledgeProjection(context.actorId, state).social;
+  const actorSafeSocialRecordIds = [
+    ...actorSocial.relationships,
+    ...actorSocial.obligations,
+    ...actorSocial.reputations,
+    ...actorSocial.heat,
+  ].map((record) => record.id);
   const authorized = authorizePacingRefs({
     pressureRefs: [...refreshedScene.pressureRefs, ...(situationProjection ? [situationProjection.pressure.id] : [])],
     clueRefs: [...foundClueRefs, ...revealedRefs],
@@ -3692,6 +3712,8 @@ export function resolveOrchestrationDecision(
       state.version + 1,
       sceneEvents,
       publicFactRefs,
+      undefined,
+      actorSafeSocialRecordIds,
     );
   } catch (error) {
     return rejection(state, "orchestration", "orchestration_rejected", error instanceof Error ? error.message : "The orchestration decision was rejected.");
@@ -3701,6 +3723,18 @@ export function resolveOrchestrationDecision(
     ...applied.state,
     processedOperationIds: [...new Set([...applied.state.processedOperationIds, clientCommandId])],
   };
+  const causalKnowledge = actorKnowledgeProjection(context.actorId, next);
+  const causalSituation = next.situation
+    ? projectSituationForActor(next.situation, next, context.actorId)
+    : null;
+  const causality = buildCausalityContext({
+    state: projectStateForActor(context.actorId, next),
+    events: events.map((event) => projectEventForActor(context.actorId, next, event)),
+    social: causalKnowledge.social,
+    situation: causalSituation,
+    knownFactRefs: causalKnowledge.facts.map((fact) => fact.id),
+    scene: next.orchestration.activeScene,
+  });
   const stateChanges = [
     { path: "/orchestration/activeScene", before: scene, after: next.orchestration.activeScene },
     { path: "/orchestration/decisions", before: orchestration.decisions, after: next.orchestration.decisions },
@@ -3718,12 +3752,13 @@ export function resolveOrchestrationDecision(
         ? "The scene is clarified with a neutral question."
         : command.decision.action === "surface_existing"
           ? "An existing authorized scene reference is surfaced."
-          : "The scene is reframed around an existing authorized reference.",
+          : "The scene is marked for a fresh fictional framing without forcing a new plot element.",
     {
       scene: next.orchestration.activeScene,
       decision: applied.decision,
       recap: applied.recap,
-      resume: buildResumeProjection(next.orchestration, projectExperienceProfile(next.experienceProfile)),
+      causality,
+      resume: buildResumeProjection(next.orchestration, projectExperienceProfile(next.experienceProfile), causality),
       noChangeTurns: refreshedScene.noChangeTurns,
       authorizedRefs: authorized.allRefs,
     },

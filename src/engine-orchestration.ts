@@ -3,6 +3,9 @@ import type {
   EngineEvent,
   EngineExperienceProfileProjection,
   EngineRandomEventResolution,
+  EngineSituationProjection,
+  EngineSocialProjection,
+  LanternCampaignState,
 } from "./engine-contracts.js";
 
 const refSchema = z.string().trim().min(1).max(160);
@@ -113,6 +116,7 @@ export const sceneRecapSchema = z.object({
   resolvedRefs: z.array(refSchema).max(100),
   unresolvedRefs: z.array(refSchema).max(100),
   hookRefs: z.array(refSchema).max(100),
+  continuityRefs: z.array(refSchema).max(100).default([]),
   headline: z.string().trim().min(1).max(500),
   createdAt: timestampSchema,
 }).strict();
@@ -171,6 +175,68 @@ export interface OrchestrationResumeProjection {
   hooks: CharacterHook[];
   lastReleasedNarrationRef: string | null;
   experienceProfile: EngineExperienceProfileProjection;
+  causality: CausalityContext | null;
+}
+
+export type CausalKind =
+  | "position"
+  | "knowledge"
+  | "time"
+  | "pressure"
+  | "resource"
+  | "relationship"
+  | "opportunity"
+  | "world"
+  | "closure";
+
+export interface CausalReceipt {
+  eventId: string;
+  version: number;
+  outcome: string;
+  kinds: CausalKind[];
+  evidencePaths: string[];
+  nextDecision: string | null;
+}
+
+export interface CausalThread {
+  id: string;
+  kind: CausalKind;
+  sourceRef: string;
+  summary: string;
+}
+
+export interface CausalLens {
+  currentTime: {
+    totalMinutes: number;
+    year: number;
+    day: number;
+    hour: number;
+    minute: number;
+  };
+  scene: Pick<SceneState, "sceneId" | "mode" | "purpose" | "immediateQuestion" | "tensionBand" | "status"> | null;
+  situation: {
+    id: string;
+    title: string;
+    status: EngineSituationProjection["status"];
+    currentLocationId: string;
+    pressure: Pick<EngineSituationProjection["pressure"], "id" | "title" | "current" | "max">;
+    complicationCount: number;
+    lastComplication: string | null;
+  } | null;
+  relationships: EngineSocialProjection["relationships"];
+  obligations: EngineSocialProjection["obligations"];
+  activeQuests: Array<Pick<LanternCampaignState["quests"][number], "id" | "title" | "status" | "progress"> & { deadlineAtMinutes: number | null }>;
+  knownFactRefs: string[];
+}
+
+export interface CausalityContext {
+  noChangeTurns: number;
+  stalled: boolean;
+  receipts: CausalReceipt[];
+  lens: CausalLens;
+  openThreads: CausalThread[];
+  /** DM capabilities, never a player-facing choice menu. */
+  affordances: Array<{ id: string; description: string }>;
 }
 
 export interface AuthorizedPacingRefs {
@@ -253,23 +319,87 @@ export function normalizeOrchestrationState(value: unknown, fallbackAt = new Dat
   });
 }
 
-function meaningfulStateChanges(event: Pick<EngineEvent, "stateChanges">): boolean {
-  return event.stateChanges.some((change) =>
-    !change.path.startsWith("/orchestration")
-    && !change.path.startsWith("/productionRoom")
-    && !change.path.startsWith("/log")
-  );
+type CausalEvent = Pick<EngineEvent, "stateChanges"> & Partial<Pick<EngineEvent, "id" | "version" | "outcome" | "tool" | "command" | "effects">>;
+
+const PRESENTATION_PATHS = ["/orchestration", "/productionRoom", "/log", "/suggestedActions"] as const;
+
+const CAUSAL_PATHS: ReadonlyArray<{ prefix: string; evidencePath: string; kinds: CausalKind[] }> = [
+  { prefix: "/worldContext", evidencePath: "/worldContext", kinds: ["world", "position", "opportunity"] },
+  { prefix: "/runtimeContent/relationships", evidencePath: "/runtimeContent/relationships", kinds: ["relationship", "opportunity"] },
+  { prefix: "/runtimeContent/instances", evidencePath: "/runtimeContent/instances", kinds: ["world", "resource"] },
+  { prefix: "/worldFacts", evidencePath: "/worldFacts", kinds: ["world", "knowledge"] },
+  { prefix: "/actorKnowledge", evidencePath: "/actorKnowledge", kinds: ["knowledge"] },
+  { prefix: "/situation", evidencePath: "/situation", kinds: ["pressure", "opportunity", "closure"] },
+  { prefix: "/time/gameTime", evidencePath: "/time/gameTime", kinds: ["time"] },
+  { prefix: "/time/travel", evidencePath: "/time/travel", kinds: ["time", "position", "resource"] },
+  { prefix: "/time/rest", evidencePath: "/time/rest", kinds: ["time", "resource"] },
+  { prefix: "/time/survival", evidencePath: "/time/survival", kinds: ["time", "pressure", "resource"] },
+  { prefix: "/time/projects", evidencePath: "/time/projects", kinds: ["time", "opportunity", "closure"] },
+  { prefix: "/failurePressures", evidencePath: "/failurePressures", kinds: ["pressure"] },
+  { prefix: "/character", evidencePath: "/character", kinds: ["resource"] },
+  { prefix: "/claimedRewards", evidencePath: "/claimedRewards", kinds: ["resource"] },
+  { prefix: "/pendingAdvancement", evidencePath: "/pendingAdvancement", kinds: ["resource", "opportunity"] },
+  { prefix: "/combat", evidencePath: "/combat", kinds: ["position", "pressure", "resource", "closure"] },
+  { prefix: "/social", evidencePath: "/social", kinds: ["relationship"] },
+  { prefix: "/quests", evidencePath: "/quests", kinds: ["opportunity", "closure"] },
+  { prefix: "/quest", evidencePath: "/quest", kinds: ["opportunity", "closure"] },
+  { prefix: "/corpses", evidencePath: "/corpses", kinds: ["world", "resource"] },
+  { prefix: "/effects", evidencePath: "/effects", kinds: ["resource", "world"] },
+  { prefix: "/improvEffects", evidencePath: "/improvEffects", kinds: ["world", "resource"] },
+  { prefix: "/proceduralNotices", evidencePath: "/proceduralNotices", kinds: ["world", "opportunity"] },
+  { prefix: "/controlledActors", evidencePath: "/controlledActors", kinds: ["position", "relationship", "resource"] },
+  { prefix: "/party", evidencePath: "/party", kinds: ["position", "relationship"] },
+  { prefix: "/currentBeat", evidencePath: "/currentBeat", kinds: ["pressure", "opportunity"] },
+  { prefix: "/phase", evidencePath: "/phase", kinds: ["opportunity", "closure"] },
+];
+
+function causalEntriesForPath(path: string): Array<{ evidencePath: string; kinds: CausalKind[] }> {
+  return CAUSAL_PATHS.filter(({ prefix }) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
-function countsAsSceneTurn(event: Pick<EngineEvent, "stateChanges"> & { tool?: string }): boolean {
-  if (event.tool === "orchestration" || event.tool === "production_room") return false;
-  if (event.stateChanges.length > 0 && !meaningfulStateChanges(event)) return false;
+function sceneMoves(event: CausalEvent): Array<{ category: string; nextDecision: string }> {
+  const commands: unknown[] = [event.command, ...(event.effects ?? []).map((effect) => effect.command)];
+  return commands.flatMap((command) => {
+    if (!command || typeof command !== "object" || Array.isArray(command)) return [];
+    const candidate = (command as { sceneMove?: unknown }).sceneMove;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const move = candidate as { category?: unknown; nextDecision?: unknown };
+    if (typeof move.category !== "string" || typeof move.nextDecision !== "string" || !move.nextDecision.trim()) return [];
+    return [{ category: move.category, nextDecision: move.nextDecision.trim() }];
+  });
+}
+
+function causalKindsForSceneMove(category: string): CausalKind[] {
+  switch (category) {
+    case "reaction": return ["relationship", "world"];
+    case "cost": return ["resource"];
+    case "pressure": return ["pressure"];
+    case "choice": return ["opportunity"];
+    case "closure": return ["closure"];
+    default: return [];
+  }
+}
+
+export function fictionBearingKinds(event: CausalEvent): CausalKind[] {
+  return unique([
+    ...event.stateChanges.flatMap((change) => causalEntriesForPath(change.path).flatMap((entry) => entry.kinds)),
+    ...sceneMoves(event).flatMap((move) => causalKindsForSceneMove(move.category)),
+  ]) as CausalKind[];
+}
+
+function meaningfulStateChanges(event: CausalEvent): boolean {
+  return fictionBearingKinds(event).length > 0;
+}
+
+function countsAsSceneTurn(event: CausalEvent): boolean {
+  if (event.tool === "orchestration" || event.tool === "production_room" || event.tool === "content_repin") return false;
+  if (event.stateChanges.length > 0 && event.stateChanges.every((change) => PRESENTATION_PATHS.some((prefix) => change.path === prefix || change.path.startsWith(`${prefix}/`)))) return false;
   return true;
 }
 
 /** Count only trailing committed events with no authoritative state delta. */
-export function deriveNoChangeTurns(events: Array<Pick<EngineEvent, "version" | "stateChanges"> & { tool?: string }>, afterVersion = 0): number {
-  let count = 0;
+export function deriveNoChangeTurns(events: Array<CausalEvent & { version: number }>, afterVersion = 0, initialCount = 0): number {
+  let count = Math.min(100, Math.max(0, initialCount));
   for (const event of [...events].sort((left, right) => left.version - right.version)) {
     if (event.version <= afterVersion) continue;
     if (!countsAsSceneTurn(event)) continue;
@@ -279,19 +409,179 @@ export function deriveNoChangeTurns(events: Array<Pick<EngineEvent, "version" | 
   return count;
 }
 
-export function refreshSceneFromEvents(scene: SceneState, events: Array<Pick<EngineEvent, "id" | "version" | "stateChanges"> & { tool?: string }>, now = new Date().toISOString()): SceneState {
+export function refreshSceneFromEvents(scene: SceneState, events: Array<CausalEvent & { id: string; version: number }>, now = new Date().toISOString()): SceneState {
   const relevant = [...events]
     .filter((event) => event.version > scene.campaignVersion)
+    .filter((event) => !scene.committedEventRefs.includes(event.id))
     .filter(countsAsSceneTurn)
     .sort((left, right) => left.version - right.version);
   if (relevant.length === 0) return scene;
   const committedEventRefs = unique([...scene.committedEventRefs, ...relevant.map((event) => event.id)]);
   return sceneStateSchema.parse({
     ...scene,
-    noChangeTurns: deriveNoChangeTurns(relevant, 0),
+    noChangeTurns: deriveNoChangeTurns(relevant, 0, scene.noChangeTurns),
     committedEventRefs,
     updatedAt: now,
   });
+}
+
+function receiptForEvent(event: EngineEvent): CausalReceipt | null {
+  const kinds = fictionBearingKinds(event);
+  if (kinds.length === 0) return null;
+  const moves = sceneMoves(event);
+  const evidencePaths = unique([
+    ...event.stateChanges.flatMap((change) => causalEntriesForPath(change.path).map((entry) => entry.evidencePath)),
+    ...moves.map((move) => `/sceneMove/${move.category}`),
+  ]);
+  return {
+    eventId: event.id,
+    version: event.version,
+    outcome: event.outcome,
+    kinds,
+    evidencePaths,
+    nextDecision: moves.at(-1)?.nextDecision ?? null,
+  };
+}
+
+function causalAffordances(): CausalityContext["affordances"] {
+  return [
+    { id: "render-committed-consequence", description: "Turn a committed receipt into concrete scene fiction." },
+    { id: "advance-live-pressure", description: "Let an already-live pressure develop without inventing a new threat." },
+    { id: "honor-social-continuity", description: "Let a current relationship or obligation shape an NPC response." },
+    { id: "change-position-or-opportunity", description: "Change access, position, knowledge, danger, time, or opportunity in line with committed truth." },
+    { id: "close-or-transform-thread", description: "Resolve or transform an open thread when the committed result supports it." },
+  ];
+}
+
+/**
+ * Derive the actor-safe causal packet from existing truth. Callers must pass
+ * actor-projected events/state; this function never consults private traces.
+ */
+export function buildCausalityContext(input: {
+  state: LanternCampaignState;
+  events?: EngineEvent[];
+  social: EngineSocialProjection;
+  situation: EngineSituationProjection | null;
+  knownFactRefs?: string[];
+  scene?: SceneState | null;
+}): CausalityContext {
+  const events = [...(input.events ?? [])].sort((left, right) => left.version - right.version);
+  const scene = input.scene ?? input.state.orchestration?.activeScene ?? null;
+  const committedEventRefs = new Set(scene?.committedEventRefs ?? []);
+  const scopedEvents = scene
+    ? events.filter((event) => event.version > scene.campaignVersion || committedEventRefs.has(event.id))
+    : events;
+  const relevantEvents = scene
+    ? events.filter((event) => event.version > scene.campaignVersion && !committedEventRefs.has(event.id) && countsAsSceneTurn(event))
+    : events.filter(countsAsSceneTurn);
+  const noChangeTurns = relevantEvents.length > 0
+    ? deriveNoChangeTurns(relevantEvents, 0, scene?.noChangeTurns ?? 0)
+    : scene?.noChangeTurns ?? 0;
+  const receipts = scopedEvents.flatMap((event) => {
+    const receipt = receiptForEvent(event);
+    return receipt ? [receipt] : [];
+  }).slice(-8);
+  const openThreads: CausalThread[] = [];
+  const addThread = (thread: CausalThread): void => {
+    if (!openThreads.some((candidate) => candidate.id === thread.id)) openThreads.push(thread);
+  };
+  for (const pressure of input.state.failurePressures ?? []) {
+    addThread({
+      id: `failure-pressure:${pressure.id}`,
+      kind: "pressure",
+      sourceRef: pressure.id,
+      summary: `${pressure.status} pressure remains after ${pressure.failureCount} failed attempt(s) at ${pressure.challengeId}.`,
+    });
+  }
+  if (input.situation?.status === "active") {
+    addThread({
+      id: `situation-pressure:${input.situation.pressure.id}`,
+      kind: "pressure",
+      sourceRef: input.situation.pressure.id,
+      summary: `${input.situation.pressure.title} is at ${input.situation.pressure.current}/${input.situation.pressure.max}.`,
+    });
+    if (input.situation.lastComplication) addThread({
+      id: `situation-complication:${input.situation.id}:${input.situation.complicationCount}`,
+      kind: "pressure",
+      sourceRef: input.situation.id,
+      summary: input.situation.lastComplication,
+    });
+  }
+  for (const obligation of input.social.obligations.filter((candidate) => candidate.status === "open")) {
+    addThread({
+      id: `obligation:${obligation.id}`,
+      kind: "relationship",
+      sourceRef: obligation.id,
+      summary: `${obligation.kind}: ${obligation.terms}`,
+    });
+  }
+  for (const quest of input.state.quests.filter((candidate) => candidate.status === "active" && candidate.deadlineAtMinutes !== undefined)) {
+    addThread({
+      id: `quest-deadline:${quest.id}`,
+      kind: "time",
+      sourceRef: quest.id,
+      summary: `${quest.title} has a deadline at game minute ${quest.deadlineAtMinutes}.`,
+    });
+  }
+  for (const ref of scene?.unresolvedRefs ?? []) addThread({ id: `scene-thread:${ref}`, kind: "opportunity", sourceRef: ref, summary: `Unresolved scene reference: ${ref}.` });
+  for (const ref of scene?.hookRefs ?? []) addThread({ id: `scene-hook:${ref}`, kind: "relationship", sourceRef: ref, summary: `Available character hook: ${ref}.` });
+  const pendingReceipt = [...receipts].reverse().find((receipt) => receipt.nextDecision);
+  const pendingDecision = pendingReceipt?.nextDecision;
+  if (pendingDecision && pendingReceipt) addThread({
+    id: `next-decision:${pendingReceipt.eventId}`,
+    kind: "opportunity",
+    sourceRef: pendingReceipt.eventId,
+    summary: pendingDecision,
+  });
+  const gameTime = input.state.time.gameTime;
+  return {
+    noChangeTurns,
+    stalled: noChangeTurns >= 3,
+    receipts,
+    lens: {
+      currentTime: {
+        totalMinutes: gameTime.totalMinutes,
+        year: gameTime.year,
+        day: gameTime.day,
+        hour: gameTime.hour,
+        minute: gameTime.minute,
+      },
+      scene: scene ? {
+        sceneId: scene.sceneId,
+        mode: scene.mode,
+        purpose: scene.purpose,
+        immediateQuestion: scene.immediateQuestion,
+        tensionBand: scene.tensionBand,
+        status: scene.status,
+      } : null,
+      situation: input.situation ? {
+        id: input.situation.id,
+        title: input.situation.title,
+        status: input.situation.status,
+        currentLocationId: input.situation.currentLocationId,
+        pressure: {
+          id: input.situation.pressure.id,
+          title: input.situation.pressure.title,
+          current: input.situation.pressure.current,
+          max: input.situation.pressure.max,
+        },
+        complicationCount: input.situation.complicationCount,
+        lastComplication: input.situation.lastComplication,
+      } : null,
+      relationships: input.social.relationships.slice(-20),
+      obligations: input.social.obligations.filter((obligation) => obligation.status === "open").slice(-20),
+      activeQuests: input.state.quests.filter((quest) => quest.status === "active").map((quest) => ({
+        id: quest.id,
+        title: quest.title,
+        status: quest.status,
+        progress: quest.progress,
+        deadlineAtMinutes: quest.deadlineAtMinutes ?? null,
+      })).slice(-20),
+      knownFactRefs: unique(input.knownFactRefs ?? []).slice(-100),
+    },
+    openThreads: openThreads.slice(-24),
+    affordances: causalAffordances(),
+  };
 }
 
 export function sceneStateFromProjection(input: {
@@ -408,10 +698,11 @@ export function validateOrchestrationDecision(
   if (scene.status === "resolved") errors.push("The scene is already resolved.");
   if (scene.campaignVersion > campaignVersion) errors.push("The scene campaign revision is ahead of the campaign.");
   if (input.action !== "transition" && noChangeTurns < 3) errors.push("Pacing intervention requires three consecutive committed no-change turns.");
-  if (input.action === "surface_existing" || input.action === "reframe") {
+  if (input.action === "surface_existing") {
     if (!input.selectedRef) errors.push("This pacing action needs an authorized existing reference.");
     else if (!authorization.allRefs.includes(input.selectedRef)) errors.push("The selected pacing reference is not authorized, public, or current.");
   }
+  if (input.action === "reframe" && input.selectedRef && !authorization.allRefs.includes(input.selectedRef)) errors.push("The selected pacing reference is not authorized, public, or current.");
   if (input.action === "clarify") {
     if (!input.clarificationQuestion || !neutralQuestion(input.clarificationQuestion)) errors.push("Clarification must be a neutral question ending in a question mark.");
   }
@@ -428,6 +719,7 @@ export function buildSceneRecap(input: {
   resolvedRefs?: string[];
   unresolvedRefs?: string[];
   hookRefs?: string[];
+  actorSafeSocialRecordIds?: string[];
   now?: string;
 }): SceneRecap {
   const now = input.now ?? new Date().toISOString();
@@ -447,6 +739,7 @@ export function buildSceneRecap(input: {
     resolvedRefs,
     unresolvedRefs,
     hookRefs: unique(input.hookRefs ?? input.scene.hookRefs),
+    continuityRefs: deriveDurableContinuityRefs(input.committedEvents, input.publicFactRefs, input.actorSafeSocialRecordIds),
     headline,
     createdAt: now,
   });
@@ -461,6 +754,7 @@ export function applyOrchestrationDecision(
   committedEvents: Pick<EngineEvent, "id" | "version" | "outcome" | "stateChanges">[] = [],
   publicFactRefs: string[] = [],
   now = new Date().toISOString(),
+  actorSafeSocialRecordIds: string[] = [],
 ): { state: OrchestrationState; decision: OrchestrationDecision; recap: SceneRecap | null } {
   const scene = orchestration.activeScene;
   if (!scene) throw new Error("No active scene is available for orchestration.");
@@ -470,11 +764,7 @@ export function applyOrchestrationDecision(
   const nextScene = activateScene(refreshed, now);
   const selectedRef = input.selectedRef;
   const surfacedRefs = selectedRef ? unique([...nextScene.surfacedRefs, selectedRef]) : nextScene.surfacedRefs;
-  const question = input.action === "clarify"
-    ? input.clarificationQuestion!
-    : input.action === "reframe" && selectedRef
-      ? `What matters about ${selectedRef} now?`
-      : nextScene.immediateQuestion;
+  const question = input.action === "clarify" ? input.clarificationQuestion! : nextScene.immediateQuestion;
   const recap = input.action === "transition"
     ? buildSceneRecap({
         scene: nextScene,
@@ -484,6 +774,7 @@ export function applyOrchestrationDecision(
         resolvedRefs: selectedRef ? [selectedRef] : [],
         unresolvedRefs: nextScene.unresolvedRefs.filter((ref) => ref !== selectedRef),
         hookRefs: nextScene.hookRefs,
+        actorSafeSocialRecordIds,
         now,
       })
     : null;
@@ -539,6 +830,7 @@ export function applyOrchestrationDecision(
 export function buildResumeProjection(
   orchestration: OrchestrationState,
   experienceProfile: EngineExperienceProfileProjection,
+  causality: CausalityContext | null = null,
 ): OrchestrationResumeProjection {
   const scene = orchestration.activeScene;
   const recap = scene?.recapRefs.at(-1)
@@ -553,5 +845,40 @@ export function buildResumeProjection(
     hooks: orchestration.hooks.filter((hook) => hook.status !== "resolved"),
     lastReleasedNarrationRef,
     experienceProfile,
+    causality,
   };
+}
+
+function decodeJsonPointerSegment(value: string): string {
+  return value.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+
+/** Compact durable references only; no narration or conversation transcript. */
+export function deriveDurableContinuityRefs(
+  events: Array<Pick<EngineEvent, "id" | "stateChanges"> & Partial<Pick<EngineEvent, "command" | "effects">>>,
+  publicFactRefs: string[] = [],
+  actorSafeSocialRecordIds: string[] = [],
+): string[] {
+  const refs = [...publicFactRefs];
+  const allowedSocialIds = new Set(actorSafeSocialRecordIds);
+  for (const event of events) {
+    for (const change of event.stateChanges) {
+      const social = change.path.match(/^\/social\/(relationships|obligations|reputations|heat)\/([^/]+)/);
+      const socialId = social ? decodeJsonPointerSegment(social[2]!) : null;
+      if (social && socialId && allowedSocialIds.has(socialId)) refs.push(`${social[1]!.replace(/s$/, "")}:${socialId}`);
+      const quest = change.path.match(/^\/quests\/([^/]+)/);
+      if (quest) refs.push(`quest:${decodeJsonPointerSegment(quest[1]!)}`);
+      const world = change.path.match(/^\/worldContext\/(objects|npcs|exits)\/([^/]+)/);
+      if (world) refs.push(`${world[1]!.replace(/s$/, "")}:${decodeJsonPointerSegment(world[2]!)}`);
+      const instance = change.path.match(/^\/runtimeContent\/instances\/([^/]+)/);
+      if (instance) refs.push(`instance:${decodeJsonPointerSegment(instance[1]!)}`);
+      const remains = change.path.match(/^\/corpses\/([^/]+)/);
+      if (remains) refs.push(`remains:${decodeJsonPointerSegment(remains[1]!)}`);
+      if (change.path === "/quest" || change.path.startsWith("/quest/")) refs.push(`quest-event:${event.id}`);
+      if (change.path === "/situation" || change.path.startsWith("/situation/")) refs.push(`situation-event:${event.id}`);
+      if (change.path === "/worldContext" || change.path === "/runtimeContent/instances") refs.push(`world-event:${event.id}`);
+    }
+    if (sceneMoves(event).length > 0) refs.push(`scene-move:${event.id}`);
+  }
+  return unique(refs).slice(-100);
 }

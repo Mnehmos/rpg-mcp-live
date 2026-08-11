@@ -6,7 +6,7 @@ import { mkdtempSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { RequestContext } from "./engine-contracts.js";
+import type { EngineEvent, RequestContext } from "./engine-contracts.js";
 import type { ModelUsageTelemetry } from "./usage-ledger.js";
 import { openAiSdkFetch as sdkFetch } from "./test-openai-stream.js";
 import { engineCoreToolDefinitions } from "./engine-capabilities.js";
@@ -85,6 +85,14 @@ describe("Lantern OpenRouter tool loop", () => {
 
   it("passes the authoritative structured action offers to the DM context", () => {
     const state = createInitialCampaign("account-offers", "actor-offers");
+    state.time.scheduledEvents = [{
+      id: "hidden-scheduler-record",
+      kind: "world-clock",
+      dueAtMinutes: 60,
+      status: "pending",
+      targetRef: "hidden-target",
+      provenance: { sourceCommandId: "internal", sourceVersion: 0 },
+    }];
     const context: RequestContext = {
       requestId: randomUUID(),
       accountId: state.accountId,
@@ -92,7 +100,27 @@ describe("Lantern OpenRouter tool loop", () => {
       actorId: state.actorId,
       capabilities: ["player", "dm"],
     };
-    const dmContext = buildDmContext(state, context, "I look around.", "player_turn");
+    const event = {
+      id: "event-world-change",
+      kind: "command",
+      tool: "declare",
+      command: { kind: "declare", goal: "Open the gate" },
+      accountId: state.accountId,
+      campaignId: state.id,
+      actorId: state.actorId,
+      requestId: context.requestId,
+      clientCommandId: randomUUID(),
+      previousVersion: 0,
+      version: 1,
+      rulesVersion: state.rulesVersion,
+      contentKeys: [],
+      rolls: [],
+      modifiers: [],
+      outcome: "gate opened",
+      stateChanges: [{ path: "/worldContext/objects/gate/state", before: "locked", after: "open" }],
+      createdAt: "2026-08-11T00:00:00.000Z",
+    } as EngineEvent;
+    const dmContext = buildDmContext(state, context, "I look around.", "player_turn", [event]);
     expect(dmContext.actionOffers).toEqual(expect.arrayContaining([
       expect.objectContaining({
         actionId: "create_character",
@@ -109,6 +137,15 @@ describe("Lantern OpenRouter tool loop", () => {
     expect(dmContext.combat).not.toHaveProperty("enemies");
     expect(dmContext).not.toHaveProperty("contentPolicy");
     expect(dmContext).not.toHaveProperty("improvEffects");
+    expect(dmContext.time).toEqual({ gameTime: state.time.gameTime });
+    expect(dmContext.social).toMatchObject({ relationships: [], obligations: [] });
+    expect(dmContext.resume).toMatchObject({ scene: null, causality: expect.any(Object) });
+    expect(dmContext.causality).toMatchObject({
+      receipts: [expect.objectContaining({ eventId: "event-world-change", kinds: expect.arrayContaining(["world", "position", "opportunity"]) })],
+      lens: expect.objectContaining({ knownFactRefs: [] }),
+    });
+    expect(JSON.stringify(dmContext)).not.toContain("hidden-scheduler-record");
+    expect(JSON.stringify(dmContext)).not.toContain("hidden-target");
   });
 
   it("reserves a player turn before asynchronous model work can be observed", async () => {
