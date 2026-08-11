@@ -577,6 +577,15 @@ describe("#175 persistent tactical zones", () => {
       },
       {
         apply: (state) => {
+          const effect = state.effects.find((candidate) => candidate.sourceRef.startsWith("tactical-zone:"))!;
+          effect.startAnchor = {
+            kind: "campaign-round",
+            round: state.combat.tactical.zones[0]!.duration.startedRound - 1,
+          };
+        },
+      },
+      {
+        apply: (state) => {
           state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.targetRefs = [
             state.combat.enemies[1]!.id,
           ];

@@ -9013,6 +9013,7 @@ function tacticalZoneEffectStateIssue(state: LanternCampaignState): TacticalIssu
         || effect.startAnchor.kind !== "campaign-round"
         || !Number.isInteger(effect.startAnchor.round)
         || effect.startAnchor.round < 0
+        || effect.startAnchor.round < zone.duration.startedRound
         || effect.startAnchor.round > state.combat.round
         || effect.startAnchor.actorId !== undefined
         || effect.startTimeMinutes !== undefined
