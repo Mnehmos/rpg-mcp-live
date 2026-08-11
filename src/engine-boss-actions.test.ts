@@ -347,6 +347,32 @@ describe("reviewed boss-action timing", () => {
       .toMatchObject({ phase: "terminal", outcome: "player_defeated", objective: { status: "failed" } });
   });
 
+  it("rejects a death save until initiative returns to the downed player", () => {
+    const ended = openLegendaryAndLairWindow(fighter());
+    const fragile = structuredClone(ended.state);
+    fragile.character.hp = 1;
+    queuedRolls.push(10, 1, 1);
+    const downed = apply(fragile, {
+      kind: "boss_action",
+      actionRef: LEGENDARY_TAIL,
+      targetId: fragile.actorId,
+    });
+    expect(downed.accepted).toBe(true);
+    expect(downed.state.character).toMatchObject({ hp: 0, lifecycleState: "dying" });
+    const resumedBossTurn = apply(downed.state, { kind: "boss_action", actionRef: PASS });
+    expect(resumedBossTurn.accepted).toBe(true);
+    expect(resumedBossTurn.state.combat).toMatchObject({
+      status: "active",
+      activeActorId: resumedBossTurn.state.combat.enemies[0]!.id,
+    });
+    expect(resumedBossTurn.state.combat.lifecycle?.bossTiming?.pendingWindow).toBeNull();
+
+    const before = structuredClone(resumedBossTurn.state);
+    const offTurn = apply(resumedBossTurn.state, { kind: "death_save" });
+    expect(offTurn).toMatchObject({ accepted: false, code: "death_save_off_turn", event: null });
+    expect(offTurn.state).toEqual(before);
+  });
+
   it("rejects restored boss windows that do not match initiative semantics", () => {
     const initial = startBoss(fighter(), 10, 11);
     expect(initial.accepted).toBe(true);
@@ -611,13 +637,24 @@ describe("reviewed boss-action timing", () => {
     expect(normalized.combat.lifecycle?.bossTiming).toEqual(committed.state.combat.lifecycle?.bossTiming);
     const corrupted = JSON.parse(JSON.stringify(committed.state)) as LanternCampaignState;
     corrupted.combat.lifecycle!.bossTiming!.sourceCombatantId = "invented-source";
-    expect(normalizeCampaignState(corrupted).combat).toMatchObject({
+    const quarantined = normalizeCampaignState(corrupted);
+    expect(quarantined.combat).toMatchObject({
       status: "ended",
       activeActorId: null,
       lifecycle: null,
       pendingReaction: null,
+      lootClaimed: true,
       lastAction: "invalid_boss_state_quarantined",
     });
+    const beforeQuarantinedLoot = structuredClone(quarantined);
+    const quarantinedLoot = apply(quarantined, {
+      kind: "loot",
+      items: [],
+      rewardXp: 1_000,
+      rewardCopper: 1_000,
+    });
+    expect(quarantinedLoot).toMatchObject({ accepted: false, code: "encounter_quarantined", event: null });
+    expect(quarantinedLoot.state).toEqual(beforeQuarantinedLoot);
 
     const missingPlayer = structuredClone(committed.state);
     const sourceId = missingPlayer.combat.enemies[0]!.id;

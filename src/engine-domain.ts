@@ -14552,6 +14552,9 @@ function resolveDeathSave(
   if (state.character.hp !== 0 || state.character.lifecycleState !== "dying" || !hasRuntimeCondition(state, state.character.id, "unconscious")) {
     return rejection(state, tool, "not_unconscious", "Death saves are only made when your character is unconscious at 0 HP.");
   }
+  if (state.combat.status === "active" && state.combat.activeActorId !== state.actorId) {
+    return rejection(state, tool, "death_save_off_turn", "Death saves are made only when the character's turn begins.");
+  }
   const roll = randomInt(1, 21);
   const next = cloneCampaign(state);
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
@@ -14650,6 +14653,9 @@ function resolveLoot(
 ): EngineResolution {
   if (command.corpseId) return resolveCorpseLoot(state, context, clientCommandId, command, tool);
   if (state.combat.status !== "ended") return rejection(state, tool, "encounter_active", "There is no defeated encounter to loot.");
+  if (state.combat.lastAction === "invalid_boss_state_quarantined") {
+    return rejection(state, tool, "encounter_quarantined", "An invalid quarantined encounter cannot grant rewards.");
+  }
   const lifecycleRewardKey = state.combat.lifecycle?.outcomeId ? `${state.combat.lifecycle.outcomeId}:loot` : null;
   if (lifecycleRewardKey && (state.claimedRewards.includes(lifecycleRewardKey) || state.combat.lifecycle?.claimedRewards.includes(lifecycleRewardKey))) {
     return rejection(state, tool, "reward_claimed", "This encounter outcome's reward has already been claimed.");
@@ -17837,6 +17843,7 @@ function quarantineInvalidBossCombat(combat: EngineCombat): EngineCombat {
     lifecycle: null,
     activeActorId: null,
     pendingReaction: null,
+    lootClaimed: true,
     lastAction: "invalid_boss_state_quarantined",
   };
 }
