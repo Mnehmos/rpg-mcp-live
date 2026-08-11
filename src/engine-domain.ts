@@ -47,6 +47,8 @@ import type {
   EngineCombatant,
   EngineCombatantProgression,
   EngineCombatantView,
+  EngineBossTiming,
+  EngineBossActionWindowKind,
   EngineCurrencyBreakdown,
   EngineCombat,
   EngineCombatView,
@@ -108,6 +110,7 @@ import type {
   EngineEncounterInitiative,
   EngineEncounterInitiativeEntry,
   EngineEncounterLifecycle,
+  EngineEncounterMorale,
   EngineEncounterOutcome,
   EngineEncounterSurrenderOffer,
   EngineMovementPlan,
@@ -2694,6 +2697,44 @@ function reactionBudgetReason(state: LanternCampaignState): string | null {
   return state.combat.turnBudget.reaction.spent ? "Reaction already spent this round." : null;
 }
 
+function activeBossTiming(state: LanternCampaignState): EngineBossTiming | null {
+  const lifecycle = state.combat.lifecycle;
+  return lifecycle?.profile === REVIEWED_BOSS_PROFILE ? lifecycle.bossTiming : null;
+}
+
+function bossActionUnavailableReason(state: LanternCampaignState, timing: EngineBossTiming): string | null {
+  if (state.combat.status !== "active" || state.combat.lifecycle?.phase === "terminal") {
+    return "The boss encounter is terminal.";
+  }
+  const source = state.combat.enemies.find((enemy) => enemy.id === timing.sourceCombatantId);
+  if (!source || !source.alive || source.hp <= 0) return "The reviewed boss is no longer alive.";
+  if (["incapacitated", "paralyzed", "petrified", "stunned", "unconscious"]
+    .some((condition) => source.conditions.includes(condition))) {
+    return "The reviewed boss is incapacitated and cannot use a boss action.";
+  }
+  if (state.character.lifecycleState === "dead") return "The player character is dead.";
+  return null;
+}
+
+function reviewedLegendaryTargetUnavailableReason(state: LanternCampaignState, timing: EngineBossTiming): string | null {
+  const source = state.combat.enemies.find((enemy) => enemy.id === timing.sourceCombatantId);
+  if (!source) return "The reviewed boss source is unavailable.";
+  const binding = reviewedBossTailBinding(source);
+  if (!binding || binding.tailAttack.contentKey !== timing.legendary.action.attackContentKey) {
+    return "The reviewed legendary attack binding is unavailable.";
+  }
+  const attack = binding.tailAttack;
+  const reachFeet = attack.distance.reach;
+  const distanceFeet = tacticalDistanceFeet(state.combat, source);
+  if (reachFeet === null || distanceFeet > reachFeet) {
+    return `${attack.name} has ${reachFeet ?? 0}-foot reach; the target is ${distanceFeet} feet away.`;
+  }
+  if (incomingCharacterCover(state, source).level === "total") {
+    return "Canonical blocking geometry gives the target total cover from the reviewed boss.";
+  }
+  return null;
+}
+
 /**
  * Derive the finite action menu from authoritative state.  This is a
  * presentation contract only: command resolvers still re-check every offer
@@ -2709,6 +2750,49 @@ export function deriveActionOffers(state: LanternCampaignState): EngineActionOff
       actionOffer(state, "reaction_response:accept", "Use an offered reaction.", "reaction", { reaction: 1 }, [pending.id], acceptReason),
       actionOffer(state, "reaction_response:decline", "Decline the offered reaction.", "free", {}, [pending.id], resolvedReason),
     ];
+  }
+  const bossTiming = activeBossTiming(state);
+  const bossWindow = bossTiming?.pendingWindow;
+  if (bossTiming && bossWindow) {
+    const kind = bossWindow.queue[0];
+    const unavailable = bossActionUnavailableReason(state, bossTiming);
+    const offers: EngineActionOffer[] = [];
+    if (kind === "legendary") {
+      const action = bossTiming.legendary.action;
+      const resourceUnavailable = bossTiming.legendary.remaining >= action.cost
+        ? null
+        : "The boss has insufficient legendary points.";
+      offers.push(actionOffer(
+        state,
+        `boss_action:${action.actionRef}`,
+        `${action.name} (${action.cost} legendary point).`,
+        "legendary",
+        { legendary: action.cost },
+        [state.actorId],
+        unavailable ?? resourceUnavailable ?? reviewedLegendaryTargetUnavailableReason(state, bossTiming),
+      ));
+    } else if (kind === "lair") {
+      const action = bossTiming.lair.action;
+      offers.push(actionOffer(
+        state,
+        `boss_action:${action.actionRef}`,
+        `${action.name} at persisted initiative count ${bossTiming.lair.initiative.count}.`,
+        "lair",
+        { lair: 1 },
+        [state.actorId],
+        unavailable ?? (bossTiming.lair.available ? null : "The lair action has already been resolved this initiative cycle."),
+      ));
+    }
+    offers.push(actionOffer(
+      state,
+      `boss_action:${REVIEWED_BOSS_PASS_REF}`,
+      "Pass the current boss-action window.",
+      "free",
+      {},
+      [],
+      null,
+    ));
+    return offers;
   }
   if (state.phase === "character_creation") {
     return [actionOffer(state, "create_character", "Create a character.", "free", {})];
@@ -3625,6 +3709,14 @@ function resolveEngineCommandCore(
   ) {
     return rejection(state, tool, "reaction_pending", "Resolve the offered incoming-hit reaction before taking another action.");
   }
+  if (
+    activeBossTiming(state)?.pendingWindow
+    && command.kind !== "observe"
+    && command.kind !== "boss_action"
+    && !experienceCommand
+  ) {
+    return rejection(state, tool, "boss_action_pending", "Resolve or pass the finite reviewed boss-action window before initiative resumes.");
+  }
   const custodyTarget = command.kind === "npc_tick"
     ? (state.worldContext?.npcs.find((npc) => npc.id === command.npcId)
       ?? (command.npcId ? null : state.worldContext?.npcs.find((npc) => Boolean(npc.agency)))
@@ -3731,6 +3823,8 @@ function resolveEngineCommandCore(
       return resolveCombatMove(state, context, clientCommandId, command, tool);
     case "tactical_zone_create":
       return resolveTacticalZoneCreate(state, context, clientCommandId, command, tool);
+    case "boss_action":
+      return resolveBossAction(state, context, clientCommandId, command, tool);
     case "end_turn":
       return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
     case "controlled_actor_create":
@@ -8438,6 +8532,14 @@ function resolveCheck(
 }
 
 const TACTICAL_CELL_FEET = 5;
+const REVIEWED_BOSS_PROFILE = "adult-black-dragon-boss-v1" as const;
+const REVIEWED_BOSS_CREATURE_KEY = "open5e:creature:5e-2014:srd-2014:srd_adult-black-dragon";
+const REVIEWED_LEGENDARY_ACTION_REF = "boss:adult-black-dragon:legendary:tail-attack-v1";
+const REVIEWED_LAIR_ACTION_REF = "boss:adult-black-dragon:lair:acid-geyser-v1";
+const REVIEWED_BOSS_PASS_REF = "boss:window:pass";
+const REVIEWED_LEGENDARY_SOURCE_TEXT = "The dragon makes a tail attack.";
+const REVIEWED_LEGENDARY_SOURCE_SHA256 = createHash("sha256").update(REVIEWED_LEGENDARY_SOURCE_TEXT).digest("hex");
+const REVIEWED_TAIL_ATTACK_CONTENT_KEY = "open5e:creature-attack:5e-2014:srd-2014:srd_adult-black-dragon/tail";
 const TACTICAL_REACH_FEET = 5;
 const MAX_TACTICAL_CELLS = 40_000;
 
@@ -9905,13 +10007,173 @@ function tacticalMovementRemaining(budget: EngineTurnBudget): number {
   return Math.max(0, budget.movementFeet.available - budget.movementFeet.spent);
 }
 
+type ReviewedBossCompileIssue = { code: string; message: string };
+
+function reviewedBossTailBinding(source: EngineCombatant) {
+  if (source.contentKey !== REVIEWED_BOSS_CREATURE_KEY) return null;
+  const view = materializeCombatant(source);
+  const legendarySource = view.actions.find((action) => action.actionKey === "tail-attack");
+  const tailSource = view.actions.find((action) => action.actionKey === "tail");
+  const tailAttack = view.attacks.find((attack) => attack.actionKey === "tail");
+  if (
+    !legendarySource
+    || legendarySource.name !== "Tail Attack"
+    || legendarySource.actionType !== "LEGENDARY_ACTION"
+    || legendarySource.legendaryActionCost !== 1
+    || legendarySource.description !== REVIEWED_LEGENDARY_SOURCE_TEXT
+    || !tailSource
+    || tailSource.actionType !== "ACTION"
+    || !tailAttack
+    || tailAttack.contentKey !== REVIEWED_TAIL_ATTACK_CONTENT_KEY
+    || tailAttack.sourceDescriptionSha256 !== createHash("sha256").update(tailSource.description).digest("hex")
+  ) return null;
+  return { view, legendarySource, tailAttack };
+}
+
+function compileReviewedBossTiming(
+  state: LanternCampaignState,
+  enemies: EngineCombatant[],
+  initiative: EngineEncounterInitiative,
+): EngineBossTiming | ReviewedBossCompileIssue {
+  if (enemies.length !== 1 || enemies[0]?.contentKey !== REVIEWED_BOSS_CREATURE_KEY) {
+    return {
+      code: "boss_profile_mismatch",
+      message: "The reviewed boss profile requires exactly one installed Adult Black Dragon.",
+    };
+  }
+  const source = enemies[0];
+  const binding = reviewedBossTailBinding(source);
+  if (!binding) {
+    return {
+      code: "boss_content_unreviewed",
+      message: "The installed Adult Black Dragon no longer matches the reviewed Tail Attack to compiled Tail binding.",
+    };
+  }
+  const { legendarySource, tailAttack } = binding;
+  const orderIndex = initiative.entries.filter((entry) => entry.total > 20).length;
+  return {
+    revision: "boss-timing-v1",
+    sourceCombatantId: source.id,
+    legendary: {
+      maximum: 3,
+      remaining: 3,
+      totalSpent: 0,
+      lastConsumedWindowId: null,
+      refresh: "start-of-source-turn",
+      action: {
+        actionRef: REVIEWED_LEGENDARY_ACTION_REF,
+        name: legendarySource.name,
+        cost: 1,
+        sourceActionKey: legendarySource.actionKey,
+        sourceDescriptionSha256: REVIEWED_LEGENDARY_SOURCE_SHA256,
+        attackContentKey: tailAttack.contentKey,
+      },
+    },
+    lair: {
+      available: true,
+      usedCycle: null,
+      initiative: {
+        count: 20,
+        orderIndex,
+        cycle: 1,
+        formulaRevision: "initiative-count-20-v1",
+      },
+      action: {
+        actionRef: REVIEWED_LAIR_ACTION_REF,
+        name: "Acid Geyser",
+        source: "lantern-reviewed",
+        ability: "dex",
+        dc: 15,
+        damage: {
+          diceCount: 2,
+          dieSides: 6,
+          bonus: 0,
+          type: "acid",
+          saveOnSuccess: "half",
+        },
+      },
+    },
+    pendingWindow: orderIndex === 0 && initiative.order[0]
+      ? {
+          id: randomUUID(),
+          triggerActorId: null,
+          resumeActorId: initiative.order[0],
+          queue: ["lair"],
+          openedAtVersion: state.version + 1,
+        }
+      : null,
+  };
+}
+
+function rollBossInitiative(
+  state: LanternCampaignState,
+  enemies: EngineCombatant[],
+): EngineEncounterInitiative {
+  const actorRoll = randomInt(1, 21);
+  const entries: EngineEncounterInitiativeEntry[] = [{
+    actorId: state.actorId,
+    roll: actorRoll,
+    modifier: state.character.abilityModifiers.dex,
+    total: actorRoll + state.character.abilityModifiers.dex,
+    tieBreaker: state.actorId,
+    surprised: false,
+  }];
+  for (const enemy of enemies) {
+    const view = materializeCombatant(enemy);
+    const roll = randomInt(1, 21);
+    entries.push({
+      actorId: enemy.id,
+      roll,
+      modifier: view.abilityModifiers.dex,
+      total: roll + view.abilityModifiers.dex,
+      tieBreaker: enemy.id,
+      surprised: false,
+    });
+  }
+  entries.sort((left, right) => right.total - left.total || right.roll - left.roll || left.tieBreaker.localeCompare(right.tieBreaker));
+  return {
+    formulaRevision: "initiative-v1",
+    entries,
+    order: entries.map((entry) => entry.actorId),
+    activeIndex: 0,
+    rolledAtVersion: state.version + 1,
+  };
+}
+
 function encounterLifecycleForProfile(
   state: LanternCampaignState,
   enemies: EngineCombatant[],
-  profile: "guards-surrender-v1",
+  profile: EngineEncounterLifecycle["profile"],
   approach: Extract<EngineCommand, { kind: "combat_start" }>["approach"],
   groupTargets: string[],
 ): EngineEncounterLifecycle | EngineResolution {
+  if (profile === REVIEWED_BOSS_PROFILE) {
+    if (approach) {
+      return rejection(state, "combat_start", "boss_approach_unsupported", "The first reviewed boss profile rolls authoritative initiative without a separate surprise approach.");
+    }
+    const initiative = rollBossInitiative(state, enemies);
+    const bossTiming = compileReviewedBossTiming(state, enemies, initiative);
+    if ("code" in bossTiming) return rejection(state, "combat_start", bossTiming.code, bossTiming.message);
+    return {
+      profile,
+      phase: "active",
+      surprise: {
+        eligible: false,
+        consumed: true,
+        source: "compatibility-default",
+        evidence: null,
+      },
+      initiative,
+      morale: null,
+      objective: { id: "defeat-boss", status: "pending" },
+      outcome: null,
+      outcomeId: null,
+      claimedRewards: [],
+      nonlethalDefeatIds: [],
+      retreatPlanRevision: null,
+      bossTiming,
+    };
+  }
   if (!approach) {
     return rejection(state, "combat_start", "approach_required", "The reviewed encounter profile requires an authoritative stealth-perception approach.");
   }
@@ -10001,6 +10263,7 @@ function encounterLifecycleForProfile(
     claimedRewards: [],
     nonlethalDefeatIds: [],
     retreatPlanRevision: null,
+    bossTiming: null,
   };
 }
 
@@ -10015,6 +10278,77 @@ function lifecycleNextActorId(combat: EngineCombat, currentId: string, actorId: 
     if (candidate && liveIds.has(candidate)) return candidate;
   }
   return null;
+}
+
+function reviewedBossCanAct(state: LanternCampaignState, timing: EngineBossTiming): boolean {
+  const source = state.combat.enemies.find((enemy) => enemy.id === timing.sourceCombatantId);
+  return Boolean(
+    source
+    && source.alive
+    && source.hp > 0
+    && !["incapacitated", "paralyzed", "petrified", "stunned", "unconscious"]
+      .some((condition) => source.conditions.includes(condition))
+  );
+}
+
+function prepareReviewedBossTransition(
+  state: LanternCampaignState,
+  triggerActorId: string,
+  resumeActorId: string,
+): void {
+  const timing = activeBossTiming(state);
+  const initiative = state.combat.lifecycle?.initiative;
+  if (!timing || !initiative || !reviewedBossCanAct(state, timing)) return;
+  const order = initiative.order;
+  const currentIndex = order.indexOf(triggerActorId);
+  const nextIndex = order.indexOf(resumeActorId);
+  if (currentIndex < 0 || nextIndex < 0) return;
+  const wrapped = nextIndex <= currentIndex;
+  if (wrapped) {
+    timing.lair.initiative.cycle += 1;
+    timing.lair.available = true;
+  }
+  const boundaryIndex = Math.max(0, Math.min(order.length, timing.lair.initiative.orderIndex));
+  const crossesLairBoundary = wrapped
+    ? boundaryIndex === 0 || boundaryIndex === order.length
+    : boundaryIndex > currentIndex && boundaryIndex <= nextIndex;
+  const queue: EngineBossActionWindowKind[] = [];
+  if (triggerActorId !== timing.sourceCombatantId && timing.legendary.remaining >= timing.legendary.action.cost) {
+    queue.push("legendary");
+  }
+  if (crossesLairBoundary && timing.lair.available) queue.push("lair");
+  timing.pendingWindow = queue.length > 0
+    ? {
+        id: randomUUID(),
+        triggerActorId,
+        resumeActorId,
+        queue,
+        openedAtVersion: state.version + 1,
+      }
+    : null;
+  if (!timing.pendingWindow && resumeActorId === timing.sourceCombatantId) {
+    timing.legendary.remaining = timing.legendary.maximum;
+  }
+}
+
+function completeReviewedBossWindow(
+  state: LanternCampaignState,
+  resolvedKind: EngineBossActionWindowKind,
+): void {
+  const timing = activeBossTiming(state);
+  const window = timing?.pendingWindow;
+  if (!timing || !window || window.queue[0] !== resolvedKind) return;
+  if (resolvedKind === "lair") {
+    timing.lair.available = false;
+    timing.lair.usedCycle = timing.lair.initiative.cycle;
+  }
+  window.queue = window.queue.slice(1);
+  if (window.queue.length > 0) return;
+  const resumeActorId = window.resumeActorId;
+  timing.pendingWindow = null;
+  if (resumeActorId === timing.sourceCombatantId) {
+    timing.legendary.remaining = timing.legendary.maximum;
+  }
 }
 
 function resolveCombatStart(
@@ -10099,13 +10433,16 @@ function resolveCombatStart(
     actor.position = afterPosition;
     controlledActorChanges.push({ path: `/controlledActors/${actor.id}/position`, before: beforePosition, after: afterPosition });
   }
+  const initialBossWindow = activeBossTiming(next)?.pendingWindow;
   return commit(
     next,
     context,
     clientCommandId,
     command,
     tool,
-    "Encounter started: " + command.encounterName + ". " + describeCombatants(enemies) + (activeActorId === state.actorId ? " Your turn." : " The opposition acts first."),
+    "Encounter started: " + command.encounterName + ". " + describeCombatants(enemies) + (initialBossWindow
+      ? " A reviewed boss-action window opens before initiative begins."
+      : activeActorId === state.actorId ? " Your turn." : " The opposition acts first."),
     { combat: combatData(next.combat), controlledActors: projectControlledActors(next) },
     "encounter_started",
     [],
@@ -10318,6 +10655,9 @@ function resolveEncounterDecision(
   if (state.combat.status !== "active") return rejection(state, tool, "encounter_terminal", "This encounter is already terminal.");
   const lifecycle = state.combat.lifecycle;
   if (!lifecycle) return rejection(state, tool, "encounter_profile_required", "This command is available only for the reviewed encounter lifecycle profile.");
+  if (lifecycle.profile !== "guards-surrender-v1" || !lifecycle.morale) {
+    return rejection(state, tool, "encounter_decision_unsupported", "This encounter profile has no surrender or retreat decision menu.");
+  }
   if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "Only the player may choose the encounter response on the player's turn.");
   if (lifecycle.phase === "terminal" || lifecycle.outcome) return rejection(state, tool, "encounter_terminal", "The encounter already has a terminal outcome.");
   if (command.decision === "retreat") {
@@ -10355,7 +10695,7 @@ function resolveEncounterDecision(
   const offer = lifecycle.morale.offers.find((candidate) => candidate.targetId === command.targetId && candidate.status === "offered");
   if (!offer) return rejection(state, tool, "surrender_not_offered", "That guard has no active surrender offer.");
   const next = cloneCampaign(state);
-  const nextOffer = next.combat.lifecycle!.morale.offers.find((candidate) => candidate.id === offer.id);
+  const nextOffer = next.combat.lifecycle!.morale!.offers.find((candidate) => candidate.id === offer.id);
   if (!nextOffer) return rejection(state, tool, "surrender_not_offered", "That surrender offer is no longer active.");
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   let outcome: EngineEncounterOutcome | null = null;
@@ -10423,25 +10763,26 @@ function maybeOfferSurrender(
   defeatedTargetId: string,
 ): boolean {
   const lifecycle = next.combat.lifecycle;
-  if (!lifecycle || lifecycle.outcome || lifecycle.phase === "terminal") return false;
+  if (!lifecycle || lifecycle.profile !== "guards-surrender-v1" || !lifecycle.morale || lifecycle.outcome || lifecycle.phase === "terminal") return false;
+  const morale = lifecycle.morale;
   if (!next.combat.enemies.some((enemy) => enemy.id === defeatedTargetId && !enemy.alive)) return false;
-  const alreadyOffered = new Set(lifecycle.morale.offers.map((offer) => offer.targetId));
+  const alreadyOffered = new Set(morale.offers.map((offer) => offer.targetId));
   const candidate = next.combat.enemies.find((enemy) => {
     if (!enemy.alive || alreadyOffered.has(enemy.id)) return false;
     const view = materializeCombatant(enemy);
-    return enemy.hp <= Math.floor(view.maxHp * lifecycle.morale.thresholdRatio);
+    return enemy.hp <= Math.floor(view.maxHp * morale.thresholdRatio);
   });
   if (!candidate) return false;
   const offer: EngineEncounterSurrenderOffer = {
     id: randomUUID(),
     targetId: candidate.id,
     reason: "ally-fallen",
-    thresholdRatio: lifecycle.morale.thresholdRatio,
+    thresholdRatio: morale.thresholdRatio,
     status: "offered",
     sourceVersion: next.version + 1,
   };
-  lifecycle.morale.offers.push(offer);
-  lifecycle.morale.lastTriggerId = offer.id;
+  morale.offers.push(offer);
+  morale.lastTriggerId = offer.id;
   lifecycle.phase = "resolving";
   next.combat.lastAction = "surrender_offer";
   return true;
@@ -10453,6 +10794,17 @@ function resolveProfileDefeatOutcome(
 ): "killed" | "surrender_offer" | null {
   const lifecycle = next.combat.lifecycle;
   if (!lifecycle) return null;
+  if (lifecycle.profile === REVIEWED_BOSS_PROFILE) {
+    if (next.combat.enemies.some((enemy) => enemy.alive)) return null;
+    lifecycle.phase = "terminal";
+    lifecycle.outcome = "killed";
+    lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:killed`;
+    lifecycle.objective.status = "succeeded";
+    if (lifecycle.bossTiming) lifecycle.bossTiming.pendingWindow = null;
+    next.combat.status = "ended";
+    next.combat.activeActorId = null;
+    return "killed";
+  }
   if (next.combat.enemies.some((enemy) => enemy.alive)) {
     return maybeOfferSurrender(next, targetId) ? "surrender_offer" : null;
   }
@@ -10474,6 +10826,9 @@ function resolveSpawnCreature(
 ): EngineResolution {
   if (state.combat.status !== "active") {
     return rejection(state, tool, "no_active_combat", "Start an encounter before spawning additional combatants.");
+  }
+  if (state.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE) {
+    return rejection(state, tool, "boss_profile_fixed_roster", "The reviewed boss lifecycle has an exact one-creature roster and cannot accept spawned combatants.");
   }
   if (state.combat.enemies.length + command.count > 20) {
     return rejection(state, tool, "encounter_too_large", "An encounter can contain at most 20 creature instances.");
@@ -12497,6 +12852,217 @@ function resolvePartyGroupCheck(
   ], [], undefined, check);
 }
 
+function finishBossEncounterIfPlayerDied(
+  state: LanternCampaignState,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): boolean {
+  if (state.character.lifecycleState !== "dead") return false;
+  const beforeStatus = state.combat.status;
+  const beforeActorId = state.combat.activeActorId;
+  state.combat.status = "ended";
+  state.combat.activeActorId = null;
+  if (state.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE) {
+    state.combat.lifecycle.phase = "terminal";
+    state.combat.lifecycle.outcome = "player_defeated";
+    state.combat.lifecycle.outcomeId = `${state.combat.encounterId ?? "encounter"}:player_defeated`;
+    state.combat.lifecycle.objective.status = "failed";
+    if (state.combat.lifecycle.bossTiming) state.combat.lifecycle.bossTiming.pendingWindow = null;
+  }
+  if (beforeStatus !== state.combat.status) changes.push({ path: "/combat/status", before: beforeStatus, after: state.combat.status });
+  if (beforeActorId !== state.combat.activeActorId) changes.push({ path: "/combat/activeActorId", before: beforeActorId, after: state.combat.activeActorId });
+  return true;
+}
+
+function resolveBossAction(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "boss_action" }>,
+  tool: EngineToolName | "declare" | "listen",
+): EngineResolution {
+  if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "There is no active boss encounter.");
+  const timing = activeBossTiming(state);
+  const window = timing?.pendingWindow;
+  const currentKind = window?.queue[0];
+  if (!timing || !window || !currentKind) {
+    return rejection(state, tool, "boss_action_off_timing", "No reviewed boss-action window is currently open.");
+  }
+  if (command.actionRef === REVIEWED_BOSS_PASS_REF) {
+    if (command.targetId) return rejection(state, tool, "boss_pass_target_forbidden", "Passing a boss-action window does not accept a target.");
+    const next = cloneCampaign(state);
+    const beforeTiming = structuredClone(timing);
+    completeReviewedBossWindow(next, currentKind);
+    next.combat.lastAction = `${REVIEWED_BOSS_PASS_REF}:${currentKind}`;
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `The ${currentKind} boss-action window passes without a mechanical effect.${activeBossTiming(next)?.pendingWindow ? " The next reviewed boss window opens." : " Initiative resumes."}`,
+      { passed: currentKind, combat: combatData(next.combat) },
+      "boss_action_passed",
+      [],
+      [],
+      [
+        { path: "/combat/lifecycle/bossTiming", before: beforeTiming, after: next.combat.lifecycle?.bossTiming ?? null },
+        { path: "/combat/lastAction", before: state.combat.lastAction, after: next.combat.lastAction },
+      ],
+    );
+  }
+  const unavailable = bossActionUnavailableReason(state, timing);
+  if (unavailable) return rejection(state, tool, "boss_action_unavailable", unavailable);
+  if (command.targetId !== state.actorId) {
+    return rejection(state, tool, "boss_action_target_invalid", "Choose the exact player actor id from the current boss-action offer.");
+  }
+  const source = state.combat.enemies.find((enemy) => enemy.id === timing.sourceCombatantId);
+  if (!source) return rejection(state, tool, "boss_source_missing", "The reviewed boss source is no longer present.");
+  const sourceView = materializeCombatant(source);
+
+  if (currentKind === "legendary") {
+    const action = timing.legendary.action;
+    if (command.actionRef !== action.actionRef) {
+      return rejection(state, tool, "boss_action_not_offered", "That legendary action ref is not the current finite offer.");
+    }
+    if (timing.legendary.remaining < action.cost) {
+      return rejection(state, tool, "boss_legendary_resource_insufficient", "The boss has insufficient legendary points.");
+    }
+    if (timing.legendary.lastConsumedWindowId === window.id) {
+      return rejection(state, tool, "boss_window_consumed", "This legendary action window was already consumed.");
+    }
+    const binding = reviewedBossTailBinding(source);
+    if (
+      !binding
+      || binding.legendarySource.actionKey !== action.sourceActionKey
+      || createHash("sha256").update(binding.legendarySource.description).digest("hex") !== action.sourceDescriptionSha256
+      || binding.tailAttack.contentKey !== action.attackContentKey
+    ) {
+      return rejection(state, tool, "boss_content_unreviewed", "The reviewed legendary action binding no longer matches the active pack.");
+    }
+    const attack = binding.tailAttack;
+    const distanceFeet = tacticalDistanceFeet(state.combat, source);
+    const reachFeet = attack.distance.reach;
+    if (reachFeet === null || distanceFeet > reachFeet) {
+      return rejection(state, tool, "boss_action_target_out_of_range", `${attack.name} has ${reachFeet ?? 0}-foot reach; the target is ${distanceFeet} feet away.`);
+    }
+    if (incomingCharacterCover(state, source).level === "total") {
+      return rejection(state, tool, "boss_action_target_total_cover", "Canonical blocking geometry gives the target total cover from the reviewed boss.");
+    }
+    const next = cloneCampaign(state);
+    const beforeTiming = structuredClone(timing);
+    const nextTiming = activeBossTiming(next)!;
+    const nextSource = next.combat.enemies.find((enemy) => enemy.id === timing.sourceCombatantId)!;
+    const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+    const modifiers: Array<{ name: string; value: number }> = [];
+    const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+    nextTiming.legendary.remaining -= action.cost;
+    nextTiming.legendary.totalSpent += action.cost;
+    nextTiming.legendary.lastConsumedWindowId = window.id;
+    const attackResult = resolveOneCreatureAttack(
+      next,
+      attack,
+      1,
+      rolls,
+      modifiers,
+      changes,
+      clientCommandId,
+      nextSource,
+      { damageSource: "boss-legendary-action" },
+    );
+    const terminal = finishBossEncounterIfPlayerDied(next, changes);
+    if (!terminal) completeReviewedBossWindow(next, "legendary");
+    next.combat.lastAction = action.actionRef;
+    changes.push(
+      { path: "/combat/lifecycle/bossTiming", before: beforeTiming, after: next.combat.lifecycle?.bossTiming ?? null },
+      { path: "/combat/lastAction", before: state.combat.lastAction, after: next.combat.lastAction },
+    );
+    return commit(
+      next,
+      context,
+      clientCommandId,
+      command,
+      tool,
+      `${sourceView.name} uses ${action.name}. ${attackResult.message}${terminal ? " The encounter ends with the character's death." : activeBossTiming(next)?.pendingWindow ? " The next reviewed boss window opens." : " Initiative resumes."}`,
+      {
+        combatantId: source.id,
+        actionRef: action.actionRef,
+        resourceCost: action.cost,
+        attack: attackResult,
+        combat: combatData(next.combat),
+        character: characterData(next.character),
+      },
+      terminal ? "dead" : attackResult.hit ? "boss_legendary_hit" : "boss_legendary_miss",
+      rolls,
+      modifiers,
+      changes,
+      [source.contentKey, action.attackContentKey],
+    );
+  }
+
+  const action = timing.lair.action;
+  if (command.actionRef !== action.actionRef) {
+    return rejection(state, tool, "boss_action_not_offered", "That lair action ref is not the current finite offer.");
+  }
+  if (!timing.lair.available || timing.lair.usedCycle === timing.lair.initiative.cycle) {
+    return rejection(state, tool, "boss_lair_resource_spent", "The lair action has already been resolved this initiative cycle.");
+  }
+  const next = cloneCampaign(state);
+  const beforeTiming = structuredClone(timing);
+  const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+  const modifiers: Array<{ name: string; value: number }> = [];
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const saveRoll = randomInt(1, 21);
+  const saveModifier = next.character.savingThrows[action.ability];
+  const saveTotal = saveRoll + saveModifier;
+  const succeeded = saveTotal >= action.dc;
+  rolls.push({ kind: `character_${action.ability}_save_d20`, value: saveRoll, sides: 20 });
+  modifiers.push(
+    { name: `${action.ability}_saving_throw`, value: saveModifier },
+    { name: "boss_lair_dc", value: action.dc },
+  );
+  const damageOperation: Extract<CompiledEffectProgram["operations"][number], { kind: "damage" }> = {
+    kind: "damage",
+    average: 7,
+    expression: { kind: "dice", diceCount: action.damage.diceCount, dieSides: action.damage.dieSides, bonus: action.damage.bonus },
+    damageType: { sourceKey: "acid", contentKey: "open5e:damage-type:5e-2014:srd-2014:acid", name: "Acid" },
+    trigger: "failed-save",
+    saveOnSuccess: action.damage.saveOnSuccess,
+  };
+  const rolledDamage = rollCompiledDamage(damageOperation, rolls);
+  const appliedDamage = succeeded ? Math.floor(rolledDamage / 2) : rolledDamage;
+  applyCharacterDamage(next, appliedDamage, "boss-lair-action", clientCommandId, changes, rolls, modifiers, false);
+  const terminal = finishBossEncounterIfPlayerDied(next, changes);
+  if (!terminal) completeReviewedBossWindow(next, "lair");
+  next.combat.lastAction = action.actionRef;
+  changes.push(
+    { path: "/combat/lifecycle/bossTiming", before: beforeTiming, after: next.combat.lifecycle?.bossTiming ?? null },
+    { path: "/combat/lastAction", before: state.combat.lastAction, after: next.combat.lastAction },
+  );
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    `${sourceView.name}'s lair erupts with ${action.name}. ${next.character.name || "The character"} rolls ${saveTotal} against DC ${action.dc}, ${succeeded ? "succeeds" : "fails"}, and takes ${appliedDamage} acid damage.${terminal ? " The encounter ends with the character's death." : activeBossTiming(next)?.pendingWindow ? " The next reviewed boss window opens." : " Initiative resumes."}`,
+    {
+      combatantId: source.id,
+      actionRef: action.actionRef,
+      initiativeCount: timing.lair.initiative.count,
+      initiativeCycle: timing.lair.initiative.cycle,
+      save: { ability: action.ability, dc: action.dc, roll: saveRoll, modifier: saveModifier, total: saveTotal, succeeded },
+      damage: { rolled: rolledDamage, applied: appliedDamage, type: action.damage.type },
+      combat: combatData(next.combat),
+      character: characterData(next.character),
+    },
+    terminal ? "dead" : succeeded ? "boss_lair_save_success" : "boss_lair_save_failure",
+    rolls,
+    modifiers,
+    changes,
+    [source.contentKey, action.actionRef, damageOperation.damageType.contentKey],
+  );
+}
+
 function resolvePlayerEndTurn(
   state: LanternCampaignState,
   context: RequestContext,
@@ -12509,6 +13075,9 @@ function resolvePlayerEndTurn(
   if (state.combat.lifecycle?.phase === "resolving") return rejection(state, tool, "surrender_decision_required", "Resolve the server-owned surrender offer before ending the turn.");
   const next = cloneCampaign(state);
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const bossTimingBefore = state.combat.lifecycle?.bossTiming
+    ? structuredClone(state.combat.lifecycle.bossTiming)
+    : null;
   applyControlledActorFallback(next, changes);
   const nextActor = next.combat.lifecycle
     ? lifecycleNextActorId(next.combat, state.actorId, state.actorId)
@@ -12522,8 +13091,28 @@ function resolvePlayerEndTurn(
   if (next.combat.lifecycle) {
     next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(nextActor);
   }
+  prepareReviewedBossTransition(next, state.actorId, nextActor);
   next.combat.lastAction = "end_turn";
-  return commit(next, context, clientCommandId, command, tool, "Your turn ends. The opposition may act.", { combat: combatData(next.combat), controlledActors: projectControlledActors(next) }, "turn_ended", [], [], [...changes, { path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextActor }]);
+  const bossWindow = activeBossTiming(next)?.pendingWindow;
+  return commit(
+    next,
+    context,
+    clientCommandId,
+    command,
+    tool,
+    bossWindow ? "Your turn ends. A reviewed boss-action window opens before initiative resumes." : "Your turn ends. The opposition may act.",
+    { combat: combatData(next.combat), controlledActors: projectControlledActors(next) },
+    "turn_ended",
+    [],
+    [],
+    [
+      ...changes,
+      { path: "/combat/activeActorId", before: state.combat.activeActorId, after: nextActor },
+      ...(JSON.stringify(bossTimingBefore) !== JSON.stringify(next.combat.lifecycle?.bossTiming ?? null)
+        ? [{ path: "/combat/lifecycle/bossTiming", before: bossTimingBefore, after: next.combat.lifecycle?.bossTiming ?? null }]
+        : []),
+    ],
+  );
 }
 
 function resolveAdvanceTurn(
@@ -12538,6 +13127,9 @@ function resolveAdvanceTurn(
     if (["incapacitated", "paralyzed", "petrified", "stunned"]
       .some((condition) => hasRuntimeCondition(state, state.character.id, condition))) {
       return resolveSkippedCharacterTurn(state, context, clientCommandId, command, tool);
+    }
+    if (state.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE) {
+      return resolvePlayerEndTurn(state, context, clientCommandId, command, tool);
     }
     // Compatibility alias for callers that used advance_turn as the old player
     // handoff. New clients should send end_turn first; the action resolver
@@ -12678,6 +13270,9 @@ function resolveAdvanceTurn(
   }
 
   const next = cloneCampaign(state);
+  const bossTimingBefore = state.combat.lifecycle?.bossTiming
+    ? structuredClone(state.combat.lifecycle.bossTiming)
+    : null;
   const armorClass = characterArmorClassWithCover(next, cover);
   const attackRoll = randomInt(1, 21);
   const attackModifier = attack.toHit;
@@ -12809,12 +13404,15 @@ function resolveAdvanceTurn(
   const nextEnemyId = next.combat.lifecycle
     ? lifecycleNextActorId(next.combat, enemy.id, state.actorId)
     : nextLiveCombatantId(next.combat, enemy.id);
-  if (next.character.lifecycleState === "dead") {
+  if (finishBossEncounterIfPlayerDied(next, changes)) {
+    // The helper records the terminal boss outcome and clears any pending window.
+  } else if (next.character.lifecycleState === "dead") {
     next.combat.status = "ended";
     next.combat.activeActorId = null;
   } else if (nextEnemyId && (!next.combat.lifecycle || nextEnemyId !== state.actorId)) {
     next.combat.activeActorId = nextEnemyId;
     if (next.combat.lifecycle) next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(nextEnemyId);
+    prepareReviewedBossTransition(next, enemy.id, nextEnemyId);
     message += " The next foe acts.";
   } else {
     next.combat.round += 1;
@@ -12824,6 +13422,7 @@ function resolveAdvanceTurn(
     resetEnemyReactions(next.combat, changes);
     resetControlledActorTurns(next, changes);
     if (next.character.hp === 0) spendTurnSlot(next.combat.turnBudget, "action");
+    prepareReviewedBossTransition(next, enemy.id, next.actorId);
     message += next.character.hp === 0
       ? " Your turn arrives; make a death save."
       : " The initiative returns to you.";
@@ -12845,7 +13444,12 @@ function resolveAdvanceTurn(
     outcome,
     rolls,
     modifiers,
-    changes
+    [
+      ...changes,
+      ...(JSON.stringify(bossTimingBefore) !== JSON.stringify(next.combat.lifecycle?.bossTiming ?? null)
+        ? [{ path: "/combat/lifecycle/bossTiming", before: bossTimingBefore, after: next.combat.lifecycle?.bossTiming ?? null }]
+        : []),
+    ]
   );
 }
 
@@ -12860,14 +13464,26 @@ function resolveSkippedCharacterTurn(
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
   const modifiers: Array<{ name: string; value: number }> = [];
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const bossTimingBefore = state.combat.lifecycle?.bossTiming
+    ? structuredClone(state.combat.lifecycle.bossTiming)
+    : null;
   applyControlledActorFallback(next, changes);
   resolveTargetEndConditionEffects(next, rolls, modifiers, changes);
   const beforeActor = next.combat.activeActorId;
-  next.combat.activeActorId = firstLiveCombatantId(next.combat);
+  next.combat.activeActorId = next.combat.lifecycle
+    ? lifecycleNextActorId(next.combat, state.actorId, state.actorId)
+    : firstLiveCombatantId(next.combat);
+  if (next.combat.lifecycle && next.combat.activeActorId) {
+    next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(next.combat.activeActorId);
+    prepareReviewedBossTransition(next, state.actorId, next.combat.activeActorId);
+  }
   spendTurnSlot(next.combat.turnBudget, "action");
   changes.push(
     { path: "/combat/activeActorId", before: beforeActor, after: next.combat.activeActorId },
-    { path: "/combat/turnBudget/action/spent", before: state.combat.turnBudget.action.spent, after: true }
+    { path: "/combat/turnBudget/action/spent", before: state.combat.turnBudget.action.spent, after: true },
+    ...(JSON.stringify(bossTimingBefore) !== JSON.stringify(next.combat.lifecycle?.bossTiming ?? null)
+      ? [{ path: "/combat/lifecycle/bossTiming", before: bossTimingBefore, after: next.combat.lifecycle?.bossTiming ?? null }]
+      : []),
   );
   const condition = ["incapacitated", "paralyzed", "petrified", "stunned"]
     .find((candidate) => hasRuntimeCondition(state, state.character.id, candidate)) ?? "incapacitated";
@@ -13608,30 +14224,66 @@ function finishCreatureTurn(
   enemyId: string,
   changes: Array<{ path: string; before: unknown; after: unknown }>
 ): string {
+  const bossTimingBefore = state.combat.lifecycle?.bossTiming
+    ? structuredClone(state.combat.lifecycle.bossTiming)
+    : null;
   expireSourceEndConditionEffects(state, enemyId, changes);
   const beforeActorId = state.combat.activeActorId;
   const beforeRound = state.combat.round;
-  const nextEnemyId = nextLiveCombatantId(state.combat, enemyId);
-  if (nextEnemyId) {
-    state.combat.activeActorId = nextEnemyId;
-    changes.push({ path: "/combat/activeActorId", before: beforeActorId, after: nextEnemyId });
-    return " The next foe acts.";
+  if (finishBossEncounterIfPlayerDied(state, changes)) {
+    return " The encounter ends with the character's death.";
+  }
+  if (state.character.lifecycleState === "dead") {
+    state.combat.status = "ended";
+    state.combat.activeActorId = null;
+    changes.push(
+      { path: "/combat/status", before: "active", after: "ended" },
+      { path: "/combat/activeActorId", before: beforeActorId, after: null },
+    );
+    return " The encounter ends with the character's death.";
+  }
+  const nextActorId = state.combat.lifecycle
+    ? lifecycleNextActorId(state.combat, enemyId, state.actorId)
+    : nextLiveCombatantId(state.combat, enemyId);
+  if (nextActorId && nextActorId !== state.actorId) {
+    state.combat.activeActorId = nextActorId;
+    if (state.combat.lifecycle) {
+      state.combat.lifecycle.initiative.activeIndex = state.combat.lifecycle.initiative.order.indexOf(nextActorId);
+    }
+    prepareReviewedBossTransition(state, enemyId, nextActorId);
+    changes.push(
+      { path: "/combat/activeActorId", before: beforeActorId, after: nextActorId },
+      ...(JSON.stringify(bossTimingBefore) !== JSON.stringify(state.combat.lifecycle?.bossTiming ?? null)
+        ? [{ path: "/combat/lifecycle/bossTiming", before: bossTimingBefore, after: state.combat.lifecycle?.bossTiming ?? null }]
+        : []),
+    );
+    return activeBossTiming(state)?.pendingWindow
+      ? " A reviewed boss-action window opens before the next foe acts."
+      : " The next foe acts.";
   }
   state.combat.round += 1;
   state.combat.activeActorId = state.actorId;
+  if (state.combat.lifecycle) {
+    state.combat.lifecycle.initiative.activeIndex = state.combat.lifecycle.initiative.order.indexOf(state.actorId);
+  }
   resetTurnBudget(state.combat.turnBudget, state.character.speed);
   resetEnemyReactions(state.combat, changes);
   resetControlledActorTurns(state, changes);
   if (state.character.hp === 0) spendTurnSlot(state.combat.turnBudget, "action");
+  prepareReviewedBossTransition(state, enemyId, state.actorId);
   const beforeConditions = [...state.character.conditions];
   expireAtCharacterTurnStart(state, changes);
   changes.push(
     { path: "/combat/round", before: beforeRound, after: state.combat.round },
-    { path: "/combat/activeActorId", before: beforeActorId, after: state.actorId }
+    { path: "/combat/activeActorId", before: beforeActorId, after: state.actorId },
+    ...(JSON.stringify(bossTimingBefore) !== JSON.stringify(state.combat.lifecycle?.bossTiming ?? null)
+      ? [{ path: "/combat/lifecycle/bossTiming", before: bossTimingBefore, after: state.combat.lifecycle?.bossTiming ?? null }]
+      : []),
   );
   if (beforeConditions.length !== state.character.conditions.length) {
     changes.push({ path: "/character/conditions", before: beforeConditions, after: state.character.conditions });
   }
+  if (activeBossTiming(state)?.pendingWindow) return " A reviewed boss-action window opens before initiative resumes.";
   return state.character.hp === 0
     ? " Your turn arrives; make a death save."
     : " The initiative returns to you.";
@@ -17108,7 +17760,7 @@ function normalizeCombat(
     status,
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
-    lifecycle: normalizeEncounterLifecycle(combat.lifecycle),
+    lifecycle: normalizeEncounterLifecycle(combat.lifecycle, enemies),
     round,
     activeActorId: combat.activeActorId ?? null,
     turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
@@ -17138,13 +17790,112 @@ function normalizeFootprint(value: unknown): EngineTacticalFootprint {
   };
 }
 
-function normalizeEncounterLifecycle(value: unknown): EngineEncounterLifecycle | null {
+function normalizeBossTiming(
+  value: unknown,
+  entries: EngineEncounterInitiativeEntry[],
+  order: string[],
+  enemies: EngineCombatant[],
+): EngineBossTiming | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EngineBossTiming>;
+  const legendary = candidate.legendary;
+  const lair = candidate.lair;
+  const source = enemies.find((enemy) => enemy.id === candidate.sourceCombatantId);
+  if (
+    candidate.revision !== "boss-timing-v1"
+    || typeof candidate.sourceCombatantId !== "string"
+    || !candidate.sourceCombatantId
+    || !legendary
+    || !lair
+    || legendary.maximum !== 3
+    || legendary.refresh !== "start-of-source-turn"
+    || legendary.action?.actionRef !== REVIEWED_LEGENDARY_ACTION_REF
+    || legendary.action.sourceActionKey !== "tail-attack"
+    || legendary.action.sourceDescriptionSha256 !== REVIEWED_LEGENDARY_SOURCE_SHA256
+    || legendary.action.attackContentKey !== REVIEWED_TAIL_ATTACK_CONTENT_KEY
+    || lair.action?.actionRef !== REVIEWED_LAIR_ACTION_REF
+    || enemies.length !== 1
+    || !source
+    || !order.includes(source.id)
+    || !entries.some((entry) => entry.actorId === source.id)
+    || !reviewedBossTailBinding(source)
+  ) return null;
+  const remaining = Number.isInteger(legendary.remaining) ? Math.max(0, Math.min(3, legendary.remaining)) : 0;
+  const totalSpent = Number.isInteger(legendary.totalSpent) ? Math.max(0, legendary.totalSpent) : 0;
+  const cycle = Number.isInteger(lair.initiative?.cycle) ? Math.max(1, lair.initiative.cycle) : 1;
+  const usedCycle = Number.isInteger(lair.usedCycle) && lair.usedCycle! >= 1 ? lair.usedCycle! : null;
+  let pendingWindow: EngineBossTiming["pendingWindow"] = null;
+  const rawWindow = candidate.pendingWindow;
+  if (rawWindow && typeof rawWindow === "object" && !Array.isArray(rawWindow)) {
+    const queue = Array.isArray(rawWindow.queue)
+      ? rawWindow.queue.filter((entry): entry is EngineBossActionWindowKind => entry === "legendary" || entry === "lair")
+      : [];
+    if (
+      typeof rawWindow.id === "string"
+      && rawWindow.id
+      && typeof rawWindow.resumeActorId === "string"
+      && order.includes(rawWindow.resumeActorId)
+      && (rawWindow.triggerActorId === null || (typeof rawWindow.triggerActorId === "string" && order.includes(rawWindow.triggerActorId)))
+      && queue.length >= 1
+      && queue.length <= 2
+      && new Set(queue).size === queue.length
+    ) {
+      pendingWindow = {
+        id: rawWindow.id,
+        triggerActorId: rawWindow.triggerActorId,
+        resumeActorId: rawWindow.resumeActorId,
+        queue,
+        openedAtVersion: Number.isInteger(rawWindow.openedAtVersion) ? Math.max(0, rawWindow.openedAtVersion) : 0,
+      };
+    }
+  }
+  return {
+    revision: "boss-timing-v1",
+    sourceCombatantId: candidate.sourceCombatantId,
+    legendary: {
+      maximum: 3,
+      remaining,
+      totalSpent,
+      lastConsumedWindowId: typeof legendary.lastConsumedWindowId === "string" ? legendary.lastConsumedWindowId : null,
+      refresh: "start-of-source-turn",
+      action: {
+        actionRef: REVIEWED_LEGENDARY_ACTION_REF,
+        name: "Tail Attack",
+        cost: 1,
+        sourceActionKey: "tail-attack",
+        sourceDescriptionSha256: REVIEWED_LEGENDARY_SOURCE_SHA256,
+        attackContentKey: REVIEWED_TAIL_ATTACK_CONTENT_KEY,
+      },
+    },
+    lair: {
+      available: usedCycle === cycle ? false : Boolean(lair.available),
+      usedCycle,
+      initiative: {
+        count: 20,
+        orderIndex: entries.filter((entry) => entry.total > 20).length,
+        cycle,
+        formulaRevision: "initiative-count-20-v1",
+      },
+      action: {
+        actionRef: REVIEWED_LAIR_ACTION_REF,
+        name: "Acid Geyser",
+        source: "lantern-reviewed",
+        ability: "dex",
+        dc: 15,
+        damage: { diceCount: 2, dieSides: 6, bonus: 0, type: "acid", saveOnSuccess: "half" },
+      },
+    },
+    pendingWindow,
+  };
+}
+
+function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[]): EngineEncounterLifecycle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineEncounterLifecycle>;
-  if (candidate.profile !== "guards-surrender-v1") return null;
+  if (candidate.profile !== "guards-surrender-v1" && candidate.profile !== REVIEWED_BOSS_PROFILE) return null;
   const rawSurprise = (candidate.surprise && typeof candidate.surprise === "object" ? candidate.surprise : {}) as Partial<EngineEncounterLifecycle["surprise"]>;
   const rawInitiative = (candidate.initiative && typeof candidate.initiative === "object" ? candidate.initiative : {}) as Partial<EngineEncounterLifecycle["initiative"]>;
-  const rawMorale = (candidate.morale && typeof candidate.morale === "object" ? candidate.morale : {}) as Partial<EngineEncounterLifecycle["morale"]>;
+  const rawMorale = (candidate.morale && typeof candidate.morale === "object" ? candidate.morale : {}) as Partial<EngineEncounterMorale>;
   const entries = Array.isArray(rawInitiative.entries)
     ? rawInitiative.entries.flatMap((entry) => {
         if (!entry || typeof entry !== "object") return [];
@@ -17187,28 +17938,54 @@ function normalizeEncounterLifecycle(value: unknown): EngineEncounterLifecycle |
   const phase = ["pre-combat", "active", "resolving", "terminal"].includes(candidate.phase ?? "")
     ? candidate.phase as EngineEncounterLifecycle["phase"]
     : "active";
-  const outcome = ["killed", "surrendered", "captured", "escaped", "player_surrendered"].includes(candidate.outcome ?? "")
+  const outcome = ["killed", "surrendered", "captured", "escaped", "player_surrendered", "player_defeated"].includes(candidate.outcome ?? "")
     ? candidate.outcome as EngineEncounterOutcome
     : null;
   const evidence = rawSurprise.evidence && typeof rawSurprise.evidence === "object"
     ? rawSurprise.evidence as EngineEncounterApproachEvidence
     : null;
-  return {
-    profile: "guards-surrender-v1",
+  const surpriseSource: EngineEncounterLifecycle["surprise"]["source"] = rawSurprise.source === "stealth-perception-v1"
+    ? "stealth-perception-v1"
+    : "compatibility-default";
+  const initiative: EngineEncounterInitiative = {
+    formulaRevision: "initiative-v1",
+    entries,
+    order,
+    activeIndex: typeof rawInitiative.activeIndex === "number" && Number.isInteger(rawInitiative.activeIndex) ? Math.max(0, rawInitiative.activeIndex) : 0,
+    rolledAtVersion: typeof rawInitiative.rolledAtVersion === "number" && Number.isInteger(rawInitiative.rolledAtVersion) ? rawInitiative.rolledAtVersion : 0,
+  };
+  const common = {
     phase,
     surprise: {
       eligible: Boolean(rawSurprise.eligible),
       consumed: Boolean(rawSurprise.consumed),
-      source: rawSurprise.source === "stealth-perception-v1" ? "stealth-perception-v1" : "compatibility-default",
+      source: surpriseSource,
       evidence,
     },
-    initiative: {
-      formulaRevision: "initiative-v1",
-      entries,
-      order,
-      activeIndex: typeof rawInitiative.activeIndex === "number" && Number.isInteger(rawInitiative.activeIndex) ? Math.max(0, rawInitiative.activeIndex) : 0,
-      rolledAtVersion: typeof rawInitiative.rolledAtVersion === "number" && Number.isInteger(rawInitiative.rolledAtVersion) ? rawInitiative.rolledAtVersion : 0,
-    },
+    initiative,
+    outcome,
+    outcomeId: typeof candidate.outcomeId === "string" ? candidate.outcomeId : null,
+    claimedRewards: Array.isArray(candidate.claimedRewards) ? candidate.claimedRewards.filter((key): key is string => typeof key === "string") : [],
+    nonlethalDefeatIds: Array.isArray(candidate.nonlethalDefeatIds) ? candidate.nonlethalDefeatIds.filter((id): id is string => typeof id === "string") : [],
+    retreatPlanRevision: typeof candidate.retreatPlanRevision === "number" && Number.isInteger(candidate.retreatPlanRevision) ? candidate.retreatPlanRevision : null,
+  };
+  if (candidate.profile === REVIEWED_BOSS_PROFILE) {
+    const bossTiming = normalizeBossTiming(candidate.bossTiming, entries, order, enemies);
+    if (!bossTiming) return null;
+    return {
+      profile: REVIEWED_BOSS_PROFILE,
+      ...common,
+      morale: null,
+      objective: {
+        id: "defeat-boss",
+        status: candidate.objective?.status === "succeeded" || candidate.objective?.status === "failed" ? candidate.objective.status : "pending",
+      },
+      bossTiming,
+    };
+  }
+  return {
+    profile: "guards-surrender-v1",
+    ...common,
     morale: {
       policy: "guards-surrender-v1",
       thresholdRatio: 0.5,
@@ -17219,11 +17996,7 @@ function normalizeEncounterLifecycle(value: unknown): EngineEncounterLifecycle |
       id: "resolve-without-killing",
       status: candidate.objective?.status === "succeeded" || candidate.objective?.status === "failed" ? candidate.objective.status : "pending",
     },
-    outcome,
-    outcomeId: typeof candidate.outcomeId === "string" ? candidate.outcomeId : null,
-    claimedRewards: Array.isArray(candidate.claimedRewards) ? candidate.claimedRewards.filter((key): key is string => typeof key === "string") : [],
-    nonlethalDefeatIds: Array.isArray(candidate.nonlethalDefeatIds) ? candidate.nonlethalDefeatIds.filter((id): id is string => typeof id === "string") : [],
-    retreatPlanRevision: typeof candidate.retreatPlanRevision === "number" && Number.isInteger(candidate.retreatPlanRevision) ? candidate.retreatPlanRevision : null,
+    bossTiming: null,
   };
 }
 

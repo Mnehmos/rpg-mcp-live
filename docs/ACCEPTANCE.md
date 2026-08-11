@@ -54,7 +54,7 @@ Every rejection carries a stable code. Automated evidence must show unchanged ca
 | DM loop | Ordered reads/effects, schema validation, provider fallback and committed-result narration | verified |
 | Character | Policy-filtered options, source-backed creation, derived sheet and starting inventory | verified |
 | Inventory/commerce | Buy/equip/AC/unequip/sell, use/drop/loot and exact currency reconciliation | verified |
-| Combat | Source-backed spawn, initiative/turns, action economy, attacks, saves, defenses and encounter end | verified |
+| Combat | Source-backed spawn, initiative/turns, action economy, attacks, saves, defenses, bounded boss windows and encounter end | verified |
 | Spells | Access, preparation, slots, range/area, target count, attack/save, typed damage, concentration and recovery | verified |
 | S7 effects | Multiattack, recharge, usage, area, save damage, condition application/expiry and illegal action | verified |
 | World/quests | Nullable context, movement edges, authored NPC/merchant/quest/beat, notes and atomic rewards | verified |

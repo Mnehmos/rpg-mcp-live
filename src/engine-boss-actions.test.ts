@@ -1,0 +1,326 @@
+import { mkdtempSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { describe, expect, it, vi } from "vitest";
+
+const queuedRolls = vi.hoisted(() => [] as number[]);
+const deterministicRandomInt = vi.hoisted(() => vi.fn((_min: number, max: number) => queuedRolls.shift() ?? max - 1));
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, randomInt: deterministicRandomInt };
+});
+
+import {
+  createInitialCampaign,
+  deriveActionOffers,
+  normalizeCampaignState,
+  resolveEngineCommand,
+} from "./engine-domain.js";
+import { LanternEngineStore } from "./engine-store.js";
+import type { EngineCommand, LanternCampaignState, RequestContext } from "./engine-contracts.js";
+
+const ADULT_BLACK_DRAGON = "open5e:creature:5e-2014:srd-2014:srd_adult-black-dragon";
+const GOBLIN = "open5e:creature:5e-2014:srd-2014:srd_goblin";
+const LEGENDARY_TAIL = "boss:adult-black-dragon:legendary:tail-attack-v1";
+const LAIR_ACID_GEYSER = "boss:adult-black-dragon:lair:acid-geyser-v1";
+const PASS = "boss:window:pass";
+
+function context(state: LanternCampaignState): RequestContext {
+  return {
+    requestId: randomUUID(),
+    accountId: state.accountId,
+    campaignId: state.id,
+    actorId: state.actorId,
+    capabilities: ["player", "dm"],
+  };
+}
+
+function apply(state: LanternCampaignState, command: EngineCommand, clientCommandId = randomUUID()) {
+  return resolveEngineCommand(state, context(state), clientCommandId, command, command.kind);
+}
+
+function fighter(): LanternCampaignState {
+  let state = createInitialCampaign("boss-account", "boss-actor");
+  for (const command of [
+    { kind: "character_create", name: "Boss Hunter", species: "human", className: "fighter" },
+    { kind: "tutorial_advance" },
+    { kind: "tutorial_advance" },
+  ] as EngineCommand[]) {
+    const result = apply(state, command);
+    expect(result.accepted).toBe(true);
+    state = result.state;
+  }
+  return state;
+}
+
+function startBoss(state: LanternCampaignState, actorInitiative = 20, bossInitiative = 18) {
+  queuedRolls.push(actorInitiative, bossInitiative);
+  return apply(state, {
+    kind: "combat_start",
+    encounterId: "black-dragon-vault",
+    encounterName: "Black Dragon Vault",
+    lifecycleProfile: "adult-black-dragon-boss-v1",
+    creatures: [{ creatureKey: ADULT_BLACK_DRAGON, count: 1 }],
+  });
+}
+
+function openLegendaryAndLairWindow(state: LanternCampaignState) {
+  const started = startBoss(state);
+  expect(started.accepted).toBe(true);
+  expect(started.state.combat.activeActorId).toBe(started.state.actorId);
+  const ended = apply(started.state, { kind: "end_turn" });
+  expect(ended.accepted).toBe(true);
+  expect(ended.state.combat.lifecycle?.bossTiming?.pendingWindow?.queue).toEqual(["legendary", "lair"]);
+  return ended;
+}
+
+describe("reviewed boss-action timing", () => {
+  it("binds exact legendary source prose to the compiled Tail attack and exposes finite offers", () => {
+    const started = startBoss(fighter());
+    expect(started.accepted).toBe(true);
+    expect(started.state.combat.lifecycle).toMatchObject({
+      profile: "adult-black-dragon-boss-v1",
+      objective: { id: "defeat-boss", status: "pending" },
+      morale: null,
+      bossTiming: {
+        revision: "boss-timing-v1",
+        legendary: {
+          maximum: 3,
+          remaining: 3,
+          totalSpent: 0,
+          refresh: "start-of-source-turn",
+          action: {
+            actionRef: LEGENDARY_TAIL,
+            sourceActionKey: "tail-attack",
+            attackContentKey: "open5e:creature-attack:5e-2014:srd-2014:srd_adult-black-dragon/tail",
+          },
+        },
+        lair: {
+          available: true,
+          initiative: { count: 20, orderIndex: 1, cycle: 1, formulaRevision: "initiative-count-20-v1" },
+          action: { actionRef: LAIR_ACID_GEYSER, source: "lantern-reviewed", dc: 15 },
+        },
+      },
+    });
+    expect(deriveActionOffers(started.state).some((offer) => offer.actionId.startsWith("boss_action:"))).toBe(false);
+
+    const ended = apply(started.state, { kind: "end_turn" });
+    expect(ended.accepted).toBe(true);
+    expect(ended.state.combat.lifecycle?.bossTiming?.pendingWindow?.queue).toEqual(["legendary", "lair"]);
+    expect(deriveActionOffers(ended.state)).toEqual([
+      expect.objectContaining({
+        actionId: `boss_action:${LEGENDARY_TAIL}`,
+        timing: "legendary",
+        cost: { legendary: 1 },
+        validTargets: [ended.state.actorId],
+        reasonUnavailable: null,
+      }),
+      expect.objectContaining({ actionId: `boss_action:${PASS}`, timing: "free", cost: {}, validTargets: [] }),
+    ]);
+  });
+
+  it("consumes Legendary Tail once, then resolves the initiative-20 lair save/damage primitive", () => {
+    const state = fighter();
+    state.character.maxHp = 200;
+    state.character.hp = 200;
+    const ended = openLegendaryAndLairWindow(state);
+
+    queuedRolls.push(10, 4, 4);
+    const tail = apply(ended.state, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: ended.state.actorId });
+    expect(tail.accepted).toBe(true);
+    expect(tail.state.character.hp).toBe(186);
+    expect(tail.state.combat.turnBudget).toEqual(ended.state.combat.turnBudget);
+    expect(tail.state.combat.enemies[0]?.reaction).toEqual(ended.state.combat.enemies[0]?.reaction);
+    expect(tail.state.combat.lifecycle?.bossTiming).toMatchObject({
+      legendary: { remaining: 2, totalSpent: 1 },
+      pendingWindow: { queue: ["lair"] },
+    });
+    expect(deriveActionOffers(tail.state)).toEqual([
+      expect.objectContaining({ actionId: `boss_action:${LAIR_ACID_GEYSER}`, timing: "lair", cost: { lair: 1 } }),
+      expect.objectContaining({ actionId: `boss_action:${PASS}` }),
+    ]);
+
+    queuedRolls.push(20, 3, 3);
+    const lair = apply(tail.state, { kind: "boss_action", actionRef: LAIR_ACID_GEYSER, targetId: tail.state.actorId });
+    expect(lair.accepted).toBe(true);
+    expect(lair.state.character.hp).toBe(183);
+    expect(lair.state.combat.lifecycle?.bossTiming).toMatchObject({
+      legendary: { remaining: 3, totalSpent: 1 },
+      lair: { available: false, usedCycle: 1 },
+      pendingWindow: null,
+    });
+    expect(lair.state.combat.activeActorId).toBe(lair.state.combat.enemies[0]?.id);
+    expect(lair.event?.contentKeys).toEqual(expect.arrayContaining([ADULT_BLACK_DRAGON, "open5e:damage-type:5e-2014:srd-2014:acid"]));
+    expect(lair.data).toMatchObject({ actionRef: LAIR_ACID_GEYSER, initiativeCount: 20, initiativeCycle: 1 });
+  });
+
+  it("rejects mismatched content, unknown refs, bad targets, insufficient points, and incapacitated sources without mutation", () => {
+    const base = fighter();
+    const mismatchBefore = structuredClone(base);
+    const mismatch = apply(base, {
+      kind: "combat_start",
+      encounterId: "wrong-boss",
+      encounterName: "Wrong Boss",
+      lifecycleProfile: "adult-black-dragon-boss-v1",
+      creatures: [{ creatureKey: GOBLIN, count: 1 }],
+    });
+    expect(mismatch.accepted).toBe(false);
+    expect(mismatch.code).toBe("boss_profile_mismatch");
+    expect(mismatch.state).toEqual(mismatchBefore);
+
+    const fixedRoster = startBoss(fighter());
+    expect(fixedRoster.accepted).toBe(true);
+    const fixedRosterBefore = structuredClone(fixedRoster.state);
+    const spawned = apply(fixedRoster.state, { kind: "spawn_creature", creatureKey: GOBLIN, count: 1 });
+    expect(spawned.accepted).toBe(false);
+    expect(spawned.code).toBe("boss_profile_fixed_roster");
+    expect(spawned.state).toEqual(fixedRosterBefore);
+
+    const ended = openLegendaryAndLairWindow(fighter());
+    for (const [command, code] of [
+      [{ kind: "boss_action", actionRef: "boss:invented", targetId: ended.state.actorId }, "boss_action_not_offered"],
+      [{ kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: "invented-target" }, "boss_action_target_invalid"],
+    ] as const) {
+      const before = structuredClone(ended.state);
+      const result = apply(ended.state, command);
+      expect(result.accepted).toBe(false);
+      expect(result.code).toBe(code);
+      expect(result.state).toEqual(before);
+    }
+
+    const spent = structuredClone(ended.state);
+    spent.combat.lifecycle!.bossTiming!.legendary.remaining = 0;
+    const spentBefore = structuredClone(spent);
+    const insufficient = apply(spent, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: spent.actorId });
+    expect(insufficient.accepted).toBe(false);
+    expect(insufficient.code).toBe("boss_legendary_resource_insufficient");
+    expect(insufficient.state).toEqual(spentBefore);
+
+    const stunned = structuredClone(ended.state);
+    stunned.combat.enemies[0]!.conditions.push("stunned");
+    const stunnedBefore = structuredClone(stunned);
+    const blocked = apply(stunned, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: stunned.actorId });
+    expect(blocked.accepted).toBe(false);
+    expect(blocked.code).toBe("boss_action_unavailable");
+    expect(blocked.state).toEqual(stunnedBefore);
+
+    const deadSource = structuredClone(ended.state);
+    deadSource.combat.enemies[0]!.alive = false;
+    deadSource.combat.enemies[0]!.hp = 0;
+    const deadSourceBefore = structuredClone(deadSource);
+    const deadBlocked = apply(deadSource, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: deadSource.actorId });
+    expect(deadBlocked.accepted).toBe(false);
+    expect(deadBlocked.code).toBe("boss_action_unavailable");
+    expect(deadBlocked.state).toEqual(deadSourceBefore);
+
+    const outOfRange = structuredClone(ended.state);
+    outOfRange.combat.tactical.actorPosition.x = 20;
+    expect(deriveActionOffers(outOfRange)[0]?.reasonUnavailable).toContain("15-foot reach");
+    const outOfRangeBefore = structuredClone(outOfRange);
+    const rangedBlocked = apply(outOfRange, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: outOfRange.actorId });
+    expect(rangedBlocked.accepted).toBe(false);
+    expect(rangedBlocked.code).toBe("boss_action_target_out_of_range");
+    expect(rangedBlocked.state).toEqual(outOfRangeBefore);
+
+    const terminal = structuredClone(ended.state);
+    terminal.combat.status = "ended";
+    terminal.combat.lifecycle!.phase = "terminal";
+    const terminalBefore = structuredClone(terminal);
+    const afterTerminal = apply(terminal, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: terminal.actorId });
+    expect(afterTerminal.accepted).toBe(false);
+    expect(afterTerminal.code).toBe("no_active_combat");
+    expect(afterTerminal.state).toEqual(terminalBefore);
+  });
+
+  it("treats a passed lair boundary as spent for that persisted initiative cycle", () => {
+    const started = startBoss(fighter(), 10, 11);
+    expect(started.accepted).toBe(true);
+    expect(started.message).toContain("boss-action window opens before initiative begins");
+    expect(started.state.combat.lifecycle?.bossTiming?.pendingWindow?.queue).toEqual(["lair"]);
+    expect(deriveActionOffers(started.state)[0]).toMatchObject({ actionId: `boss_action:${LAIR_ACID_GEYSER}` });
+    const hpBefore = started.state.character.hp;
+    const passed = apply(started.state, { kind: "boss_action", actionRef: PASS });
+    expect(passed.accepted).toBe(true);
+    expect(passed.state.character.hp).toBe(hpBefore);
+    expect(passed.state.combat.lifecycle?.bossTiming).toMatchObject({
+      lair: { available: false, usedCycle: 1 },
+      pendingWindow: null,
+    });
+    const beforeRepeat = structuredClone(passed.state);
+    const repeated = apply(passed.state, { kind: "boss_action", actionRef: LAIR_ACID_GEYSER, targetId: passed.state.actorId });
+    expect(repeated.accepted).toBe(false);
+    expect(repeated.code).toBe("boss_action_off_timing");
+    expect(repeated.state).toEqual(beforeRepeat);
+  });
+
+  it("preserves exactly-once damage/resource evidence across command replay and store restart", () => {
+    const directory = mkdtempSync(join(tmpdir(), "lantern-boss-actions-"));
+    const databasePath = join(directory, "engine.db");
+    const store = new LanternEngineStore(databasePath);
+    let state = createInitialCampaign("boss-store-account", "boss-store-actor");
+    const request = context(state);
+    store.createCampaign(request, state);
+
+    const execute = (command: EngineCommand, id = randomUUID(), expectedVersion = state.version) => {
+      const result = store.executeCommand({
+        context: request,
+        clientCommandId: id,
+        expectedCampaignVersion: expectedVersion,
+        command,
+        tool: command.kind,
+        resolve: (current) => resolveEngineCommand(current, request, id, command, command.kind),
+      });
+      state = result.state;
+      return result;
+    };
+    for (const command of [
+      { kind: "character_create", name: "Persisted Boss Hunter", species: "human", className: "fighter" },
+      { kind: "tutorial_advance" },
+      { kind: "tutorial_advance" },
+    ] as EngineCommand[]) execute(command);
+    queuedRolls.push(20, 18);
+    execute({
+      kind: "combat_start",
+      encounterId: "persisted-black-dragon",
+      encounterName: "Persisted Black Dragon",
+      lifecycleProfile: "adult-black-dragon-boss-v1",
+      creatures: [{ creatureKey: ADULT_BLACK_DRAGON, count: 1 }],
+    });
+    execute({ kind: "end_turn" });
+
+    const hpBefore = state.character.hp;
+    queuedRolls.push(10, 1, 1);
+    const action: EngineCommand = { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: state.actorId };
+    const actionId = randomUUID();
+    const expectedVersion = state.version;
+    const committed = execute(action, actionId, expectedVersion);
+    const callsAfterCommit = deterministicRandomInt.mock.calls.length;
+    const replayed = store.executeCommand({
+      context: request,
+      clientCommandId: actionId,
+      expectedCampaignVersion: expectedVersion,
+      command: action,
+      tool: "boss_action",
+      resolve: (current) => resolveEngineCommand(current, request, actionId, action, "boss_action"),
+    });
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.state).toEqual(committed.state);
+    expect(committed.state.character.hp).toBeLessThan(hpBefore);
+    expect(replayed.state.character.hp).toBe(committed.state.character.hp);
+    expect(replayed.state.combat.lifecycle?.bossTiming?.legendary.totalSpent).toBe(1);
+    expect(deterministicRandomInt.mock.calls.length).toBe(callsAfterCommit);
+    const normalized = normalizeCampaignState(JSON.parse(JSON.stringify(committed.state)) as LanternCampaignState);
+    expect(normalized.combat.lifecycle?.bossTiming).toEqual(committed.state.combat.lifecycle?.bossTiming);
+    const corrupted = JSON.parse(JSON.stringify(committed.state)) as LanternCampaignState;
+    corrupted.combat.lifecycle!.bossTiming!.sourceCombatantId = "invented-source";
+    expect(normalizeCampaignState(corrupted).combat.lifecycle).toBeNull();
+
+    store.close();
+    const reopened = new LanternEngineStore(databasePath);
+    const persisted = reopened.getCampaign(request);
+    expect(persisted.combat.lifecycle?.bossTiming?.legendary.totalSpent).toBe(1);
+    expect(persisted.combat.lifecycle?.bossTiming?.pendingWindow?.queue).toEqual(["lair"]);
+    reopened.close();
+  });
+});

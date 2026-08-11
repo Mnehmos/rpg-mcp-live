@@ -344,6 +344,7 @@ function lifecycleOfferState(): LanternCampaignState {
     claimedRewards: [],
     nonlethalDefeatIds: [],
     retreatPlanRevision: null,
+    bossTiming: null,
   } satisfies EngineEncounterLifecycle;
   return state;
 }
