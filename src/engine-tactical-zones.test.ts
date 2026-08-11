@@ -148,6 +148,7 @@ describe("#175 persistent tactical zones", () => {
       "/effects",
     ]));
     expect(created.data).toMatchObject({
+      tacticalZone: { id: zone.id, revision: 1, affectedActorIds: expect.arrayContaining([state.character.id, insideEnemy.id]) },
       combat: { tactical: { zones: [expect.objectContaining({ id: zone.id, revision: 1 })] } },
       zoneTransitions: [expect.objectContaining({ enteredActorIds: expect.arrayContaining([state.character.id, insideEnemy.id]) })],
     });

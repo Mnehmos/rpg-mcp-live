@@ -9093,8 +9093,18 @@ function reconcileZonesInResolution(resolution: EngineResolution, sourceCommandI
   const sourceData = resolution.data && typeof resolution.data === "object" && !Array.isArray(resolution.data)
     ? resolution.data as Record<string, unknown>
     : {};
+  const sourceZoneId = sourceData.tacticalZone
+    && typeof sourceData.tacticalZone === "object"
+    && !Array.isArray(sourceData.tacticalZone)
+    && typeof (sourceData.tacticalZone as { id?: unknown }).id === "string"
+      ? (sourceData.tacticalZone as { id: string }).id
+      : null;
+  const canonicalSourceZone = sourceZoneId
+    ? resolution.state.combat.tactical.zones.find((zone) => zone.id === sourceZoneId) ?? null
+    : null;
   resolution.data = {
     ...sourceData,
+    ...(canonicalSourceZone ? { tacticalZone: canonicalSourceZone } : {}),
     combat: combatData(resolution.state.combat),
     tacticalZones: resolution.state.combat.tactical.zones,
     zoneTransitions: reconciled.transitions,
