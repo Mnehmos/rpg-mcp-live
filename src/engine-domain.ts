@@ -8357,7 +8357,9 @@ function resolveCheck(
     ? "cancelled"
     : advantageCount > 0 ? "advantage" : disadvantageCount > 0 ? "disadvantage" : "normal";
   const passive = command.kind === "roll_check" && command.passive === true;
-  const firstRoll = passive ? 10 : randomInt(1, 21);
+  const firstRoll = passive
+    ? mode === "advantage" ? 15 : mode === "disadvantage" ? 5 : 10
+    : randomInt(1, 21);
   const secondRoll = !passive && mode !== "normal" && mode !== "cancelled" ? randomInt(1, 21) : null;
   const roll = secondRoll === null
     ? firstRoll

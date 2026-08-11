@@ -199,6 +199,19 @@ describe("#175 persistent tactical zones", () => {
       expect(party.accepted).toBe(true);
       const created = apply(party.state, scenario.command(party.state));
       expect(created.accepted).toBe(true);
+      const passiveScore = scenario.mode === "advantage" ? 15 : 5;
+      const passive = apply(created.state, {
+        kind: "roll_check",
+        ability: "wis",
+        goal: "Notice the zone passively.",
+        passive: true,
+      });
+      expect(passive.accepted).toBe(true);
+      expect(passive.state.lastRoll).toBe(passiveScore);
+      expect(passive.event?.check).toMatchObject({ mode: scenario.mode });
+      expect(passive.event?.rolls).toEqual([
+        { kind: "passive_score", value: passiveScore, sides: undefined },
+      ]);
       const nextRound = advanceToNextPlayerRound(created.state);
       const zoneEffectId = nextRound.effects.find((effect) =>
         effect.status === "active"
