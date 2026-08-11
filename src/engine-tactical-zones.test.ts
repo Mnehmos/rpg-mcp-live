@@ -330,6 +330,23 @@ describe("#175 persistent tactical zones", () => {
     reopened.close();
   });
 
+  it("keeps historical zone provenance valid after the campaign rules pack is re-pinned", () => {
+    const state = encounter();
+    const created = apply(state, followingAura(state));
+    const historicalRulesVersion = created.state.rulesVersion;
+    const repinned = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    repinned.rulesVersion = `${historicalRulesVersion}:reviewed-repin`;
+
+    const continued = apply(repinned, { kind: "end_turn" });
+    expect(continued.accepted).toBe(true);
+    expect(continued.state.rulesVersion).toBe(repinned.rulesVersion);
+    expect(continued.state.combat.tactical.zones[0]!.provenance.rulesVersion).toBe(historicalRulesVersion);
+    expect(continued.state.effects.filter((effect) => effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:")))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ provenance: expect.objectContaining({ rulesVersion: historicalRulesVersion }) }),
+      ]));
+  });
+
   it("fails closed after restart when persisted active zone authority is corrupt", () => {
     for (const corruption of [
       {
@@ -352,6 +369,14 @@ describe("#175 persistent tactical zones", () => {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => {
           state.combat.tactical.actorPosition.x = state.combat.tactical.geometry.bounds.maxX + 1;
+        },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          const duration = state.combat.tactical.zones[0]!.duration;
+          duration.startedRound = state.combat.round + 100;
+          duration.expiresAtRound = duration.startedRound + duration.amount;
         },
       },
     ]) {

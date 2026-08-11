@@ -8890,6 +8890,7 @@ function tacticalZoneStateIssue(
       || zone.shape.radiusFeet !== definition.radiusFeet
       || zone.duration.kind !== "rounds"
       || zone.duration.amount !== definition.durationRounds
+      || zone.duration.startedRound > state.combat.round
       || zone.duration.expiresAtRound !== zone.duration.startedRound + definition.durationRounds
       || (definition.anchorKind === "stationary" && (zone.anchor.kind !== "stationary" || Boolean(tacticalAimIssue(zone.anchor.position, state.combat.tactical.geometry))))
       || (definition.anchorKind === "actor" && (zone.anchor.kind !== "actor" || zone.anchor.actorId !== state.actorId))
@@ -8999,7 +9000,7 @@ function tacticalZoneEffectStateIssue(state: LanternCampaignState): TacticalIssu
         || effect.provenance.sourceContentKey !== null
         || typeof effect.provenance.sourceCommandId !== "string"
         || !effect.provenance.sourceCommandId.trim()
-        || effect.provenance.rulesVersion !== state.rulesVersion
+        || effect.provenance.rulesVersion !== zone.provenance.rulesVersion
         || effect.provenance.formulaRevision !== "tactical-zone-effects-v1"
       ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_effect");
       seenTargets.add(target);
@@ -16915,7 +16916,8 @@ function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "act
     };
   }
   const maxDistanceCells = Math.max(1, ...legacyEnemies.map((enemy) => Math.max(1, Math.ceil(Number(enemy.distanceFeet ?? 5) / TACTICAL_CELL_FEET))));
-  const tactical = normalizeCombatTactical(combat.tactical, combat.encounterId ?? "legacy", actorId, maxDistanceCells);
+  const round = Math.max(0, combat.round ?? 0);
+  const tactical = normalizeCombatTactical(combat.tactical, combat.encounterId ?? "legacy", actorId, maxDistanceCells, round);
   const enemies = legacyEnemies.map((enemy, index) => {
     const position = isTacticalPosition(enemy.position) && enemy.position.frameId === tactical.geometry.frameId
       ? { ...enemy.position }
@@ -16950,7 +16952,7 @@ function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "act
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
     lifecycle: normalizeEncounterLifecycle(combat.lifecycle),
-    round: Math.max(0, combat.round ?? 0),
+    round,
     activeActorId: combat.activeActorId ?? null,
     turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
     tactical,
@@ -17073,6 +17075,7 @@ function normalizeCombatTactical(
   encounterId: string,
   actorId: string,
   maxDistanceCells: number,
+  currentRound: number,
 ): EngineCombatTacticalState {
   const fallback = emptyTacticalState(encounterId);
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
@@ -17115,7 +17118,7 @@ function normalizeCombatTactical(
     ? { ...candidate.actorPosition }
     : { frameId, x: 0, y: 0, z: 0 };
   if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallbackWithIntegrity();
-  const normalizedZones = normalizeTacticalZones(candidate.zones, actorId, geometry);
+  const normalizedZones = normalizeTacticalZones(candidate.zones, actorId, geometry, currentRound);
   return {
     geometry,
     movementMode: "walking",
@@ -17131,6 +17134,7 @@ function normalizeTacticalZones(
   value: unknown,
   actorId: string,
   geometry: EngineTacticalGeometry,
+  currentRound: number,
 ): { zones: EngineTacticalZone[]; integrityIssue: EngineTacticalZoneIntegrityIssue | null } {
   if (value === undefined || value === null) return { zones: [], integrityIssue: null };
   if (!Array.isArray(value)) {
@@ -17165,6 +17169,7 @@ function normalizeTacticalZones(
       || raw.duration.amount !== definition.durationRounds
       || !Number.isInteger(raw.duration.startedRound)
       || raw.duration.startedRound < 0
+      || (raw.status === "active" && raw.duration.startedRound > currentRound)
       || raw.duration.expiresAtRound !== raw.duration.startedRound + definition.durationRounds
       || !isTacticalPosition(raw.currentCenter)
       || raw.currentCenter.frameId !== geometry.frameId
