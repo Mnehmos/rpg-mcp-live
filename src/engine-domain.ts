@@ -8613,8 +8613,9 @@ function tacticalAimIssue(position: EngineTacticalPosition, geometry: EngineTact
 
 export function deriveTacticalAreaSnapshot(
   geometry: EngineTacticalGeometry,
+  casterId: string,
   casterPosition: EngineTacticalPosition,
-  _casterFootprint: EngineTacticalFootprint,
+  casterFootprint: EngineTacticalFootprint,
   enemies: EngineCombatant[],
   aim: EngineTacticalPosition,
   program: CompiledEffectProgram,
@@ -8678,9 +8679,12 @@ export function deriveTacticalAreaSnapshot(
     }
   }
   const includedCells = new Set(cells.map(cellKey));
-  const targetIds = enemies
+  const targetIds = [
+    ...(positionCells(casterPosition, casterFootprint).some((cell) => includedCells.has(cellKey(cell))) ? [casterId] : []),
+    ...enemies
     .filter((enemy) => enemy.alive && positionCells(enemy.position, enemy.footprint).some((cell) => includedCells.has(cellKey(cell))))
-    .map((enemy) => enemy.id);
+    .map((enemy) => enemy.id),
+  ];
   return {
     geometryRevision: geometry.revision,
     frameId: geometry.frameId,
@@ -8846,8 +8850,28 @@ function positionEquals(left: EngineTacticalPosition, right: EngineTacticalPosit
   return left.frameId === right.frameId && left.x === right.x && left.y === right.y && left.z === right.z;
 }
 
+function footprintDistanceFeet(
+  leftPosition: EngineTacticalPosition,
+  leftFootprint: EngineTacticalFootprint,
+  rightPosition: EngineTacticalPosition,
+  rightFootprint: EngineTacticalFootprint,
+): number {
+  let distance = Number.POSITIVE_INFINITY;
+  for (const left of positionCells(leftPosition, leftFootprint)) {
+    for (const right of positionCells(rightPosition, rightFootprint)) {
+      distance = Math.min(distance, Math.max(Math.abs(left.x - right.x), Math.abs(left.y - right.y)) * TACTICAL_CELL_FEET);
+    }
+  }
+  return distance;
+}
+
 function tacticalDistanceFeet(combat: EngineCombat, enemy: EngineCombatant): number {
-  const derived = fiveESimpleDistanceFeet(combat.tactical.actorPosition, enemy.position);
+  const derived = footprintDistanceFeet(
+    combat.tactical.actorPosition,
+    combat.tactical.actorFootprint,
+    enemy.position,
+    enemy.footprint,
+  );
   return Number.isFinite(derived) ? derived : Math.max(0, enemy.distanceFeet);
 }
 
@@ -8859,6 +8883,7 @@ function opportunityAttackFor(enemy: EngineCombatant): CompiledCreatureAttack | 
 
 function movementTriggers(
   from: EngineTacticalPosition,
+  actorFootprint: EngineTacticalFootprint,
   path: EngineTacticalPosition[],
   enemies: EngineCombatant[],
   sourceCommandId: string,
@@ -8870,8 +8895,8 @@ function movementTriggers(
       if (!enemy.alive) continue;
       const attack = opportunityAttackFor(enemy);
       const reachFeet = attack?.distance.reach ?? TACTICAL_REACH_FEET;
-      const distanceBeforeFeet = fiveESimpleDistanceFeet(previous, enemy.position);
-      const distanceAfterFeet = fiveESimpleDistanceFeet(next, enemy.position);
+      const distanceBeforeFeet = footprintDistanceFeet(previous, actorFootprint, enemy.position, enemy.footprint);
+      const distanceAfterFeet = footprintDistanceFeet(next, actorFootprint, enemy.position, enemy.footprint);
       const enters = distanceBeforeFeet > reachFeet && distanceAfterFeet <= reachFeet;
       const leaves = distanceBeforeFeet <= reachFeet && distanceAfterFeet > reachFeet;
       if (enters || leaves) {
@@ -8938,13 +8963,14 @@ function resolveCombatMove(
     to: { ...command.destination },
     path: pathResult.path.map((position) => ({ ...position })),
     costFeet: pathResult.costFeet,
-    triggers: movementTriggers(tactical.actorPosition, pathResult.path, state.combat.enemies, clientCommandId),
+    triggers: movementTriggers(tactical.actorPosition, tactical.actorFootprint, pathResult.path, state.combat.enemies, clientCommandId),
   };
   const next = cloneCampaign(state);
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
   const modifiers: Array<{ name: string; value: number }> = [];
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   const reactionMessages: string[] = [];
+  let interruptedAtTriggerIndex: number | null = null;
   for (const [index, trigger] of plan.triggers.entries()) {
     if (trigger.boundary !== "leaving-reach") continue;
     const enemy = next.combat.enemies.find((candidate) => candidate.id === trigger.enemyId && candidate.alive);
@@ -9003,6 +9029,20 @@ function resolveCombatMove(
       hpAfter: result.hpAfter,
     };
     reactionMessages.push(`${materializeCombatant(enemy).name}'s opportunity ${result.message.toLocaleLowerCase("en-US")}`);
+    if (next.character.hp === 0) {
+      interruptedAtTriggerIndex = index;
+      break;
+    }
+  }
+  if (interruptedAtTriggerIndex !== null) {
+    const stoppingSegment = plan.triggers[interruptedAtTriggerIndex]!.segmentIndex;
+    plan.triggers = plan.triggers.slice(0, interruptedAtTriggerIndex + 1);
+    plan.path = plan.path.slice(0, Math.max(0, stoppingSegment - 1));
+    plan.to = plan.path.at(-1) ?? { ...plan.from };
+    plan.costFeet = plan.path.reduce(
+      (total, position) => total + terrainCostFeet(position, tactical.actorFootprint, tactical.geometry),
+      0,
+    );
   }
   next.combat.tactical.actorPosition = { ...plan.to };
   next.combat.tactical.lastPlan = plan;
@@ -9015,16 +9055,22 @@ function resolveCombatMove(
     clientCommandId,
     command,
     tool,
-    `You move ${plan.costFeet} feet through ${plan.path.length} tactical cell${plan.path.length === 1 ? "" : "s"}.`
+    `${plan.path.length > 0
+      ? `You move ${plan.costFeet} feet through ${plan.path.length} tactical cell${plan.path.length === 1 ? "" : "s"}.`
+      : "You do not leave your starting tactical cell."}`
       + (reactionMessages.length > 0 ? ` ${reactionMessages.join(" ")}` : ""),
     { movement: plan, combat: combatData(next.combat) },
-    "combat_moved",
+    interruptedAtTriggerIndex === null ? "combat_moved" : "combat_move_interrupted",
     rolls,
     modifiers,
     [
       ...changes,
-      { path: "/combat/tactical/actorPosition", before: state.combat.tactical.actorPosition, after: next.combat.tactical.actorPosition },
-      { path: "/combat/turnBudget/movementFeet/spent", before: state.combat.turnBudget.movementFeet.spent, after: next.combat.turnBudget.movementFeet.spent },
+      ...(!positionEquals(state.combat.tactical.actorPosition, next.combat.tactical.actorPosition)
+        ? [{ path: "/combat/tactical/actorPosition", before: state.combat.tactical.actorPosition, after: next.combat.tactical.actorPosition }]
+        : []),
+      ...(state.combat.turnBudget.movementFeet.spent !== next.combat.turnBudget.movementFeet.spent
+        ? [{ path: "/combat/turnBudget/movementFeet/spent", before: state.combat.turnBudget.movementFeet.spent, after: next.combat.turnBudget.movementFeet.spent }]
+        : []),
       { path: "/combat/tactical/lastPlan", before: state.combat.tactical.lastPlan, after: next.combat.tactical.lastPlan },
     ],
     [...new Set(plan.triggers.flatMap((trigger) => trigger.resolution?.attackContentKey ? [trigger.resolution.attackContentKey] : []))],
@@ -9942,6 +9988,7 @@ function resolveCastSpell(
   const tacticalAreaResult = reviewedArea
     ? deriveTacticalAreaSnapshot(
         state.combat.tactical.geometry,
+        state.character.id,
         state.combat.tactical.actorPosition,
         state.combat.tactical.actorFootprint,
         state.combat.enemies,
@@ -9966,30 +10013,32 @@ function resolveCastSpell(
   ) {
     return rejection(state, tool, "invalid_target_count", `${spell.definition.name} requires ${targetLimit} target selection${targetLimit === 1 ? "" : "s"} at this casting level.`);
   }
-  const targets = selectedIds.map((targetId) => findLiveCombatant(state.combat, targetId));
-  if (targets.some((target) => target === null)) {
+  const targets = selectedIds.map((targetId) => tacticalArea && targetId === state.character.id
+    ? { kind: "character" as const, targetId }
+    : { kind: "enemy" as const, targetId, combatant: findLiveCombatant(state.combat, targetId) });
+  if (targets.some((target) => target.kind === "enemy" && target.combatant === null)) {
     return rejection(state, tool, "invalid_spell_target", "Every spell target must be a living combatant in the active encounter.");
   }
   const rangeFeet = executableSpellRangeFeet(spell.definition);
   const outOfRange = tacticalArea
     ? undefined
-    : targets.find((target) => target !== null && tacticalDistanceFeet(state.combat, target) > rangeFeet);
+    : targets.find((target) => target.kind === "enemy" && target.combatant !== null && tacticalDistanceFeet(state.combat, target.combatant) > rangeFeet);
   if (outOfRange) {
-    const distanceFeet = tacticalDistanceFeet(state.combat, outOfRange);
+    const distanceFeet = tacticalDistanceFeet(state.combat, outOfRange.combatant!);
     return rejection(
       state,
       tool,
       "spell_target_out_of_range",
-      `${spell.definition.name} can currently resolve through ${rangeFeet} feet; target ${outOfRange.id} is ${distanceFeet} feet away.`
+      `${spell.definition.name} can currently resolve through ${rangeFeet} feet; target ${outOfRange.targetId} is ${distanceFeet} feet away.`
     );
   }
   if (spell.effect.resolution === "spell-attack") {
-    const coveredTarget = targets.find((target) => target && deriveTacticalCover(
+    const coveredTarget = targets.find((target) => target.kind === "enemy" && target.combatant && deriveTacticalCover(
       state.combat.tactical.geometry,
       state.combat.tactical.actorPosition,
       state.combat.tactical.actorFootprint,
-      target.position,
-      target.footprint,
+      target.combatant.position,
+      target.combatant.footprint,
     ).level === "total");
     if (coveredTarget) {
       return rejection(state, tool, "target_has_total_cover", "Canonical blocking geometry gives that spell target total cover from your position.");
@@ -10034,22 +10083,27 @@ function resolveCastSpell(
 
   const targetResults: Array<Record<string, unknown>> = [];
   for (const [index, sourceTarget] of targets.entries()) {
-    if (!sourceTarget) continue;
-    const target = next.combat.enemies.find((candidate) => candidate.id === sourceTarget.id);
-    if (!target || !target.alive) continue;
-    const targetView = materializeCombatant(target);
+    const isCharacter = sourceTarget.kind === "character";
+    const sourceEnemy = sourceTarget.kind === "enemy" ? sourceTarget.combatant : null;
+    const target = sourceEnemy
+      ? next.combat.enemies.find((candidate) => candidate.id === sourceEnemy.id && candidate.alive) ?? null
+      : null;
+    if (!isCharacter && !target) continue;
+    const targetView = target ? materializeCombatant(target) : null;
+    const targetId = isCharacter ? next.character.id : target!.id;
+    const targetName = isCharacter ? next.character.name : targetView!.name;
     let successfulSave: boolean | null = null;
     let hit = true;
     let critical = false;
     let attackTotal: number | null = null;
     let saveTotal: number | null = null;
-    const cover = spell.effect.resolution === "spell-attack"
+    const cover = spell.effect.resolution === "spell-attack" && sourceEnemy
       ? deriveTacticalCover(
           state.combat.tactical.geometry,
           state.combat.tactical.actorPosition,
           state.combat.tactical.actorFootprint,
-          sourceTarget.position,
-          sourceTarget.footprint,
+          sourceEnemy.position,
+          sourceEnemy.footprint,
         )
       : null;
 
@@ -10057,7 +10111,9 @@ function resolveCastSpell(
       const die = randomInt(1, 21);
       attackTotal = die + spellcasting.spellAttackBonus;
       critical = die === 20;
-      const targetArmorClass = targetView.armorClass + (cover?.armorClassBonus ?? 0);
+      const targetArmorClass = isCharacter
+        ? next.character.ac
+        : targetView!.armorClass + (cover?.armorClassBonus ?? 0);
       hit = die !== 1 && (critical || attackTotal >= targetArmorClass);
       rolls.push({ kind: `spell_attack_${index + 1}`, value: die, sides: 20 });
       modifiers.push(
@@ -10071,7 +10127,9 @@ function resolveCastSpell(
       const ability = spell.definition.savingThrowAbility;
       if (!ability) return rejection(state, tool, "content_tier_insufficient", `${spell.definition.name} has no structured saving throw ability.`);
       const die = randomInt(1, 21);
-      const saveModifier = targetView.savingThrowsAll[ability];
+      const saveModifier = isCharacter
+        ? next.character.savingThrows[ability]
+        : targetView!.savingThrowsAll[ability];
       saveTotal = die + saveModifier;
       successfulSave = saveTotal >= spellcasting.spellSaveDc;
       rolls.push({ kind: `spell_save_${ability}_${index + 1}`, value: die, sides: 20 });
@@ -10082,14 +10140,21 @@ function resolveCastSpell(
     const afterSave = successfulSave
       ? spell.effect.saveOnSuccess === "half" ? Math.floor(rolled / 2) : 0
       : rolled;
-    const damage = applyCreatureDamageAffinity(targetView, spell.effect.damageType.contentKey, afterSave);
-    const beforeHp = target.hp;
-    target.hp = Math.max(0, target.hp - damage);
-    target.alive = target.hp > 0;
-    changes.push({ path: `/combat/enemies/${target.id}/hp`, before: beforeHp, after: target.hp });
+    const damage = isCharacter
+      ? afterSave
+      : applyCreatureDamageAffinity(targetView!, spell.effect.damageType.contentKey, afterSave);
+    const beforeHp = isCharacter ? next.character.hp : target!.hp;
+    if (isCharacter) {
+      applyCharacterDamage(next, damage, "spell-area-self", clientCommandId, changes, rolls, modifiers, critical);
+    } else {
+      target!.hp = Math.max(0, target!.hp - damage);
+      target!.alive = target!.hp > 0;
+      changes.push({ path: `/combat/enemies/${target!.id}/hp`, before: beforeHp, after: target!.hp });
+    }
+    const hpAfter = isCharacter ? next.character.hp : target!.hp;
     targetResults.push({
-      targetId: target.id,
-      targetName: targetView.name,
+      targetId,
+      targetName,
       hit,
       critical,
       attackTotal,
@@ -10100,8 +10165,8 @@ function resolveCastSpell(
       damageApplied: damage,
       damageType: spell.effect.damageType.name,
       hpBefore: beforeHp,
-      hpAfter: target.hp,
-      defeated: !target.alive,
+      hpAfter,
+      defeated: hpAfter === 0,
     });
   }
 

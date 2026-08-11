@@ -1,8 +1,15 @@
+import { describe, expect, it, vi } from "vitest";
+
+const fixedRandomInt = vi.hoisted(() => vi.fn((_min: number, max: number) => max - 1));
+vi.mock("node:crypto", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:crypto")>()),
+  randomInt: fixedRandomInt,
+}));
+
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
 import {
   createInitialCampaign,
   deriveTacticalAreaSnapshot,
@@ -220,6 +227,7 @@ describe("#139 server-derived spell areas", () => {
     expect(program).toBeDefined();
     const area = deriveTacticalAreaSnapshot(
       state.combat.tactical.geometry,
+      state.character.id,
       state.combat.tactical.actorPosition,
       state.combat.tactical.actorFootprint,
       state.combat.enemies,
@@ -235,6 +243,21 @@ describe("#139 server-derived spell areas", () => {
       targetIds: [state.combat.enemies[0]!.id, state.combat.enemies[1]!.id],
       programContentKey: program!.contentKey,
     });
+  });
+
+  it("includes and damages the caster when a reviewed area contains their footprint", () => {
+    const state = wizardEncounter(FIREBALL, [{ x: 1, y: 0 }]);
+    const beforeHp = state.character.hp;
+    const cast = apply(state, areaCast(state, FIREBALL, { x: 0, y: 0 }));
+    expect(cast.accepted).toBe(true);
+    expect(cast.data).toMatchObject({
+      area: { targetIds: [state.character.id, state.combat.enemies[0]!.id] },
+      targetResults: [
+        { targetId: state.character.id, hpBefore: beforeHp, defeated: true },
+        { targetId: state.combat.enemies[0]!.id },
+      ],
+    });
+    expect(cast.state.character.hp).toBe(0);
   });
 
   it("rejects target spoofing, stale geometry, invalid directions, and arbitrary area fields byte-for-byte", () => {
@@ -346,5 +369,40 @@ describe("#139 ordered movement reactions", () => {
     expect(enemyTurn.accepted).toBe(true);
     expect(enemyTurn.state.combat.round).toBe(state.combat.round + 1);
     expect(enemyTurn.state.combat.enemies[0]!.reaction).toEqual({ available: true, spent: false });
+  });
+
+  it("measures leaving reach between occupied footprint cells", () => {
+    const state = fighterEncounter([{ x: 1, y: 0 }]);
+    state.combat.tactical.actorPosition = { frameId: "reaction-frame", x: 3, y: 0, z: 0 };
+    state.combat.enemies[0]!.footprint = { width: 2, height: 2 };
+    const moved = apply(state, move(state, 4, 0));
+    expect(moved.accepted).toBe(true);
+    expect(moved.state.combat.tactical.lastPlan?.triggers).toMatchObject([
+      {
+        enemyId: state.combat.enemies[0]!.id,
+        boundary: "leaving-reach",
+        distanceBeforeFeet: 5,
+        distanceAfterFeet: 10,
+        resolution: { status: "resolved", reactionSpent: true },
+      },
+    ]);
+  });
+
+  it("stops the remaining path before a reaction that downs the mover", () => {
+    const state = fighterEncounter([{ x: 1, y: 0 }]);
+    state.character.hp = 1;
+    const origin = { ...state.combat.tactical.actorPosition };
+    const moved = apply(state, move(state, -2, 0));
+    expect(moved).toMatchObject({ accepted: true, event: { outcome: "combat_move_interrupted" } });
+    expect(moved.state.character.hp).toBe(0);
+    expect(moved.state.combat.tactical.actorPosition).toEqual(origin);
+    expect(moved.state.combat.turnBudget.movementFeet.spent).toBe(0);
+    expect(moved.state.combat.tactical.lastPlan).toMatchObject({
+      from: origin,
+      to: origin,
+      path: [],
+      costFeet: 0,
+      triggers: [{ boundary: "leaving-reach", resolution: { status: "resolved", hpAfter: 0 } }],
+    });
   });
 });
