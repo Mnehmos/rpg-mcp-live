@@ -170,6 +170,7 @@ cast_spell
 combat_action
 advance_turn
 death_save
+remains_action
 loot
 rest
 project
@@ -194,6 +195,8 @@ Runtime arcane synthesis also enters through `content_compile`, but it is execut
 Shipping this topology slice also requires exact-SHA native Railway evidence: both staging services must report the merge SHA, the staging verifier must pass its invariant and deterministic evaluations, and production health must report that same SHA. A green code check alone is not a deployment claim.
 
 Campaign time is an explicit `time.gameTime` calendar aggregate and is separate from wall-clock `updatedAt`. `travel` uses the reviewed `one-day-road-v1` route profile; the engine derives distance, elapsed minutes, navigation, ration/water consumption, watches, weather, random-event evidence, exhaustion, and world-clock/deadline consequences. `rest` advances authoritative time, processes scheduled events exactly once, honors interruption, and applies existing effect clear policies; repeated long rests are gated by one in-fiction day. `project` is the bounded `research-v1` downtime clock. Legacy saves normalize with a zero-time aggregate, and every accepted time-advancing event records before/after game time plus its reason. Background workers, full route/weather catalogs, and multiplayer scheduling remain out of scope.
+
+Character death creates one persisted remains record and atomically transfers ordinary inventory plus matching inventory-backed world objects to its stable ID. The closed `remains_action` command loots one existing item, derives the sole reviewed `dragonborn-scale-v1` harvest, or explicitly cleans up decayed remains; callers cannot supply yield, eligibility, decay, or cleanup outcomes. The `ordinary-remains-v1` decay threshold snapshots reviewed weather at death and advances only through authoritative campaign time. Cleanup retains the ledger and provenance, and it rejects while a linked critical world object still requires recovery. See ADR-H36.
 
 Read tools return authoritative projections without changing the campaign version. A DM turn may use multiple reads and propose multiple ordered, typed effects. The engine validates the complete turn plan against one working snapshot and either commits every effect in one transaction or commits none. The turn receives one idempotency result and increments the campaign version once. See ADR-H15.
 

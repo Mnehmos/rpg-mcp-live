@@ -94,7 +94,7 @@ export const engineItemOwnerRefSchema = z.object({
 export type EngineItemOwnerRef = z.infer<typeof engineItemOwnerRefSchema>;
 
 export const engineItemProvenanceSchema = z.object({
-  kind: z.enum(["starter", "loot", "merchant", "quest", "authored", "open5e"]),
+  kind: z.enum(["starter", "loot", "merchant", "quest", "authored", "open5e", "harvest"]),
   sourceId: z.string().trim().min(1).max(160).optional(),
 }).strict();
 export type EngineItemProvenance = z.infer<typeof engineItemProvenanceSchema>;
@@ -122,13 +122,40 @@ export interface EngineDeathRecord {
   occurredAt: string;
 }
 
+export interface EngineRemainsDecay {
+  profileId: "ordinary-remains-v1";
+  environment: EngineGameWeather;
+  state: "fresh" | "decayed";
+  createdAtMinutes: number;
+  decaysAtMinutes: number;
+  transitionedAtMinutes: number | null;
+}
+
+export interface EngineRemainsHarvest {
+  profileId: "dragonborn-scale-v1" | null;
+  status: "eligible" | "ineligible" | "harvested";
+  resourceItemId: string | null;
+  harvestedAtMinutes: number | null;
+  sourceCommandId: string | null;
+}
+
+export interface EngineRemainsCleanup {
+  status: "present" | "removed";
+  removedAtMinutes: number | null;
+  sourceCommandId: string | null;
+}
+
 export interface EngineCorpse {
   id: string;
   formerActorId: string;
   formerActorName: string;
+  formerActorSpecies: string | null;
   locationRef: string | null;
   inventory: EngineInventoryItem[];
   status: "lootable" | "looted";
+  decay: EngineRemainsDecay;
+  harvest: EngineRemainsHarvest;
+  cleanup: EngineRemainsCleanup;
   provenance: {
     sourceCommandId: string;
     sourceVersion: number;
@@ -1082,6 +1109,7 @@ export const engineToolNameSchema = z.enum([
   "advancement_confirm",
   "npc_advance",
   "death_save",
+  "remains_action",
   "loot",
   "rest",
   "project",
@@ -2013,6 +2041,21 @@ export const engineProjectCommandSchema = z.object({
 }).strict();
 export type EngineProjectCommand = z.infer<typeof engineProjectCommandSchema>;
 
+export const engineRemainsActionCommandSchema = z.object({
+  kind: z.literal("remains_action"),
+  remainsId: z.string().trim().min(1).max(120),
+  action: z.enum(["loot", "harvest", "cleanup"]),
+  itemId: z.string().trim().min(1).max(120).optional(),
+}).strict().superRefine((command, context) => {
+  if (command.action === "loot" && !command.itemId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["itemId"], message: "One existing item id is required for remains loot." });
+  }
+  if (command.action !== "loot" && command.itemId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["itemId"], message: "Harvest and cleanup derive their result without an item id." });
+  }
+});
+export type EngineRemainsActionCommand = z.infer<typeof engineRemainsActionCommandSchema>;
+
 export const engineSpellKeySchema = z.string().trim().max(300).refine(
   (value) => value.startsWith("open5e:spell:") || value.startsWith("runtime:spell:"),
   "Spell keys must reference installed Open5e content or a persisted runtime spell.",
@@ -2328,6 +2371,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     templateId: z.literal("veteran"),
   }).strict(),
   z.object({ kind: z.literal("death_save") }).strict(),
+  engineRemainsActionCommandSchema,
   z
     .object({
       kind: z.literal("loot"),
