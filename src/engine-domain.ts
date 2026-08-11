@@ -8925,7 +8925,7 @@ function installedTacticalZoneRulesVersion(rulesVersion: unknown): rulesVersion 
   if (typeof rulesVersion !== "string" || !rulesVersion.startsWith("open5e-pack@")) return false;
   const packHash = rulesVersion.slice("open5e-pack@".length);
   if (!/^[a-f0-9]{64}$/.test(packHash)) return false;
-  return loadRulesKernelForPackHash(packHash)?.rulesVersion === rulesVersion;
+  return loadRulesKernelForPackHash(packHash) !== null;
 }
 
 export function rejectInvalidTacticalZonePersistence(

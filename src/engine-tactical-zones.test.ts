@@ -26,7 +26,8 @@ import {
 import { queryModifiers } from "./engine-effects.js";
 import { LanternEngineStore } from "./engine-store.js";
 import { commandForTool, parseToolArguments } from "./engine-tools.js";
-import { materializeCombatant } from "./open5e-rules.js";
+import { registerOpen5ePackCompatibilityAlias } from "./content/rules-kernel.js";
+import { materializeCombatant, OPEN5E_RULES_PACK_HASH } from "./open5e-rules.js";
 
 const GOBLIN = "open5e:creature:5e-2014:srd-2014:srd_goblin";
 
@@ -410,6 +411,27 @@ describe("#175 persistent tactical zones", () => {
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ provenance: expect.objectContaining({ rulesVersion: historicalRulesVersion }) }),
       ]));
+  });
+
+  it("preserves a registered compatibility-alias rules identity", () => {
+    const state = encounter();
+    const created = apply(state, followingAura(state));
+    const aliasHash = `${OPEN5E_RULES_PACK_HASH[0] === "0" ? "1" : "0"}${OPEN5E_RULES_PACK_HASH.slice(1)}`;
+    const aliasRulesVersion = `open5e-pack@${aliasHash}`;
+    registerOpen5ePackCompatibilityAlias(aliasHash, OPEN5E_RULES_PACK_HASH);
+    const aliased = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    aliased.combat.tactical.zones[0]!.provenance.rulesVersion = aliasRulesVersion;
+    aliased.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:"))
+      .forEach((effect) => { effect.provenance.rulesVersion = aliasRulesVersion; });
+
+    const normalized = normalizeCampaignState(aliased);
+    expect(normalized.combat.tactical.zoneIntegrityIssue).toBeNull();
+    expect(normalized.combat.tactical.zones[0]!.provenance.rulesVersion).toBe(aliasRulesVersion);
+    expect(normalized.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:")))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ provenance: expect.objectContaining({ rulesVersion: aliasRulesVersion }) }),
+      ]));
+    expect(apply(normalized, { kind: "end_turn" }).accepted).toBe(true);
   });
 
   it("fails closed after restart on duplicate active zone ids or definitions", () => {
