@@ -101,6 +101,14 @@ try {
   const page = await fetch(`${webBaseUrl}/play`);
   const pageHtml = await page.text();
   assert(page.ok && pageHtml.includes("character-background-choice"), "Web did not serve the source-backed character builder.");
+  const favicon = await fetch(`${webBaseUrl}/favicon.ico`);
+  const faviconSvg = await favicon.text();
+  assert(
+    favicon.ok
+      && favicon.headers.get("content-type")?.includes("image/svg+xml")
+      && faviconSvg.includes("<svg"),
+    "Web did not serve the source-backed SVG favicon.",
+  );
 
   const catalogEnvelope = await waitForEngineBackedJson<{ catalog: ContentCatalog }>(`${webBaseUrl}/api/content-catalog`);
   const catalog = catalogEnvelope.catalog;

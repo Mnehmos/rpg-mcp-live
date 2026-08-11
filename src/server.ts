@@ -152,7 +152,7 @@ function requireUser(request: Request, response: Response): string | null {
 }
 
 function sendAppPage(_request: Request, response: Response): void {
-  response.sendFile(path.join(publicDirectory, "index.html"));
+  response.sendFile("index.html", { root: publicDirectory });
 }
 
 async function sendCampaignCommand(
@@ -253,7 +253,7 @@ app.post(
 
 app.use(express.json({ limit: "64kb" }));
 app.get("/favicon.ico", (_request, response) => {
-  response.type("image/svg+xml").sendFile(path.join(publicDirectory, "favicon.svg"));
+  response.type("image/svg+xml").sendFile("favicon.svg", { root: publicDirectory });
 });
 app.use(express.static(publicDirectory, { extensions: ["html"] }));
 
