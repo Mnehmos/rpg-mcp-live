@@ -2125,6 +2125,7 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
     next.character.speed,
     next.version,
     next.character.lifecycleState !== "dead",
+    next.character.abilityModifiers.dex,
   );
   next.quest = normalizeQuest(next.quest ?? ({} as EngineQuest));
   if (!Array.isArray(next.quests) || !next.quests.length) next.quests = [next.quest];
@@ -2137,6 +2138,9 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   // Persisted timed stat effects (for example Shield) are authoritative for
   // the derived AC projection after a save/load or process restart.
   next.character.ac = deriveArmorClass(next.character, next.effects);
+  if (!restoredBossReactionMechanicsValid(next)) {
+    next.combat = quarantineInvalidBossCombat(next.combat);
+  }
   syncConditionProjections(next);
   if (next.currentBeat === undefined) next.currentBeat = null;
   if (!Array.isArray(next.suggestedActions)) next.suggestedActions = [];
@@ -17814,12 +17818,24 @@ function emptyCombat(): EngineCombat {
   };
 }
 
+function quarantineInvalidBossCombat(combat: EngineCombat): EngineCombat {
+  return {
+    ...combat,
+    status: "ended",
+    lifecycle: null,
+    activeActorId: null,
+    pendingReaction: null,
+    lastAction: "invalid_boss_state_quarantined",
+  };
+}
+
 function normalizeCombat(
   combat: EngineCombat | null | undefined,
   actorId = "actor",
   movementFeet = 30,
   campaignVersion = 0,
   sourceAlive = true,
+  actorInitiativeModifier = 0,
 ): EngineCombat {
   if (!combat || !Array.isArray(combat.enemies)) return emptyCombat();
   const legacyEnemies = combat.enemies as Array<Partial<EngineCombatant>>;
@@ -17877,7 +17893,17 @@ function normalizeCombat(
   });
   syncDerivedCombatDistances(tactical, enemies);
   const activeActorId = combat.activeActorId ?? null;
-  const lifecycle = normalizeEncounterLifecycle(combat.lifecycle, enemies, actorId, activeActorId, status, campaignVersion);
+  const lifecycle = normalizeEncounterLifecycle(
+    combat.lifecycle,
+    enemies,
+    actorId,
+    activeActorId,
+    status,
+    campaignVersion,
+    sourceAlive,
+    combat.encounterId ?? null,
+    actorInitiativeModifier,
+  );
   const pendingReaction = normalizePendingReaction(combat.pendingReaction);
   const rawLifecycle = combat.lifecycle && typeof combat.lifecycle === "object" && !Array.isArray(combat.lifecycle)
     ? combat.lifecycle as Partial<EngineEncounterLifecycle>
@@ -17891,25 +17917,13 @@ function normalizeCombat(
   const bossWindow = lifecycle?.profile === REVIEWED_BOSS_PROFILE ? lifecycle.bossTiming?.pendingWindow : null;
   const bossWindowAwaitsReaction = bossWindow?.queue[0] === "legendary"
     && lifecycle?.bossTiming?.legendary.lastConsumedWindowId === bossWindow.id;
+  const terminalBossHasReaction = lifecycle?.profile === REVIEWED_BOSS_PROFILE
+    && lifecycle.phase === "terminal"
+    && pendingReaction !== null;
   const invalidBossState = (claimsReviewedBoss && lifecycle?.profile !== REVIEWED_BOSS_PROFILE)
+    || terminalBossHasReaction
     || ((claimsBossReaction || bossWindowAwaitsReaction) && !restoredBossReactionMatchesWindow(pendingReaction, lifecycle, actorId));
-  if (invalidBossState) {
-    return {
-      status: "ended",
-      encounterId: combat.encounterId ?? null,
-      encounterName: combat.encounterName ?? null,
-      lifecycle: null,
-      round,
-      activeActorId: null,
-      turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
-      tactical,
-      pendingReaction: null,
-      enemies,
-      lootClaimed: combat.lootClaimed ?? false,
-      lastAction: "invalid_boss_state_quarantined",
-    };
-  }
-  return {
+  const normalized: EngineCombat = {
     status,
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
@@ -17923,6 +17937,7 @@ function normalizeCombat(
     lootClaimed: combat.lootClaimed ?? false,
     lastAction: combat.lastAction ?? null,
   };
+  return invalidBossState ? quarantineInvalidBossCombat(normalized) : normalized;
 }
 
 function isTacticalPosition(value: unknown): value is EngineTacticalPosition {
@@ -17952,6 +17967,7 @@ function normalizeBossTiming(
   combatStatus: EngineCombat["status"],
   lifecyclePhase: EngineEncounterLifecycle["phase"],
   campaignVersion: number,
+  actorInitiativeModifier: number,
 ): EngineBossTiming | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineBossTiming>;
@@ -17959,7 +17975,23 @@ function normalizeBossTiming(
   const lair = candidate.lair;
   const { entries, order } = initiative;
   const source = enemies.find((enemy) => enemy.id === candidate.sourceCombatantId);
+  const sourceEntry = entries.find((entry) => entry.actorId === source?.id);
+  const actorEntry = entries.find((entry) => entry.actorId === actorId);
   const entryIds = entries.map((entry) => entry.actorId);
+  const expectedOrder = [...entries]
+    .sort((left, right) => right.total - left.total || right.roll - left.roll || left.tieBreaker.localeCompare(right.tieBreaker))
+    .map((entry) => entry.actorId);
+  const exactInitiativeValues = entries.every((entry) => entry.roll >= 1
+      && entry.roll <= 20
+      && entry.total === entry.roll + entry.modifier
+      && entry.tieBreaker === entry.actorId
+      && !entry.surprised)
+    && actorEntry?.modifier === actorInitiativeModifier
+    && sourceEntry?.modifier === (source ? materializeCombatant(source).abilityModifiers.dex : undefined)
+    && order.every((entry, index) => entry === expectedOrder[index])
+    && entryIds.every((entry, index) => entry === order[index])
+    && initiative.rolledAtVersion >= 1
+    && initiative.rolledAtVersion <= campaignVersion;
   const exactInitiativeRoster = source !== undefined
     && source.id !== actorId
     && entries.length === 2
@@ -17969,7 +18001,8 @@ function normalizeBossTiming(
     && entryIds.includes(actorId)
     && entryIds.includes(source.id)
     && order.includes(actorId)
-    && order.includes(source.id);
+    && order.includes(source.id)
+    && exactInitiativeValues;
   const activeInitiativeValid = combatStatus !== "active"
     || (activeActorId !== null
       && order.includes(activeActorId)
@@ -17980,30 +18013,57 @@ function normalizeBossTiming(
     || !candidate.sourceCombatantId
     || !legendary
     || !lair
+    || !lair.initiative
     || legendary.maximum !== 3
+    || !Number.isInteger(legendary.remaining)
+    || legendary.remaining < 0
+    || legendary.remaining > 3
+    || !Number.isInteger(legendary.totalSpent)
+    || legendary.totalSpent < 0
+    || (legendary.lastConsumedWindowId !== null
+      && (typeof legendary.lastConsumedWindowId !== "string" || !legendary.lastConsumedWindowId))
     || legendary.refresh !== "start-of-source-turn"
     || legendary.action?.actionRef !== REVIEWED_LEGENDARY_ACTION_REF
+    || legendary.action.name !== "Tail Attack"
+    || legendary.action.cost !== 1
     || legendary.action.sourceActionKey !== "tail-attack"
     || legendary.action.sourceDescriptionSha256 !== REVIEWED_LEGENDARY_SOURCE_SHA256
     || legendary.action.attackContentKey !== REVIEWED_TAIL_ATTACK_CONTENT_KEY
     || lair.action?.actionRef !== REVIEWED_LAIR_ACTION_REF
+    || lair.action.name !== "Acid Geyser"
+    || lair.action.source !== "lantern-reviewed"
+    || lair.action.ability !== "dex"
+    || lair.action.dc !== 15
+    || lair.action.damage?.diceCount !== 2
+    || lair.action.damage.dieSides !== 6
+    || lair.action.damage.bonus !== 0
+    || lair.action.damage.type !== "acid"
+    || lair.action.damage.saveOnSuccess !== "half"
+    || typeof lair.available !== "boolean"
+    || !Number.isInteger(lair.initiative.cycle)
+    || lair.initiative.cycle < 1
+    || lair.initiative.count !== 20
+    || lair.initiative.formulaRevision !== "initiative-count-20-v1"
     || enemies.length !== 1
     || !source
     || !exactInitiativeRoster
     || !activeInitiativeValid
     || !reviewedBossTailBinding(source)
   ) return null;
-  const remaining = Number.isInteger(legendary.remaining) ? Math.max(0, Math.min(3, legendary.remaining)) : 0;
-  const totalSpent = Number.isInteger(legendary.totalSpent) ? Math.max(0, legendary.totalSpent) : 0;
-  const cycle = Number.isInteger(lair.initiative?.cycle) ? Math.max(1, lair.initiative.cycle) : 1;
-  const usedCycle = Number.isInteger(lair.usedCycle) && lair.usedCycle! >= 1 ? lair.usedCycle! : null;
+  const remaining = legendary.remaining;
+  const totalSpent = legendary.totalSpent;
+  const cycle = lair.initiative.cycle;
+  const usedCycle = lair.usedCycle === null ? null : lair.usedCycle;
+  if (usedCycle !== null && (!Number.isInteger(usedCycle) || usedCycle < 1)) return null;
   if (usedCycle !== null && usedCycle > cycle) return null;
   const lastConsumedWindowId = typeof legendary.lastConsumedWindowId === "string" ? legendary.lastConsumedWindowId : null;
-  const lairAvailable = usedCycle === cycle ? false : Boolean(lair.available);
+  const lairAvailable = lair.available;
   const lairOrderIndex = entries.filter((entry) => entry.total > 20).length;
+  if (lair.initiative.orderIndex !== lairOrderIndex || lairAvailable !== (usedCycle !== cycle)) return null;
   let pendingWindow: EngineBossTiming["pendingWindow"] = null;
   const rawWindow = candidate.pendingWindow;
-  if (rawWindow !== null && rawWindow !== undefined) {
+  if (rawWindow === undefined) return null;
+  if (rawWindow !== null) {
     if (typeof rawWindow !== "object" || Array.isArray(rawWindow)) return null;
     const rawQueue = Array.isArray(rawWindow.queue) ? rawWindow.queue : [];
     const queue = rawQueue.filter((entry): entry is EngineBossActionWindowKind => entry === "legendary" || entry === "lair");
@@ -18117,6 +18177,9 @@ function normalizeEncounterLifecycle(
   activeActorId: string | null,
   combatStatus: EngineCombat["status"],
   campaignVersion: number,
+  playerAlive: boolean,
+  encounterId: string | null,
+  actorInitiativeModifier: number,
 ): EngineEncounterLifecycle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineEncounterLifecycle>;
@@ -18169,6 +18232,13 @@ function normalizeEncounterLifecycle(
   const outcome = ["killed", "subdued", "surrendered", "captured", "escaped", "player_surrendered", "player_defeated"].includes(candidate.outcome ?? "")
     ? candidate.outcome as EngineEncounterOutcome
     : null;
+  const outcomeId = typeof candidate.outcomeId === "string" ? candidate.outcomeId : null;
+  const objectiveStatus = candidate.objective?.status === "succeeded" || candidate.objective?.status === "failed"
+    ? candidate.objective.status
+    : "pending";
+  const nonlethalDefeatIds = Array.isArray(candidate.nonlethalDefeatIds)
+    ? candidate.nonlethalDefeatIds.filter((id): id is string => typeof id === "string")
+    : [];
   const evidence = rawSurprise.evidence && typeof rawSurprise.evidence === "object"
     ? rawSurprise.evidence as EngineEncounterApproachEvidence
     : null;
@@ -18192,12 +18262,87 @@ function normalizeEncounterLifecycle(
     },
     initiative,
     outcome,
-    outcomeId: typeof candidate.outcomeId === "string" ? candidate.outcomeId : null,
+    outcomeId,
     claimedRewards: Array.isArray(candidate.claimedRewards) ? candidate.claimedRewards.filter((key): key is string => typeof key === "string") : [],
-    nonlethalDefeatIds: Array.isArray(candidate.nonlethalDefeatIds) ? candidate.nonlethalDefeatIds.filter((id): id is string => typeof id === "string") : [],
+    nonlethalDefeatIds,
     retreatPlanRevision: typeof candidate.retreatPlanRevision === "number" && Number.isInteger(candidate.retreatPlanRevision) ? candidate.retreatPlanRevision : null,
   };
   if (candidate.profile === REVIEWED_BOSS_PROFILE) {
+    const rawEntries = Array.isArray(rawInitiative.entries) ? rawInitiative.entries : [];
+    const rawOrder = Array.isArray(rawInitiative.order) ? rawInitiative.order : [];
+    const rawInitiativePreserved = rawInitiative.formulaRevision === "initiative-v1"
+      && rawEntries.length === entries.length
+      && rawEntries.every((raw, index) => {
+        if (!raw || typeof raw !== "object") return false;
+        const normalized = entries[index];
+        const entry = raw as Partial<EngineEncounterInitiativeEntry>;
+        return Boolean(normalized)
+          && entry.actorId === normalized!.actorId
+          && entry.roll === normalized!.roll
+          && entry.modifier === normalized!.modifier
+          && entry.total === normalized!.total
+          && entry.tieBreaker === normalized!.tieBreaker
+          && entry.surprised === normalized!.surprised;
+      })
+      && rawOrder.length === order.length
+      && rawOrder.every((entry, index) => entry === order[index])
+      && rawInitiative.activeIndex === initiative.activeIndex
+      && rawInitiative.rolledAtVersion === initiative.rolledAtVersion;
+    const rawBossLifecycleValid = (candidate.phase === "active" || candidate.phase === "terminal")
+      && (candidate.outcome === null
+        || candidate.outcome === "killed"
+        || candidate.outcome === "subdued"
+        || candidate.outcome === "player_surrendered"
+        || candidate.outcome === "player_defeated")
+      && (candidate.outcomeId === null || typeof candidate.outcomeId === "string")
+      && candidate.morale === null
+      && candidate.objective?.id === "defeat-boss"
+      && (candidate.objective.status === "pending"
+        || candidate.objective.status === "succeeded"
+        || candidate.objective.status === "failed")
+      && candidate.surprise?.eligible === false
+      && candidate.surprise.consumed === true
+      && candidate.surprise.source === "compatibility-default"
+      && candidate.surprise.evidence === null
+      && Array.isArray(candidate.claimedRewards)
+      && Array.isArray(candidate.nonlethalDefeatIds)
+      && candidate.retreatPlanRevision === null
+      && rawInitiativePreserved;
+    if (!rawBossLifecycleValid) return null;
+    const source = enemies[0];
+    const activeLifecycleValid = combatStatus === "active"
+      && phase === "active"
+      && outcome === null
+      && outcomeId === null
+      && objectiveStatus === "pending"
+      && playerAlive
+      && source?.alive === true;
+    const terminalOutcomeValid = outcome === "killed"
+      || outcome === "subdued"
+      || outcome === "player_surrendered"
+      || outcome === "player_defeated";
+    const terminalObjectiveValid = outcome === "player_defeated"
+      ? objectiveStatus === "failed"
+      : objectiveStatus === "succeeded";
+    const terminalActorsValid = outcome === "killed" || outcome === "subdued"
+      ? playerAlive && source?.alive === false
+      : outcome === "player_surrendered"
+        ? playerAlive && source?.alive === true
+        : outcome === "player_defeated" && !playerAlive && source?.alive === true;
+    const terminalNonlethalValid = outcome === "subdued"
+      ? Boolean(source && nonlethalDefeatIds.includes(source.id))
+      : outcome === "killed"
+        ? Boolean(source && !nonlethalDefeatIds.includes(source.id))
+        : true;
+    const terminalLifecycleValid = combatStatus === "ended"
+      && activeActorId === null
+      && phase === "terminal"
+      && terminalOutcomeValid
+      && terminalObjectiveValid
+      && terminalActorsValid
+      && terminalNonlethalValid
+      && outcomeId === `${encounterId ?? "encounter"}:${outcome}`;
+    if (!activeLifecycleValid && !terminalLifecycleValid) return null;
     const bossTiming = normalizeBossTiming(
       candidate.bossTiming,
       initiative,
@@ -18207,6 +18352,7 @@ function normalizeEncounterLifecycle(
       combatStatus,
       phase,
       campaignVersion,
+      actorInitiativeModifier,
     );
     if (!bossTiming) return null;
     return {
@@ -18215,7 +18361,7 @@ function normalizeEncounterLifecycle(
       morale: null,
       objective: {
         id: "defeat-boss",
-        status: candidate.objective?.status === "succeeded" || candidate.objective?.status === "failed" ? candidate.objective.status : "pending",
+        status: objectiveStatus,
       },
       bossTiming,
     };
@@ -18621,30 +18767,39 @@ function normalizePathTrigger(value: unknown, index: number): EnginePathTrigger 
 function normalizePendingReaction(value: unknown): EnginePendingReaction | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EnginePendingReaction>;
+  const resumeMode = candidate.resumeMode === "continue-character-turn"
+    || candidate.resumeMode === "finish-boss-window"
+    || candidate.resumeMode === "finish-creature-turn"
+    ? candidate.resumeMode
+    : null;
   if (
     candidate.version !== 1
-    || typeof candidate.id !== "string"
-    || typeof candidate.kind !== "string"
+    || typeof candidate.id !== "string" || !candidate.id
+    || typeof candidate.kind !== "string" || !candidate.kind
     || candidate.trigger !== "incoming-attack-would-hit"
-    || typeof candidate.sourceCommandId !== "string"
-    || typeof candidate.sourceVersion !== "number"
-    || typeof candidate.actorId !== "string"
-    || typeof candidate.attackerId !== "string"
-    || typeof candidate.targetId !== "string"
-    || typeof candidate.sourceActionKey !== "string"
-    || typeof candidate.attackName !== "string"
-    || typeof candidate.attackRoll !== "number"
-    || typeof candidate.attackTotal !== "number"
-    || typeof candidate.attackBonus !== "number"
+    || typeof candidate.sourceCommandId !== "string" || !candidate.sourceCommandId
+    || !Number.isInteger(candidate.sourceVersion) || candidate.sourceVersion! < 0
+    || typeof candidate.actorId !== "string" || !candidate.actorId
+    || typeof candidate.attackerId !== "string" || !candidate.attackerId
+    || typeof candidate.targetId !== "string" || !candidate.targetId
+    || typeof candidate.sourceActionKey !== "string" || !candidate.sourceActionKey
+    || typeof candidate.attackName !== "string" || !candidate.attackName
+    || !Number.isInteger(candidate.attackRoll) || candidate.attackRoll! < 1 || candidate.attackRoll! > 20
+    || !Number.isInteger(candidate.attackTotal)
+    || !Number.isInteger(candidate.attackBonus)
     || typeof candidate.critical !== "boolean"
-    || typeof candidate.originalArmorClass !== "number"
-    || typeof candidate.damageDiceCount !== "number"
-    || typeof candidate.damageDieSides !== "number"
-    || typeof candidate.damageBonus !== "number"
-    || typeof candidate.damageType !== "string"
+    || !Number.isInteger(candidate.originalArmorClass) || candidate.originalArmorClass! < 0
+    || !Number.isInteger(candidate.damageDiceCount) || candidate.damageDiceCount! < 0
+    || !Number.isInteger(candidate.damageDieSides) || candidate.damageDieSides! < 1
+    || !Number.isInteger(candidate.damageBonus)
+    || typeof candidate.damageType !== "string" || !candidate.damageType
     || !Array.isArray(candidate.eligibleReactionIds)
+    || candidate.eligibleReactionIds.some((id) => typeof id !== "string" || !id)
     || !["offered", "accepted", "declined", "resolved"].includes(candidate.status ?? "")
-    || typeof candidate.resumeToken !== "string"
+    || resumeMode === null
+    || (candidate.movementTriggerId !== null && typeof candidate.movementTriggerId !== "string")
+    || (candidate.bossWindowId !== null && typeof candidate.bossWindowId !== "string")
+    || typeof candidate.resumeToken !== "string" || !candidate.resumeToken
   ) return null;
   return {
     version: 1,
@@ -18652,30 +18807,26 @@ function normalizePendingReaction(value: unknown): EnginePendingReaction | null 
     kind: candidate.kind,
     trigger: "incoming-attack-would-hit",
     sourceCommandId: candidate.sourceCommandId,
-    sourceVersion: Math.max(0, Math.trunc(candidate.sourceVersion)),
+    sourceVersion: candidate.sourceVersion!,
     actorId: candidate.actorId,
     attackerId: candidate.attackerId,
     targetId: candidate.targetId,
     sourceActionKey: candidate.sourceActionKey,
     attackName: candidate.attackName,
-    attackRoll: Math.max(1, Math.min(20, Math.trunc(candidate.attackRoll))),
-    attackTotal: Math.trunc(candidate.attackTotal),
-    attackBonus: Math.trunc(candidate.attackBonus),
+    attackRoll: candidate.attackRoll!,
+    attackTotal: candidate.attackTotal!,
+    attackBonus: candidate.attackBonus!,
     critical: candidate.critical,
-    originalArmorClass: Math.trunc(candidate.originalArmorClass),
-    damageDiceCount: Math.max(0, Math.trunc(candidate.damageDiceCount)),
-    damageDieSides: Math.max(1, Math.trunc(candidate.damageDieSides)),
-    damageBonus: Math.trunc(candidate.damageBonus),
+    originalArmorClass: candidate.originalArmorClass!,
+    damageDiceCount: candidate.damageDiceCount!,
+    damageDieSides: candidate.damageDieSides!,
+    damageBonus: candidate.damageBonus!,
     damageType: candidate.damageType,
-    eligibleReactionIds: candidate.eligibleReactionIds.filter((id): id is string => typeof id === "string"),
+    eligibleReactionIds: [...candidate.eligibleReactionIds] as string[],
     status: candidate.status!,
-    resumeMode: candidate.resumeMode === "continue-character-turn"
-      ? "continue-character-turn"
-      : candidate.resumeMode === "finish-boss-window"
-        ? "finish-boss-window"
-        : "finish-creature-turn",
-    movementTriggerId: typeof candidate.movementTriggerId === "string" ? candidate.movementTriggerId : null,
-    bossWindowId: typeof candidate.bossWindowId === "string" ? candidate.bossWindowId : null,
+    resumeMode,
+    movementTriggerId: candidate.movementTriggerId ?? null,
+    bossWindowId: candidate.bossWindowId ?? null,
     resumeToken: candidate.resumeToken,
   };
 }
@@ -18698,6 +18849,36 @@ function restoredBossReactionMatchesWindow(
     && reaction.bossWindowId === window?.id
     && window.queue[0] === "legendary"
     && timing?.legendary.lastConsumedWindowId === window.id;
+}
+
+function restoredBossReactionMechanicsValid(state: LanternCampaignState): boolean {
+  const reaction = state.combat.pendingReaction;
+  if (reaction?.resumeMode !== "finish-boss-window") return true;
+  const lifecycle = state.combat.lifecycle;
+  if (lifecycle?.profile !== REVIEWED_BOSS_PROFILE) return false;
+  const source = state.combat.enemies.find((enemy) => enemy.id === lifecycle.bossTiming?.sourceCombatantId);
+  const binding = source ? reviewedBossTailBinding(source) : null;
+  if (!source || !binding) return false;
+  const attack = binding.tailAttack;
+  const cover = incomingCharacterCover(state, source);
+  const armorClass = characterArmorClassWithCover(state, cover);
+  const expectedReactionIds = eligibleIncomingHitReactions(state).map((spell) => spell.contentKey);
+  return reaction.sourceVersion === state.version - 1
+    && reaction.targetId === state.character.id
+    && reaction.attackName === attack.name
+    && reaction.attackRoll >= 2
+    && reaction.attackTotal === reaction.attackRoll + attack.toHit
+    && reaction.attackBonus === attack.toHit
+    && reaction.critical === (reaction.attackRoll === 20)
+    && cover.level !== "total"
+    && (reaction.critical || reaction.attackTotal >= armorClass)
+    && reaction.originalArmorClass === armorClass
+    && reaction.damageDiceCount === attack.damage.diceCount * (reaction.critical ? 2 : 1)
+    && reaction.damageDieSides === attack.damage.dieSides
+    && reaction.damageBonus === attack.damage.bonus
+    && reaction.damageType === attack.damage.typeName
+    && reaction.eligibleReactionIds.length === expectedReactionIds.length
+    && reaction.eligibleReactionIds.every((id, index) => id === expectedReactionIds[index]);
 }
 
 function normalizeActionResources(

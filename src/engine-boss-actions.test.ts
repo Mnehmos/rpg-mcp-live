@@ -174,7 +174,6 @@ describe("reviewed boss-action timing", () => {
 
   it("offers Shield before Legendary Tail damage and resumes the same persisted boss window", () => {
     const ended = openLegendaryAndLairWindow(wizard());
-    ended.state.character.ac = 10;
     const hpBefore = ended.state.character.hp;
     queuedRolls.push(2);
     const offered = apply(ended.state, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: ended.state.actorId });
@@ -225,6 +224,32 @@ describe("reviewed boss-action timing", () => {
       pendingReaction: null,
       lastAction: "invalid_boss_state_quarantined",
     });
+    const rejectReactionMechanics = (
+      mutate: (reaction: NonNullable<LanternCampaignState["combat"]["pendingReaction"]>) => void,
+    ) => {
+      const corrupted = structuredClone(offered.state);
+      mutate(corrupted.combat.pendingReaction!);
+      expect(normalizeCampaignState(corrupted).combat).toMatchObject({
+        status: "ended",
+        activeActorId: null,
+        lifecycle: null,
+        pendingReaction: null,
+        lastAction: "invalid_boss_state_quarantined",
+      });
+    };
+    rejectReactionMechanics((reaction) => { reaction.attackName = "Invented Tail"; });
+    rejectReactionMechanics((reaction) => { reaction.attackRoll += 1; });
+    rejectReactionMechanics((reaction) => { reaction.attackTotal += 1; });
+    rejectReactionMechanics((reaction) => { reaction.attackBonus += 1; });
+    rejectReactionMechanics((reaction) => { reaction.critical = true; });
+    rejectReactionMechanics((reaction) => { reaction.originalArmorClass += 1; });
+    rejectReactionMechanics((reaction) => { reaction.damageDiceCount += 1; });
+    rejectReactionMechanics((reaction) => { reaction.damageDieSides += 1; });
+    rejectReactionMechanics((reaction) => { reaction.damageBonus += 1; });
+    rejectReactionMechanics((reaction) => { reaction.damageType = "invented"; });
+    rejectReactionMechanics((reaction) => { reaction.eligibleReactionIds = []; });
+    rejectReactionMechanics((reaction) => { reaction.targetId = "invented-target"; });
+    rejectReactionMechanics((reaction) => { reaction.sourceVersion -= 1; });
     const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(offered.state)) as LanternCampaignState);
     expect(restarted.combat.pendingReaction).toEqual(offered.state.combat.pendingReaction);
 
@@ -351,10 +376,58 @@ describe("reviewed boss-action timing", () => {
     rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.pendingWindow!.triggerActorId = sourceId; });
     rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.pendingWindow!.queue = ["lair", "legendary"]; });
     rejectWindow((state) => { state.combat.activeActorId = state.actorId; });
+    rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.legendary.remaining = 4; });
+    rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.lair.usedCycle = 0; });
+    rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.lair.available = false; });
+    rejectWindow((state) => {
+      const actorEntry = state.combat.lifecycle!.initiative.entries.find((entry) => entry.actorId === state.actorId)!;
+      actorEntry.modifier += 1;
+      actorEntry.total += 1;
+    });
     rejectWindow((state) => {
       for (const entry of state.combat.lifecycle!.initiative.entries) entry.total = 21;
       state.combat.lifecycle!.bossTiming!.pendingWindow!.queue = ["lair"];
     });
+  });
+
+  it("quarantines cross-field boss lifecycle contradictions", () => {
+    const started = startBoss(fighter());
+    expect(started.accepted).toBe(true);
+    const terminal = structuredClone(started.state);
+    terminal.combat.status = "ended";
+    terminal.combat.activeActorId = null;
+    terminal.combat.enemies[0]!.hp = 0;
+    terminal.combat.enemies[0]!.alive = false;
+    terminal.combat.lifecycle!.phase = "terminal";
+    terminal.combat.lifecycle!.outcome = "killed";
+    terminal.combat.lifecycle!.outcomeId = `${terminal.combat.encounterId}:killed`;
+    terminal.combat.lifecycle!.objective.status = "succeeded";
+    terminal.combat.lifecycle!.bossTiming!.pendingWindow = null;
+    expect(normalizeCampaignState(terminal).combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "killed",
+      objective: { status: "succeeded" },
+    });
+
+    const rejectLifecycle = (mutate: (state: LanternCampaignState) => void) => {
+      const corrupted = structuredClone(terminal);
+      mutate(corrupted);
+      expect(normalizeCampaignState(corrupted).combat).toMatchObject({
+        status: "ended",
+        activeActorId: null,
+        lifecycle: null,
+        pendingReaction: null,
+        lastAction: "invalid_boss_state_quarantined",
+      });
+    };
+    rejectLifecycle((state) => {
+      state.combat.status = "active";
+      state.combat.activeActorId = state.actorId;
+    });
+    rejectLifecycle((state) => { state.combat.lifecycle!.phase = "active"; });
+    rejectLifecycle((state) => { state.combat.lifecycle!.outcome = null; });
+    rejectLifecycle((state) => { state.combat.lifecycle!.outcomeId = "invented-outcome"; });
+    rejectLifecycle((state) => { state.combat.lifecycle!.objective.status = "pending"; });
   });
 
   it("rejects mismatched content, unknown refs, bad targets, insufficient points, and incapacitated sources without mutation", () => {
