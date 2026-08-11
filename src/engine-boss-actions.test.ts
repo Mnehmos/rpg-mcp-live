@@ -186,7 +186,7 @@ describe("reviewed boss-action timing", () => {
     });
     expect(offered.state.combat.lifecycle?.bossTiming).toMatchObject({
       legendary: { remaining: 2, totalSpent: 1 },
-      pendingWindow: { queue: ["legendary", "lair"] },
+      pendingWindow: { queue: ["legendary", "lair"], legendaryResolution: "used" },
     });
     const mismatched = structuredClone(offered.state);
     mismatched.combat.pendingReaction!.bossWindowId = "invented-window";
@@ -250,8 +250,12 @@ describe("reviewed boss-action timing", () => {
     rejectReactionMechanics((reaction) => { reaction.eligibleReactionIds = []; });
     rejectReactionMechanics((reaction) => { reaction.targetId = "invented-target"; });
     rejectReactionMechanics((reaction) => { reaction.sourceVersion -= 1; });
-    const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(offered.state)) as LanternCampaignState);
-    expect(restarted.combat.pendingReaction).toEqual(offered.state.combat.pendingReaction);
+    const profileUpdated = apply(offered.state, { kind: "experience_feedback_add", rating: 4 });
+    expect(profileUpdated.accepted).toBe(true);
+    expect(profileUpdated.state.version).toBe(offered.state.version + 1);
+    expect(profileUpdated.state.combat.pendingReaction).toEqual(offered.state.combat.pendingReaction);
+    const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(profileUpdated.state)) as LanternCampaignState);
+    expect(restarted.combat.pendingReaction).toEqual(profileUpdated.state.combat.pendingReaction);
 
     const pending = restarted.combat.pendingReaction!;
     const slotBefore = restarted.character.spellcasting!.slots["1"];
@@ -387,6 +391,24 @@ describe("reviewed boss-action timing", () => {
     rejectWindow((state) => {
       for (const entry of state.combat.lifecycle!.initiative.entries) entry.total = 21;
       state.combat.lifecycle!.bossTiming!.pendingWindow!.queue = ["lair"];
+    });
+
+    const passed = apply(ended.state, { kind: "boss_action", actionRef: PASS });
+    expect(passed.accepted).toBe(true);
+    expect(passed.state.combat.lifecycle?.bossTiming).toMatchObject({
+      legendary: { remaining: 3, totalSpent: 0 },
+      pendingWindow: { queue: ["lair"], legendaryResolution: "passed" },
+    });
+    expect(normalizeCampaignState(structuredClone(passed.state)).combat.lifecycle?.bossTiming?.pendingWindow)
+      .toEqual(passed.state.combat.lifecycle?.bossTiming?.pendingWindow);
+    const readdedLegendary = structuredClone(passed.state);
+    readdedLegendary.combat.lifecycle!.bossTiming!.pendingWindow!.queue = ["legendary", "lair"];
+    expect(normalizeCampaignState(readdedLegendary).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
     });
   });
 

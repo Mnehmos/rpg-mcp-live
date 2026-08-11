@@ -10105,6 +10105,7 @@ function compileReviewedBossTiming(
           triggerActorId: null,
           resumeActorId: initiative.order[0],
           queue: ["lair"],
+          legendaryResolution: "not-offered",
           openedAtVersion: state.version + 1,
         }
       : null,
@@ -10319,7 +10320,9 @@ function prepareReviewedBossTransition(
     ? boundaryIndex === 0 || boundaryIndex === order.length
     : boundaryIndex > currentIndex && boundaryIndex <= nextIndex;
   const queue: EngineBossActionWindowKind[] = [];
-  if (triggerActorId !== timing.sourceCombatantId && timing.legendary.remaining >= timing.legendary.action.cost) {
+  const legendaryOffered = triggerActorId !== timing.sourceCombatantId
+    && timing.legendary.remaining >= timing.legendary.action.cost;
+  if (legendaryOffered) {
     queue.push("legendary");
   }
   if (crossesLairBoundary && timing.lair.available) queue.push("lair");
@@ -10329,6 +10332,7 @@ function prepareReviewedBossTransition(
         triggerActorId,
         resumeActorId,
         queue,
+        legendaryResolution: legendaryOffered ? "pending" : "not-offered",
         openedAtVersion: state.version + 1,
       }
     : null;
@@ -12949,8 +12953,12 @@ function resolveBossAction(
   }
   if (command.actionRef === REVIEWED_BOSS_PASS_REF) {
     if (command.targetId) return rejection(state, tool, "boss_pass_target_forbidden", "Passing a boss-action window does not accept a target.");
+    if (currentKind === "legendary" && window.legendaryResolution !== "pending") {
+      return rejection(state, tool, "boss_window_consumed", "This legendary action window was already resolved.");
+    }
     const next = cloneCampaign(state);
     const beforeTiming = structuredClone(timing);
+    if (currentKind === "legendary") activeBossTiming(next)!.pendingWindow!.legendaryResolution = "passed";
     completeReviewedBossWindow(next, currentKind);
     next.combat.lastAction = `${REVIEWED_BOSS_PASS_REF}:${currentKind}`;
     return commit(
@@ -12990,6 +12998,9 @@ function resolveBossAction(
     if (timing.legendary.lastConsumedWindowId === window.id) {
       return rejection(state, tool, "boss_window_consumed", "This legendary action window was already consumed.");
     }
+    if (window.legendaryResolution !== "pending") {
+      return rejection(state, tool, "boss_window_consumed", "This legendary action window was already resolved.");
+    }
     const binding = reviewedBossTailBinding(source);
     if (
       !binding
@@ -13019,6 +13030,7 @@ function resolveBossAction(
     nextTiming.legendary.remaining -= action.cost;
     nextTiming.legendary.totalSpent += action.cost;
     nextTiming.legendary.lastConsumedWindowId = window.id;
+    nextTiming.pendingWindow!.legendaryResolution = "used";
     const attackResult = resolveOneCreatureAttack(
       next,
       attack,
@@ -18068,6 +18080,7 @@ function normalizeBossTiming(
     const rawQueue = Array.isArray(rawWindow.queue) ? rawWindow.queue : [];
     const queue = rawQueue.filter((entry): entry is EngineBossActionWindowKind => entry === "legendary" || entry === "lair");
     const queueKey = queue.join(",");
+    const legendaryResolution = rawWindow.legendaryResolution;
     const queueShapeValid = rawQueue.length === queue.length
       && (queueKey === "legendary" || queueKey === "lair" || queueKey === "legendary,lair");
     const resumeIndex = typeof rawWindow.resumeActorId === "string" ? order.indexOf(rawWindow.resumeActorId) : -1;
@@ -18081,6 +18094,10 @@ function normalizeBossTiming(
       && initiative.activeIndex === resumeIndex
       && openedAtVersion >= 1
       && openedAtVersion <= campaignVersion
+      && (legendaryResolution === "pending"
+        || legendaryResolution === "used"
+        || legendaryResolution === "passed"
+        || legendaryResolution === "not-offered")
       && queueShapeValid;
     let semanticWindowValid = false;
     if (commonWindowValid && rawWindow.triggerActorId === null) {
@@ -18092,6 +18109,7 @@ function normalizeBossTiming(
         && remaining === 3
         && totalSpent === 0
         && lastConsumedWindowId === null
+        && legendaryResolution === "not-offered"
         && queueKey === "lair";
     } else if (commonWindowValid && typeof rawWindow.triggerActorId === "string") {
       const triggerIndex = order.indexOf(rawWindow.triggerActorId);
@@ -18105,21 +18123,28 @@ function normalizeBossTiming(
       const legendaryQueued = queue.includes("legendary");
       const lairQueued = queue.includes("lair");
       const currentLegendaryAlreadyConsumed = lastConsumedWindowId === rawWindow.id;
-      const consumedLegendaryStateValid = !currentLegendaryAlreadyConsumed || (
-        rawWindow.triggerActorId !== source.id
-        && totalSpent > 0
-        && remaining <= 2
-      );
-      const legendaryResourceValid = currentLegendaryAlreadyConsumed
-        ? consumedLegendaryStateValid
-        : remaining >= legendary.action.cost;
+      const legendaryResolutionValid = legendaryResolution === "pending"
+        ? legendaryQueued
+          && !currentLegendaryAlreadyConsumed
+          && rawWindow.triggerActorId !== source.id
+          && remaining >= legendary.action.cost
+        : legendaryResolution === "used"
+          ? currentLegendaryAlreadyConsumed
+            && rawWindow.triggerActorId !== source.id
+            && totalSpent > 0
+            && remaining <= 2
+          : legendaryResolution === "passed"
+            ? !legendaryQueued
+              && !currentLegendaryAlreadyConsumed
+              && rawWindow.triggerActorId !== source.id
+              && remaining >= legendary.action.cost
+            : !legendaryQueued
+              && !currentLegendaryAlreadyConsumed
+              && (rawWindow.triggerActorId === source.id || remaining < legendary.action.cost);
       semanticWindowValid = immediatelyResumes
-        && consumedLegendaryStateValid
+        && legendaryResolutionValid
         && lairQueued === (crossesLairBoundary && lairAvailable)
-        && (!legendaryQueued || (
-          rawWindow.triggerActorId !== source.id
-          && legendaryResourceValid
-        ));
+        && (!legendaryQueued || legendaryResolution === "pending" || legendaryResolution === "used");
     }
     if (!semanticWindowValid) return null;
     pendingWindow = {
@@ -18127,6 +18152,7 @@ function normalizeBossTiming(
       triggerActorId: rawWindow.triggerActorId,
       resumeActorId: rawWindow.resumeActorId,
       queue,
+      legendaryResolution,
       openedAtVersion,
     };
   }
@@ -18848,6 +18874,7 @@ function restoredBossReactionMatchesWindow(
     && reaction.bossWindowId !== null
     && reaction.bossWindowId === window?.id
     && window.queue[0] === "legendary"
+    && window.legendaryResolution === "used"
     && timing?.legendary.lastConsumedWindowId === window.id;
 }
 
@@ -18860,10 +18887,13 @@ function restoredBossReactionMechanicsValid(state: LanternCampaignState): boolea
   const binding = source ? reviewedBossTailBinding(source) : null;
   if (!source || !binding) return false;
   const attack = binding.tailAttack;
+  const window = lifecycle.bossTiming?.pendingWindow;
+  if (!window) return false;
   const cover = incomingCharacterCover(state, source);
   const armorClass = characterArmorClassWithCover(state, cover);
   const expectedReactionIds = eligibleIncomingHitReactions(state).map((spell) => spell.contentKey);
-  return reaction.sourceVersion === state.version - 1
+  return reaction.sourceVersion >= window.openedAtVersion
+    && reaction.sourceVersion < state.version
     && reaction.targetId === state.character.id
     && reaction.attackName === attack.name
     && reaction.attackRoll >= 2

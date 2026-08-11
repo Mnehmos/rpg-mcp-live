@@ -1693,6 +1693,7 @@ export interface EngineBossTiming {
     triggerActorId: string | null;
     resumeActorId: string;
     queue: EngineBossActionWindowKind[];
+    legendaryResolution: "pending" | "used" | "passed" | "not-offered";
     openedAtVersion: number;
   } | null;
 }
