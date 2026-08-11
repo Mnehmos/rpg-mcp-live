@@ -75,6 +75,8 @@ describe("effects and conditions kernel", () => {
       advantage: 1,
       disadvantage: 1,
       mode: "cancelled",
+      advantageEffectIds: ["effect-2"],
+      disadvantageEffectIds: ["effect-1"],
     });
   });
 

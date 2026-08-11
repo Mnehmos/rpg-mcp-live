@@ -859,9 +859,9 @@ function resolveOpposedCheck(
   if ("accepted" in derived) return derived;
   const opponentView = materializeCombatant(opponent);
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
-  const advantageSources = [...modifierQuery.effectIds];
+  const advantageSources = [...modifierQuery.advantageEffectIds];
   if (decision.helperId) advantageSources.push("helper:" + decision.helperId);
-  const disadvantageSources = modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [];
+  const disadvantageSources = [...modifierQuery.disadvantageEffectIds];
   const advantageCount = modifierQuery.advantage + (decision.helperId ? 1 : 0);
   const disadvantageCount = modifierQuery.disadvantage;
   const mode: EngineCheckEvidence["mode"] = advantageCount > 0 && disadvantageCount > 0 ? "cancelled" : advantageCount > 0 ? "advantage" : disadvantageCount > 0 ? "disadvantage" : "normal";
@@ -6383,8 +6383,8 @@ function resolveSocialCheck(
       expertise: derived.expertise,
       modifier,
       modifierSources: [...derived.modifierSources],
-      advantageSources: [...modifierQuery.effectIds],
-      disadvantageSources: modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [],
+      advantageSources: [...modifierQuery.advantageEffectIds],
+      disadvantageSources: [...modifierQuery.disadvantageEffectIds],
       mode: modifierQuery.mode,
       attribution,
       informationPolicy: "public",
@@ -8336,9 +8336,9 @@ function resolveCheck(
     return failurePressureRejection(state, tool, existingPressure, adjudication);
   }
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
-  const advantageSources = [...modifierQuery.effectIds];
+  const advantageSources = [...modifierQuery.advantageEffectIds];
   if (adjudication?.helperId) advantageSources.push("helper:" + adjudication.helperId);
-  const disadvantageSources = modifierQuery.disadvantage > 0 ? [...modifierQuery.effectIds] : [];
+  const disadvantageSources = [...modifierQuery.disadvantageEffectIds];
   const advantageCount = modifierQuery.advantage + (adjudication?.helperId ? 1 : 0);
   const disadvantageCount = modifierQuery.disadvantage;
   const mode: EngineCheckEvidence["mode"] = advantageCount > 0 && disadvantageCount > 0
@@ -8954,6 +8954,21 @@ function tacticalZoneEffectSourceRef(zoneId: string): string {
   return `tactical-zone:${zoneId}`;
 }
 
+function validTacticalZoneEffectId(
+  effectId: string,
+  zoneId: string,
+  zoneRevision: number,
+  targetId: string,
+): boolean {
+  const prefix = `tactical-zone-effect:${zoneId}:`;
+  const suffix = `:${targetId}`;
+  if (!effectId.startsWith(prefix) || !effectId.endsWith(suffix)) return false;
+  const revisionText = effectId.slice(prefix.length, effectId.length - suffix.length);
+  if (!/^[1-9]\d*$/.test(revisionText)) return false;
+  const revision = Number(revisionText);
+  return Number.isSafeInteger(revision) && revision <= zoneRevision;
+}
+
 function sameSortedStrings(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
   const sortedLeft = [...left].sort();
@@ -9033,6 +9048,7 @@ function tacticalZoneEffectStateIssue(state: LanternCampaignState): TacticalIssu
       const target = effect.targetRefs.length === 1 ? effect.targetRefs[0] : null;
       if (
         !target
+        || !validTacticalZoneEffectId(effect.id, zone.id, zone.revision, target)
         || seenTargets.has(target)
         || !expectedTargets.includes(target)
         || effect.definitionKey !== definition.key
@@ -12366,15 +12382,8 @@ function resolvePartyGroupCheck(
   const assistance = Math.min(2, Math.max(0, command.actorIds.length - 1));
   const modifier = derived.modifier + assistance;
   const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
-  const modifierEffectIds = new Set(modifierQuery.effectIds);
-  const advantageSources = state.effects.filter((effect) =>
-    modifierEffectIds.has(effect.id)
-    && effect.operations.some((operation) => operation.kind === "advantage" && operation.category === "ability-check")
-  ).map((effect) => effect.id);
-  const disadvantageSources = state.effects.filter((effect) =>
-    modifierEffectIds.has(effect.id)
-    && effect.operations.some((operation) => operation.kind === "disadvantage" && operation.category === "ability-check")
-  ).map((effect) => effect.id);
+  const advantageSources = [...modifierQuery.advantageEffectIds];
+  const disadvantageSources = [...modifierQuery.disadvantageEffectIds];
   const mode: EngineCheckEvidence["mode"] = modifierQuery.mode;
   const firstRoll = randomInt(1, 21);
   const secondRoll = mode === "advantage" || mode === "disadvantage" ? randomInt(1, 21) : null;

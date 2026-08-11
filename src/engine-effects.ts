@@ -19,6 +19,8 @@ export interface ModifierQuery {
   disadvantage: number;
   mode: "normal" | "advantage" | "disadvantage" | "cancelled";
   effectIds: string[];
+  advantageEffectIds: string[];
+  disadvantageEffectIds: string[];
 }
 
 /**
@@ -152,6 +154,12 @@ export function queryModifiers(
           ? "disadvantage"
           : "normal",
     effectIds: relevant.map((effect) => effect.id),
+    advantageEffectIds: relevant
+      .filter((effect) => effect.operations.some((operation) => operation.kind === "advantage" && operation.category === category))
+      .map((effect) => effect.id),
+    disadvantageEffectIds: relevant
+      .filter((effect) => effect.operations.some((operation) => operation.kind === "disadvantage" && operation.category === category))
+      .map((effect) => effect.id),
   };
 }
 

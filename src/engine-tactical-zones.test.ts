@@ -158,6 +158,20 @@ describe("#175 persistent tactical zones", () => {
     expect(zone.activeEffectIds).toHaveLength(2);
     expect(created.state.effects.filter((effect) => effect.sourceRef === `tactical-zone:${zone.id}` && effect.status === "active")).toHaveLength(2);
     expect(queryModifiers(created.state.effects, state.character.id, "ability-check").mode).toBe("disadvantage");
+    const characterEffectId = created.state.effects.find((effect) =>
+      effect.status === "active"
+      && effect.sourceRef === `tactical-zone:${zone.id}`
+      && effect.targetRefs.includes(state.character.id)
+    )!.id;
+    queuedRolls.push(18, 3);
+    const checked = apply(created.state, { kind: "roll_check", ability: "str", goal: "Test the hindering field." });
+    expect(checked.accepted).toBe(true);
+    expect(checked.state.lastRoll).toBe(3);
+    expect(checked.event?.check).toMatchObject({
+      mode: "disadvantage",
+      advantageSources: [],
+      disadvantageSources: [characterEffectId],
+    });
     expect(created.event?.stateChanges.map((change) => change.path)).toEqual(expect.arrayContaining([
       "/combat/tactical/zones",
       "/effects",
@@ -747,6 +761,15 @@ describe("#175 persistent tactical zones", () => {
       {
         apply: (state) => {
           state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.definitionKey = "invented-zone-definition";
+        },
+      },
+      {
+        apply: (state) => {
+          const effect = state.effects.find((candidate) => candidate.sourceRef.startsWith("tactical-zone:"))!;
+          const originalId = effect.id;
+          effect.id = "forged-tactical-zone-effect";
+          const zone = state.combat.tactical.zones[0]!;
+          zone.activeEffectIds = zone.activeEffectIds.map((id) => id === originalId ? effect.id : id);
         },
       },
       {
