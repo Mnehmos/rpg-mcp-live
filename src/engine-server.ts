@@ -33,7 +33,7 @@ import {
   type LanternCampaignState,
   type RequestContext,
 } from "./engine-contracts.js";
-import { createInitialCampaign, projectEventForActor, projectExperienceProfile, projectResolutionForActor, projectStateForActor, resolveEngineCommand, resolveOrchestrationDecision, resolveProductionRoomEnter, resolveProductionRoomNarrationRelease, toSessionView } from "./engine-domain.js";
+import { actorKnowledgeProjection, createInitialCampaign, projectEventForActor, projectExperienceProfile, projectResolutionForActor, projectStateForActor, resolveEngineCommand, resolveOrchestrationDecision, resolveProductionRoomEnter, resolveProductionRoomNarrationRelease, toSessionView } from "./engine-domain.js";
 import {
   EngineEventStreamCursorError,
   EngineEventStreamQueryError,
@@ -42,7 +42,8 @@ import {
   type EngineEventStreamEvidence,
 } from "./engine-event-stream.js";
 import { parseProductionRoomState, productionRoomNarrationReleaseRequestSchema, projectNarrationSequenceForActor, projectSceneForActor } from "./engine-production-room.js";
-import { buildResumeProjection, emptyOrchestrationState, orchestrationDecisionRequestSchema, refreshSceneFromEvents } from "./engine-orchestration.js";
+import { buildCausalityContext, buildResumeProjection, emptyOrchestrationState, orchestrationDecisionRequestSchema, refreshSceneFromEvents } from "./engine-orchestration.js";
+import { projectSituationForActor } from "./engine-situations.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
 import type { OpenRouterCompletionTelemetry } from "./openrouter.js";
 import type { ModelUsageSummaryFilters, ModelUsageTelemetry } from "./usage-ledger.js";
@@ -578,10 +579,21 @@ app.get("/v1/campaigns/:campaignId/orchestration", (request, response) => {
     const events = store.listCampaignEvents(context);
     const activeScene = base.activeScene ? refreshSceneFromEvents(base.activeScene, events) : null;
     const orchestration = { ...base, activeScene };
+    const viewpointActorId = state.party?.activeViewpointActorId ?? context.actorId;
+    const knowledge = actorKnowledgeProjection(viewpointActorId, state);
+    const causality = buildCausalityContext({
+      state: projectStateForActor(context.actorId, state),
+      events: events.map((event) => projectEventForActor(context.actorId, state, event)),
+      social: knowledge.social,
+      situation: state.situation ? projectSituationForActor(state.situation, state, viewpointActorId) : null,
+      knownFactRefs: knowledge.facts.map((fact) => fact.id),
+      scene: activeScene,
+    });
     response.json({
       orchestration: {
         ...orchestration,
-        resume: buildResumeProjection(orchestration, projectExperienceProfile(state.experienceProfile)),
+        causality,
+        resume: buildResumeProjection(orchestration, projectExperienceProfile(state.experienceProfile), causality),
       },
     });
   } catch (error) {

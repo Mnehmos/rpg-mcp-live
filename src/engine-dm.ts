@@ -13,6 +13,7 @@ import {
   deriveActionOffers,
   NPC_AGENCY_CONFIG,
   prepareNpcAgencyChoice,
+  projectEventForActor,
   projectExperienceProfile,
   projectStateForActor,
   projectResolutionForActor,
@@ -30,6 +31,7 @@ import { materializeInventoryItem } from "./open5e-rules.js";
 import type {
   EngineCommand,
   EngineCommandResult,
+  EngineEvent,
   EngineCapabilityFamilyId,
   EngineSocialCheckAttribution,
   EngineNpcProviderSelection,
@@ -40,6 +42,11 @@ import type {
   LanternCampaignState,
   RequestContext,
 } from "./engine-contracts.js";
+import {
+  buildCausalityContext,
+  buildResumeProjection,
+  emptyOrchestrationState,
+} from "./engine-orchestration.js";
 import {
   commandForTool,
   executeReadTool,
@@ -257,11 +264,24 @@ export function buildDmContext(
   state: LanternCampaignState,
   context: RequestContext,
   playerText: string,
-  mode: DmLoopMode
+  mode: DmLoopMode,
+  events: EngineEvent[] = [],
 ): Record<string, unknown> {
   const activeViewpointActorId = state.party?.activeViewpointActorId ?? context.actorId;
   const projection = actorKnowledgeProjection(activeViewpointActorId, state);
   const projectedState = projectStateForActor(context.actorId, state);
+  const situation = state.situation ? projectSituationForActor(state.situation, state, activeViewpointActorId) : null;
+  const projectedEvents = events.map((event) => projectEventForActor(context.actorId, state, event));
+  const experienceProfile = projectExperienceProfile(state.experienceProfile);
+  const causality = buildCausalityContext({
+    state: projectedState,
+    events: projectedEvents,
+    social: projection.social,
+    situation,
+    knownFactRefs: projection.facts.map((fact) => fact.id),
+    scene: state.orchestration?.activeScene ?? null,
+  });
+  const orchestration = state.orchestration ?? emptyOrchestrationState();
   return {
     playerText,
     intentClauses: mode === "player_turn" ? derivePlayerIntentClauses(playerText) : [],
@@ -271,8 +291,10 @@ export function buildDmContext(
     campaign: state.campaign,
     phase: state.phase,
     tutorialStep: state.tutorialStep,
-    experienceProfile: projectExperienceProfile(state.experienceProfile),
+    experienceProfile,
     failurePressures: state.failurePressures ?? [],
+    time: { gameTime: state.time.gameTime },
+    social: projection.social,
     worldContext: projection.worldContext,
     proceduralNotices: projection.proceduralNotices,
     knowledge: projection.knowledge,
@@ -287,7 +309,10 @@ export function buildDmContext(
       deadlineAtMinutes: quest.deadlineAtMinutes ?? null,
     })),
     currentBeat: state.currentBeat,
-    situation: state.situation ? projectSituationForActor(state.situation, state, activeViewpointActorId) : null,
+    situation,
+    scene: orchestration.activeScene,
+    resume: buildResumeProjection(orchestration, experienceProfile, causality),
+    causality,
     suggestedActions: state.suggestedActions,
     actionOffers: deriveActionOffers(state),
     character: {
@@ -340,6 +365,7 @@ export function buildPublicNarratorPrompt(): string {
     "kind is establishing, sensory, npc, dialogue, mechanical, consequence, or question. Every entity/fact/event ref must be copied exactly from the actor-safe packet. Use empty ref arrays when a beat makes no such claim.",
     "A mechanical or consequence beat must cite at least one committed event. Do not propose facts, expose hidden state, mention tools/prompts/context/schema/retries, or ask the player to wait for internal work.",
     "The packet includes ordered intentClauses. Address each clause in order with its own compatible beat. Use dialogue or npc beats for each direct question, sensory/consequence beats for searches and observations, and establishing/consequence beats for movement. If the committed result did not support a requested consequence, say so honestly instead of inventing it.",
+    "The causality packet contains committed receipts, current actor-safe consequences, and open threads. Treat its affordances as creative ingredients, never as a forced menu; do not invent a new threat merely to create motion.",
     "The primary prose is the game: portray present NPCs, state what the character perceives, honor the committed consequence, and leave a changed or conclusively answered situation. Exact mechanics may appear secondarily.",
     "suggestedActions contains 0 to 5 optional objects with exactly id, label, and a first-person prompt. Freeform play always remains available.",
   ].join(" ");
@@ -420,9 +446,23 @@ function buildCommittedNarratorContext(
   context: RequestContext,
   playerText: string,
   projection: ActorSceneProjection,
+  events: EngineEvent[],
 ): Record<string, unknown> {
   const publicResult = projectResolutionForActor(result, context.actorId);
   const publicState = publicResult.state;
+  const viewpointActorId = result.state.party?.activeViewpointActorId ?? context.actorId;
+  const knowledge = actorKnowledgeProjection(viewpointActorId, result.state);
+  const situation = result.state.situation
+    ? projectSituationForActor(result.state.situation, result.state, viewpointActorId)
+    : null;
+  const causality = buildCausalityContext({
+    state: publicState,
+    events: events.map((event) => projectEventForActor(context.actorId, result.state, event)),
+    social: knowledge.social,
+    situation,
+    knownFactRefs: knowledge.facts.map((fact) => fact.id),
+    scene: result.state.orchestration?.activeScene ?? null,
+  });
   return {
     playerIntent: playerText,
     intentClauses: derivePlayerIntentClauses(playerText),
@@ -435,6 +475,7 @@ function buildCommittedNarratorContext(
       data: publicResult.data,
       event: publicResult.event,
     },
+    causality,
     experienceProfile: projectExperienceProfile(publicState.experienceProfile),
     recentPublicLog: publicState.log.slice(-8),
     legalActionOffers: deriveActionOffers(publicState).filter((offer) => offer.reasonUnavailable === null),
@@ -1126,6 +1167,7 @@ export class LanternDungeonMaster {
           context,
           playerText,
           projection,
+          this.store.listCampaignEvents(context),
         )),
       },
     ];
@@ -1225,7 +1267,13 @@ export class LanternDungeonMaster {
       },
       {
         role: "user",
-        content: JSON.stringify(buildDmContext(initialState, context, playerText, mode)),
+        content: JSON.stringify(buildDmContext(
+          initialState,
+          context,
+          playerText,
+          mode,
+          this.store.listCampaignEvents(context),
+        )),
       },
     ];
 
