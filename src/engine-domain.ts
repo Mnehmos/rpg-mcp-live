@@ -10581,7 +10581,13 @@ function resolveCustodyAction(
         next.combat.lifecycle.phase = "terminal";
         next.combat.lifecycle.outcome = "player_surrendered";
         next.combat.lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:player_surrendered`;
-        next.combat.lifecycle.objective.status = "succeeded";
+        next.combat.lifecycle.objective.status = next.combat.lifecycle.profile === REVIEWED_BOSS_PROFILE
+          ? "failed"
+          : "succeeded";
+        if (next.combat.lifecycle.bossTiming) {
+          next.combat.lifecycle.bossTiming.pendingWindow = null;
+          next.combat.lifecycle.bossTiming.lastCompletedWindow = null;
+        }
       }
       changes.push({ path: "/combat", before: beforeCombat, after: next.combat });
     }
@@ -11418,7 +11424,15 @@ function resolveCastSpell(
     changes.push({ path: "/combat/status", before: "active", after: "ended" });
     if (bossOutcome) changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
   } else if (castingTime === "action") {
-    next.combat.activeActorId = firstLiveCombatantId(next.combat);
+    const activeActorBefore = next.combat.activeActorId;
+    const lifecycleBefore = structuredClone(next.combat.lifecycle);
+    handoffPlayerInitiative(next);
+    if (activeActorBefore !== next.combat.activeActorId) {
+      changes.push({ path: "/combat/activeActorId", before: activeActorBefore, after: next.combat.activeActorId });
+    }
+    if (JSON.stringify(lifecycleBefore) !== JSON.stringify(next.combat.lifecycle)) {
+      changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
+    }
   }
   next.combat.lastAction = `cast:${spell.contentKey}`;
 
@@ -11706,7 +11720,9 @@ function resolveReactionResponse(
     const hpBefore = next.character.hp;
     const applied = applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
     completePendingMovementTrigger(next, pending, true, applied.applied, hpBefore, changes);
-    next.combat.lastAction = `reaction:${pending.id}:declined`;
+    next.combat.lastAction = pending.resumeMode === "finish-boss-window" && pending.bossWindowId
+      ? `boss:window:reaction:${pending.bossWindowId}:declined`
+      : `reaction:${pending.id}:declined`;
     const turnSuffix = pendingReactionTurnSuffix(next, pending, enemy.id, changes);
     return commit(
       next,
@@ -11810,7 +11826,9 @@ function resolveReactionResponse(
     applyCharacterDamage(next, damage, "reaction", clientCommandId, changes, rolls, modifiers, pending.critical);
   }
   completePendingMovementTrigger(next, pending, hitAfter, damage, hpBefore, changes);
-  next.combat.lastAction = `reaction:${pending.id}:spell`;
+  next.combat.lastAction = pending.resumeMode === "finish-boss-window" && pending.bossWindowId
+    ? `boss:window:reaction:${pending.bossWindowId}:spell`
+    : `reaction:${pending.id}:spell`;
   const turnSuffix = pendingReactionTurnSuffix(next, pending, enemy.id, changes);
   return commit(
     next,
@@ -14687,6 +14705,13 @@ function resolveLoot(
   if (state.combat.status !== "ended") return rejection(state, tool, "encounter_active", "There is no defeated encounter to loot.");
   if (state.combat.lastAction === "invalid_boss_state_quarantined") {
     return rejection(state, tool, "encounter_quarantined", "An invalid quarantined encounter cannot grant rewards.");
+  }
+  if (
+    state.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE
+    && state.combat.lifecycle.outcome !== "killed"
+    && state.combat.lifecycle.outcome !== "subdued"
+  ) {
+    return rejection(state, tool, "boss_outcome_not_lootable", "Only a defeated reviewed boss can grant encounter rewards.");
   }
   const lifecycleRewardKey = state.combat.lifecycle?.outcomeId ? `${state.combat.lifecycle.outcomeId}:loot` : null;
   if (lifecycleRewardKey && (state.claimedRewards.includes(lifecycleRewardKey) || state.combat.lifecycle?.claimedRewards.includes(lifecycleRewardKey))) {
@@ -17954,6 +17979,7 @@ function normalizeCombat(
     sourceAlive,
     combat.encounterId ?? null,
     actorInitiativeModifier,
+    combat.lastAction ?? null,
   );
   const pendingReaction = normalizePendingReaction(combat.pendingReaction);
   const rawLifecycle = combat.lifecycle && typeof combat.lifecycle === "object" && !Array.isArray(combat.lifecycle)
@@ -18019,6 +18045,7 @@ function normalizeBossTiming(
   lifecyclePhase: EngineEncounterLifecycle["phase"],
   campaignVersion: number,
   actorInitiativeModifier: number,
+  combatLastAction: string | null,
 ): EngineBossTiming | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineBossTiming>;
@@ -18248,6 +18275,14 @@ function normalizeBossTiming(
       completedAtVersion,
     };
   }
+  const pendingWindowRetainsResolution = pendingWindow !== null
+    && pendingWindow.legendaryResolution !== "pending";
+  const lastActionCompletedBossWindow = combatLastAction === REVIEWED_LEGENDARY_ACTION_REF
+    || combatLastAction === REVIEWED_LAIR_ACTION_REF
+    || combatLastAction === `${REVIEWED_BOSS_PASS_REF}:legendary`
+    || combatLastAction === `${REVIEWED_BOSS_PASS_REF}:lair`
+    || combatLastAction?.startsWith("boss:window:reaction:") === true;
+  if (lastActionCompletedBossWindow && lastCompletedWindow === null && !pendingWindowRetainsResolution) return null;
   return {
     revision: "boss-timing-v1",
     sourceCombatantId: candidate.sourceCombatantId,
@@ -18299,6 +18334,7 @@ function normalizeEncounterLifecycle(
   playerAlive: boolean,
   encounterId: string | null,
   actorInitiativeModifier: number,
+  combatLastAction: string | null,
 ): EngineEncounterLifecycle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineEncounterLifecycle>;
@@ -18440,9 +18476,9 @@ function normalizeEncounterLifecycle(
       || outcome === "subdued"
       || outcome === "player_surrendered"
       || outcome === "player_defeated";
-    const terminalObjectiveValid = outcome === "player_defeated"
-      ? objectiveStatus === "failed"
-      : objectiveStatus === "succeeded";
+    const terminalObjectiveValid = outcome === "killed" || outcome === "subdued"
+      ? objectiveStatus === "succeeded"
+      : objectiveStatus === "failed";
     const terminalActorsValid = outcome === "killed" || outcome === "subdued"
       ? playerAlive && source?.alive === false
       : outcome === "player_surrendered"
@@ -18472,6 +18508,7 @@ function normalizeEncounterLifecycle(
       phase,
       campaignVersion,
       actorInitiativeModifier,
+      combatLastAction,
     );
     if (!bossTiming) return null;
     return {

@@ -83,6 +83,37 @@ function startBoss(state: LanternCampaignState, actorInitiative = 20, bossInitia
   });
 }
 
+function establishGuard(state: LanternCampaignState): LanternCampaignState {
+  const established = apply(state, {
+    kind: "world_context",
+    title: "The guarded boss arena",
+    description: "A watch patrol holds the only exit.",
+    features: ["guard post"],
+    exits: [{ id: "arena-exit", label: "Arena exit" }],
+    npcs: {
+      upsert: [{
+        id: "guard-patrol",
+        name: "Patrol guard",
+        description: "A guard authorized to take prisoners.",
+        disposition: "hostile",
+        goals: ["secure the arena"],
+        memories: [],
+        agency: {
+          actorType: "guard",
+          locationRef: "boss-arena",
+          schedule: [],
+          goals: [],
+          resources: { inventory: [], copper: 0, actionPoints: 0 },
+          maxHp: 10,
+          hp: 10,
+        },
+      }],
+    },
+  });
+  expect(established.accepted).toBe(true);
+  return established.state;
+}
+
 function openLegendaryAndLairWindow(state: LanternCampaignState) {
   const started = startBoss(state);
   expect(started.accepted).toBe(true);
@@ -341,6 +372,61 @@ describe("reviewed boss-action timing", () => {
     expect(normalizeCampaignState(structuredClone(controlledDefeat.state)).combat.lifecycle?.outcome).toBe("killed");
   });
 
+  it("routes a surviving action spell through the reviewed boss window", () => {
+    const learned = apply(wizard(), { kind: "learn_spell", spellKey: FIRE_BOLT });
+    expect(learned.accepted).toBe(true);
+    const started = startBoss(learned.state);
+    expect(started.accepted).toBe(true);
+    queuedRolls.push(1);
+    const cast = apply(started.state, {
+      kind: "cast_spell",
+      spellKey: FIRE_BOLT,
+      targetIds: [started.state.combat.enemies[0]!.id],
+    });
+
+    expect(cast.accepted).toBe(true);
+    const sourceId = cast.state.combat.enemies[0]!.id;
+    expect(cast.state.combat).toMatchObject({ status: "active", activeActorId: sourceId });
+    expect(cast.state.combat.lifecycle?.initiative.activeIndex)
+      .toBe(cast.state.combat.lifecycle?.initiative.order.indexOf(sourceId));
+    expect(cast.state.combat.lifecycle?.bossTiming?.pendingWindow).toMatchObject({
+      triggerActorId: cast.state.actorId,
+      resumeActorId: sourceId,
+      queue: ["legendary", "lair"],
+      legendaryResolution: "pending",
+    });
+    expect(normalizeCampaignState(structuredClone(cast.state)).combat.lifecycle?.bossTiming?.pendingWindow)
+      .toEqual(cast.state.combat.lifecycle?.bossTiming?.pendingWindow);
+  });
+
+  it("records player surrender as a failed, non-lootable boss outcome", () => {
+    const started = startBoss(establishGuard(fighter()));
+    expect(started.accepted).toBe(true);
+    const surrendered = apply(started.state, {
+      kind: "custody_action",
+      action: "surrender",
+      guardId: "guard-patrol",
+    });
+
+    expect(surrendered.accepted).toBe(true);
+    expect(surrendered.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_surrendered",
+      objective: { id: "defeat-boss", status: "failed" },
+      bossTiming: { pendingWindow: null, lastCompletedWindow: null },
+    });
+    const reloaded = normalizeCampaignState(structuredClone(surrendered.state));
+    expect(reloaded.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_surrendered",
+      objective: { status: "failed" },
+    });
+    const beforeLoot = structuredClone(reloaded);
+    const loot = apply(reloaded, { kind: "loot", items: [], rewardXp: 1_000, rewardCopper: 1_000 });
+    expect(loot).toMatchObject({ accepted: false, code: "boss_outcome_not_lootable", event: null });
+    expect(loot.state).toEqual(beforeLoot);
+  });
+
   it("routes death-save handoffs through boss timing and terminalizes death-save death", () => {
     const makeDying = (state: LanternCampaignState) => {
       const dying = structuredClone(state);
@@ -512,6 +598,7 @@ describe("reviewed boss-action timing", () => {
       legendaryResolution: "pending",
       openedAtVersion: reopenedStandalone.version,
     };
+    reopenedStandalone.combat.lifecycle!.bossTiming!.lastCompletedWindow = null;
     expect(normalizeCampaignState(reopenedStandalone).combat).toMatchObject({
       status: "ended",
       activeActorId: null,
