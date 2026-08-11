@@ -17870,7 +17870,7 @@ function normalizeCombat(
     status,
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
-    lifecycle: normalizeEncounterLifecycle(combat.lifecycle, enemies),
+    lifecycle: normalizeEncounterLifecycle(combat.lifecycle, enemies, actorId),
     round,
     activeActorId: combat.activeActorId ?? null,
     turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
@@ -17905,12 +17905,24 @@ function normalizeBossTiming(
   entries: EngineEncounterInitiativeEntry[],
   order: string[],
   enemies: EngineCombatant[],
+  actorId: string,
 ): EngineBossTiming | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineBossTiming>;
   const legendary = candidate.legendary;
   const lair = candidate.lair;
   const source = enemies.find((enemy) => enemy.id === candidate.sourceCombatantId);
+  const entryIds = entries.map((entry) => entry.actorId);
+  const exactInitiativeRoster = source !== undefined
+    && source.id !== actorId
+    && entries.length === 2
+    && order.length === 2
+    && new Set(entryIds).size === 2
+    && new Set(order).size === 2
+    && entryIds.includes(actorId)
+    && entryIds.includes(source.id)
+    && order.includes(actorId)
+    && order.includes(source.id);
   if (
     candidate.revision !== "boss-timing-v1"
     || typeof candidate.sourceCombatantId !== "string"
@@ -17926,8 +17938,7 @@ function normalizeBossTiming(
     || lair.action?.actionRef !== REVIEWED_LAIR_ACTION_REF
     || enemies.length !== 1
     || !source
-    || !order.includes(source.id)
-    || !entries.some((entry) => entry.actorId === source.id)
+    || !exactInitiativeRoster
     || !reviewedBossTailBinding(source)
   ) return null;
   const remaining = Number.isInteger(legendary.remaining) ? Math.max(0, Math.min(3, legendary.remaining)) : 0;
@@ -17999,7 +18010,7 @@ function normalizeBossTiming(
   };
 }
 
-function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[]): EngineEncounterLifecycle | null {
+function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[], actorId: string): EngineEncounterLifecycle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineEncounterLifecycle>;
   if (candidate.profile !== "guards-surrender-v1" && candidate.profile !== REVIEWED_BOSS_PROFILE) return null;
@@ -18080,7 +18091,7 @@ function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[])
     retreatPlanRevision: typeof candidate.retreatPlanRevision === "number" && Number.isInteger(candidate.retreatPlanRevision) ? candidate.retreatPlanRevision : null,
   };
   if (candidate.profile === REVIEWED_BOSS_PROFILE) {
-    const bossTiming = normalizeBossTiming(candidate.bossTiming, entries, order, enemies);
+    const bossTiming = normalizeBossTiming(candidate.bossTiming, entries, order, enemies, actorId);
     if (!bossTiming) return null;
     return {
       profile: REVIEWED_BOSS_PROFILE,

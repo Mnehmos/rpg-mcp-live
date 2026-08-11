@@ -401,6 +401,23 @@ describe("reviewed boss-action timing", () => {
     corrupted.combat.lifecycle!.bossTiming!.sourceCombatantId = "invented-source";
     expect(normalizeCampaignState(corrupted).combat.lifecycle).toBeNull();
 
+    const missingPlayer = structuredClone(committed.state);
+    const sourceId = missingPlayer.combat.enemies[0]!.id;
+    missingPlayer.combat.lifecycle!.initiative.entries = missingPlayer.combat.lifecycle!.initiative.entries
+      .filter((entry) => entry.actorId === sourceId);
+    missingPlayer.combat.lifecycle!.initiative.order = [sourceId];
+    expect(normalizeCampaignState(missingPlayer).combat.lifecycle).toBeNull();
+
+    const duplicateSource = structuredClone(committed.state);
+    const sourceEntry = duplicateSource.combat.lifecycle!.initiative.entries.find((entry) => entry.actorId === sourceId)!;
+    duplicateSource.combat.lifecycle!.initiative.entries = [sourceEntry, structuredClone(sourceEntry)];
+    duplicateSource.combat.lifecycle!.initiative.order = [sourceId, sourceId];
+    expect(normalizeCampaignState(duplicateSource).combat.lifecycle).toBeNull();
+
+    const mismatchedOrder = structuredClone(committed.state);
+    mismatchedOrder.combat.lifecycle!.initiative.order = [mismatchedOrder.actorId, "invented-actor"];
+    expect(normalizeCampaignState(mismatchedOrder).combat.lifecycle).toBeNull();
+
     store.close();
     const reopened = new LanternEngineStore(databasePath);
     const persisted = reopened.getCampaign(request);
