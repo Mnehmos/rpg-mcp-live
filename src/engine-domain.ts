@@ -10333,6 +10333,18 @@ function prepareReviewedBossTransition(
   }
 }
 
+function handoffPlayerInitiative(state: LanternCampaignState): string | null {
+  const nextActor = state.combat.lifecycle
+    ? lifecycleNextActorId(state.combat, state.actorId, state.actorId)
+    : firstLiveCombatantId(state.combat);
+  state.combat.activeActorId = nextActor;
+  if (state.combat.lifecycle && nextActor) {
+    state.combat.lifecycle.initiative.activeIndex = state.combat.lifecycle.initiative.order.indexOf(nextActor);
+    prepareReviewedBossTransition(state, state.actorId, nextActor);
+  }
+  return nextActor;
+}
+
 function completeReviewedBossWindow(
   state: LanternCampaignState,
   resolvedKind: EngineBossActionWindowKind,
@@ -13188,19 +13200,12 @@ function resolvePlayerEndTurn(
     ? structuredClone(state.combat.lifecycle.bossTiming)
     : null;
   applyControlledActorFallback(next, changes);
-  const nextActor = next.combat.lifecycle
-    ? lifecycleNextActorId(next.combat, state.actorId, state.actorId)
-    : firstLiveCombatantId(next.combat);
+  const nextActor = handoffPlayerInitiative(next);
   if (!nextActor) {
     next.combat.status = "ended";
     next.combat.activeActorId = null;
     return commit(next, context, clientCommandId, command, tool, "With no foe left standing, the encounter ends.", { combat: combatData(next.combat), controlledActors: projectControlledActors(next) }, "encounter_ended", [], [], [...changes, { path: "/combat/status", before: "active", after: "ended" }]);
   }
-  next.combat.activeActorId = nextActor;
-  if (next.combat.lifecycle) {
-    next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(nextActor);
-  }
-  prepareReviewedBossTransition(next, state.actorId, nextActor);
   next.combat.lastAction = "end_turn";
   const bossWindow = activeBossTiming(next)?.pendingWindow;
   return commit(
@@ -13580,13 +13585,7 @@ function resolveSkippedCharacterTurn(
   applyControlledActorFallback(next, changes);
   resolveTargetEndConditionEffects(next, rolls, modifiers, changes);
   const beforeActor = next.combat.activeActorId;
-  next.combat.activeActorId = next.combat.lifecycle
-    ? lifecycleNextActorId(next.combat, state.actorId, state.actorId)
-    : firstLiveCombatantId(next.combat);
-  if (next.combat.lifecycle && next.combat.activeActorId) {
-    next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(next.combat.activeActorId);
-    prepareReviewedBossTransition(next, state.actorId, next.combat.activeActorId);
-  }
+  handoffPlayerInitiative(next);
   spendTurnSlot(next.combat.turnBudget, "action");
   changes.push(
     { path: "/combat/activeActorId", before: beforeActor, after: next.combat.activeActorId },
@@ -14540,6 +14539,7 @@ function resolveDeathSave(
   const roll = randomInt(1, 21);
   const next = cloneCampaign(state);
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const lifecycleBefore = structuredClone(state.combat.lifecycle);
   let success = false;
   let outcome = "death_save_failure";
   let message = "Death save: d20 " + roll + ". ";
@@ -14550,8 +14550,6 @@ function resolveDeathSave(
     next.character.deathRecord = null;
     message += "Natural 20; you regain 1 hit point and stand.";
     outcome = "death_save_natural_20";
-    next.combat.activeActorId = firstLiveCombatantId(next.combat);
-    spendTurnSlot(next.combat.turnBudget, "action");
   } else if (roll === 1) {
     next.character.deathSaveFailures = Math.min(3, next.character.deathSaveFailures + 2);
     message += "Natural 1; two failures.";
@@ -14577,17 +14575,29 @@ function resolveDeathSave(
     const beforeLifecycle = next.character.lifecycleState;
     next.character.lifecycleState = "stable";
     if (beforeLifecycle !== next.character.lifecycleState) changes.push({ path: "/character/lifecycleState", before: beforeLifecycle, after: next.character.lifecycleState });
-    next.combat.activeActorId = firstLiveCombatantId(next.combat);
-    spendTurnSlot(next.combat.turnBudget, "action");
     message += " You stabilize.";
     outcome = "stable";
   } else if (next.character.deathSaveFailures >= 3) {
     transitionActorToDead(next, clientCommandId, "death-save", changes);
+    finishBossEncounterIfPlayerDied(next, changes);
     message += " The character dies.";
     outcome = "dead";
-  } else if (outcome !== "death_save_natural_20") {
-    next.combat.activeActorId = firstLiveCombatantId(next.combat);
+  }
+  if (next.character.lifecycleState !== "dead") {
+    handoffPlayerInitiative(next);
     spendTurnSlot(next.combat.turnBudget, "action");
+  }
+  if (state.combat.status !== next.combat.status) {
+    changes.push({ path: "/combat/status", before: state.combat.status, after: next.combat.status });
+  }
+  if (state.combat.activeActorId !== next.combat.activeActorId) {
+    changes.push({ path: "/combat/activeActorId", before: state.combat.activeActorId, after: next.combat.activeActorId });
+  }
+  if (JSON.stringify(lifecycleBefore) !== JSON.stringify(next.combat.lifecycle)) {
+    changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
+  }
+  if (JSON.stringify(state.combat.pendingReaction) !== JSON.stringify(next.combat.pendingReaction)) {
+    changes.push({ path: "/combat/pendingReaction", before: state.combat.pendingReaction, after: next.combat.pendingReaction });
   }
 
   return commit(
@@ -17866,13 +17876,14 @@ function normalizeCombat(
     } satisfies EngineCombatant;
   });
   syncDerivedCombatDistances(tactical, enemies);
+  const activeActorId = combat.activeActorId ?? null;
   return {
     status,
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
-    lifecycle: normalizeEncounterLifecycle(combat.lifecycle, enemies, actorId),
+    lifecycle: normalizeEncounterLifecycle(combat.lifecycle, enemies, actorId, activeActorId, status, campaignVersion),
     round,
-    activeActorId: combat.activeActorId ?? null,
+    activeActorId,
     turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
     tactical,
     pendingReaction: normalizePendingReaction(combat.pendingReaction),
@@ -17902,15 +17913,19 @@ function normalizeFootprint(value: unknown): EngineTacticalFootprint {
 
 function normalizeBossTiming(
   value: unknown,
-  entries: EngineEncounterInitiativeEntry[],
-  order: string[],
+  initiative: EngineEncounterInitiative,
   enemies: EngineCombatant[],
   actorId: string,
+  activeActorId: string | null,
+  combatStatus: EngineCombat["status"],
+  lifecyclePhase: EngineEncounterLifecycle["phase"],
+  campaignVersion: number,
 ): EngineBossTiming | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineBossTiming>;
   const legendary = candidate.legendary;
   const lair = candidate.lair;
+  const { entries, order } = initiative;
   const source = enemies.find((enemy) => enemy.id === candidate.sourceCombatantId);
   const entryIds = entries.map((entry) => entry.actorId);
   const exactInitiativeRoster = source !== undefined
@@ -17923,6 +17938,10 @@ function normalizeBossTiming(
     && entryIds.includes(source.id)
     && order.includes(actorId)
     && order.includes(source.id);
+  const activeInitiativeValid = combatStatus !== "active"
+    || (activeActorId !== null
+      && order.includes(activeActorId)
+      && initiative.activeIndex === order.indexOf(activeActorId));
   if (
     candidate.revision !== "boss-timing-v1"
     || typeof candidate.sourceCombatantId !== "string"
@@ -17939,36 +17958,85 @@ function normalizeBossTiming(
     || enemies.length !== 1
     || !source
     || !exactInitiativeRoster
+    || !activeInitiativeValid
     || !reviewedBossTailBinding(source)
   ) return null;
   const remaining = Number.isInteger(legendary.remaining) ? Math.max(0, Math.min(3, legendary.remaining)) : 0;
   const totalSpent = Number.isInteger(legendary.totalSpent) ? Math.max(0, legendary.totalSpent) : 0;
   const cycle = Number.isInteger(lair.initiative?.cycle) ? Math.max(1, lair.initiative.cycle) : 1;
   const usedCycle = Number.isInteger(lair.usedCycle) && lair.usedCycle! >= 1 ? lair.usedCycle! : null;
+  if (usedCycle !== null && usedCycle > cycle) return null;
+  const lastConsumedWindowId = typeof legendary.lastConsumedWindowId === "string" ? legendary.lastConsumedWindowId : null;
+  const lairAvailable = usedCycle === cycle ? false : Boolean(lair.available);
+  const lairOrderIndex = entries.filter((entry) => entry.total > 20).length;
   let pendingWindow: EngineBossTiming["pendingWindow"] = null;
   const rawWindow = candidate.pendingWindow;
-  if (rawWindow && typeof rawWindow === "object" && !Array.isArray(rawWindow)) {
-    const queue = Array.isArray(rawWindow.queue)
-      ? rawWindow.queue.filter((entry): entry is EngineBossActionWindowKind => entry === "legendary" || entry === "lair")
-      : [];
-    if (
-      typeof rawWindow.id === "string"
-      && rawWindow.id
-      && typeof rawWindow.resumeActorId === "string"
-      && order.includes(rawWindow.resumeActorId)
-      && (rawWindow.triggerActorId === null || (typeof rawWindow.triggerActorId === "string" && order.includes(rawWindow.triggerActorId)))
-      && queue.length >= 1
-      && queue.length <= 2
-      && new Set(queue).size === queue.length
-    ) {
-      pendingWindow = {
-        id: rawWindow.id,
-        triggerActorId: rawWindow.triggerActorId,
-        resumeActorId: rawWindow.resumeActorId,
-        queue,
-        openedAtVersion: Number.isInteger(rawWindow.openedAtVersion) ? Math.max(0, rawWindow.openedAtVersion) : 0,
-      };
+  if (rawWindow !== null && rawWindow !== undefined) {
+    if (typeof rawWindow !== "object" || Array.isArray(rawWindow)) return null;
+    const rawQueue = Array.isArray(rawWindow.queue) ? rawWindow.queue : [];
+    const queue = rawQueue.filter((entry): entry is EngineBossActionWindowKind => entry === "legendary" || entry === "lair");
+    const queueKey = queue.join(",");
+    const queueShapeValid = rawQueue.length === queue.length
+      && (queueKey === "legendary" || queueKey === "lair" || queueKey === "legendary,lair");
+    const resumeIndex = typeof rawWindow.resumeActorId === "string" ? order.indexOf(rawWindow.resumeActorId) : -1;
+    const openedAtVersion = Number.isInteger(rawWindow.openedAtVersion) ? rawWindow.openedAtVersion : -1;
+    const commonWindowValid = combatStatus === "active"
+      && lifecyclePhase === "active"
+      && typeof rawWindow.id === "string"
+      && rawWindow.id.length > 0
+      && resumeIndex >= 0
+      && rawWindow.resumeActorId === activeActorId
+      && initiative.activeIndex === resumeIndex
+      && openedAtVersion >= 1
+      && openedAtVersion <= campaignVersion
+      && queueShapeValid;
+    let semanticWindowValid = false;
+    if (commonWindowValid && rawWindow.triggerActorId === null) {
+      semanticWindowValid = rawWindow.resumeActorId === order[0]
+        && lairOrderIndex === 0
+        && cycle === 1
+        && usedCycle === null
+        && lairAvailable
+        && remaining === 3
+        && totalSpent === 0
+        && lastConsumedWindowId === null
+        && queueKey === "lair";
+    } else if (commonWindowValid && typeof rawWindow.triggerActorId === "string") {
+      const triggerIndex = order.indexOf(rawWindow.triggerActorId);
+      const immediatelyResumes = triggerIndex >= 0
+        && triggerIndex !== resumeIndex
+        && resumeIndex === (triggerIndex + 1) % order.length;
+      const wrapped = immediatelyResumes && resumeIndex <= triggerIndex;
+      const crossesLairBoundary = immediatelyResumes && (wrapped
+        ? lairOrderIndex === 0 || lairOrderIndex === order.length
+        : lairOrderIndex > triggerIndex && lairOrderIndex <= resumeIndex);
+      const legendaryQueued = queue.includes("legendary");
+      const lairQueued = queue.includes("lair");
+      const currentLegendaryAlreadyConsumed = lastConsumedWindowId === rawWindow.id;
+      const consumedLegendaryStateValid = !currentLegendaryAlreadyConsumed || (
+        rawWindow.triggerActorId !== source.id
+        && totalSpent > 0
+        && remaining <= 2
+      );
+      const legendaryResourceValid = currentLegendaryAlreadyConsumed
+        ? consumedLegendaryStateValid
+        : remaining >= legendary.action.cost;
+      semanticWindowValid = immediatelyResumes
+        && consumedLegendaryStateValid
+        && lairQueued === (crossesLairBoundary && lairAvailable)
+        && (!legendaryQueued || (
+          rawWindow.triggerActorId !== source.id
+          && legendaryResourceValid
+        ));
     }
+    if (!semanticWindowValid) return null;
+    pendingWindow = {
+      id: rawWindow.id,
+      triggerActorId: rawWindow.triggerActorId,
+      resumeActorId: rawWindow.resumeActorId,
+      queue,
+      openedAtVersion,
+    };
   }
   return {
     revision: "boss-timing-v1",
@@ -17977,7 +18045,7 @@ function normalizeBossTiming(
       maximum: 3,
       remaining,
       totalSpent,
-      lastConsumedWindowId: typeof legendary.lastConsumedWindowId === "string" ? legendary.lastConsumedWindowId : null,
+      lastConsumedWindowId,
       refresh: "start-of-source-turn",
       action: {
         actionRef: REVIEWED_LEGENDARY_ACTION_REF,
@@ -17989,11 +18057,11 @@ function normalizeBossTiming(
       },
     },
     lair: {
-      available: usedCycle === cycle ? false : Boolean(lair.available),
+      available: lairAvailable,
       usedCycle,
       initiative: {
         count: 20,
-        orderIndex: entries.filter((entry) => entry.total > 20).length,
+        orderIndex: lairOrderIndex,
         cycle,
         formulaRevision: "initiative-count-20-v1",
       },
@@ -18010,7 +18078,14 @@ function normalizeBossTiming(
   };
 }
 
-function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[], actorId: string): EngineEncounterLifecycle | null {
+function normalizeEncounterLifecycle(
+  value: unknown,
+  enemies: EngineCombatant[],
+  actorId: string,
+  activeActorId: string | null,
+  combatStatus: EngineCombat["status"],
+  campaignVersion: number,
+): EngineEncounterLifecycle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Partial<EngineEncounterLifecycle>;
   if (candidate.profile !== "guards-surrender-v1" && candidate.profile !== REVIEWED_BOSS_PROFILE) return null;
@@ -18091,7 +18166,16 @@ function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[],
     retreatPlanRevision: typeof candidate.retreatPlanRevision === "number" && Number.isInteger(candidate.retreatPlanRevision) ? candidate.retreatPlanRevision : null,
   };
   if (candidate.profile === REVIEWED_BOSS_PROFILE) {
-    const bossTiming = normalizeBossTiming(candidate.bossTiming, entries, order, enemies, actorId);
+    const bossTiming = normalizeBossTiming(
+      candidate.bossTiming,
+      initiative,
+      enemies,
+      actorId,
+      activeActorId,
+      combatStatus,
+      phase,
+      campaignVersion,
+    );
     if (!bossTiming) return null;
     return {
       profile: REVIEWED_BOSS_PROFILE,

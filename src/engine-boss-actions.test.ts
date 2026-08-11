@@ -240,6 +240,83 @@ describe("reviewed boss-action timing", () => {
     expect(normalizeCampaignState(JSON.parse(JSON.stringify(subdued.state)) as LanternCampaignState).combat.lifecycle?.outcome).toBe("subdued");
   });
 
+  it("routes death-save handoffs through boss timing and terminalizes death-save death", () => {
+    const makeDying = (state: LanternCampaignState) => {
+      const dying = structuredClone(state);
+      dying.character.hp = 0;
+      dying.character.lifecycleState = "dying";
+      dying.character.deathRecord = {
+        source: "damage",
+        sourceCommandId: randomUUID(),
+        sourceVersion: dying.version,
+        occurredAt: new Date().toISOString(),
+      };
+      dying.character.conditions = ["unconscious"];
+      dying.character.deathSaveSuccesses = 0;
+      dying.character.deathSaveFailures = 0;
+      return normalizeCampaignState(dying);
+    };
+
+    const started = startBoss(fighter());
+    expect(started.accepted).toBe(true);
+    const dying = makeDying(started.state);
+    queuedRolls.push(10);
+    const saved = apply(dying, { kind: "death_save" });
+    const sourceId = saved.state.combat.enemies[0]!.id;
+    expect(saved.accepted).toBe(true);
+    expect(saved.state.character.lifecycleState).toBe("dying");
+    expect(saved.state.combat.activeActorId).toBe(sourceId);
+    expect(saved.state.combat.lifecycle).toMatchObject({
+      initiative: {
+        activeIndex: saved.state.combat.lifecycle!.initiative.order.indexOf(sourceId),
+      },
+      bossTiming: { pendingWindow: { triggerActorId: saved.state.actorId, resumeActorId: sourceId, queue: ["legendary", "lair"] } },
+    });
+
+    const fatalStarted = startBoss(fighter());
+    expect(fatalStarted.accepted).toBe(true);
+    const fatal = makeDying(fatalStarted.state);
+    fatal.character.deathSaveFailures = 2;
+    queuedRolls.push(2);
+    const dead = apply(fatal, { kind: "death_save" });
+    expect(dead.accepted).toBe(true);
+    expect(dead.state.character.lifecycleState).toBe("dead");
+    expect(dead.state.combat).toMatchObject({ status: "ended", activeActorId: null });
+    expect(dead.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_defeated",
+      objective: { status: "failed" },
+      bossTiming: { pendingWindow: null },
+    });
+    expect(normalizeCampaignState(JSON.parse(JSON.stringify(dead.state)) as LanternCampaignState).combat.lifecycle)
+      .toMatchObject({ phase: "terminal", outcome: "player_defeated", objective: { status: "failed" } });
+  });
+
+  it("rejects restored boss windows that do not match initiative semantics", () => {
+    const initial = startBoss(fighter(), 10, 11);
+    expect(initial.accepted).toBe(true);
+    expect(normalizeCampaignState(JSON.parse(JSON.stringify(initial.state)) as LanternCampaignState).combat.lifecycle?.bossTiming?.pendingWindow)
+      .toEqual(initial.state.combat.lifecycle?.bossTiming?.pendingWindow);
+
+    const ended = openLegendaryAndLairWindow(fighter());
+    expect(normalizeCampaignState(JSON.parse(JSON.stringify(ended.state)) as LanternCampaignState).combat.lifecycle?.bossTiming?.pendingWindow)
+      .toEqual(ended.state.combat.lifecycle?.bossTiming?.pendingWindow);
+    const sourceId = ended.state.combat.enemies[0]!.id;
+    const rejectWindow = (mutate: (state: LanternCampaignState) => void) => {
+      const corrupted = structuredClone(ended.state);
+      mutate(corrupted);
+      expect(normalizeCampaignState(corrupted).combat.lifecycle).toBeNull();
+    };
+
+    rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.pendingWindow!.triggerActorId = sourceId; });
+    rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.pendingWindow!.queue = ["lair", "legendary"]; });
+    rejectWindow((state) => { state.combat.activeActorId = state.actorId; });
+    rejectWindow((state) => {
+      for (const entry of state.combat.lifecycle!.initiative.entries) entry.total = 21;
+      state.combat.lifecycle!.bossTiming!.pendingWindow!.queue = ["lair"];
+    });
+  });
+
   it("rejects mismatched content, unknown refs, bad targets, insufficient points, and incapacitated sources without mutation", () => {
     const base = fighter();
     const mismatchBefore = structuredClone(base);
