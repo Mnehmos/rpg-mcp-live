@@ -18063,6 +18063,10 @@ function normalizeBossTiming(
   const lair = candidate.lair;
   const { entries, order } = initiative;
   const source = enemies.find((enemy) => enemy.id === candidate.sourceCombatantId);
+  const sourceRecord = source ? getOpen5eCreature(source.contentKey, source.packHash) : null;
+  const sourceView = source && sourceRecord && source.progression === null
+    ? materializeCombatant(source)
+    : null;
   const sourceEntry = entries.find((entry) => entry.actorId === source?.id);
   const actorEntry = entries.find((entry) => entry.actorId === actorId);
   const entryIds = entries.map((entry) => entry.actorId);
@@ -18075,7 +18079,7 @@ function normalizeBossTiming(
       && entry.tieBreaker === entry.actorId
       && !entry.surprised)
     && actorEntry?.modifier === actorInitiativeModifier
-    && sourceEntry?.modifier === (source ? materializeCombatant(source).abilityModifiers.dex : undefined)
+    && sourceEntry?.modifier === sourceView?.abilityModifiers.dex
     && order.every((entry, index) => entry === expectedOrder[index])
     && entryIds.every((entry, index) => entry === order[index])
     && initiative.rolledAtVersion >= 1
@@ -18134,6 +18138,7 @@ function normalizeBossTiming(
     || lair.initiative.formulaRevision !== "initiative-count-20-v1"
     || enemies.length !== 1
     || !source
+    || !sourceView
     || !exactInitiativeRoster
     || !activeInitiativeValid
     || !reviewedBossTailBinding(source)

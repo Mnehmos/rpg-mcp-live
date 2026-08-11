@@ -723,6 +723,18 @@ describe("reviewed boss-action timing", () => {
     rejectLifecycle((state) => { state.combat.lifecycle!.outcome = null; });
     rejectLifecycle((state) => { state.combat.lifecycle!.outcomeId = "invented-outcome"; });
     rejectLifecycle((state) => { state.combat.lifecycle!.objective.status = "pending"; });
+    rejectLifecycle((state) => { state.combat.enemies[0]!.packHash = "missing-reviewed-pack"; });
+    rejectLifecycle((state) => {
+      state.combat.enemies[0]!.progression = {
+        templateId: "veteran",
+        templateVersion: "v1",
+        sourceCommandId: randomUUID(),
+        sourceVersion: state.version,
+        base: { maxHp: 195, armorClass: 19, challengeRating: 14, experiencePoints: 11_500 },
+        revised: { maxHp: 200, armorClass: 20, challengeRating: 14.5, experiencePoints: 23_000 },
+        modifications: { maxHp: 5, armorClass: 1, attackBonus: 1, damageBonus: 1 },
+      };
+    });
   });
 
   it("rejects mismatched content, unknown refs, bad targets, insufficient points, and incapacitated sources without mutation", () => {
