@@ -58,7 +58,9 @@ provenance, so a reviewed campaign content re-pin does not rewrite past
 evidence or disable an otherwise valid active zone; effects created later by
 that zone inherit the same historical provenance. An active zone whose start
 round is later than the authoritative combat round is invalid. Zone identities
-are unique, and at most one active zone may use each reviewed definition.
+are unique, and at most one active zone may use each reviewed definition. A
+persisted zone still marked active at or after its expiry round also fails
+closed before its effects can participate in another resolution.
 
 Zone reconciliation enriches the same accepted command result before the
 state and event are persisted. It does not increment campaign version again or

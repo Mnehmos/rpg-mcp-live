@@ -8939,6 +8939,9 @@ function sameReviewedZoneOperations(
 
 function tacticalZoneEffectStateIssue(state: LanternCampaignState): TacticalIssue | null {
   const activeZones = state.combat.tactical.zones.filter((zone) => zone.status === "active");
+  if (activeZones.some((zone) => state.combat.round >= zone.duration.expiresAtRound)) {
+    return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+  }
   const zonesBySource = new Map(activeZones.map((zone) => [tacticalZoneEffectSourceRef(zone.id), zone]));
   const activeZoneEffects = state.effects.filter((effect) =>
     effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:")
@@ -17180,6 +17183,7 @@ function normalizeTacticalZones(
       || !Number.isInteger(raw.duration.startedRound)
       || raw.duration.startedRound < 0
       || (raw.status === "active" && raw.duration.startedRound > currentRound)
+      || (raw.status === "active" && raw.duration.expiresAtRound <= currentRound)
       || raw.duration.expiresAtRound !== raw.duration.startedRound + definition.durationRounds
       || !isTacticalPosition(raw.currentCenter)
       || raw.currentCenter.frameId !== geometry.frameId

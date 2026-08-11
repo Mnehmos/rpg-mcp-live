@@ -444,6 +444,12 @@ describe("#175 persistent tactical zones", () => {
           duration.expiresAtRound = duration.startedRound + duration.amount;
         },
       },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.round = state.combat.tactical.zones[0]!.duration.expiresAtRound;
+        },
+      },
     ]) {
       const state = encounter();
       const created = apply(state, followingAura(state));
@@ -466,15 +472,19 @@ describe("#175 persistent tactical zones", () => {
       expect(normalizeCampaignState(loaded).combat.tactical.zoneIntegrityIssue).toEqual(loaded.combat.tactical.zoneIntegrityIssue);
       expect(loaded.effects.some((effect) => effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:"))).toBe(true);
       const before = JSON.stringify(loaded);
-      const command = engineCommandSchema.parse({ kind: "end_turn" });
+      const command = engineCommandSchema.parse({
+        kind: "roll_check",
+        ability: "str",
+        goal: "Prove an expired or corrupt zone cannot influence this roll.",
+      });
       const commandId = randomUUID();
       const rejected = reopened.executeCommand({
         context: request,
         clientCommandId: commandId,
         expectedCampaignVersion: loaded.version,
         command,
-        tool: "end_turn",
-        resolve: (current) => resolveEngineCommand(current, request, commandId, command, "end_turn"),
+        tool: "roll_check",
+        resolve: (current) => resolveEngineCommand(current, request, commandId, command, "roll_check"),
       });
       expect(rejected).toMatchObject({ accepted: false, code: corruption.code, event: null });
       expect(JSON.stringify(rejected.state)).toBe(before);
