@@ -806,6 +806,13 @@ describe("#175 persistent tactical zones", () => {
       },
       {
         code: "invalid_tactical_zone_source",
+        apply: (state: LanternCampaignState) => {
+          state.character.hp = 0;
+          state.character.lifecycleState = "dead";
+        },
+      },
+      {
+        code: "invalid_tactical_zone_source",
         apply: (state: LanternCampaignState) => { state.combat.tactical.zones[0]!.provenance.sourceCommandId = "   "; },
       },
       {
@@ -1085,45 +1092,61 @@ describe("#175 persistent tactical zones", () => {
   });
 
   it("guards direct persisted resolvers before their callback or player text can mutate state", () => {
-    const state = encounter();
-    const created = apply(state, followingAura(state));
-    const corrupted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
-    corrupted.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.operations = [
-      { kind: "disadvantage", category: "ability-check" },
-    ];
-    const directory = mkdtempSync(join(tmpdir(), "lantern-zone-store-boundary-"));
-    const databasePath = join(directory, "engine.db");
-    const request = context(corrupted);
-    const store = new LanternEngineStore(databasePath);
-    store.createCampaign(
-      { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
-      corrupted,
-    );
-    const loaded = store.getCampaign(request);
-    const before = JSON.stringify(loaded);
-    const command = { kind: "production_room_enter" } as const;
-    const commandId = randomUUID();
-    let resolverInvoked = false;
-
-    const rejected = store.executeCommand({
-      context: request,
-      clientCommandId: commandId,
-      expectedCampaignVersion: loaded.version,
-      command,
-      tool: "production_room",
-      playerText: "This text must not be appended when zone integrity fails.",
-      resolve: (current) => {
-        resolverInvoked = true;
-        return resolveProductionRoomEnter(current, request, commandId);
+    for (const scenario of [
+      {
+        code: "invalid_tactical_zone_effect",
+        corrupt: (state: LanternCampaignState) => {
+          state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.operations = [
+            { kind: "disadvantage", category: "ability-check" },
+          ];
+        },
       },
-    });
+      {
+        code: "invalid_tactical_zone_source",
+        corrupt: (state: LanternCampaignState) => {
+          state.character.hp = 0;
+          state.character.lifecycleState = "dead";
+        },
+      },
+    ]) {
+      const state = encounter();
+      const created = apply(state, followingAura(state));
+      const corrupted = structuredClone(created.state);
+      scenario.corrupt(corrupted);
+      const directory = mkdtempSync(join(tmpdir(), "lantern-zone-store-boundary-"));
+      const databasePath = join(directory, "engine.db");
+      const request = context(corrupted);
+      const store = new LanternEngineStore(databasePath);
+      store.createCampaign(
+        { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+        corrupted,
+      );
+      const loaded = store.getCampaign(request);
+      const before = JSON.stringify(loaded);
+      const command = { kind: "production_room_enter" } as const;
+      const commandId = randomUUID();
+      let resolverInvoked = false;
 
-    expect(resolverInvoked).toBe(false);
-    expect(rejected).toMatchObject({ accepted: false, code: "invalid_tactical_zone_effect", event: null });
-    expect(JSON.stringify(rejected.state)).toBe(before);
-    expect(JSON.stringify(store.getCampaign(request))).toBe(before);
-    expect(store.listCampaignEvents(request)).toEqual([]);
-    store.close();
+      const rejected = store.executeCommand({
+        context: request,
+        clientCommandId: commandId,
+        expectedCampaignVersion: loaded.version,
+        command,
+        tool: "production_room",
+        playerText: "This text must not be appended when zone integrity fails.",
+        resolve: (current) => {
+          resolverInvoked = true;
+          return resolveProductionRoomEnter(current, request, commandId);
+        },
+      });
+
+      expect(resolverInvoked).toBe(false);
+      expect(rejected).toMatchObject({ accepted: false, code: scenario.code, event: null });
+      expect(JSON.stringify(rejected.state)).toBe(before);
+      expect(JSON.stringify(store.getCampaign(request))).toBe(before);
+      expect(store.listCampaignEvents(request)).toEqual([]);
+      store.close();
+    }
   });
 
   it("does not remove an unrelated persisted effect that shares a departing zone effect id", () => {

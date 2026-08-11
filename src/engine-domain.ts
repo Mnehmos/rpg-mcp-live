@@ -2116,7 +2116,13 @@ export function normalizeCampaignState(state: LanternCampaignState): LanternCamp
   next.situation = normalizeSituation((next as LanternCampaignState & { situation?: unknown }).situation, next);
   next.character = recalculateProgressionOnLoad(normalizeCharacter(next.character));
   reconcileWorldObjectInventory(next);
-  next.combat = normalizeCombat(next.combat, next.actorId, next.character.speed, next.version);
+  next.combat = normalizeCombat(
+    next.combat,
+    next.actorId,
+    next.character.speed,
+    next.version,
+    next.character.lifecycleState !== "dead",
+  );
   next.quest = normalizeQuest(next.quest ?? ({} as EngineQuest));
   if (!Array.isArray(next.quests) || !next.quests.length) next.quests = [next.quest];
   next.quests = next.quests.map(normalizeQuest);
@@ -8923,7 +8929,11 @@ function tacticalZoneStateIssue(
     if (zone.geometryRevision !== state.combat.tactical.geometry.revision) {
       return { code: "stale_tactical_geometry", message: "An active tactical zone references stale geometry; the command cannot mutate state." };
     }
-    if (zone.source.actorId !== state.actorId || zone.source.ref !== `actor:${state.actorId}`) {
+    if (
+      (validateEffectProjection && state.character.lifecycleState === "dead")
+      || zone.source.actorId !== state.actorId
+      || zone.source.ref !== `actor:${state.actorId}`
+    ) {
       return { code: "invalid_tactical_zone_source", message: "An active tactical zone has an invalid source; the command cannot mutate state." };
     }
     if (
@@ -17032,7 +17042,13 @@ function emptyCombat(): EngineCombat {
   };
 }
 
-function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "actor", movementFeet = 30, campaignVersion = 0): EngineCombat {
+function normalizeCombat(
+  combat: EngineCombat | null | undefined,
+  actorId = "actor",
+  movementFeet = 30,
+  campaignVersion = 0,
+  sourceAlive = true,
+): EngineCombat {
   if (!combat || !Array.isArray(combat.enemies)) return emptyCombat();
   const legacyEnemies = combat.enemies as Array<Partial<EngineCombatant>>;
   if (legacyEnemies.some((enemy) => !enemy.id || !enemy.contentKey || !enemy.packHash)) {
@@ -17049,7 +17065,16 @@ function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "act
   const maxDistanceCells = Math.max(1, ...legacyEnemies.map((enemy) => Math.max(1, Math.ceil(Number(enemy.distanceFeet ?? 5) / TACTICAL_CELL_FEET))));
   const round = Math.max(0, combat.round ?? 0);
   const status = combat.status ?? "none";
-  const tactical = normalizeCombatTactical(combat.tactical, combat.encounterId ?? "legacy", actorId, maxDistanceCells, round, campaignVersion, status);
+  const tactical = normalizeCombatTactical(
+    combat.tactical,
+    combat.encounterId ?? "legacy",
+    actorId,
+    maxDistanceCells,
+    round,
+    campaignVersion,
+    status,
+    sourceAlive,
+  );
   const enemies = legacyEnemies.map((enemy, index) => {
     const position = isTacticalPosition(enemy.position) && enemy.position.frameId === tactical.geometry.frameId
       ? { ...enemy.position }
@@ -17210,6 +17235,7 @@ function normalizeCombatTactical(
   currentRound: number,
   campaignVersion: number,
   combatStatus: EngineCombat["status"],
+  sourceAlive: boolean,
 ): EngineCombatTacticalState {
   const fallback = emptyTacticalState(encounterId);
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
@@ -17252,7 +17278,15 @@ function normalizeCombatTactical(
     ? { ...candidate.actorPosition }
     : { frameId, x: 0, y: 0, z: 0 };
   if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallbackWithIntegrity();
-  const normalizedZones = normalizeTacticalZones(candidate.zones, actorId, geometry, currentRound, campaignVersion, combatStatus);
+  const normalizedZones = normalizeTacticalZones(
+    candidate.zones,
+    actorId,
+    geometry,
+    currentRound,
+    campaignVersion,
+    combatStatus,
+    sourceAlive,
+  );
   return {
     geometry,
     movementMode: "walking",
@@ -17271,17 +17305,18 @@ function normalizeTacticalZones(
   currentRound: number,
   campaignVersion: number,
   combatStatus: EngineCombat["status"],
+  sourceAlive: boolean,
 ): { zones: EngineTacticalZone[]; integrityIssue: EngineTacticalZoneIntegrityIssue | null } {
   if (value === undefined || value === null) return { zones: [], integrityIssue: null };
   if (!Array.isArray(value)) {
-    return { zones: [], integrityIssue: tacticalZoneNormalizationIssue({}, actorId, campaignVersion) };
+    return { zones: [], integrityIssue: tacticalZoneNormalizationIssue({}, actorId, campaignVersion, sourceAlive) };
   }
   let integrityIssue: EngineTacticalZoneIntegrityIssue | null = null;
   const zoneIds = new Set<string>();
   const activeDefinitionKeys = new Set<EngineTacticalZoneDefinitionKey>();
   const zones = value.flatMap((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      integrityIssue ??= tacticalZoneNormalizationIssue({}, actorId, campaignVersion);
+      integrityIssue ??= tacticalZoneNormalizationIssue({}, actorId, campaignVersion, sourceAlive);
       return [];
     }
     const raw = entry as Partial<EngineTacticalZone>;
@@ -17307,6 +17342,7 @@ function normalizeTacticalZones(
       || raw.duration.amount !== definition.durationRounds
       || !Number.isInteger(raw.duration.startedRound)
       || raw.duration.startedRound < 0
+      || (raw.status === "active" && !sourceAlive)
       || (raw.status === "active" && combatStatus !== "active")
       || (raw.status === "active" && raw.duration.startedRound > currentRound)
       || (raw.status === "active" && raw.duration.expiresAtRound <= currentRound)
@@ -17335,16 +17371,16 @@ function normalizeTacticalZones(
       || (raw.status === "active" && !installedTacticalZoneRulesVersion(raw.provenance.rulesVersion))
       || raw.provenance.definitionRevision !== "tactical-zones-v1"
     ) {
-      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion, sourceAlive);
       return [];
     }
     if (definition.anchorKind === "stationary") {
       if (raw.anchor.kind !== "stationary" || !isTacticalPosition(raw.anchor.position) || tacticalAimIssue(raw.anchor.position, geometry)) {
-        integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
+        integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion, sourceAlive);
         return [];
       }
     } else if (raw.anchor.kind !== "actor" || raw.anchor.actorId !== actorId) {
-      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion, sourceAlive);
       return [];
     }
     const endedReason = raw.endedReason === "expired"
@@ -17357,7 +17393,7 @@ function normalizeTacticalZones(
       || (raw.status === "expired" && endedReason !== "expired")
       || (raw.status === "removed" && endedReason !== "source-dead" && endedReason !== "encounter-ended")
     ) {
-      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion, sourceAlive);
       return [];
     }
     if (
@@ -17406,10 +17442,12 @@ function tacticalZoneNormalizationIssue(
   zone: Partial<EngineTacticalZone>,
   actorId: string,
   campaignVersion: number,
+  sourceAlive: boolean,
 ): EngineTacticalZoneIntegrityIssue {
   const provenance = zone.provenance;
   return tacticalZoneIntegrityIssue(
-    !zone.source
+    (zone.status === "active" && !sourceAlive)
+      || !zone.source
       || zone.source.actorId !== actorId
       || zone.source.ref !== `actor:${actorId}`
       || !provenance
