@@ -500,7 +500,7 @@ async function runSurrenderInsteadOfFighting(): Promise<GauntletTrace> {
     const second = execute(session, { kind: "encounter_decision", decision: "accept_surrender", targetId }, "I accept the guards' surrender instead of continuing the fight.");
     const assertions = [
       assertion("nonlethal action is authoritative", first.result.accepted && first.result.event !== null, `code=${first.result.code}`),
-      assertion("server offers surrender", first.result.state.combat.lifecycle?.morale.offers.some((offer) => offer.status === "offered") === true, "surrender offer present"),
+      assertion("server offers surrender", first.result.state.combat.lifecycle?.morale?.offers.some((offer) => offer.status === "offered") === true, "surrender offer present"),
       assertion("surrender ends combat without a kill", second.result.accepted && second.result.state.combat.lifecycle?.outcome === "surrendered" && second.result.state.combat.status === "ended", `outcome=${second.result.state.combat.lifecycle?.outcome}`),
     ];
     return makeTrace("surrender-instead-of-fighting", "Surrender is a legal alternative to fighting", "forced-combat-outcome", "I accept the guards' surrender instead of continuing the fight.", "encounter_decision.accept_surrender", [first, second], assertions, { continuationStatus: "resolved" });

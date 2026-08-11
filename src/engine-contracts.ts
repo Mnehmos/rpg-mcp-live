@@ -1073,6 +1073,7 @@ export const engineToolNameSchema = z.enum([
   "combat_action",
   "combat_move",
   "tactical_zone_create",
+  "boss_action",
   "end_turn",
   "controlled_actor_create",
   "controlled_actor_command",
@@ -1570,7 +1571,10 @@ export interface EngineCombatTacticalState {
   zoneIntegrityIssue: EngineTacticalZoneIntegrityIssue | null;
 }
 
-export const engineEncounterLifecycleProfileSchema = z.literal("guards-surrender-v1");
+export const engineEncounterLifecycleProfileSchema = z.enum([
+  "guards-surrender-v1",
+  "adult-black-dragon-boss-v1",
+]);
 export type EngineEncounterLifecycleProfile = z.infer<typeof engineEncounterLifecycleProfileSchema>;
 
 export const engineEncounterDecisionSchema = z.enum([
@@ -1584,7 +1588,7 @@ export const engineEncounterDecisionSchema = z.enum([
 export type EngineEncounterDecision = z.infer<typeof engineEncounterDecisionSchema>;
 
 export type EngineEncounterPhase = "pre-combat" | "active" | "resolving" | "terminal";
-export type EngineEncounterOutcome = "killed" | "surrendered" | "captured" | "escaped" | "player_surrendered";
+export type EngineEncounterOutcome = "killed" | "subdued" | "surrendered" | "captured" | "escaped" | "player_surrendered" | "player_defeated";
 
 export interface EngineEncounterApproachEvidence {
   challengeId: "stealth-perception-v1";
@@ -1640,14 +1644,76 @@ export interface EngineEncounterMorale {
   lastTriggerId: string | null;
 }
 
+export type EngineBossActionWindowKind = "legendary" | "lair";
+
+export interface EngineBossTiming {
+  revision: "boss-timing-v1";
+  sourceCombatantId: string;
+  legendary: {
+    maximum: 3;
+    remaining: number;
+    totalSpent: number;
+    lastConsumedWindowId: string | null;
+    refresh: "start-of-source-turn";
+    action: {
+      actionRef: string;
+      name: string;
+      cost: 1;
+      sourceActionKey: string;
+      sourceDescriptionSha256: string;
+      attackContentKey: string;
+    };
+  };
+  lair: {
+    available: boolean;
+    usedCycle: number | null;
+    initiative: {
+      count: 20;
+      orderIndex: number;
+      cycle: number;
+      formulaRevision: "initiative-count-20-v1";
+    };
+    action: {
+      actionRef: string;
+      name: string;
+      source: "lantern-reviewed";
+      ability: "dex";
+      dc: 15;
+      damage: {
+        diceCount: 2;
+        dieSides: 6;
+        bonus: 0;
+        type: "acid";
+        saveOnSuccess: "half";
+      };
+    };
+  };
+  pendingWindow: {
+    id: string;
+    triggerActorId: string | null;
+    resumeActorId: string;
+    queue: EngineBossActionWindowKind[];
+    legendaryResolution: "pending" | "used" | "passed" | "not-offered";
+    openedAtVersion: number;
+  } | null;
+  lastCompletedWindow: {
+    id: string;
+    triggerActorId: string | null;
+    resumeActorId: string;
+    legendaryResolution: "used" | "passed" | "not-offered";
+    openedAtVersion: number;
+    completedAtVersion: number;
+  } | null;
+}
+
 export interface EngineEncounterLifecycle {
   profile: EngineEncounterLifecycleProfile;
   phase: EngineEncounterPhase;
   surprise: EngineEncounterSurprise;
   initiative: EngineEncounterInitiative;
-  morale: EngineEncounterMorale;
+  morale: EngineEncounterMorale | null;
   objective: {
-    id: "resolve-without-killing";
+    id: "resolve-without-killing" | "defeat-boss";
     status: "pending" | "succeeded" | "failed";
   };
   outcome: EngineEncounterOutcome | null;
@@ -1655,6 +1721,7 @@ export interface EngineEncounterLifecycle {
   claimedRewards: string[];
   nonlethalDefeatIds: string[];
   retreatPlanRevision: number | null;
+  bossTiming: EngineBossTiming | null;
 }
 
 export const engineCampaignPhaseSchema = z.enum(["character_creation", "tutorial", "sandbox"]);
@@ -2225,6 +2292,11 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   engineTacticalZoneCreateCommandSchema,
+  z.object({
+    kind: z.literal("boss_action"),
+    actionRef: z.string().trim().min(1).max(300),
+    targetId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
   z.object({ kind: z.literal("end_turn") }).strict(),
   engineControlledActorCreateCommandSchema,
   engineControlledActorCommandSchema,
@@ -3195,17 +3267,20 @@ export interface EnginePendingReaction {
   damageType: string;
   eligibleReactionIds: string[];
   status: "offered" | "accepted" | "declined" | "resolved";
-  resumeMode: "finish-creature-turn" | "continue-character-turn";
+  resumeMode: "finish-creature-turn" | "continue-character-turn" | "finish-boss-window";
   movementTriggerId: string | null;
+  bossWindowId: string | null;
   resumeToken: string;
 }
 
-export type EngineActionOfferTiming = "action" | "bonus_action" | "reaction" | "movement" | "free";
+export type EngineActionOfferTiming = "action" | "bonus_action" | "reaction" | "legendary" | "lair" | "movement" | "free";
 
 export interface EngineActionOfferCost {
   action?: number;
   bonusAction?: number;
   reaction?: number;
+  legendary?: number;
+  lair?: number;
   movementFeet?: number;
 }
 

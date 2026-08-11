@@ -364,6 +364,10 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["center"], message: "The source-following aura derives its center from the player." });
     }
   }),
+  boss_action: z.object({
+    actionRef: z.string().trim().min(1).max(300),
+    targetId: z.string().trim().min(1).max(120).optional(),
+  }).strict(),
   end_turn: noArguments,
   advancement_confirm: z.object({ pendingId: z.string().trim().min(1).max(120) }).strict(),
   npc_advance: z.object({
@@ -1037,7 +1041,11 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       properties: {
         encounterId: { type: "string" },
         encounterName: { type: "string" },
-        lifecycleProfile: { type: "string", enum: ["guards-surrender-v1"], description: "Opt into the reviewed non-kill encounter lifecycle slice." },
+        lifecycleProfile: {
+          type: "string",
+          enum: ["guards-surrender-v1", "adult-black-dragon-boss-v1"],
+          description: "Opt into one reviewed encounter lifecycle slice. The boss profile is restricted to exactly one installed Adult Black Dragon.",
+        },
         approach: {
           type: "object",
           properties: {
@@ -1296,6 +1304,19 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
       additionalProperties: false,
     }
   ),
+  tool(
+    "boss_action",
+    "Resolve exactly one server-offered legendary or lair action, or pass the current boss window. Choose actionRef and targetId only from the current actionOffers; timing, resource cost, attack/save numbers, and resume order are engine-owned.",
+    {
+      type: "object",
+      properties: {
+        actionRef: { type: "string", description: "Exact reviewed action ref or pass ref from the current actionOffers." },
+        targetId: { type: "string", description: "Exact valid target id from the selected offer; omit when passing." },
+      },
+      required: ["actionRef"],
+      additionalProperties: false,
+    }
+  ),
   tool("end_turn", "Explicitly end the player's combat turn and offer the opposition its turn.", {}),
   tool(
     "advancement_confirm",
@@ -1322,7 +1343,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "advance_turn",
-    "Resolve the active creature's turn with a source-backed executable action. Choose actionKey from combat_state. Exact S7 multiattack and save/damage programs run atomically; incomplete prose, legendary timing, and unsupported fragments are rejected without mutation. attackKey remains a compatibility alias.",
+    "Resolve the active creature's ordinary turn with a source-backed executable action. Choose actionKey from combat_state. Exact S7 multiattack and save/damage programs run atomically; unsupported boss content and fragments are rejected without mutation. Use boss_action only when the engine exposes a reviewed boss offer. attackKey remains a compatibility alias.",
     {
       type: "object",
       properties: {
@@ -1580,6 +1601,12 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         definitionKey: args.definitionKey,
         geometryRevision: args.geometryRevision,
         center: args.center,
+      });
+    case "boss_action":
+      return engineCommandSchema.parse({
+        kind: "boss_action",
+        actionRef: args.actionRef,
+        targetId: args.targetId,
       });
     case "end_turn":
       return engineCommandSchema.parse({ kind: "end_turn" });

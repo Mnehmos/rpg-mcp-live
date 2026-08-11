@@ -236,6 +236,7 @@ describe("typed action-economy kernel", () => {
       status: "offered",
       resumeMode: "finish-creature-turn",
       movementTriggerId: null,
+      bossWindowId: null,
       resumeToken: "resume-1",
     };
     const normalized = normalizeCampaignState(JSON.parse(JSON.stringify(state)));

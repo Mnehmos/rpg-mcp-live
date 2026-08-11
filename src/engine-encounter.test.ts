@@ -95,7 +95,7 @@ describe("reviewed encounter lifecycle", () => {
     const attack = apply(started.state, { kind: "combat_action", action: "attack_nonlethal", targetId: first.id });
     expect(attack.accepted).toBe(true);
     expect(attack.state.combat.lifecycle?.phase).toBe("resolving");
-    expect(attack.state.combat.lifecycle?.morale.offers[0]).toMatchObject({ targetId: second.id, status: "offered" });
+    expect(attack.state.combat.lifecycle?.morale?.offers[0]).toMatchObject({ targetId: second.id, status: "offered" });
     expect(attack.state.combat.lifecycle?.nonlethalDefeatIds).toContain(first.id);
 
     const accepted = apply(attack.state, { kind: "encounter_decision", decision: "accept_surrender", targetId: second.id });

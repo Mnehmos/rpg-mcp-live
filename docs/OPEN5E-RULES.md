@@ -66,7 +66,7 @@ The complete per-collection and per-document matrix is generated at [COVERAGE.md
 | S0 | Retryable paginated import, verbatim raw NDJSON, normalized/compiled layers, checksums, coverage, attribution, deterministic rollup | Independent import equality and installed-pack verification |
 | S1 | Verified immutable loader, pack registration, rules identity, policy resolver, `content_search` and `content_get`, pack-sourced skills and currency | Read-only/version invariants and stable policy rejections |
 | S2 | Pack-backed items, weapons, armor, magic items, starting kits, merchant stock, equipment AC, exact copper values | Atomic buy/equip/unequip/sell golden path |
-| S3 | Pack-backed combatants, full typed SRD statblocks, saves, senses, defenses, typed attacks, authoritative spawn | Caller cannot supply creature stats; tier-0 actions fail closed |
+| S3 | Pack-backed combatants, full typed SRD statblocks, saves, senses, defenses, typed attacks, authoritative spawn | Caller cannot supply creature stats; tier-0 actions fail closed except the exact reviewed ADR-H35 boss binding |
 | S4 | Spell lists, level 1-20 slot progressions, known/prepared state, range, targeting, attack/save damage, concentration and recovery | Slot/resource/range/area/defense/recovery tests |
 | S5 | Pack-backed character options and compiled level-one class/species/background profiles | Open character creation, option filtering, full sheet and starting inventory projections |
 | S6 | Pinned rules, rulesets, sections, and planes exposed through `rules_reference` | Read-only exact/search lookup with source evidence |
@@ -82,7 +82,7 @@ Open5e supplies source definitions. The DM supplies the world, situations, NPC c
 | --- | --- | --- |
 | Character | Source-backed legal options, scores, modifiers, saves, skills, HP, AC, speed, slots, load | Concept, identity, description, goals, choices |
 | Inventory and money | Pack identity, quantities, slots, attunement, transfer, exact integer copper | Availability, original authored goods, price and barter terms |
-| Creatures and combat | Pack stats, turns, action economy, attacks, saves, defenses, damage, conditions | Encounter choice, count, placement, tactics and motives |
+| Creatures and combat | Pack stats, turns, action economy, attacks, saves, defenses, damage, conditions, and reviewed boss timing/resources | Encounter choice, count, placement, tactics and motives |
 | Spells | Access, known/prepared state, slots, range, targets, attacks/saves, typed effects | Spell choice, target intent and narration |
 | World and quests | Typed persistence and atomic rewards/progress | Places, people, stakes, objectives and consequences |
 | Improvisation | Validated typed mechanical effects and duration evidence | Stunt, fictional permission and rule-of-cool framing |

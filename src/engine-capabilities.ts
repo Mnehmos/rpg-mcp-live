@@ -138,7 +138,7 @@ export const engineCapabilityFamilies: readonly EngineCapabilityFamily[] = [
     "COMBAT CAPABILITY (rev 2). Start opposition from exact installed creature content keys and fictionally established distances; never invent or copy stats. Read combat_state, use the active combatant and source-backed action keys, and obey turn, range, reaction, condition, morale, custody, loot, rest, and action-economy results. A tier or legality rejection means no mechanical effect occurred. Narrate the committed combat result as physical consequence, with exact mechanics secondary.",
     ["sandbox"],
     "resolve",
-    ["combat_state", "combat_start", "encounter_decision", "custody_action", "spawn_creature", "combat_action", "combat_move", "tactical_zone_create", "end_turn", "advance_turn", "npc_advance", "loot", "rest"],
+    ["combat_state", "combat_start", "encounter_decision", "custody_action", "spawn_creature", "combat_action", "boss_action", "combat_move", "tactical_zone_create", "end_turn", "advance_turn", "npc_advance", "loot", "rest"],
   ),
   family(
     "magic",
