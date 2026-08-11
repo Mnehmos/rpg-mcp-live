@@ -9141,6 +9141,7 @@ function reconcileTacticalZones(
 
     if (orphanedEffectIds.length > 0) {
       state.effects = state.effects.map((effect) => effect.status === "active"
+        && effect.sourceRef === sourceRef
         && orphanedEffectIds.includes(effect.id)
         ? { ...effect, status: "removed" as const }
         : effect);

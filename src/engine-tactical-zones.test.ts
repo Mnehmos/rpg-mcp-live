@@ -727,6 +727,57 @@ describe("#175 persistent tactical zones", () => {
     store.close();
   });
 
+  it("does not remove an unrelated persisted effect that shares a departing zone effect id", () => {
+    const state = encounter();
+    const created = apply(state, followingAura(state));
+    const enemyId = created.state.combat.enemies[0]!.id;
+    const zoneEffect = created.state.effects.find((effect) =>
+      effect.sourceRef.startsWith("tactical-zone:") && effect.targetRefs.includes(enemyId)
+    )!;
+    const persisted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    persisted.effects.push({
+      ...structuredClone(zoneEffect),
+      sourceRef: "spell:unrelated-persistent-effect",
+      targetRefs: [persisted.character.id],
+    });
+    const directory = mkdtempSync(join(tmpdir(), "lantern-zone-effect-id-collision-"));
+    const databasePath = join(directory, "engine.db");
+    const request = context(persisted);
+    const store = new LanternEngineStore(databasePath);
+    store.createCampaign(
+      { requestId: randomUUID(), accountId: persisted.accountId, actorId: persisted.actorId, capabilities: ["player", "dm"] },
+      persisted,
+    );
+    store.close();
+
+    const reopened = new LanternEngineStore(databasePath);
+    const loaded = reopened.getCampaign(request);
+    expect(loaded.effects.filter((effect) => effect.id === zoneEffect.id)).toHaveLength(2);
+    const command = engineCommandSchema.parse({
+      kind: "combat_move",
+      geometryRevision: loaded.combat.tactical.geometry.revision,
+      destination: { frameId: loaded.combat.tactical.geometry.frameId, x: -3, y: 0, z: 0 },
+    });
+    const commandId = randomUUID();
+    const moved = reopened.executeCommand({
+      context: request,
+      clientCommandId: commandId,
+      expectedCampaignVersion: loaded.version,
+      command,
+      tool: "combat_move",
+      resolve: (current) => resolveEngineCommand(current, request, commandId, command, "combat_move"),
+    });
+
+    expect(moved.accepted).toBe(true);
+    expect(moved.state.effects.find((effect) =>
+      effect.id === zoneEffect.id && effect.sourceRef.startsWith("tactical-zone:")
+    )?.status).toBe("removed");
+    expect(moved.state.effects.find((effect) =>
+      effect.id === zoneEffect.id && effect.sourceRef === "spell:unrelated-persistent-effect"
+    )?.status).toBe("active");
+    reopened.close();
+  });
+
   it("advertises only the two reviewed definitions through the existing tool registry", () => {
     const state = encounter();
     const args = parseToolArguments("tactical_zone_create", {
