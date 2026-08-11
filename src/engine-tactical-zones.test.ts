@@ -44,7 +44,10 @@ function apply(state: LanternCampaignState, raw: unknown, clientCommandId = rand
   return resolveEngineCommand(state, context(state), clientCommandId, command, command.kind);
 }
 
-function encounter(enemyPositions: Array<{ x: number; y: number }> = [{ x: 0, y: 2 }, { x: 3, y: 1 }]): LanternCampaignState {
+function encounter(
+  enemyPositions: Array<{ x: number; y: number }> = [{ x: 0, y: 2 }, { x: 3, y: 1 }],
+  lifecycleProfile = false,
+): LanternCampaignState {
   const initial = createInitialCampaign(randomUUID(), randomUUID());
   const created = apply(initial, {
     kind: "character_create",
@@ -53,10 +56,20 @@ function encounter(enemyPositions: Array<{ x: number; y: number }> = [{ x: 0, y:
     className: "fighter",
   });
   expect(created.accepted).toBe(true);
+  if (lifecycleProfile) queuedRolls.push(18, 5, 17, 16, 15);
   const started = apply(created.state, {
     kind: "combat_start",
     encounterId: `zones-${randomUUID()}`,
     encounterName: "Reviewed Persistent Geometry",
+    ...(lifecycleProfile ? {
+      lifecycleProfile: "guards-surrender-v1" as const,
+      approach: {
+        challengeId: "stealth-perception-v1" as const,
+        groupIndex: 0,
+        goal: "Approach the guards without starting a fight.",
+        approach: "Keep to the shadows until the tactical zone is needed.",
+      },
+    } : {}),
     tactical: {
       frameId: "zone-frame",
       bounds: { minX: -6, maxX: 8, minY: -6, maxY: 8 },
@@ -286,6 +299,31 @@ describe("#175 persistent tactical zones", () => {
       expect(rejected).toMatchObject({ accepted: false, code: corruption.code, event: null });
       expect(JSON.stringify(rejected.state)).toBe(corruptedBefore);
     }
+  });
+
+  it("rejects zone creation whenever ordinary combat actions are prohibited without mutation", () => {
+    for (const condition of ["incapacitated", "paralyzed", "petrified", "stunned"]) {
+      const state = encounter();
+      state.character.conditions = [condition];
+      const before = JSON.stringify(state);
+      const rejected = apply(state, stationaryZone(state));
+
+      expect(rejected).toMatchObject({ accepted: false, code: "condition_prevents_action", event: null });
+      expect(JSON.stringify(rejected.state)).toBe(before);
+      expect(rejected.state.combat.turnBudget.action.spent).toBe(false);
+      expect(rejected.state.combat.tactical.zones).toHaveLength(0);
+    }
+
+    const resolving = encounter(undefined, true);
+    expect(resolving.combat.lifecycle).not.toBeNull();
+    resolving.combat.lifecycle!.phase = "resolving";
+    const before = JSON.stringify(resolving);
+    const rejected = apply(resolving, stationaryZone(resolving));
+
+    expect(rejected).toMatchObject({ accepted: false, code: "surrender_decision_required", event: null });
+    expect(JSON.stringify(rejected.state)).toBe(before);
+    expect(rejected.state.combat.turnBudget.action.spent).toBe(false);
+    expect(rejected.state.combat.tactical.zones).toHaveLength(0);
   });
 
   it("preserves zone identity and effect evidence on restart and command replay", () => {

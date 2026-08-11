@@ -9469,7 +9469,15 @@ function resolveTacticalZoneCreate(
 ): EngineResolution {
   if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "Persistent tactical zones require an active encounter.");
   if (state.combat.activeActorId !== state.actorId) return rejection(state, tool, "off_turn", "It is not your turn.");
+  if (state.combat.lifecycle?.phase === "resolving") {
+    return rejection(state, tool, "surrender_decision_required", "Resolve the server-owned surrender offer before creating a tactical zone.");
+  }
   if (hasRuntimeCondition(state, state.character.id, "unconscious")) return rejection(state, tool, "unconscious", "You are unconscious and cannot create a tactical zone.");
+  const preventingCondition = ["incapacitated", "paralyzed", "petrified", "stunned"]
+    .find((condition) => hasRuntimeCondition(state, state.character.id, condition));
+  if (preventingCondition) {
+    return rejection(state, tool, "condition_prevents_action", `You are ${preventingCondition} and cannot take an action. End the turn to resolve the skipped turn.`);
+  }
   if (!state.combat.turnBudget.action.available || state.combat.turnBudget.action.spent) {
     return rejection(state, tool, "action_spent", "Your Action is already spent this turn.");
   }
