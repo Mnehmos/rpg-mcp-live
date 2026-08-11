@@ -3543,11 +3543,13 @@ export function resolveEngineCommand(
   playerText?: string,
   internalAuthority?: EngineInternalAuthority,
 ): EngineResolution {
-  const beforeZoneIssue = tacticalZoneStateIssue(state);
+  const beforeZoneIssue = tacticalZoneStateIssue(state, true);
   if (beforeZoneIssue) return rejection(state, tool, beforeZoneIssue.code, beforeZoneIssue.message);
   const resolution = resolveEngineCommandCore(state, context, clientCommandId, command, tool, playerText, internalAuthority);
   if (resolution.accepted && !resolution.readOnly) {
-    const afterZoneIssue = tacticalZoneStateIssue(resolution.state);
+    // Movement and other accepted mutations are reconciled immediately below,
+    // so only structural zone authority is checked in this intermediate state.
+    const afterZoneIssue = tacticalZoneStateIssue(resolution.state, false);
     if (afterZoneIssue) return rejection(state, tool, afterZoneIssue.code, afterZoneIssue.message);
   }
   return reconcileZonesInResolution(
@@ -8868,7 +8870,10 @@ interface TacticalZoneReconcileResult {
   transitions: TacticalZoneTransition[];
 }
 
-function tacticalZoneStateIssue(state: LanternCampaignState): TacticalIssue | null {
+function tacticalZoneStateIssue(
+  state: LanternCampaignState,
+  validateEffectProjection: boolean,
+): TacticalIssue | null {
   if (state.combat.tactical.zoneIntegrityIssue) return state.combat.tactical.zoneIntegrityIssue;
   for (const zone of state.combat.tactical.zones) {
     if (zone.status !== "active") continue;
@@ -8893,7 +8898,7 @@ function tacticalZoneStateIssue(state: LanternCampaignState): TacticalIssue | nu
       return { code: "invalid_tactical_zone_shape", message: "An active tactical zone has an invalid reviewed shape or anchor; the command cannot mutate state." };
     }
   }
-  return null;
+  return validateEffectProjection ? tacticalZoneEffectStateIssue(state) : null;
 }
 
 function tacticalZoneEffectSourceRef(zoneId: string): string {
@@ -8905,6 +8910,102 @@ function sameSortedStrings(left: readonly string[], right: readonly string[]): b
   const sortedLeft = [...left].sort();
   const sortedRight = [...right].sort();
   return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function sameReviewedZoneOperations(
+  actual: readonly EngineEffectOperation[],
+  expected: readonly EngineEffectOperation[],
+): boolean {
+  if (actual.length !== expected.length) return false;
+  return actual.every((operation, index) => {
+    const reviewed = expected[index];
+    if (!reviewed || operation.kind !== reviewed.kind) return false;
+    if (
+      (operation.kind !== "advantage" && operation.kind !== "disadvantage")
+      || (reviewed.kind !== "advantage" && reviewed.kind !== "disadvantage")
+    ) return false;
+    return operation.category === reviewed.category && Object.keys(operation).length === 2;
+  });
+}
+
+function tacticalZoneEffectStateIssue(state: LanternCampaignState): TacticalIssue | null {
+  const activeZones = state.combat.tactical.zones.filter((zone) => zone.status === "active");
+  const zonesBySource = new Map(activeZones.map((zone) => [tacticalZoneEffectSourceRef(zone.id), zone]));
+  const activeZoneEffects = state.effects.filter((effect) =>
+    effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:")
+  );
+  if (activeZoneEffects.some((effect) => !zonesBySource.has(effect.sourceRef))) {
+    return tacticalZoneIntegrityIssue("invalid_tactical_zone_effect");
+  }
+
+  for (const zone of activeZones) {
+    const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
+    if (!definition) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+    const expectedCenter = zone.anchor.kind === "actor"
+      ? state.combat.tactical.actorPosition
+      : zone.anchor.position;
+    if (!positionEquals(zone.currentCenter, expectedCenter)) {
+      return tacticalZoneIntegrityIssue("invalid_tactical_zone_effect");
+    }
+    const cells = deriveTacticalCircleCells(
+      state.combat.tactical.geometry,
+      expectedCenter,
+      definition.radiusFeet,
+    );
+    if ("code" in cells) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+    const expectedTargets = tacticalActorIdsInCells(
+      state.combat.tactical.geometry,
+      {
+        id: state.character.id,
+        position: state.combat.tactical.actorPosition,
+        footprint: state.combat.tactical.actorFootprint,
+        eligible: state.character.lifecycleState !== "dead",
+      },
+      state.combat.enemies,
+      state.controlledActors,
+      cells,
+    ).sort();
+    if (!sameSortedStrings(zone.affectedActorIds, expectedTargets)) {
+      return tacticalZoneIntegrityIssue("invalid_tactical_zone_effect");
+    }
+
+    const sourceRef = tacticalZoneEffectSourceRef(zone.id);
+    const effects = activeZoneEffects.filter((effect) => effect.sourceRef === sourceRef);
+    if (
+      effects.length !== expectedTargets.length
+      || !sameSortedStrings(zone.activeEffectIds, effects.map((effect) => effect.id))
+    ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_effect");
+
+    const seenTargets = new Set<string>();
+    for (const effect of effects) {
+      const target = effect.targetRefs.length === 1 ? effect.targetRefs[0] : null;
+      if (
+        !target
+        || seenTargets.has(target)
+        || !expectedTargets.includes(target)
+        || effect.definitionKey !== definition.key
+        || !sameReviewedZoneOperations(effect.operations, definition.operations)
+        || effect.duration.kind !== "persistent"
+        || Object.keys(effect.duration).length !== 1
+        || effect.stackingKey !== definition.stackingKey
+        || effect.stackingRule !== "ignore"
+        || !sameSortedStrings(effect.clearedBy, ["source-removal"])
+        || effect.startAnchor.kind !== "campaign-round"
+        || !Number.isInteger(effect.startAnchor.round)
+        || effect.startAnchor.round < 0
+        || effect.startAnchor.round > state.combat.round
+        || effect.startAnchor.actorId !== undefined
+        || effect.startTimeMinutes !== undefined
+        || effect.provenance.sourceContentKey !== null
+        || typeof effect.provenance.sourceCommandId !== "string"
+        || !effect.provenance.sourceCommandId.trim()
+        || effect.provenance.rulesVersion !== state.rulesVersion
+        || effect.provenance.formulaRevision !== "tactical-zone-effects-v1"
+      ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_effect");
+      seenTargets.add(target);
+    }
+  }
+  return null;
 }
 
 function removeActiveTacticalZoneEffects(state: LanternCampaignState, zoneId: string): void {
@@ -16976,6 +17077,17 @@ function normalizeCombatTactical(
   const fallback = emptyTacticalState(encounterId);
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
   const candidate = value as Partial<EngineCombatTacticalState>;
+  const fallbackWithIntegrity = (): EngineCombatTacticalState => {
+    const persistedIssue = normalizeTacticalZoneIntegrityIssue(candidate.zoneIntegrityIssue);
+    const hadZoneState = candidate.zones !== undefined
+      && candidate.zones !== null
+      && (!Array.isArray(candidate.zones) || candidate.zones.length > 0);
+    return {
+      ...fallback,
+      zoneIntegrityIssue: persistedIssue
+        ?? (hadZoneState ? tacticalZoneIntegrityIssue("invalid_tactical_zone_shape") : null),
+    };
+  };
   const rawGeometry = candidate.geometry && typeof candidate.geometry === "object" && !Array.isArray(candidate.geometry)
     ? candidate.geometry as Partial<EngineTacticalGeometry>
     : {};
@@ -16998,11 +17110,11 @@ function normalizeCombatTactical(
       ? rawGeometry.difficultTerrain.flatMap((entry) => normalizeTacticalTerrain(entry))
       : [],
   };
-  if (validateTacticalGeometry(geometry)) return fallback;
+  if (validateTacticalGeometry(geometry)) return fallbackWithIntegrity();
   const actorPosition = isTacticalPosition(candidate.actorPosition) && candidate.actorPosition.frameId === frameId && candidate.actorPosition.z === 0
     ? { ...candidate.actorPosition }
     : { frameId, x: 0, y: 0, z: 0 };
-  if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallback;
+  if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallbackWithIntegrity();
   const normalizedZones = normalizeTacticalZones(candidate.zones, actorId, geometry);
   return {
     geometry,
@@ -17142,15 +17254,22 @@ function tacticalZoneNormalizationIssue(
 function tacticalZoneIntegrityIssue(
   code: EngineTacticalZoneIntegrityIssue["code"],
 ): EngineTacticalZoneIntegrityIssue {
-  return code === "invalid_tactical_zone_source"
-    ? {
-        code: "invalid_tactical_zone_source",
-        message: "A persisted tactical zone has an invalid source; commands are disabled until the state is repaired.",
-      }
-    : {
-        code: "invalid_tactical_zone_shape",
-        message: "A persisted tactical zone has an invalid reviewed shape or anchor; commands are disabled until the state is repaired.",
-      };
+  if (code === "invalid_tactical_zone_source") {
+    return {
+      code,
+      message: "A persisted tactical zone has an invalid source; commands are disabled until the state is repaired.",
+    };
+  }
+  if (code === "invalid_tactical_zone_effect") {
+    return {
+      code,
+      message: "A persisted tactical-zone effect does not match its reviewed producer; commands are disabled until the state is repaired.",
+    };
+  }
+  return {
+    code,
+    message: "A persisted tactical zone has an invalid reviewed shape or anchor; commands are disabled until the state is repaired.",
+  };
 }
 
 function normalizeTacticalZoneIntegrityIssue(value: unknown): EngineTacticalZoneIntegrityIssue | null {
@@ -17160,6 +17279,8 @@ function normalizeTacticalZoneIntegrityIssue(value: unknown): EngineTacticalZone
     ? tacticalZoneIntegrityIssue(code)
     : code === "invalid_tactical_zone_shape"
       ? tacticalZoneIntegrityIssue(code)
+      : code === "invalid_tactical_zone_effect"
+        ? tacticalZoneIntegrityIssue(code)
       : null;
 }
 

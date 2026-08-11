@@ -227,11 +227,17 @@ describe("#175 persistent tactical zones", () => {
     expect(dead.state.combat.tactical.zones[0]).toMatchObject({ status: "removed", endedReason: "source-dead" });
     expect(dead.state.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:") && effect.status === "active")).toHaveLength(0);
 
-    const endingState = encounter([{ x: 0, y: 2 }]);
+    const endingState = encounter([{ x: 0, y: 1 }]);
     const endingZone = apply(endingState, stationaryZone(endingState));
-    endingZone.state.combat.enemies[0]!.hp = 0;
-    endingZone.state.combat.enemies[0]!.alive = false;
-    const ended = apply(endingZone.state, { kind: "end_turn" });
+    const killReady = advanceToNextPlayerRound(endingZone.state);
+    killReady.combat.enemies[0]!.hp = 1;
+    queuedRolls.push(20);
+    const ended = apply(killReady, {
+      kind: "combat_action",
+      action: "attack",
+      targetId: killReady.combat.enemies[0]!.id,
+    });
+    expect(ended.accepted).toBe(true);
     expect(ended.state.combat.status).toBe("ended");
     expect(ended.state.combat.tactical.zones[0]).toMatchObject({ status: "removed", endedReason: "encounter-ended" });
   });
@@ -336,6 +342,18 @@ describe("#175 persistent tactical zones", () => {
           (state.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
         },
       },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.geometry.bounds.maxX = state.combat.tactical.geometry.bounds.minX - 1;
+        },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.actorPosition.x = state.combat.tactical.geometry.bounds.maxX + 1;
+        },
+      },
     ]) {
       const state = encounter();
       const created = apply(state, followingAura(state));
@@ -369,6 +387,86 @@ describe("#175 persistent tactical zones", () => {
         resolve: (current) => resolveEngineCommand(current, request, commandId, command, "end_turn"),
       });
       expect(rejected).toMatchObject({ accepted: false, code: corruption.code, event: null });
+      expect(JSON.stringify(rejected.state)).toBe(before);
+      expect(reopened.listCampaignEvents(request)).toEqual([]);
+      reopened.close();
+    }
+  });
+
+  it("rejects tampered or orphaned producer effects before any command can use them", () => {
+    const corruptions: Array<{
+      apply: (state: LanternCampaignState) => void;
+    }> = [
+      {
+        apply: (state) => {
+          state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.definitionKey = "invented-zone-definition";
+        },
+      },
+      {
+        apply: (state) => {
+          state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.operations = [
+            { kind: "disadvantage", category: "ability-check" },
+          ];
+        },
+      },
+      {
+        apply: (state) => {
+          state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.stackingRule = "stack";
+        },
+      },
+      {
+        apply: (state) => {
+          state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.duration = {
+            kind: "fixed",
+            amount: 1,
+            unit: "round",
+          };
+        },
+      },
+      {
+        apply: (state) => {
+          state.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.targetRefs = [
+            state.combat.enemies[1]!.id,
+          ];
+        },
+      },
+      {
+        apply: (state) => {
+          state.combat.tactical.zones = [];
+        },
+      },
+    ];
+
+    for (const corruption of corruptions) {
+      const state = encounter();
+      const created = apply(state, followingAura(state));
+      const corrupted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+      corruption.apply(corrupted);
+      const directory = mkdtempSync(join(tmpdir(), "lantern-corrupt-zone-effects-"));
+      const databasePath = join(directory, "engine.db");
+      const request = context(corrupted);
+      const store = new LanternEngineStore(databasePath);
+      store.createCampaign(
+        { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+        corrupted,
+      );
+      store.close();
+
+      const reopened = new LanternEngineStore(databasePath);
+      const loaded = reopened.getCampaign(request);
+      expect(loaded.effects.some((effect) => effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:"))).toBe(true);
+      const before = JSON.stringify(loaded);
+      const command = engineCommandSchema.parse({ kind: "end_turn" });
+      const commandId = randomUUID();
+      const rejected = reopened.executeCommand({
+        context: request,
+        clientCommandId: commandId,
+        expectedCampaignVersion: loaded.version,
+        command,
+        tool: "end_turn",
+        resolve: (current) => resolveEngineCommand(current, request, commandId, command, "end_turn"),
+      });
+      expect(rejected).toMatchObject({ accepted: false, code: "invalid_tactical_zone_effect", event: null });
       expect(JSON.stringify(rejected.state)).toBe(before);
       expect(reopened.listCampaignEvents(request)).toEqual([]);
       reopened.close();

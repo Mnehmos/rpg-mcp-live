@@ -1521,7 +1521,7 @@ export interface EngineTacticalZone {
 }
 
 export interface EngineTacticalZoneIntegrityIssue {
-  code: "invalid_tactical_zone_source" | "invalid_tactical_zone_shape";
+  code: "invalid_tactical_zone_source" | "invalid_tactical_zone_shape" | "invalid_tactical_zone_effect";
   message: string;
 }
 

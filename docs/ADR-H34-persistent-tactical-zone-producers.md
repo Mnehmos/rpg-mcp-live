@@ -47,7 +47,13 @@ mutation. Reconciliation is idempotent.
 
 Load normalization records malformed persisted zone authority as an integrity
 issue instead of silently discarding it. Commands then fail closed before an
-orphaned source-linked effect can influence another resolution.
+orphaned source-linked effect can influence another resolution. The marker is
+also preserved when invalid geometry or actor placement forces tactical-state
+fallback. Before every command, active producer effects must exactly match the
+reviewed definition, operation, duration, stacking policy, source, target set,
+active-effect ids, and provenance of their canonical active zone. A mismatch
+or an orphan in the reserved `tactical-zone:` source namespace rejects without
+mutation.
 
 Zone reconciliation enriches the same accepted command result before the
 state and event are persisted. It does not increment campaign version again or
