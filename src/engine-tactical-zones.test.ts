@@ -732,10 +732,12 @@ describe("#175 persistent tactical zones", () => {
       expectedCampaignVersion: advanced.state.version,
       command: returning,
       tool: "combat_move",
+      playerText: "I return through the exhausted aura boundary.",
       resolve: (current) => resolveEngineCommand(current, request, returningId, returning, "combat_move"),
     });
     expect(rejected).toMatchObject({ accepted: false, code: "tactical_zone_revision_exhausted", event: null });
     expect(JSON.stringify(rejected.state)).toBe(beforeOverflow);
+    expect(JSON.stringify(reopened.getCampaign(request))).toBe(beforeOverflow);
     expect(reopened.listCampaignEvents(request)).toEqual(events);
     reopened.close();
   });

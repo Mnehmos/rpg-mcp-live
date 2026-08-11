@@ -828,7 +828,9 @@ export class LanternEngineStore {
         boundaryRejected = true;
       } else {
         rawResolution = input.resolve(current);
-        if (rawResolution.accepted && !rawResolution.readOnly) {
+        if (rawResolution.code === "tactical_zone_revision_exhausted") {
+          boundaryRejected = true;
+        } else if (rawResolution.accepted && !rawResolution.readOnly) {
           const postResolutionRejection = rejectInvalidTacticalZonePersistence(current, input.tool, rawResolution.state);
           if (postResolutionRejection) {
             rawResolution = postResolutionRejection;
