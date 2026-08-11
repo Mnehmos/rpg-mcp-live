@@ -8882,6 +8882,11 @@ function tacticalZoneStateIssue(
   const activeZoneIds = new Set<string>();
   const activeDefinitionKeys = new Set<EngineTacticalZoneDefinitionKey>();
   for (const zone of state.combat.tactical.zones) {
+    if (
+      (zone.status === "active" && zone.endedReason !== null)
+      || (zone.status === "expired" && zone.endedReason !== "expired")
+      || (zone.status === "removed" && zone.endedReason !== "source-dead" && zone.endedReason !== "encounter-ended")
+    ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
     if (zone.status !== "active") continue;
     const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
     if (
@@ -17288,11 +17293,11 @@ function normalizeTacticalZones(
       || raw.endedReason === "encounter-ended"
       ? raw.endedReason
       : null;
-    if (raw.status === "active" && endedReason !== null) {
-      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
-      return [];
-    }
-    if (raw.status !== "active" && endedReason === null) {
+    if (
+      (raw.status === "active" && endedReason !== null)
+      || (raw.status === "expired" && endedReason !== "expired")
+      || (raw.status === "removed" && endedReason !== "source-dead" && endedReason !== "encounter-ended")
+    ) {
       integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
       return [];
     }

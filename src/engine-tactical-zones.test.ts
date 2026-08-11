@@ -358,6 +358,14 @@ describe("#175 persistent tactical zones", () => {
     const inactiveEncounter = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     inactiveEncounter.combat.status = "ended";
     corruptions.push({ state: inactiveEncounter, code: "invalid_tactical_zone_shape" });
+    const mismatchedExpiredReason = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    mismatchedExpiredReason.combat.tactical.zones[0]!.status = "expired";
+    mismatchedExpiredReason.combat.tactical.zones[0]!.endedReason = "source-dead";
+    corruptions.push({ state: mismatchedExpiredReason, code: "invalid_tactical_zone_shape" });
+    const mismatchedRemovedReason = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    mismatchedRemovedReason.combat.tactical.zones[0]!.status = "removed";
+    mismatchedRemovedReason.combat.tactical.zones[0]!.endedReason = "expired";
+    corruptions.push({ state: mismatchedRemovedReason, code: "invalid_tactical_zone_shape" });
     for (const corruption of corruptions) {
       const corruptedBefore = JSON.stringify(corruption.state);
       const rejected = apply(corruption.state, { kind: "end_turn" });
@@ -602,6 +610,20 @@ describe("#175 persistent tactical zones", () => {
       {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => { state.combat.status = "ended"; },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.zones[0]!.status = "expired";
+          state.combat.tactical.zones[0]!.endedReason = "source-dead";
+        },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.zones[0]!.status = "removed";
+          state.combat.tactical.zones[0]!.endedReason = "expired";
+        },
       },
       {
         code: "invalid_tactical_zone_shape",
