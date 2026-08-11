@@ -431,12 +431,6 @@ describe("#175 persistent tactical zones", () => {
     const invalidShape = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     (invalidShape.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
     corruptions.push({ state: invalidShape, code: "invalid_tactical_zone_shape" });
-    const nonIncrementableRevision = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
-    nonIncrementableRevision.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER;
-    corruptions.push({ state: nonIncrementableRevision, code: "invalid_tactical_zone_shape" });
-    const insufficientRevisionHeadroom = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
-    insufficientRevisionHeadroom.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER - 1;
-    corruptions.push({ state: insufficientRevisionHeadroom, code: "invalid_tactical_zone_shape" });
     const inactiveEncounter = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     inactiveEncounter.combat.status = "ended";
     corruptions.push({ state: inactiveEncounter, code: "invalid_tactical_zone_shape" });
@@ -689,6 +683,63 @@ describe("#175 persistent tactical zones", () => {
     reopened.close();
   });
 
+  it("permits the final safe revision and rejects only an overflowing boundary change", () => {
+    const state = encounter();
+    const created = apply(state, followingAura(state));
+    const nearBoundary = structuredClone(created.state);
+    nearBoundary.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER - 1;
+    const directory = mkdtempSync(join(tmpdir(), "lantern-zone-revision-boundary-"));
+    const databasePath = join(directory, "engine.db");
+    const request = context(nearBoundary);
+    const store = new LanternEngineStore(databasePath);
+    store.createCampaign(
+      { requestId: randomUUID(), accountId: nearBoundary.accountId, actorId: nearBoundary.actorId, capabilities: ["player", "dm"] },
+      nearBoundary,
+    );
+    store.close();
+
+    const reopened = new LanternEngineStore(databasePath);
+    const loaded = reopened.getCampaign(request);
+    expect(loaded.combat.tactical.zoneIntegrityIssue).toBeNull();
+    const outward = engineCommandSchema.parse({
+      kind: "combat_move",
+      geometryRevision: loaded.combat.tactical.geometry.revision,
+      destination: { frameId: loaded.combat.tactical.geometry.frameId, x: 3, y: 0, z: 0 },
+    });
+    const outwardId = randomUUID();
+    const advanced = reopened.executeCommand({
+      context: request,
+      clientCommandId: outwardId,
+      expectedCampaignVersion: loaded.version,
+      command: outward,
+      tool: "combat_move",
+      resolve: (current) => resolveEngineCommand(current, request, outwardId, outward, "combat_move"),
+    });
+    expect(advanced.accepted).toBe(true);
+    expect(advanced.state.combat.tactical.zones[0]!.revision).toBe(Number.MAX_SAFE_INTEGER);
+    const events = reopened.listCampaignEvents(request);
+
+    const beforeOverflow = JSON.stringify(advanced.state);
+    const returning = engineCommandSchema.parse({
+      kind: "combat_move",
+      geometryRevision: advanced.state.combat.tactical.geometry.revision,
+      destination: { frameId: advanced.state.combat.tactical.geometry.frameId, x: 0, y: 0, z: 0 },
+    });
+    const returningId = randomUUID();
+    const rejected = reopened.executeCommand({
+      context: request,
+      clientCommandId: returningId,
+      expectedCampaignVersion: advanced.state.version,
+      command: returning,
+      tool: "combat_move",
+      resolve: (current) => resolveEngineCommand(current, request, returningId, returning, "combat_move"),
+    });
+    expect(rejected).toMatchObject({ accepted: false, code: "tactical_zone_revision_exhausted", event: null });
+    expect(JSON.stringify(rejected.state)).toBe(beforeOverflow);
+    expect(reopened.listCampaignEvents(request)).toEqual(events);
+    reopened.close();
+  });
+
   it("fails closed after restart on duplicate active zone ids or definitions", () => {
     for (const duplicate of [
       (state: LanternCampaignState) => {
@@ -780,18 +831,6 @@ describe("#175 persistent tactical zones", () => {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => {
           (state.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
-        },
-      },
-      {
-        code: "invalid_tactical_zone_shape",
-        apply: (state: LanternCampaignState) => {
-          state.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER;
-        },
-      },
-      {
-        code: "invalid_tactical_zone_shape",
-        apply: (state: LanternCampaignState) => {
-          state.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER - 1;
         },
       },
       {

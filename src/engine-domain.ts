@@ -3568,6 +3568,7 @@ export function resolveEngineCommand(
   return reconcileZonesInResolution(
     resolution,
     clientCommandId,
+    state,
   );
 }
 
@@ -8883,6 +8884,7 @@ interface TacticalZoneReconcileResult {
   beforeZones: EngineTacticalZone[];
   beforeEffects: EngineEffectInstance[];
   transitions: TacticalZoneTransition[];
+  issue: TacticalIssue | null;
 }
 
 function tacticalZoneStateIssue(
@@ -8899,7 +8901,6 @@ function tacticalZoneStateIssue(
     if (
       !Number.isSafeInteger(zone.revision)
       || zone.revision < (validateEffectProjection ? 1 : 0)
-      || (zone.status === "active" && zone.revision >= Number.MAX_SAFE_INTEGER - 1)
     ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
     if (
       (zone.status === "active" && zone.endedReason !== null)
@@ -9114,9 +9115,11 @@ function reconcileTacticalZones(
   const beforeZones = state.combat.tactical.zones.map((zone) => structuredClone(zone));
   const beforeEffects = state.effects.map((effect) => structuredClone(effect));
   const transitions: TacticalZoneTransition[] = [];
-  if (state.combat.tactical.zones.length === 0) return { beforeZones, beforeEffects, transitions };
+  let issue: TacticalIssue | null = null;
+  if (state.combat.tactical.zones.length === 0) return { beforeZones, beforeEffects, transitions, issue };
 
   state.combat.tactical.zones = state.combat.tactical.zones.map((zone) => {
+    if (issue) return zone;
     if (zone.status !== "active") return zone;
     const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
     let endedReason: EngineTacticalZoneEndReason | null = null;
@@ -9132,7 +9135,7 @@ function reconcileTacticalZones(
         activeEffectIds: [],
         status: endedReason === "expired" ? "expired" : "removed",
         endedReason,
-        revision: zone.revision + 1,
+        revision: zone.revision < Number.MAX_SAFE_INTEGER ? zone.revision + 1 : zone.revision,
       };
       transitions.push({
         zoneId: terminal.id,
@@ -9189,6 +9192,13 @@ function reconcileTacticalZones(
       || missingEffectActorIds.length > 0
       || orphanedEffectIds.length > 0
       || zone.revision === 0;
+    if (changed && zone.revision >= Number.MAX_SAFE_INTEGER) {
+      issue = {
+        code: "tactical_zone_revision_exhausted",
+        message: "An active tactical zone cannot record another boundary change; the command did not mutate state.",
+      };
+      return zone;
+    }
     const revision = changed ? zone.revision + 1 : zone.revision;
 
     if (orphanedEffectIds.length > 0) {
@@ -9245,7 +9255,7 @@ function reconcileTacticalZones(
     }
     return nextZone;
   });
-  return { beforeZones, beforeEffects, transitions };
+  return { beforeZones, beforeEffects, transitions, issue };
 }
 
 function zoneTransitionMessage(transitions: TacticalZoneTransition[]): string {
@@ -9270,9 +9280,16 @@ function extendEventStateChange(
   else event.stateChanges.push({ path, before, after });
 }
 
-function reconcileZonesInResolution(resolution: EngineResolution, sourceCommandId: string): EngineResolution {
+function reconcileZonesInResolution(
+  resolution: EngineResolution,
+  sourceCommandId: string,
+  originalState: LanternCampaignState,
+): EngineResolution {
   if (!resolution.accepted || resolution.readOnly || !resolution.event) return resolution;
   const reconciled = reconcileTacticalZones(resolution.state, sourceCommandId);
+  if (reconciled.issue) {
+    return rejection(originalState, resolution.tool, reconciled.issue.code, reconciled.issue.message);
+  }
   const zonesChanged = JSON.stringify(reconciled.beforeZones) !== JSON.stringify(resolution.state.combat.tactical.zones);
   const effectsChanged = JSON.stringify(reconciled.beforeEffects) !== JSON.stringify(resolution.state.effects);
   if (!zonesChanged && !effectsChanged) return resolution;
@@ -17308,7 +17325,6 @@ function normalizeTacticalZones(
       || (raw.status !== "active" && (raw.affectedActorIds.length > 0 || raw.activeEffectIds.length > 0))
       || !Number.isSafeInteger(raw.revision)
       || raw.revision! < 1
-      || (raw.status === "active" && raw.revision! >= Number.MAX_SAFE_INTEGER - 1)
       || !raw.provenance
       || typeof raw.provenance.sourceCommandId !== "string"
       || !raw.provenance.sourceCommandId.trim()
