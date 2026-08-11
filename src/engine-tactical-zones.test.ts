@@ -290,6 +290,12 @@ describe("#175 persistent tactical zones", () => {
     const invalidSource = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     invalidSource.combat.tactical.zones[0]!.source.actorId = "invented-source";
     corruptions.push({ state: invalidSource, code: "invalid_tactical_zone_source" });
+    const emptyCommandProvenance = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    emptyCommandProvenance.combat.tactical.zones[0]!.provenance.sourceCommandId = "   ";
+    corruptions.push({ state: emptyCommandProvenance, code: "invalid_tactical_zone_source" });
+    const futureVersionProvenance = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    futureVersionProvenance.combat.tactical.zones[0]!.provenance.sourceVersion = futureVersionProvenance.version + 1;
+    corruptions.push({ state: futureVersionProvenance, code: "invalid_tactical_zone_source" });
     const invalidShape = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     (invalidShape.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
     corruptions.push({ state: invalidShape, code: "invalid_tactical_zone_shape" });
@@ -455,6 +461,14 @@ describe("#175 persistent tactical zones", () => {
       {
         code: "invalid_tactical_zone_source",
         apply: (state: LanternCampaignState) => { state.combat.tactical.zones[0]!.source.actorId = "invented-source"; },
+      },
+      {
+        code: "invalid_tactical_zone_source",
+        apply: (state: LanternCampaignState) => { state.combat.tactical.zones[0]!.provenance.sourceCommandId = "   "; },
+      },
+      {
+        code: "invalid_tactical_zone_source",
+        apply: (state: LanternCampaignState) => { state.combat.tactical.zones[0]!.provenance.sourceVersion = state.version + 1; },
       },
       {
         code: "invalid_tactical_zone_shape",
