@@ -287,10 +287,42 @@ describe("ordinary remains lifecycle", () => {
     const remainsId = dead.corpses[0]!.id;
     expect(dead.corpses[0]!.inventory.some((item) => item.id === "gatehouse-clue")).toBe(true);
     expect(dead.worldContext?.objects.find((object) => object.id === "gatehouse-clue")).toMatchObject({
-      ownerRef: { kind: "world", id: remainsId },
-      containerRef: remainsId,
+      ownerRef: { kind: "world", id: dead.worldContext?.id },
+      containerRef: null,
+      state: "hidden",
     });
-    const advanced = advanceToDecay(revive(dead));
+    const revived = revive(dead);
+    const unrelated = apply(revived, {
+      kind: "interact",
+      targetId: "gatehouse-door",
+      affordance: "inspect",
+      goal: "Confirm the remaining world-object topology.",
+    });
+    expect(unrelated.accepted).toBe(true);
+    const beforeDirect = JSON.stringify(revived);
+    const direct = apply(revived, {
+      kind: "interact",
+      targetId: "gatehouse-clue",
+      affordance: "take",
+      goal: "Bypass the remains ledger.",
+    });
+    expect(direct.code).toBe("object_in_remains");
+    expect(JSON.stringify(direct.state)).toBe(beforeDirect);
+
+    const recovered = apply(revived, {
+      kind: "remains_action",
+      remainsId,
+      action: "loot",
+      itemId: "gatehouse-clue",
+    });
+    expect(recovered.accepted).toBe(true);
+    expect(recovered.state.worldContext?.objects.find((object) => object.id === "gatehouse-clue")).toMatchObject({
+      ownerRef: { kind: "actor", id: revived.character.id },
+      containerRef: null,
+      state: "carried",
+    });
+
+    const advanced = advanceToDecay(revived);
     expect(advanced.accepted).toBe(true);
     const before = JSON.stringify(advanced.state);
     const blocked = apply(advanced.state, { kind: "remains_action", remainsId, action: "cleanup" });

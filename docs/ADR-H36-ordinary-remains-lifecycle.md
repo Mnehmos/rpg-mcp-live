@@ -12,7 +12,7 @@ Lantern already creates one corpse record when the player character dies and mov
 
 `EngineCorpse` remains the single persisted remains record. Existing records are additively normalized with species, one decay profile, one optional reviewed harvest profile, and one cleanup marker.
 
-- Death creates one stable remains ID, records actor/source/location provenance, and atomically transfers inventory and inventory-backed world objects to that ID.
+- Death creates one stable remains ID, records actor/source/location provenance, and atomically transfers inventory to that ID. A matching world-object instance remains validly scene-owned and is hidden; its shared item ID in the remains inventory is the authoritative association, and direct interaction must use `remains_action` first.
 - `ordinary-remains-v1` snapshots the current reviewed weather at death. Clear weather decays remains after three days, rain after two days, and storm after one day. Only the central campaign-time advance changes `fresh` to `decayed`; wall-clock time and load normalization do not.
 - `remains_action` is a closed command with `loot`, `harvest`, and `cleanup`. Loot must name one item already held by the remains. The caller cannot provide yield, decay, eligibility, ownership, or cleanup outcome.
 - One reviewed harvest profile exists: `dragonborn-scale-v1`. Species is read from the persisted death record and the engine creates exactly one inert `Preserved dragonborn scale` inventory instance with harvest provenance. Other species fail closed.

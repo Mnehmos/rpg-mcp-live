@@ -7844,6 +7844,18 @@ function resolveWorldObjectAffordance(
   const object = world?.objects.find((candidate) => candidate.id === command.targetId);
   if (!world) return rejection(state, tool, "world_context_required", "There is no authoritative world context for that object interaction.");
   if (!object) return rejection(state, tool, "object_not_found", "That world object is not established in the current context.");
+  const holdingRemains = state.corpses.find((remains) => remains.inventory.some((item) => item.id === object.id));
+  if (holdingRemains) {
+    return rejection(
+      state,
+      tool,
+      holdingRemains.cleanup.status === "removed" ? "object_removed_with_remains" : "object_in_remains",
+      holdingRemains.cleanup.status === "removed"
+        ? "That object was removed with its remains and is no longer available in the scene."
+        : "That object is held by remains; recover it through remains_action.",
+      { objectId: object.id, remainsId: holdingRemains.id },
+    );
+  }
   const topology = worldObjectTopologyValidation(world.objects, world.id, state.actorId);
   if (topology) return rejection(state, tool, topology.code, topology.message);
   if (!object.definition.affordances.includes(command.affordance)) {
@@ -14843,18 +14855,25 @@ function resolveRemainsAction(
     if (remains.decay.state !== "decayed") {
       return rejection(state, tool, "remains_not_decayed", "These remains have not reached their reviewed cleanup state.");
     }
-    const itemIds = new Set(remains.inventory.map((item) => item.id));
-    const protectedObject = state.worldContext?.objects.find((object) =>
-      itemIds.has(object.id)
-      && (object.definition.criticalPolicy.kind !== "ordinary_consequence" || !object.definition.criticalPolicy.canLose)
-    );
-    if (protectedObject) {
+    const protectedItem = remains.inventory.find((item) => {
+      const object = state.worldContext?.objects.find((candidate) => candidate.id === item.id);
+      if (object) {
+        return object.definition.criticalPolicy.kind !== "ordinary_consequence"
+          || !object.definition.criticalPolicy.canLose;
+      }
+      return normalizedItemProperties(item).includes("critical");
+    });
+    if (protectedItem) {
+      const protectedObject = state.worldContext?.objects.find((object) => object.id === protectedItem.id);
+      const protectedName = protectedObject?.definition.name
+        ?? protectedItem.authoredDefinition?.name
+        ?? "A critical item";
       return rejection(
         state,
         tool,
         "critical_object_requires_recovery",
-        `${protectedObject.definition.name} must be recovered through its declared critical-object policy before cleanup.`,
-        { objectId: protectedObject.id },
+        `${protectedName} must be recovered through its declared critical-object policy before cleanup.`,
+        { objectId: protectedItem.id },
       );
     }
     const next = cloneCampaign(state);
@@ -14908,7 +14927,7 @@ function resolveRemainsAction(
     const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
     if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
     const worldChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
-    transferWorldObjectFromRemains(next, recovered.id, nextRemains.id, clientCommandId, worldChanges);
+    transferWorldObjectFromRemains(next, recovered.id, clientCommandId, worldChanges);
     nextRemains.status = nextRemains.inventory.length > 0 ? "lootable" : "looted";
     if (nextRemains.status === "looted") nextRemains.lootedAt = new Date().toISOString();
     return commit(
@@ -15119,7 +15138,7 @@ function resolveCorpseLoot(
   const capacityIssue = inventoryCapacityIssue(next.character.inventory, next.character);
   if (capacityIssue) return rejection(state, tool, capacityIssue.code, capacityIssue.message);
   const worldChanges: Array<{ path: string; before: unknown; after: unknown }> = [];
-  for (const item of recovered) transferWorldObjectFromRemains(next, item.id, nextCorpse.id, clientCommandId, worldChanges);
+  for (const item of recovered) transferWorldObjectFromRemains(next, item.id, clientCommandId, worldChanges);
   nextCorpse.inventory = [];
   nextCorpse.status = "looted";
   nextCorpse.lootedAt = new Date().toISOString();
@@ -16663,7 +16682,6 @@ function normalizeCharacter(character: EngineCharacter): EngineCharacter {
 function transferWorldObjectsToRemains(
   state: LanternCampaignState,
   itemIds: ReadonlySet<string>,
-  remainsId: string,
   sourceCommandId: string,
   changes: Array<{ path: string; before: unknown; after: unknown }>,
 ): void {
@@ -16671,9 +16689,9 @@ function transferWorldObjectsToRemains(
   for (const object of state.worldContext.objects) {
     if (!itemIds.has(object.id)) continue;
     const before = structuredClone(object);
-    object.ownerRef = { kind: "world", id: remainsId };
-    object.containerRef = remainsId;
-    if (object.state === "carried" || object.state === "equipped") object.state = "intact";
+    object.ownerRef = { kind: "world", id: state.worldContext.id };
+    object.containerRef = null;
+    object.state = object.definition.criticalPolicy.canHide ? "hidden" : "intact";
     object.revision += 1;
     object.provenance = {
       sourceCommandId,
@@ -16687,12 +16705,11 @@ function transferWorldObjectsToRemains(
 function transferWorldObjectFromRemains(
   state: LanternCampaignState,
   itemId: string,
-  remainsId: string,
   sourceCommandId: string,
   changes: Array<{ path: string; before: unknown; after: unknown }>,
 ): void {
   const object = state.worldContext?.objects.find((candidate) => candidate.id === itemId);
-  if (!object || object.ownerRef.kind !== "world" || object.ownerRef.id !== remainsId) return;
+  if (!object || !state.worldContext || object.ownerRef.kind !== "world" || object.ownerRef.id !== state.worldContext.id) return;
   const before = structuredClone(object);
   object.ownerRef = { kind: "actor", id: state.character.id };
   object.containerRef = null;
@@ -16736,7 +16753,7 @@ function transitionActorToDead(
       }
     }
     existing.status = existing.inventory.length > 0 ? "lootable" : "looted";
-    transferWorldObjectsToRemains(state, transferredIds, existing.id, sourceCommandId, changes);
+    transferWorldObjectsToRemains(state, transferredIds, sourceCommandId, changes);
     state.character.inventory = [];
     if (beforeInventory.length > 0) changes.push({ path: "/character/inventory", before: beforeInventory, after: [] });
     state.character.lifecycleState = "dead";
@@ -16799,7 +16816,7 @@ function transitionActorToDead(
     cleanup: { status: "present", removedAtMinutes: null, sourceCommandId: null },
     provenance: { sourceCommandId, sourceVersion: state.version, occurredAt },
   };
-  transferWorldObjectsToRemains(state, new Set(inventory.map((item) => item.id)), corpseId, sourceCommandId, changes);
+  transferWorldObjectsToRemains(state, new Set(inventory.map((item) => item.id)), sourceCommandId, changes);
   const beforeCorpses = state.corpses;
   state.corpses = [...state.corpses, corpse];
   changes.push({ path: "/corpses", before: beforeCorpses, after: state.corpses });
@@ -18009,9 +18026,9 @@ function reconcileRemainsWorldObjects(state: LanternCampaignState): void {
     for (const item of remains.inventory) {
       const object = state.worldContext.objects.find((candidate) => candidate.id === item.id);
       if (!object) continue;
-      object.ownerRef = { kind: "world", id: remains.id };
-      object.containerRef = remains.id;
-      if (object.state === "carried" || object.state === "equipped") object.state = "intact";
+      object.ownerRef = { kind: "world", id: state.worldContext.id };
+      object.containerRef = null;
+      object.state = object.definition.criticalPolicy.canHide ? "hidden" : "intact";
     }
   }
 }
