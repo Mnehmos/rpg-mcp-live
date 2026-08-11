@@ -253,12 +253,14 @@ Rejected results contain a stable code, a human-readable explanation, and the un
 
 The encounter's #10 frame, `five_e_simple` metric, footprints, obstacles, and
 geometry revision are the only tactical spatial authority. Cover is derived
-from canonical blocking cells. Reviewed area effects accept an aim and current
-revision, then derive their circle, cone, or 5-foot-line cells and targets from
-compiled content; callers cannot provide area targets or mechanics. Movement
-resolves leaving-reach triggers in path order and consumes each enemy Reaction
-at most once per round. Movement, reaction attacks, spell effects, resource
-spending, and event evidence share the normal atomic command boundary. Any
+from canonical blocking cells for attacks in either direction. Reviewed area
+effects accept an aim and current revision, then derive their circle, cone, or
+5-foot-line cells and all living player, enemy, and active controlled-actor
+targets from compiled content; callers cannot provide area targets or
+mechanics. Movement resolves leaving-reach triggers in path order and consumes
+each enemy Reaction at most once per round; total cover prevents the attack
+without consuming the Reaction. Movement, reaction attacks, spell effects,
+resource spending, and event evidence share the normal atomic command boundary. Any
 stale or invalid spatial request leaves state and version unchanged. ADR-H33
 records the exact first-slice geometry and deferrals.
 

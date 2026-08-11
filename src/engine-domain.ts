@@ -2127,6 +2127,8 @@ function controlledActorProfile(profileId: EngineControlledActorProfile): {
   kind: "companion" | "summon";
   name: string;
   maxHp: number;
+  armorClass: number;
+  savingThrows: Record<EngineAbility, number>;
   attack: EngineControlledActorAttack;
   expiresAfterMinutes: number | null;
 } {
@@ -2136,6 +2138,8 @@ function controlledActorProfile(profileId: EngineControlledActorProfile): {
       kind: "summon",
       name: "Arcane scout",
       maxHp: 8,
+      armorClass: 10,
+      savingThrows: { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 },
       attack: { attackBonus: 3, damageDice: "1d4", damageBonus: 1, damageType: "force", rangeFeet: 30 },
       expiresAfterMinutes: 60,
     };
@@ -2145,6 +2149,8 @@ function controlledActorProfile(profileId: EngineControlledActorProfile): {
     kind: "companion",
     name: "Scout familiar",
     maxHp: 5,
+    armorClass: 10,
+    savingThrows: { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 },
     attack: { attackBonus: 4, damageDice: "1d4", damageBonus: 2, damageType: "piercing", rangeFeet: 5 },
     expiresAfterMinutes: null,
   };
@@ -8579,6 +8585,20 @@ export function deriveTacticalCover(
   };
 }
 
+function incomingCharacterCover(state: LanternCampaignState, attacker: EngineCombatant): EngineTacticalCover {
+  return deriveTacticalCover(
+    state.combat.tactical.geometry,
+    attacker.position,
+    attacker.footprint,
+    state.combat.tactical.actorPosition,
+    state.combat.tactical.actorFootprint,
+  );
+}
+
+function characterArmorClassWithCover(state: LanternCampaignState, cover: EngineTacticalCover): number {
+  return state.character.ac + (cover.armorClassBonus ?? 0);
+}
+
 type CompiledAreaOperation = Extract<CompiledEffectProgram["operations"][number], { kind: "area" }>;
 
 function reviewedTacticalSpellArea(
@@ -8617,6 +8637,7 @@ export function deriveTacticalAreaSnapshot(
   casterPosition: EngineTacticalPosition,
   casterFootprint: EngineTacticalFootprint,
   enemies: EngineCombatant[],
+  controlledActors: EngineControlledActor[],
   aim: EngineTacticalPosition,
   program: CompiledEffectProgram,
   aimRangeFeet: number,
@@ -8684,6 +8705,12 @@ export function deriveTacticalAreaSnapshot(
     ...enemies
     .filter((enemy) => enemy.alive && positionCells(enemy.position, enemy.footprint).some((cell) => includedCells.has(cellKey(cell))))
     .map((enemy) => enemy.id),
+    ...controlledActors
+    .filter((actor) => actor.status === "active"
+      && actor.hp > 0
+      && actor.position.frameId === geometry.frameId
+      && positionCells(actor.position, actor.footprint).some((cell) => includedCells.has(cellKey(cell))))
+    .map((actor) => actor.id),
   ];
   return {
     geometryRevision: geometry.revision,
@@ -9004,6 +9031,22 @@ function resolveCombatMove(
       };
       continue;
     }
+    const cover = incomingCharacterCover(next, enemy);
+    if (cover.level === "total") {
+      trigger.resolution = {
+        status: "total_cover",
+        actionKey: attack.actionKey,
+        attackContentKey: attack.contentKey,
+        reactionSpent: false,
+        hit: null,
+        critical: null,
+        damageApplied: 0,
+        hpBefore,
+        hpAfter: hpBefore,
+      };
+      reactionMessages.push(`${materializeCombatant(enemy).name}'s opportunity attack is blocked by total cover.`);
+      continue;
+    }
     const beforeReaction = { ...enemy.reaction };
     enemy.reaction = { available: false, spent: true };
     changes.push({ path: `/combat/enemies/${enemy.id}/reaction`, before: beforeReaction, after: enemy.reaction });
@@ -9015,6 +9058,7 @@ function resolveCombatMove(
       modifiers,
       changes,
       clientCommandId,
+      enemy,
       "opportunity-attack",
     );
     trigger.resolution = {
@@ -9992,6 +10036,7 @@ function resolveCastSpell(
         state.combat.tactical.actorPosition,
         state.combat.tactical.actorFootprint,
         state.combat.enemies,
+        state.controlledActors,
         command.area!.aim,
         reviewedArea,
         spellAreaAimRangeFeet(spell.definition),
@@ -10013,9 +10058,15 @@ function resolveCastSpell(
   ) {
     return rejection(state, tool, "invalid_target_count", `${spell.definition.name} requires ${targetLimit} target selection${targetLimit === 1 ? "" : "s"} at this casting level.`);
   }
-  const targets = selectedIds.map((targetId) => tacticalArea && targetId === state.character.id
-    ? { kind: "character" as const, targetId }
-    : { kind: "enemy" as const, targetId, combatant: findLiveCombatant(state.combat, targetId) });
+  const targets = selectedIds.map((targetId) => {
+    if (tacticalArea && targetId === state.character.id) return { kind: "character" as const, targetId };
+    const controlledActor = tacticalArea
+      ? state.controlledActors.find((actor) => actor.id === targetId && actor.status === "active" && actor.hp > 0) ?? null
+      : null;
+    return controlledActor
+      ? { kind: "controlled" as const, targetId, controlledActor }
+      : { kind: "enemy" as const, targetId, combatant: findLiveCombatant(state.combat, targetId) };
+  });
   if (targets.some((target) => target.kind === "enemy" && target.combatant === null)) {
     return rejection(state, tool, "invalid_spell_target", "Every spell target must be a living combatant in the active encounter.");
   }
@@ -10085,13 +10136,18 @@ function resolveCastSpell(
   for (const [index, sourceTarget] of targets.entries()) {
     const isCharacter = sourceTarget.kind === "character";
     const sourceEnemy = sourceTarget.kind === "enemy" ? sourceTarget.combatant : null;
+    const sourceControlled = sourceTarget.kind === "controlled" ? sourceTarget.controlledActor : null;
     const target = sourceEnemy
       ? next.combat.enemies.find((candidate) => candidate.id === sourceEnemy.id && candidate.alive) ?? null
       : null;
-    if (!isCharacter && !target) continue;
+    const controlledTarget = sourceControlled
+      ? next.controlledActors.find((candidate) => candidate.id === sourceControlled.id && candidate.status === "active" && candidate.hp > 0) ?? null
+      : null;
+    if (!isCharacter && !target && !controlledTarget) continue;
     const targetView = target ? materializeCombatant(target) : null;
-    const targetId = isCharacter ? next.character.id : target!.id;
-    const targetName = isCharacter ? next.character.name : targetView!.name;
+    const controlledDefenses = controlledTarget ? controlledActorProfile(controlledTarget.profileId) : null;
+    const targetId = isCharacter ? next.character.id : controlledTarget?.id ?? target!.id;
+    const targetName = isCharacter ? next.character.name : controlledTarget?.name ?? targetView!.name;
     let successfulSave: boolean | null = null;
     let hit = true;
     let critical = false;
@@ -10113,7 +10169,9 @@ function resolveCastSpell(
       critical = die === 20;
       const targetArmorClass = isCharacter
         ? next.character.ac
-        : targetView!.armorClass + (cover?.armorClassBonus ?? 0);
+        : controlledDefenses
+          ? controlledDefenses.armorClass
+          : targetView!.armorClass + (cover?.armorClassBonus ?? 0);
       hit = die !== 1 && (critical || attackTotal >= targetArmorClass);
       rolls.push({ kind: `spell_attack_${index + 1}`, value: die, sides: 20 });
       modifiers.push(
@@ -10129,7 +10187,9 @@ function resolveCastSpell(
       const die = randomInt(1, 21);
       const saveModifier = isCharacter
         ? next.character.savingThrows[ability]
-        : targetView!.savingThrowsAll[ability];
+        : controlledDefenses
+          ? controlledDefenses.savingThrows[ability]
+          : targetView!.savingThrowsAll[ability];
       saveTotal = die + saveModifier;
       successfulSave = saveTotal >= spellcasting.spellSaveDc;
       rolls.push({ kind: `spell_save_${ability}_${index + 1}`, value: die, sides: 20 });
@@ -10140,18 +10200,20 @@ function resolveCastSpell(
     const afterSave = successfulSave
       ? spell.effect.saveOnSuccess === "half" ? Math.floor(rolled / 2) : 0
       : rolled;
-    const damage = isCharacter
+    const damage = isCharacter || controlledTarget
       ? afterSave
       : applyCreatureDamageAffinity(targetView!, spell.effect.damageType.contentKey, afterSave);
-    const beforeHp = isCharacter ? next.character.hp : target!.hp;
+    const beforeHp = isCharacter ? next.character.hp : controlledTarget?.hp ?? target!.hp;
     if (isCharacter) {
       applyCharacterDamage(next, damage, "spell-area-self", clientCommandId, changes, rolls, modifiers, critical);
+    } else if (controlledTarget) {
+      applyControlledActorDamage(next, controlledTarget, damage, changes);
     } else {
       target!.hp = Math.max(0, target!.hp - damage);
       target!.alive = target!.hp > 0;
       changes.push({ path: `/combat/enemies/${target!.id}/hp`, before: beforeHp, after: target!.hp });
     }
-    const hpAfter = isCharacter ? next.character.hp : target!.hp;
+    const hpAfter = isCharacter ? next.character.hp : controlledTarget?.hp ?? target!.hp;
     targetResults.push({
       targetId,
       targetName,
@@ -10383,6 +10445,7 @@ function resolveReactionResponse(
   }
   const enemy = findLiveCombatant(state.combat, pending.attackerId);
   if (!enemy) return rejection(state, tool, "combatant_not_found", "The attacker for this reaction is no longer in the encounter.");
+  const cover = incomingCharacterCover(state, enemy);
 
   if (command.decision === "decline") {
     const next = cloneCampaign(state);
@@ -10408,6 +10471,7 @@ function resolveReactionResponse(
         decision: "decline",
         attackTotal: pending.attackTotal,
         armorClass: pending.originalArmorClass,
+        cover,
         damage: { rolled: damage, applied: damage, type: pending.damageType },
         combat: combatData(next.combat),
         character: characterData(next.character, next.runtimeContent),
@@ -10476,11 +10540,13 @@ function resolveReactionResponse(
     ),
     changes,
   );
+  const baseAcBefore = state.character.ac;
   const acBefore = pending.originalArmorClass;
-  const acAfter = deriveArmorClass(next.character, next.effects);
-  next.character.ac = acAfter;
-  changes.push({ path: "/character/ac", before: acBefore, after: acAfter });
-  const hitAfter = pending.attackRoll !== 1 && (pending.critical || pending.attackTotal >= acAfter);
+  const baseAcAfter = deriveArmorClass(next.character, next.effects);
+  next.character.ac = baseAcAfter;
+  changes.push({ path: "/character/ac", before: baseAcBefore, after: baseAcAfter });
+  const acAfter = baseAcAfter + (cover.armorClassBonus ?? 0);
+  const hitAfter = cover.level !== "total" && pending.attackRoll !== 1 && (pending.critical || pending.attackTotal >= acAfter);
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
   const modifiers: Array<{ name: string; value: number }> = [
     { name: "attack_total", value: pending.attackTotal },
@@ -10509,6 +10575,7 @@ function resolveReactionResponse(
       attackTotal: pending.attackTotal,
       acBefore,
       acAfter,
+      cover,
       armorClassComponents: queryStatModifier(next.effects, next.character.id, "armor-class").components,
       hitAfter,
       damage: { rolled: damage, applied: damage, type: pending.damageType },
@@ -11766,8 +11833,13 @@ function resolveAdvanceTurn(
     attack = enemyView.attacks[0];
   }
   if (!attack) return rejection(state, tool, "content_tier_insufficient", "No executable attack was selected.");
+  const cover = incomingCharacterCover(state, enemy);
+  if (cover.level === "total") {
+    return rejection(state, tool, "target_has_total_cover", "Canonical blocking geometry gives the character total cover from that attacker.");
+  }
 
   const next = cloneCampaign(state);
+  const armorClass = characterArmorClassWithCover(next, cover);
   const attackRoll = randomInt(1, 21);
   const attackModifier = attack.toHit;
   const attackModifiers = queryModifiers(state.effects, state.character.id, "attack-roll");
@@ -11781,10 +11853,14 @@ function resolveAdvanceTurn(
       : Math.min(attackRoll, secondRoll);
   const total = effectiveRoll + attackModifier;
   const critical = effectiveRoll === 20;
-  const hit = effectiveRoll !== 1 && (critical || total >= next.character.ac);
+  const hit = effectiveRoll !== 1 && (critical || total >= armorClass);
   const rolls: Array<{ kind: string; value: number; sides?: number }> = [{ kind: "enemy_attack_d20", value: effectiveRoll, sides: 20 }];
   if (secondRoll !== null) rolls.push({ kind: `enemy_attack_${attackModifiers.mode}_d20`, value: secondRoll, sides: 20 });
-  const modifiers = [{ name: "enemy_attack_bonus", value: attackModifier }, { name: "armor_class", value: next.character.ac }];
+  const modifiers = [
+    { name: "enemy_attack_bonus", value: attackModifier },
+    { name: "armor_class", value: armorClass },
+    ...(cover.armorClassBonus ? [{ name: `${cover.level}_cover_ac`, value: cover.armorClassBonus }] : []),
+  ];
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
   let message = enemyView.name + " uses " + attack.name + ".";
   let outcome = "enemy_miss";
@@ -11808,7 +11884,7 @@ function resolveAdvanceTurn(
         attackTotal: total,
         attackBonus: attackModifier,
         critical,
-        originalArmorClass: next.character.ac,
+        originalArmorClass: armorClass,
         damageDiceCount: attack.damage.diceCount * (critical ? 2 : 1),
         damageDieSides: attack.damage.dieSides,
         damageBonus: attack.damage.bonus,
@@ -11830,7 +11906,7 @@ function resolveAdvanceTurn(
         {
           reactionId: pending.id,
           pendingReaction: pending,
-          attack: { attackRoll: effectiveRoll, attackTotal: total, attackBonus: attackModifier, critical, armorClass: next.character.ac },
+          attack: { attackRoll: effectiveRoll, attackTotal: total, attackBonus: attackModifier, critical, armorClass, cover },
           combat: combatData(next.combat),
           character: characterData(next.character),
         },
@@ -11920,7 +11996,11 @@ function resolveAdvanceTurn(
     command,
     tool,
     message,
-    { combat: combatData(next.combat), character: characterData(next.character) },
+    {
+      attack: { attackRoll: effectiveRoll, attackTotal: total, attackBonus: attackModifier, critical, armorClass, cover },
+      combat: combatData(next.combat),
+      character: characterData(next.character),
+    },
     outcome,
     rolls,
     modifiers,
@@ -12026,6 +12106,10 @@ function resolveCompiledMultiattack(
   if (attacks.length !== expectedAttackCount) {
     return rejection(state, tool, "effect_program_mismatch", "A compiled multiattack step is unavailable in the active pack.");
   }
+  const cover = incomingCharacterCover(state, enemy);
+  if (cover.level === "total") {
+    return rejection(state, tool, "target_has_total_cover", "Canonical blocking geometry gives the character total cover from that attacker.");
+  }
 
   const next = cloneCampaign(state);
   const nextEnemy = next.combat.enemies.find((candidate) => candidate.id === enemy.id);
@@ -12060,7 +12144,7 @@ function resolveCompiledMultiattack(
   for (let index = 0; index < attacks.length && next.character.lifecycleState !== "dead"; index += 1) {
     const attack = attacks[index];
     if (!attack) continue;
-    const result = resolveOneCreatureAttack(next, attack, index + 1, rolls, modifiers, changes, clientCommandId);
+    const result = resolveOneCreatureAttack(next, attack, index + 1, rolls, modifiers, changes, clientCommandId, nextEnemy);
     attackMessages.push(result.message);
     if (result.hit) hitCount += 1;
   }
@@ -12087,6 +12171,7 @@ function resolveCompiledMultiattack(
       programKey: program.contentKey,
       attacksResolved: attackMessages.length,
       hits: hitCount,
+      cover,
       combat: combatData(next.combat),
       character: characterData(next.character),
     },
@@ -12392,9 +12477,12 @@ function resolveOneCreatureAttack(
   modifiers: Array<{ name: string; value: number }>,
   changes: Array<{ path: string; before: unknown; after: unknown }>,
   sourceCommandId: string,
+  attacker: EngineCombatant,
   damageSource = "enemy-multiattack",
 ): { hit: boolean; message: string; critical: boolean; damageApplied: number; hpBefore: number; hpAfter: number } {
   const hpBefore = state.character.hp;
+  const cover = incomingCharacterCover(state, attacker);
+  const armorClass = characterArmorClassWithCover(state, cover);
   const attackRoll = randomInt(1, 21);
   const modifierQuery = queryModifiers(state.effects, state.character.id, "attack-roll");
   const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
@@ -12407,12 +12495,15 @@ function resolveOneCreatureAttack(
       : Math.min(attackRoll, secondRoll);
   const total = effectiveRoll + attack.toHit;
   const critical = effectiveRoll === 20;
-  const hit = effectiveRoll !== 1 && (critical || total >= state.character.ac);
+  const hit = cover.level !== "total" && effectiveRoll !== 1 && (critical || total >= armorClass);
   rolls.push({ kind: `enemy_attack_${sequenceNumber}_d20`, value: effectiveRoll, sides: 20 });
   if (secondRoll !== null) rolls.push({ kind: `enemy_attack_${sequenceNumber}_${modifierQuery.mode}_d20`, value: secondRoll, sides: 20 });
   modifiers.push(
     { name: `enemy_attack_${sequenceNumber}_bonus`, value: attack.toHit },
-    { name: `enemy_attack_${sequenceNumber}_armor_class`, value: state.character.ac }
+    { name: `enemy_attack_${sequenceNumber}_armor_class`, value: armorClass },
+    ...(cover.armorClassBonus
+      ? [{ name: `enemy_attack_${sequenceNumber}_${cover.level}_cover_ac`, value: cover.armorClassBonus }]
+      : []),
   );
   if (!hit) {
     return { hit: false, message: `${attack.name} misses.`, critical, damageApplied: 0, hpBefore, hpAfter: hpBefore };
@@ -12469,6 +12560,43 @@ function applyCharacterDamage(
   if (beforeHp !== state.character.hp) changes.push({ path: "/character/hp", before: beforeHp, after: state.character.hp });
   applyConcentrationAndDownedState(state, applied, rolls, modifiers, changes, critical, sourceCommandId, source, beforeHp);
   return { beforeHp, afterHp: state.character.hp, applied };
+}
+
+function applyControlledActorDamage(
+  state: LanternCampaignState,
+  actor: EngineControlledActor,
+  amount: number,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): { beforeHp: number; afterHp: number; applied: number } {
+  const beforeHp = actor.hp;
+  if (actor.status !== "active") return { beforeHp, afterHp: beforeHp, applied: 0 };
+  const applied = Math.max(0, Math.trunc(Number.isFinite(amount) ? amount : 0));
+  actor.hp = Math.max(0, beforeHp - applied);
+  if (beforeHp !== actor.hp) {
+    changes.push({ path: `/controlledActors/${actor.id}/hp`, before: beforeHp, after: actor.hp });
+  }
+  if (actor.hp > 0) return { beforeHp, afterHp: actor.hp, applied };
+
+  const beforeStatus = actor.status;
+  const beforeTerminalAtMinutes = actor.terminalAtMinutes;
+  const beforeCommandedThisTurn = actor.commandedThisTurn;
+  actor.status = "dead";
+  actor.terminalAtMinutes = state.time.gameTime.totalMinutes;
+  actor.commandedThisTurn = false;
+  changes.push(
+    { path: `/controlledActors/${actor.id}/status`, before: beforeStatus, after: actor.status },
+    { path: `/controlledActors/${actor.id}/terminalAtMinutes`, before: beforeTerminalAtMinutes, after: actor.terminalAtMinutes },
+  );
+  if (beforeCommandedThisTurn) {
+    changes.push({ path: `/controlledActors/${actor.id}/commandedThisTurn`, before: true, after: false });
+  }
+  if (actor.sourceRef) removeRuntimeSource(state, actor.sourceRef, changes);
+  const beforeScheduledEvents = state.time.scheduledEvents;
+  state.time.scheduledEvents = state.time.scheduledEvents.filter((event) => event.targetRef !== actor.id || event.status !== "pending");
+  if (beforeScheduledEvents.length !== state.time.scheduledEvents.length) {
+    changes.push({ path: "/time/scheduledEvents", before: beforeScheduledEvents, after: state.time.scheduledEvents });
+  }
+  return { beforeHp, afterHp: actor.hp, applied };
 }
 
 function applyConcentrationAndDownedState(
@@ -16321,7 +16449,7 @@ function normalizePathTrigger(value: unknown, index: number): EnginePathTrigger 
     ? candidate.resolution
     : null;
   const resolution = rawResolution
-    && ["resolved", "reaction_spent", "no_melee_attack"].includes(rawResolution.status)
+    && ["resolved", "reaction_spent", "no_melee_attack", "total_cover"].includes(rawResolution.status)
     ? {
         status: rawResolution.status,
         actionKey: typeof rawResolution.actionKey === "string" ? rawResolution.actionKey : null,

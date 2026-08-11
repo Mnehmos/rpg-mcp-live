@@ -31,7 +31,10 @@ const GOBLIN = "open5e:creature:5e-2014:srd-2014:srd_goblin";
 const FIRE_BOLT = "open5e:spell:5e-2014:srd-2014:srd_fire-bolt";
 const BURNING_HANDS = "open5e:spell:5e-2014:srd-2014:srd_burning-hands";
 const FIREBALL = "open5e:spell:5e-2014:srd-2014:srd_fireball";
+const SHIELD = "open5e:spell:5e-2014:srd-2014:srd_shield";
 const ADULT_BLACK_DRAGON = "open5e:creature:5e-2014:srd-2014:srd_adult-black-dragon";
+const AIR_ELEMENTAL = "open5e:creature:5e-2014:srd-2014:srd_air-elemental";
+const EARTH_ELEMENTAL = "open5e:creature:5e-2014:srd-2014:srd_earth-elemental";
 
 function context(state: LanternCampaignState): RequestContext {
   return {
@@ -102,7 +105,12 @@ function areaCast(state: LanternCampaignState, spellKey: string, aim: { x: numbe
   }) as Extract<EngineCommand, { kind: "cast_spell" }>;
 }
 
-function fighterEncounter(positions: Array<{ x: number; y: number }>): LanternCampaignState {
+function fighterEncounter(
+  positions: Array<{ x: number; y: number }>,
+  obstacles: EngineTacticalGeometry["obstacles"] = [],
+  creatureKey = GOBLIN,
+  playerPosition = { x: 0, y: 0 },
+): LanternCampaignState {
   const initial = createInitialCampaign(randomUUID(), randomUUID());
   const created = apply(initial, {
     kind: "character_create",
@@ -116,12 +124,12 @@ function fighterEncounter(positions: Array<{ x: number; y: number }>): LanternCa
     encounterName: "Ordered Movement Reactions",
     tactical: {
       frameId: "reaction-frame",
-      bounds: { minX: -4, maxX: 4, minY: -3, maxY: 3 },
-      obstacles: [],
-      playerPosition: { frameId: "reaction-frame", x: 0, y: 0, z: 0 },
+      bounds: { minX: -4, maxX: 8, minY: -3, maxY: 3 },
+      obstacles,
+      playerPosition: { frameId: "reaction-frame", ...playerPosition, z: 0 },
     },
     creatures: positions.map((position) => ({
-      creatureKey: GOBLIN,
+      creatureKey,
       count: 1,
       position: { frameId: "reaction-frame", ...position, z: 0 },
     })),
@@ -178,6 +186,107 @@ describe("#139 tactical cover", () => {
     expect(rejected).toMatchObject({ accepted: false, code: "target_has_total_cover", event: null });
     expect(JSON.stringify(rejected.state)).toBe(before);
   });
+
+  it("applies reverse-direction cover to incoming attacks and rejects total cover without mutation", () => {
+    const half = fighterEncounter(
+      [{ x: 4, y: 0 }],
+      [{ id: "crate", x: 1, y: 0, width: 1, height: 1 }],
+    );
+    const halfTurn = apply(half, { kind: "end_turn" });
+    const halfAttack = apply(halfTurn.state, {
+      kind: "advance_turn",
+      combatantId: halfTurn.state.combat.enemies[0]!.id,
+      actionKey: "scimitar",
+    });
+    expect(halfAttack.accepted).toBe(true);
+    expect(halfAttack.data).toMatchObject({ attack: { armorClass: 102, cover: { level: "half", armorClassBonus: 2 } } });
+    expect(halfAttack.event?.modifiers).toEqual(expect.arrayContaining([
+      { name: "armor_class", value: 102 },
+      { name: "half_cover_ac", value: 2 },
+    ]));
+
+    const total = fighterEncounter(
+      [{ x: 4, y: 0 }],
+      [{ id: "wall", x: 2, y: -1, width: 1, height: 3 }],
+    );
+    const totalTurn = apply(total, { kind: "end_turn" });
+    const before = JSON.stringify(totalTurn.state);
+    const rejected = apply(totalTurn.state, {
+      kind: "advance_turn",
+      combatantId: totalTurn.state.combat.enemies[0]!.id,
+      actionKey: "scimitar",
+    });
+    expect(rejected).toMatchObject({ accepted: false, code: "target_has_total_cover", event: null });
+    expect(JSON.stringify(rejected.state)).toBe(before);
+  });
+
+  it("keeps cover derived while Shield persists only its own armor bonus", () => {
+    const state = wizardEncounter(
+      SHIELD,
+      [{ x: 4, y: 0 }, { x: 4, y: 2 }],
+      [{ id: "crate", x: 1, y: 0, width: 1, height: 1 }],
+    );
+    state.character.maxHp = 1_000;
+    state.character.hp = 1_000;
+    const baseArmorClass = state.character.ac;
+    const enemyTurn = apply(state, { kind: "end_turn" });
+    const offered = apply(enemyTurn.state, {
+      kind: "advance_turn",
+      combatantId: enemyTurn.state.combat.enemies[0]!.id,
+      actionKey: "scimitar",
+    });
+    const pending = offered.state.combat.pendingReaction;
+    expect(offered).toMatchObject({ accepted: true, event: { outcome: "reaction_offered" } });
+    expect(pending?.originalArmorClass).toBe(baseArmorClass + 2);
+    const resolved = apply(offered.state, {
+      kind: "reaction_response",
+      reactionId: pending!.id,
+      decision: "accept",
+      spellKey: SHIELD,
+    });
+    expect(resolved.accepted).toBe(true);
+    expect(resolved.data).toMatchObject({
+      acBefore: baseArmorClass + 2,
+      acAfter: baseArmorClass + 7,
+      cover: { level: "half", armorClassBonus: 2 },
+    });
+    expect(resolved.state.character.ac).toBe(baseArmorClass + 5);
+  });
+
+  it("applies cover to compiled multiattacks before consuming their turn", () => {
+    const half = fighterEncounter(
+      [{ x: 4, y: 0 }],
+      [{ id: "crate", x: 1, y: 0, width: 1, height: 1 }],
+      AIR_ELEMENTAL,
+    );
+    const halfTurn = apply(half, { kind: "end_turn" });
+    const halfAttack = apply(halfTurn.state, {
+      kind: "advance_turn",
+      combatantId: halfTurn.state.combat.enemies[0]!.id,
+      actionKey: "multiattack",
+    });
+    expect(halfAttack.accepted).toBe(true);
+    expect(halfAttack.data).toMatchObject({ cover: { level: "half", armorClassBonus: 2 } });
+    expect(halfAttack.event?.modifiers).toEqual(expect.arrayContaining([
+      { name: "enemy_attack_1_armor_class", value: 102 },
+      { name: "enemy_attack_1_half_cover_ac", value: 2 },
+    ]));
+
+    const total = fighterEncounter(
+      [{ x: 4, y: 0 }],
+      [{ id: "wall", x: 2, y: -1, width: 1, height: 3 }],
+      AIR_ELEMENTAL,
+    );
+    const totalTurn = apply(total, { kind: "end_turn" });
+    const before = JSON.stringify(totalTurn.state);
+    const rejected = apply(totalTurn.state, {
+      kind: "advance_turn",
+      combatantId: totalTurn.state.combat.enemies[0]!.id,
+      actionKey: "multiattack",
+    });
+    expect(rejected).toMatchObject({ accepted: false, code: "target_has_total_cover", event: null });
+    expect(JSON.stringify(rejected.state)).toBe(before);
+  });
 });
 
 describe("#139 server-derived spell areas", () => {
@@ -231,6 +340,7 @@ describe("#139 server-derived spell areas", () => {
       state.combat.tactical.actorPosition,
       state.combat.tactical.actorFootprint,
       state.combat.enemies,
+      state.controlledActors,
       { frameId: state.combat.tactical.geometry.frameId, x: 1, y: 0, z: 0 },
       program!,
       60,
@@ -258,6 +368,28 @@ describe("#139 server-derived spell areas", () => {
       ],
     });
     expect(cast.state.character.hp).toBe(0);
+  });
+
+  it("includes active controlled actors and commits their damage and terminal status", () => {
+    const state = wizardEncounter(FIREBALL, [{ x: 1, y: 0 }]);
+    const created = apply(state, { kind: "controlled_actor_create", profileId: "summon-scout-v1" });
+    expect(created.accepted).toBe(true);
+    const actor = created.state.controlledActors[0]!;
+    const cast = apply(created.state, areaCast(created.state, FIREBALL, { x: 0, y: 0 }));
+    expect(cast.accepted).toBe(true);
+    expect(cast.data).toMatchObject({
+      area: { targetIds: [created.state.character.id, created.state.combat.enemies[0]!.id, actor.id] },
+      targetResults: expect.arrayContaining([
+        expect.objectContaining({ targetId: actor.id, hpBefore: actor.hp, hpAfter: 0, defeated: true }),
+      ]),
+    });
+    expect(cast.state.controlledActors[0]).toMatchObject({ hp: 0, status: "dead", terminalAtMinutes: 0 });
+    expect(cast.state.time.scheduledEvents.some((event) => event.targetRef === actor.id && event.status === "pending")).toBe(false);
+    expect(cast.event?.stateChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: `/controlledActors/${actor.id}/hp`, before: actor.hp, after: 0 }),
+      expect.objectContaining({ path: `/controlledActors/${actor.id}/status`, before: "active", after: "dead" }),
+    ]));
+    expect(normalizeCampaignState(JSON.parse(JSON.stringify(cast.state))).controlledActors[0]).toEqual(cast.state.controlledActors[0]);
   });
 
   it("rejects target spoofing, stale geometry, invalid directions, and arbitrary area fields byte-for-byte", () => {
@@ -404,5 +536,26 @@ describe("#139 ordered movement reactions", () => {
       costFeet: 0,
       triggers: [{ boundary: "leaving-reach", resolution: { status: "resolved", hpAfter: 0 } }],
     });
+  });
+
+  it("does not spend an opportunity reaction through total cover", () => {
+    const state = fighterEncounter(
+      [{ x: -1, y: 0 }],
+      [{ id: "wall", x: 1, y: -1, width: 1, height: 3 }],
+      EARTH_ELEMENTAL,
+      { x: 2, y: 0 },
+    );
+    const hpBefore = state.character.hp;
+    const moved = apply(state, move(state, 3, 0));
+    expect(moved.accepted).toBe(true);
+    expect(moved.state.combat.tactical.lastPlan?.triggers).toMatchObject([
+      {
+        boundary: "leaving-reach",
+        reachFeet: 10,
+        resolution: { status: "total_cover", reactionSpent: false, damageApplied: 0 },
+      },
+    ]);
+    expect(moved.state.combat.enemies[0]!.reaction).toEqual({ available: true, spent: false });
+    expect(moved.state.character.hp).toBe(hpBefore);
   });
 });

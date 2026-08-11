@@ -1461,7 +1461,7 @@ export interface EngineTacticalAreaSnapshot {
 }
 
 export interface EnginePathTriggerResolution {
-  status: "resolved" | "reaction_spent" | "no_melee_attack";
+  status: "resolved" | "reaction_spent" | "no_melee_attack" | "total_cover";
   actionKey: string | null;
   attackContentKey: string | null;
   reactionSpent: boolean;
