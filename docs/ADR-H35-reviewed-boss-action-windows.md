@@ -19,6 +19,8 @@ The first boss slice is one fixed lifecycle profile: `adult-black-dragon-boss-v1
 - Initiative count 20 is persisted as an order index: after actors whose server-rolled total is greater than 20 and before totals of 20 or less. The engine opens the lair window only when authoritative initiative crosses that boundary.
 - At the end of another actor's turn, the engine may queue a legendary window. If the same transition crosses initiative count 20, the lair window follows it. The pending queue and resume actor are persisted.
 - `boss_action` accepts only the exact action ref and target from current server-derived `actionOffers`, or the exact pass ref. Every call rechecks profile, timing, source state, target, content binding, attack reach/cover, and remaining resource before one atomic commit.
+- A Legendary Tail hit uses the existing incoming-hit reaction envelope. Its persisted resume record names the exact boss-window id, so Shield resolves before damage and the same legendary window completes exactly once afterward.
+- An explicit nonlethal final strike ends the encounter as `subdued`, preserves unconscious state, and never rewrites the player's mercy choice as a kill.
 - Campaign normalization revalidates the fixed roster, source combatant, initiative membership, and exact Tail binding before restoring boss timing after a restart.
 - Passing a lair window spends that cycle's opportunity. Passing a legendary window spends no point, but closes that end-of-turn opportunity.
 

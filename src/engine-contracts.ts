@@ -1588,7 +1588,7 @@ export const engineEncounterDecisionSchema = z.enum([
 export type EngineEncounterDecision = z.infer<typeof engineEncounterDecisionSchema>;
 
 export type EngineEncounterPhase = "pre-combat" | "active" | "resolving" | "terminal";
-export type EngineEncounterOutcome = "killed" | "surrendered" | "captured" | "escaped" | "player_surrendered" | "player_defeated";
+export type EngineEncounterOutcome = "killed" | "subdued" | "surrendered" | "captured" | "escaped" | "player_surrendered" | "player_defeated";
 
 export interface EngineEncounterApproachEvidence {
   challengeId: "stealth-perception-v1";
@@ -3258,8 +3258,9 @@ export interface EnginePendingReaction {
   damageType: string;
   eligibleReactionIds: string[];
   status: "offered" | "accepted" | "declined" | "resolved";
-  resumeMode: "finish-creature-turn" | "continue-character-turn";
+  resumeMode: "finish-creature-turn" | "continue-character-turn" | "finish-boss-window";
   movementTriggerId: string | null;
+  bossWindowId: string | null;
   resumeToken: string;
 }
 

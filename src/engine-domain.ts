@@ -3713,6 +3713,7 @@ function resolveEngineCommandCore(
     activeBossTiming(state)?.pendingWindow
     && command.kind !== "observe"
     && command.kind !== "boss_action"
+    && command.kind !== "reaction_response"
     && !experienceCommand
   ) {
     return rejection(state, tool, "boss_action_pending", "Resolve or pass the finite reviewed boss-action window before initiative resumes.");
@@ -9911,6 +9912,7 @@ function resolveCombatMove(
         status: "offered",
         resumeMode: "continue-character-turn",
         movementTriggerId: trigger.id,
+        bossWindowId: null,
         resumeToken: randomUUID(),
       };
       next.combat.pendingReaction = pending;
@@ -10791,19 +10793,20 @@ function maybeOfferSurrender(
 function resolveProfileDefeatOutcome(
   next: LanternCampaignState,
   targetId: string,
-): "killed" | "surrender_offer" | null {
+): "killed" | "subdued" | "surrender_offer" | null {
   const lifecycle = next.combat.lifecycle;
   if (!lifecycle) return null;
   if (lifecycle.profile === REVIEWED_BOSS_PROFILE) {
     if (next.combat.enemies.some((enemy) => enemy.alive)) return null;
+    const outcome = lifecycle.nonlethalDefeatIds.includes(targetId) ? "subdued" : "killed";
     lifecycle.phase = "terminal";
-    lifecycle.outcome = "killed";
-    lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:killed`;
+    lifecycle.outcome = outcome;
+    lifecycle.outcomeId = `${next.combat.encounterId ?? "encounter"}:${outcome}`;
     lifecycle.objective.status = "succeeded";
     if (lifecycle.bossTiming) lifecycle.bossTiming.pendingWindow = null;
     next.combat.status = "ended";
     next.combat.activeActorId = null;
-    return "killed";
+    return outcome;
   }
   if (next.combat.enemies.some((enemy) => enemy.alive)) {
     return maybeOfferSurrender(next, targetId) ? "surrender_offer" : null;
@@ -11600,6 +11603,19 @@ function pendingReactionTurnSuffix(
   changes: Array<{ path: string; before: unknown; after: unknown }>,
 ): string {
   if (pending.resumeMode === "finish-creature-turn") return finishCreatureTurn(state, enemyId, changes);
+  if (pending.resumeMode === "finish-boss-window") {
+    const beforeLifecycle = structuredClone(state.combat.lifecycle);
+    const terminal = finishBossEncounterIfPlayerDied(state, changes);
+    if (!terminal) completeReviewedBossWindow(state, "legendary");
+    if (JSON.stringify(beforeLifecycle) !== JSON.stringify(state.combat.lifecycle)) {
+      changes.push({ path: "/combat/lifecycle", before: beforeLifecycle, after: state.combat.lifecycle });
+    }
+    return terminal
+      ? " The encounter ends with the character's death."
+      : activeBossTiming(state)?.pendingWindow
+        ? " The next reviewed boss window opens."
+        : " Initiative resumes.";
+  }
   return state.character.hp === 0
     ? " Your movement ends here because you are unconscious."
     : " You may continue your turn from this position.";
@@ -11619,6 +11635,18 @@ function resolveReactionResponse(
   if (pending.id !== command.reactionId) return rejection(state, tool, "reaction_mismatch", "That reaction id does not match the pending incoming hit.");
   if (pending.actorId !== context.actorId || pending.targetId !== state.character.id) {
     return rejection(state, tool, "reaction_not_authorized", "Only the targeted character may resolve this reaction.");
+  }
+  if (pending.resumeMode === "finish-boss-window") {
+    const timing = activeBossTiming(state);
+    const window = timing?.pendingWindow;
+    if (
+      !pending.bossWindowId
+      || window?.id !== pending.bossWindowId
+      || window.queue[0] !== "legendary"
+      || timing?.legendary.lastConsumedWindowId !== pending.bossWindowId
+    ) {
+      return rejection(state, tool, "boss_reaction_resume_invalid", "The stored incoming-hit reaction no longer matches the authoritative legendary-action window.");
+    }
   }
   const enemy = findLiveCombatant(state.combat, pending.attackerId);
   if (!enemy) return rejection(state, tool, "combatant_not_found", "The attacker for this reaction is no longer in the encounter.");
@@ -11656,7 +11684,7 @@ function resolveReactionResponse(
         combat: combatData(next.combat),
         character: characterData(next.character, next.runtimeContent),
       },
-      next.character.hp === 0 ? "downed" : "reaction_declined",
+      next.character.lifecycleState === "dead" ? "dead" : next.character.hp === 0 ? "downed" : "reaction_declined",
       rolls,
       modifiers,
       changes,
@@ -11765,7 +11793,7 @@ function resolveReactionResponse(
       combat: combatData(next.combat),
       character: characterData(next.character, next.runtimeContent),
     },
-    next.character.hp === 0 ? "downed" : hitAfter ? "reaction_resolved_hit" : "reaction_resolved_miss",
+    next.character.lifecycleState === "dead" ? "dead" : next.character.hp === 0 ? "downed" : hitAfter ? "reaction_resolved_hit" : "reaction_resolved_miss",
     rolls,
     modifiers,
     changes,
@@ -12177,9 +12205,21 @@ function resolveCombatAction(
       target.alive = target.hp > 0;
       if (nonlethal && !target.alive) {
         const beforeConditions = [...target.conditions];
-        target.conditions = [...new Set([...target.conditions, "unconscious"])];
+        applyConditionRuntimeEffect(
+          next,
+          "unconscious",
+          `actor:${state.actorId}`,
+          target.id,
+          { kind: "persistent" },
+          "condition:unconscious",
+          ["never"],
+          clientCommandId,
+          changes,
+        );
         next.combat.lifecycle!.nonlethalDefeatIds.push(target.id);
-        changes.push({ path: `/combat/enemies/${target.id}/conditions`, before: beforeConditions, after: target.conditions });
+        if (JSON.stringify(beforeConditions) !== JSON.stringify(target.conditions)) {
+          changes.push({ path: `/combat/enemies/${target.id}/conditions`, before: beforeConditions, after: target.conditions });
+        }
       }
       damageDice.forEach((die) => rolls.push({ kind: `damage_${derivedAttack.damageDice}`, value: die, sides: dieSides }));
       modifiers.push({ name: "damage_modifier", value: derivedAttack.abilityModifier });
@@ -12192,13 +12232,17 @@ function resolveCombatAction(
       if (lifecycleDefeat === "surrender_offer") {
         message += " A surviving guard reaches its reviewed morale threshold and offers surrender.";
         changes.push({ path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle });
-      } else if (lifecycleDefeat === "killed" || (!next.combat.lifecycle && !next.combat.enemies.some((combatant) => combatant.alive))) {
+      } else if (lifecycleDefeat === "killed" || lifecycleDefeat === "subdued" || (!next.combat.lifecycle && !next.combat.enemies.some((combatant) => combatant.alive))) {
         next.combat.status = "ended";
         next.combat.activeActorId = null;
-        message += " The encounter ground falls silent.";
+        message += lifecycleDefeat === "subdued"
+          ? ` ${targetView.name} is subdued and left unconscious; the encounter ends without a kill.`
+          : " The encounter ground falls silent.";
         changes.push(
           { path: "/combat/status", before: "active", after: "ended" },
-          ...(lifecycleDefeat === "killed" ? [{ path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle }] : []),
+          ...(lifecycleDefeat === "killed" || lifecycleDefeat === "subdued"
+            ? [{ path: "/combat/lifecycle", before: state.combat.lifecycle, after: next.combat.lifecycle }]
+            : []),
         );
       } else {
         message += " Your turn remains open; end it when you are ready.";
@@ -12948,6 +12992,7 @@ function resolveBossAction(
     if (incomingCharacterCover(state, source).level === "total") {
       return rejection(state, tool, "boss_action_target_total_cover", "Canonical blocking geometry gives the target total cover from the reviewed boss.");
     }
+    const reactions = eligibleIncomingHitReactions(state);
     const next = cloneCampaign(state);
     const beforeTiming = structuredClone(timing);
     const nextTiming = activeBossTiming(next)!;
@@ -12967,8 +13012,72 @@ function resolveBossAction(
       changes,
       clientCommandId,
       nextSource,
-      { damageSource: "boss-legendary-action" },
+      { damageSource: "boss-legendary-action", deferDamage: reactions.length > 0 },
     );
+    if (attackResult.hit && reactions.length > 0) {
+      const pending: EnginePendingReaction = {
+        version: 1,
+        id: randomUUID(),
+        kind: "incoming-hit",
+        trigger: "incoming-attack-would-hit",
+        sourceCommandId: clientCommandId,
+        sourceVersion: state.version,
+        actorId: state.actorId,
+        attackerId: source.id,
+        targetId: state.character.id,
+        sourceActionKey: attack.contentKey,
+        attackName: attack.name,
+        attackRoll: attackResult.attackRoll,
+        attackTotal: attackResult.attackTotal,
+        attackBonus: attack.toHit,
+        critical: attackResult.critical,
+        originalArmorClass: attackResult.armorClass,
+        damageDiceCount: attack.damage.diceCount * (attackResult.critical ? 2 : 1),
+        damageDieSides: attack.damage.dieSides,
+        damageBonus: attack.damage.bonus,
+        damageType: attack.damage.typeName,
+        eligibleReactionIds: reactions.map((spell) => spell.contentKey),
+        status: "offered",
+        resumeMode: "finish-boss-window",
+        movementTriggerId: null,
+        bossWindowId: window.id,
+        resumeToken: randomUUID(),
+      };
+      next.combat.pendingReaction = pending;
+      next.combat.lastAction = `reaction:${pending.id}:offered`;
+      changes.push(
+        { path: "/combat/pendingReaction", before: state.combat.pendingReaction, after: pending },
+        { path: "/combat/lifecycle/bossTiming", before: beforeTiming, after: next.combat.lifecycle?.bossTiming ?? null },
+        { path: "/combat/lastAction", before: state.combat.lastAction, after: next.combat.lastAction },
+      );
+      return commit(
+        next,
+        context,
+        clientCommandId,
+        command,
+        tool,
+        `${sourceView.name} uses ${action.name}; the stored attack would hit, and an eligible reaction may resolve before damage.`,
+        {
+          combatantId: source.id,
+          actionRef: action.actionRef,
+          resourceCost: action.cost,
+          reactionId: pending.id,
+          pendingReaction: pending,
+          attack: attackResult,
+          combat: combatData(next.combat),
+          character: characterData(next.character),
+        },
+        "reaction_offered",
+        rolls,
+        modifiers,
+        changes,
+        [
+          source.contentKey,
+          attack.contentKey,
+          ...reactions.flatMap((spell) => [spell.contentKey, ...runtimeSpellPrimitiveEvidence(state, spell.contentKey)]),
+        ],
+      );
+    }
     const terminal = finishBossEncounterIfPlayerDied(next, changes);
     if (!terminal) completeReviewedBossWindow(next, "legendary");
     next.combat.lastAction = action.actionRef;
@@ -13327,6 +13436,7 @@ function resolveAdvanceTurn(
         status: "offered",
         resumeMode: "finish-creature-turn",
         movementTriggerId: null,
+        bossWindowId: null,
         resumeToken: randomUUID(),
       };
       next.combat.pendingReaction = pending;
@@ -17938,7 +18048,7 @@ function normalizeEncounterLifecycle(value: unknown, enemies: EngineCombatant[])
   const phase = ["pre-combat", "active", "resolving", "terminal"].includes(candidate.phase ?? "")
     ? candidate.phase as EngineEncounterLifecycle["phase"]
     : "active";
-  const outcome = ["killed", "surrendered", "captured", "escaped", "player_surrendered", "player_defeated"].includes(candidate.outcome ?? "")
+  const outcome = ["killed", "subdued", "surrendered", "captured", "escaped", "player_surrendered", "player_defeated"].includes(candidate.outcome ?? "")
     ? candidate.outcome as EngineEncounterOutcome
     : null;
   const evidence = rawSurprise.evidence && typeof rawSurprise.evidence === "object"
@@ -18432,8 +18542,13 @@ function normalizePendingReaction(value: unknown): EnginePendingReaction | null 
     damageType: candidate.damageType,
     eligibleReactionIds: candidate.eligibleReactionIds.filter((id): id is string => typeof id === "string"),
     status: candidate.status!,
-    resumeMode: candidate.resumeMode === "continue-character-turn" ? "continue-character-turn" : "finish-creature-turn",
+    resumeMode: candidate.resumeMode === "continue-character-turn"
+      ? "continue-character-turn"
+      : candidate.resumeMode === "finish-boss-window"
+        ? "finish-boss-window"
+        : "finish-creature-turn",
     movementTriggerId: typeof candidate.movementTriggerId === "string" ? candidate.movementTriggerId : null,
+    bossWindowId: typeof candidate.bossWindowId === "string" ? candidate.bossWindowId : null,
     resumeToken: candidate.resumeToken,
   };
 }

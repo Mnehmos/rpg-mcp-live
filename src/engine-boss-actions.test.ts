@@ -25,6 +25,7 @@ const GOBLIN = "open5e:creature:5e-2014:srd-2014:srd_goblin";
 const LEGENDARY_TAIL = "boss:adult-black-dragon:legendary:tail-attack-v1";
 const LAIR_ACID_GEYSER = "boss:adult-black-dragon:lair:acid-geyser-v1";
 const PASS = "boss:window:pass";
+const SHIELD = "open5e:spell:5e-2014:srd-2014:srd_shield";
 
 function context(state: LanternCampaignState): RequestContext {
   return {
@@ -44,6 +45,22 @@ function fighter(): LanternCampaignState {
   let state = createInitialCampaign("boss-account", "boss-actor");
   for (const command of [
     { kind: "character_create", name: "Boss Hunter", species: "human", className: "fighter" },
+    { kind: "tutorial_advance" },
+    { kind: "tutorial_advance" },
+  ] as EngineCommand[]) {
+    const result = apply(state, command);
+    expect(result.accepted).toBe(true);
+    state = result.state;
+  }
+  return state;
+}
+
+function wizard(): LanternCampaignState {
+  let state = createInitialCampaign("boss-wizard-account", "boss-wizard-actor");
+  for (const command of [
+    { kind: "character_create", name: "Boss Ward", species: "human", className: "wizard" },
+    { kind: "learn_spell", spellKey: SHIELD },
+    { kind: "prepare_spell", spellKey: SHIELD, prepared: true },
     { kind: "tutorial_advance" },
     { kind: "tutorial_advance" },
   ] as EngineCommand[]) {
@@ -153,6 +170,74 @@ describe("reviewed boss-action timing", () => {
     expect(lair.state.combat.activeActorId).toBe(lair.state.combat.enemies[0]?.id);
     expect(lair.event?.contentKeys).toEqual(expect.arrayContaining([ADULT_BLACK_DRAGON, "open5e:damage-type:5e-2014:srd-2014:acid"]));
     expect(lair.data).toMatchObject({ actionRef: LAIR_ACID_GEYSER, initiativeCount: 20, initiativeCycle: 1 });
+  });
+
+  it("offers Shield before Legendary Tail damage and resumes the same persisted boss window", () => {
+    const ended = openLegendaryAndLairWindow(wizard());
+    ended.state.character.ac = 10;
+    const hpBefore = ended.state.character.hp;
+    queuedRolls.push(2);
+    const offered = apply(ended.state, { kind: "boss_action", actionRef: LEGENDARY_TAIL, targetId: ended.state.actorId });
+    expect(offered).toMatchObject({ accepted: true, event: { outcome: "reaction_offered" } });
+    expect(offered.state.character.hp).toBe(hpBefore);
+    expect(offered.state.combat.pendingReaction).toMatchObject({
+      resumeMode: "finish-boss-window",
+      bossWindowId: offered.state.combat.lifecycle?.bossTiming?.pendingWindow?.id,
+      eligibleReactionIds: [SHIELD],
+    });
+    expect(offered.state.combat.lifecycle?.bossTiming).toMatchObject({
+      legendary: { remaining: 2, totalSpent: 1 },
+      pendingWindow: { queue: ["legendary", "lair"] },
+    });
+    const mismatched = structuredClone(offered.state);
+    mismatched.combat.pendingReaction!.bossWindowId = "invented-window";
+    const mismatchedBefore = structuredClone(mismatched);
+    const blocked = apply(mismatched, {
+      kind: "reaction_response",
+      reactionId: mismatched.combat.pendingReaction!.id,
+      decision: "decline",
+    });
+    expect(blocked).toMatchObject({ accepted: false, code: "boss_reaction_resume_invalid", event: null });
+    expect(blocked.state).toEqual(mismatchedBefore);
+    const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(offered.state)) as LanternCampaignState);
+    expect(restarted.combat.pendingReaction).toEqual(offered.state.combat.pendingReaction);
+
+    const pending = restarted.combat.pendingReaction!;
+    const slotBefore = restarted.character.spellcasting!.slots["1"];
+    const shielded = apply(restarted, {
+      kind: "reaction_response",
+      reactionId: pending.id,
+      decision: "accept",
+      spellKey: SHIELD,
+    });
+    expect(shielded).toMatchObject({ accepted: true, event: { outcome: "reaction_resolved_miss" } });
+    expect(shielded.state.character.hp).toBe(hpBefore);
+    expect(shielded.state.character.spellcasting!.slots["1"]).toBe(slotBefore - 1);
+    expect(shielded.state.combat.pendingReaction).toBeNull();
+    expect(shielded.state.combat.lifecycle?.bossTiming).toMatchObject({
+      legendary: { remaining: 2, totalSpent: 1 },
+      pendingWindow: { queue: ["lair"] },
+    });
+  });
+
+  it("preserves an explicit nonlethal final strike as a subdued boss outcome", () => {
+    const started = startBoss(fighter());
+    expect(started.accepted).toBe(true);
+    const dragon = started.state.combat.enemies[0]!;
+    dragon.hp = 1;
+    const subdued = apply(started.state, { kind: "combat_action", action: "attack_nonlethal", targetId: dragon.id });
+    expect(subdued.accepted).toBe(true);
+    expect(subdued.message).toContain("ends without a kill");
+    expect(subdued.state.combat.status).toBe("ended");
+    expect(subdued.state.combat.enemies[0]).toMatchObject({ alive: false, conditions: expect.arrayContaining(["unconscious"]) });
+    expect(subdued.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "subdued",
+      objective: { status: "succeeded" },
+      nonlethalDefeatIds: [dragon.id],
+      bossTiming: { pendingWindow: null },
+    });
+    expect(normalizeCampaignState(JSON.parse(JSON.stringify(subdued.state)) as LanternCampaignState).combat.lifecycle?.outcome).toBe("subdued");
   });
 
   it("rejects mismatched content, unknown refs, bad targets, insufficient points, and incapacitated sources without mutation", () => {
