@@ -70,6 +70,7 @@ describe("Open5e S9 pack review and campaign re-pin", () => {
       footprint: { width: 1, height: 1 },
       distanceFeet: 30,
       conditions: [],
+      reaction: { available: true, spent: false },
       actionResources: {},
     }];
     store.createCampaign({

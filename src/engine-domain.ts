@@ -81,6 +81,8 @@ import type {
   EngineTurnBudgetSlot,
   EngineMovementBudget,
   EngineTacticalBounds,
+  EngineTacticalAreaSnapshot,
+  EngineTacticalCover,
   EngineTacticalFootprint,
   EngineTacticalGeometry,
   EngineTacticalGeometryInput,
@@ -8507,6 +8509,193 @@ function rectangleCells(rectangle: { x: number; y: number; width: number; height
   return cells;
 }
 
+type TacticalPoint = { x: number; y: number };
+
+function footprintCorners(position: EngineTacticalPosition, footprint: EngineTacticalFootprint): TacticalPoint[] {
+  return [
+    { x: position.x, y: position.y },
+    { x: position.x + footprint.width, y: position.y },
+    { x: position.x, y: position.y + footprint.height },
+    { x: position.x + footprint.width, y: position.y + footprint.height },
+  ];
+}
+
+function segmentIntersectsObstacleInterior(
+  from: TacticalPoint,
+  to: TacticalPoint,
+  obstacle: EngineTacticalObstacle,
+): boolean {
+  const epsilon = 1e-9;
+  const minimum = { x: obstacle.x + epsilon, y: obstacle.y + epsilon };
+  const maximum = { x: obstacle.x + obstacle.width - epsilon, y: obstacle.y + obstacle.height - epsilon };
+  const delta = { x: to.x - from.x, y: to.y - from.y };
+  let entry = 0;
+  let exit = 1;
+  for (const axis of ["x", "y"] as const) {
+    if (Math.abs(delta[axis]) < epsilon) {
+      if (from[axis] <= minimum[axis] || from[axis] >= maximum[axis]) return false;
+      continue;
+    }
+    const first = (minimum[axis] - from[axis]) / delta[axis];
+    const second = (maximum[axis] - from[axis]) / delta[axis];
+    entry = Math.max(entry, Math.min(first, second));
+    exit = Math.min(exit, Math.max(first, second));
+    if (entry > exit) return false;
+  }
+  return exit > epsilon && entry < 1 - epsilon;
+}
+
+export function deriveTacticalCover(
+  geometry: EngineTacticalGeometry,
+  attackerPosition: EngineTacticalPosition,
+  attackerFootprint: EngineTacticalFootprint,
+  targetPosition: EngineTacticalPosition,
+  targetFootprint: EngineTacticalFootprint,
+): EngineTacticalCover {
+  const attackerCorners = footprintCorners(attackerPosition, attackerFootprint);
+  const targetCorners = footprintCorners(targetPosition, targetFootprint);
+  const candidates = attackerCorners.map((attackerCorner) => ({
+    attackerCorner,
+    blockedTargetCorners: targetCorners.filter((targetCorner) =>
+      geometry.obstacles.some((obstacle) => segmentIntersectsObstacleInterior(attackerCorner, targetCorner, obstacle))
+    ).length,
+  }));
+  const best = candidates.reduce((selected, candidate) =>
+    candidate.blockedTargetCorners < selected.blockedTargetCorners ? candidate : selected
+  );
+  const level = best.blockedTargetCorners === 0
+    ? "none"
+    : best.blockedTargetCorners <= 2
+      ? "half"
+      : best.blockedTargetCorners === 3
+        ? "three_quarters"
+        : "total";
+  return {
+    geometryRevision: geometry.revision,
+    level,
+    armorClassBonus: level === "none" ? 0 : level === "half" ? 2 : level === "three_quarters" ? 5 : null,
+    blockedTargetCorners: best.blockedTargetCorners,
+    attackerCorner: best.attackerCorner,
+  };
+}
+
+type CompiledAreaOperation = Extract<CompiledEffectProgram["operations"][number], { kind: "area" }>;
+
+function reviewedTacticalSpellArea(
+  spell: NonNullable<ReturnType<typeof getOpen5eSpell>>,
+): CompiledEffectProgram | TacticalIssue | null {
+  const candidates = spell.effects.filter((program) => program.executionMode === "spell-area");
+  if (candidates.length === 0) return null;
+  if (candidates.length !== 1) {
+    return { code: "ambiguous_tactical_area", message: `${spell.definition.name} has more than one compiled area program.` };
+  }
+  const program = candidates[0]!;
+  const operations = program.operations.filter((operation): operation is CompiledAreaOperation => operation.kind === "area");
+  if (operations.length !== 1) {
+    return { code: "invalid_tactical_area_program", message: `${spell.definition.name} does not have one exact compiled area operation.` };
+  }
+  return program;
+}
+
+function tacticalAimIssue(position: EngineTacticalPosition, geometry: EngineTacticalGeometry): TacticalIssue | null {
+  const frameIssue = validatePositionFrame(position, geometry.frameId);
+  if (frameIssue) return frameIssue;
+  if (
+    position.x < geometry.bounds.minX
+    || position.x > geometry.bounds.maxX
+    || position.y < geometry.bounds.minY
+    || position.y > geometry.bounds.maxY
+  ) {
+    return { code: "tactical_area_aim_out_of_bounds", message: "The tactical area aim must remain within the encounter bounds." };
+  }
+  return null;
+}
+
+export function deriveTacticalAreaSnapshot(
+  geometry: EngineTacticalGeometry,
+  casterPosition: EngineTacticalPosition,
+  _casterFootprint: EngineTacticalFootprint,
+  enemies: EngineCombatant[],
+  aim: EngineTacticalPosition,
+  program: CompiledEffectProgram,
+  aimRangeFeet: number,
+): EngineTacticalAreaSnapshot | TacticalIssue {
+  const aimIssue = tacticalAimIssue(aim, geometry);
+  if (aimIssue) return aimIssue;
+  const operations = program.operations.filter((operation): operation is CompiledAreaOperation => operation.kind === "area");
+  if (operations.length !== 1) {
+    return { code: "invalid_tactical_area_program", message: "Tactical resolution requires one exact compiled area operation." };
+  }
+  const operation = operations[0]!;
+  if (!Number.isInteger(operation.size) || operation.size < TACTICAL_CELL_FEET || operation.size % TACTICAL_CELL_FEET !== 0 || operation.unit.toLocaleLowerCase("en-US") !== "feet") {
+    return { code: "unsupported_tactical_area", message: "Tactical areas require a reviewed whole-cell size measured in feet." };
+  }
+  if (operation.shape !== "sphere" && operation.shape !== "cone" && operation.shape !== "line") {
+    return { code: "unsupported_tactical_area", message: `The ${operation.shape} area shape is not part of the reviewed #139 slice.` };
+  }
+  if (operation.shape === "line" && operation.width !== TACTICAL_CELL_FEET) {
+    return { code: "unsupported_tactical_area", message: "The reviewed tactical line must be exactly 5 feet wide." };
+  }
+
+  const origin = { ...casterPosition };
+  const deltaX = aim.x - casterPosition.x;
+  const deltaY = aim.y - casterPosition.y;
+  if (operation.shape === "sphere") {
+    if (fiveESimpleDistanceFeet(casterPosition, aim) > aimRangeFeet) {
+      return { code: "spell_area_out_of_range", message: `The chosen area origin is beyond the spell's ${aimRangeFeet}-foot range.` };
+    }
+  } else if (
+    (deltaX === 0 && deltaY === 0)
+    || !(deltaX === 0 || deltaY === 0 || Math.abs(deltaX) === Math.abs(deltaY))
+  ) {
+    return { code: "invalid_tactical_area_direction", message: "Cone and line aims must choose one cardinal or diagonal grid direction." };
+  }
+
+  const directionX = Math.sign(deltaX);
+  const directionY = Math.sign(deltaY);
+  const directionLength = Math.hypot(directionX, directionY) || 1;
+  const unitX = directionX / directionLength;
+  const unitY = directionY / directionLength;
+  const cells: EngineTacticalPosition[] = [];
+  for (let y = geometry.bounds.minY; y <= geometry.bounds.maxY; y += 1) {
+    for (let x = geometry.bounds.minX; x <= geometry.bounds.maxX; x += 1) {
+      const cell = { frameId: geometry.frameId, x, y, z: 0 };
+      let included = false;
+      if (operation.shape === "sphere") {
+        included = fiveESimpleDistanceFeet(aim, cell) <= operation.size;
+      } else {
+        const relativeX = x - casterPosition.x;
+        const relativeY = y - casterPosition.y;
+        const forward = relativeX * unitX + relativeY * unitY;
+        const lateral = Math.abs(relativeX * unitY - relativeY * unitX);
+        const withinLength = forward > 0
+          && fiveESimpleDistanceFeet(casterPosition, cell) <= operation.size;
+        included = operation.shape === "line"
+          ? withinLength && lateral <= 0.5
+          : withinLength && lateral <= forward / 2 + 0.5;
+      }
+      if (included) cells.push(cell);
+    }
+  }
+  const includedCells = new Set(cells.map(cellKey));
+  const targetIds = enemies
+    .filter((enemy) => enemy.alive && positionCells(enemy.position, enemy.footprint).some((cell) => includedCells.has(cellKey(cell))))
+    .map((enemy) => enemy.id);
+  return {
+    geometryRevision: geometry.revision,
+    frameId: geometry.frameId,
+    sourceShape: operation.shape,
+    shape: operation.shape === "sphere" ? "circle" : operation.shape,
+    sizeFeet: operation.size,
+    widthFeet: operation.width,
+    origin,
+    aim: { ...aim },
+    cells,
+    targetIds,
+    programContentKey: program.contentKey,
+  };
+}
+
 function positionFitsGeometry(
   position: EngineTacticalPosition,
   footprint: EngineTacticalFootprint,
@@ -8662,29 +8851,40 @@ function tacticalDistanceFeet(combat: EngineCombat, enemy: EngineCombatant): num
   return Number.isFinite(derived) ? derived : Math.max(0, enemy.distanceFeet);
 }
 
+function opportunityAttackFor(enemy: EngineCombatant): CompiledCreatureAttack | null {
+  return materializeCombatant(enemy).attacks
+    .filter((attack) => attack.attackMode !== "ranged" && (attack.distance.reach ?? 0) > 0)
+    .sort((left, right) => left.actionKey.localeCompare(right.actionKey))[0] ?? null;
+}
+
 function movementTriggers(
   from: EngineTacticalPosition,
   path: EngineTacticalPosition[],
   enemies: EngineCombatant[],
+  sourceCommandId: string,
 ): EnginePathTrigger[] {
   const triggers: EnginePathTrigger[] = [];
   let previous = from;
   path.forEach((next, index) => {
     for (const enemy of enemies) {
       if (!enemy.alive) continue;
+      const attack = opportunityAttackFor(enemy);
+      const reachFeet = attack?.distance.reach ?? TACTICAL_REACH_FEET;
       const distanceBeforeFeet = fiveESimpleDistanceFeet(previous, enemy.position);
       const distanceAfterFeet = fiveESimpleDistanceFeet(next, enemy.position);
-      const enters = distanceBeforeFeet > TACTICAL_REACH_FEET && distanceAfterFeet <= TACTICAL_REACH_FEET;
-      const leaves = distanceBeforeFeet <= TACTICAL_REACH_FEET && distanceAfterFeet > TACTICAL_REACH_FEET;
+      const enters = distanceBeforeFeet > reachFeet && distanceAfterFeet <= reachFeet;
+      const leaves = distanceBeforeFeet <= reachFeet && distanceAfterFeet > reachFeet;
       if (enters || leaves) {
         triggers.push({
+          id: `${sourceCommandId}:${enemy.id}:${index + 1}:${enters ? "entering-reach" : "leaving-reach"}`,
           kind: "reach-boundary",
           enemyId: enemy.id,
           segmentIndex: index + 1,
           boundary: enters ? "entering-reach" : "leaving-reach",
-          reachFeet: TACTICAL_REACH_FEET,
+          reachFeet,
           distanceBeforeFeet,
           distanceAfterFeet,
+          resolution: null,
         });
       }
     }
@@ -8738,9 +8938,72 @@ function resolveCombatMove(
     to: { ...command.destination },
     path: pathResult.path.map((position) => ({ ...position })),
     costFeet: pathResult.costFeet,
-    triggers: movementTriggers(tactical.actorPosition, pathResult.path, state.combat.enemies),
+    triggers: movementTriggers(tactical.actorPosition, pathResult.path, state.combat.enemies, clientCommandId),
   };
   const next = cloneCampaign(state);
+  const rolls: Array<{ kind: string; value: number; sides?: number }> = [];
+  const modifiers: Array<{ name: string; value: number }> = [];
+  const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
+  const reactionMessages: string[] = [];
+  for (const [index, trigger] of plan.triggers.entries()) {
+    if (trigger.boundary !== "leaving-reach") continue;
+    const enemy = next.combat.enemies.find((candidate) => candidate.id === trigger.enemyId && candidate.alive);
+    const hpBefore = next.character.hp;
+    const attack = enemy ? opportunityAttackFor(enemy) : null;
+    if (!enemy || !attack) {
+      trigger.resolution = {
+        status: "no_melee_attack",
+        actionKey: null,
+        attackContentKey: null,
+        reactionSpent: false,
+        hit: null,
+        critical: null,
+        damageApplied: 0,
+        hpBefore,
+        hpAfter: hpBefore,
+      };
+      continue;
+    }
+    if (enemy.reaction.spent) {
+      trigger.resolution = {
+        status: "reaction_spent",
+        actionKey: attack.actionKey,
+        attackContentKey: attack.contentKey,
+        reactionSpent: false,
+        hit: null,
+        critical: null,
+        damageApplied: 0,
+        hpBefore,
+        hpAfter: hpBefore,
+      };
+      continue;
+    }
+    const beforeReaction = { ...enemy.reaction };
+    enemy.reaction = { available: false, spent: true };
+    changes.push({ path: `/combat/enemies/${enemy.id}/reaction`, before: beforeReaction, after: enemy.reaction });
+    const result = resolveOneCreatureAttack(
+      next,
+      attack,
+      index + 1,
+      rolls,
+      modifiers,
+      changes,
+      clientCommandId,
+      "opportunity-attack",
+    );
+    trigger.resolution = {
+      status: "resolved",
+      actionKey: attack.actionKey,
+      attackContentKey: attack.contentKey,
+      reactionSpent: true,
+      hit: result.hit,
+      critical: result.critical,
+      damageApplied: result.damageApplied,
+      hpBefore: result.hpBefore,
+      hpAfter: result.hpAfter,
+    };
+    reactionMessages.push(`${materializeCombatant(enemy).name}'s opportunity ${result.message.toLocaleLowerCase("en-US")}`);
+  }
   next.combat.tactical.actorPosition = { ...plan.to };
   next.combat.tactical.lastPlan = plan;
   next.combat.turnBudget.movementFeet.spent += plan.costFeet;
@@ -8752,16 +9015,19 @@ function resolveCombatMove(
     clientCommandId,
     command,
     tool,
-    `You move ${plan.costFeet} feet through ${plan.path.length} tactical cell${plan.path.length === 1 ? "" : "s"}.`,
+    `You move ${plan.costFeet} feet through ${plan.path.length} tactical cell${plan.path.length === 1 ? "" : "s"}.`
+      + (reactionMessages.length > 0 ? ` ${reactionMessages.join(" ")}` : ""),
     { movement: plan, combat: combatData(next.combat) },
     "combat_moved",
-    [],
-    [],
+    rolls,
+    modifiers,
     [
+      ...changes,
       { path: "/combat/tactical/actorPosition", before: state.combat.tactical.actorPosition, after: next.combat.tactical.actorPosition },
       { path: "/combat/turnBudget/movementFeet/spent", before: state.combat.turnBudget.movementFeet.spent, after: next.combat.turnBudget.movementFeet.spent },
       { path: "/combat/tactical/lastPlan", before: state.combat.tactical.lastPlan, after: next.combat.tactical.lastPlan },
     ],
+    [...new Set(plan.triggers.flatMap((trigger) => trigger.resolution?.attackContentKey ? [trigger.resolution.attackContentKey] : []))],
   );
 }
 
@@ -9619,6 +9885,7 @@ function resolveCastSpell(
   }
 
   if (spell.effect.effectKind === "healing") {
+    if (command.area) return rejection(state, tool, "unexpected_tactical_area", "A healing spell in this slice does not accept tactical area aim data.");
     return resolveHealingSpell(
       state,
       context,
@@ -9631,7 +9898,23 @@ function resolveCastSpell(
     );
   }
   if (spell.effect.effectKind === "stat-modifier") {
+    if (command.area) return rejection(state, tool, "unexpected_tactical_area", "This reaction spell does not accept tactical area aim data.");
     return resolveShieldCast(state, context, clientCommandId, command, tool, spell, spellcasting);
+  }
+
+  const reviewedArea = reviewedTacticalSpellArea(spell);
+  if (reviewedArea && "code" in reviewedArea) return rejection(state, tool, reviewedArea.code, reviewedArea.message);
+  if (reviewedArea && command.targetIds.length > 0) {
+    return rejection(state, tool, "area_targets_server_owned", "Do not supply target ids for a reviewed area spell; the engine derives affected actors from canonical geometry.");
+  }
+  if (reviewedArea && !command.area) {
+    return rejection(state, tool, "tactical_area_required", `${spell.definition.name} requires the current geometry revision and one aim cell.`);
+  }
+  if (!reviewedArea && command.area) {
+    return rejection(state, tool, "unexpected_tactical_area", `${spell.definition.name} is not a reviewed tactical area spell.`);
+  }
+  if (reviewedArea && command.area!.geometryRevision !== state.combat.tactical.geometry.revision) {
+    return rejection(state, tool, "stale_tactical_geometry", "The tactical geometry changed; re-aim the spell from the current revision.");
   }
 
   const slotSelection = selectSpellSlot(spell.definition.level, command.slotLevel, spellcasting.slots);
@@ -9656,15 +9939,27 @@ function resolveCastSpell(
   }
   const damageExpression = selectSpellDamage(spell.effect, spell.definition.level, selectedSlotLevel, state.character.level);
   const targetLimit = slotOption?.targetCount ?? spell.definition.targetCount;
-  const usesAreaSelection = spell.definition.targetType === "point"
-    || spell.definition.targetType === "area"
-    || spell.definition.area.shape !== null;
-  const selectedIds = usesAreaSelection
-    ? [...new Set(command.targetIds)]
-    : command.targetIds;
-  if (selectedIds.length === 0) return rejection(state, tool, "target_required", `Choose at least one living target for ${spell.definition.name}.`);
+  const tacticalAreaResult = reviewedArea
+    ? deriveTacticalAreaSnapshot(
+        state.combat.tactical.geometry,
+        state.combat.tactical.actorPosition,
+        state.combat.tactical.actorFootprint,
+        state.combat.enemies,
+        command.area!.aim,
+        reviewedArea,
+        spellAreaAimRangeFeet(spell.definition),
+      )
+    : null;
+  if (tacticalAreaResult && "code" in tacticalAreaResult) {
+    return rejection(state, tool, tacticalAreaResult.code, tacticalAreaResult.message);
+  }
+  const tacticalArea = tacticalAreaResult as EngineTacticalAreaSnapshot | null;
+  const selectedIds = tacticalArea ? tacticalArea.targetIds : [...new Set(command.targetIds)];
+  if (!tacticalArea && selectedIds.length === 0) {
+    return rejection(state, tool, "target_required", `Choose at least one living target for ${spell.definition.name}.`);
+  }
   if (
-    !usesAreaSelection
+    !tacticalArea
     && (spell.definition.targetType === "creature" || spell.definition.targetType === "object")
     && targetLimit !== null
     && selectedIds.length !== targetLimit
@@ -9676,7 +9971,9 @@ function resolveCastSpell(
     return rejection(state, tool, "invalid_spell_target", "Every spell target must be a living combatant in the active encounter.");
   }
   const rangeFeet = executableSpellRangeFeet(spell.definition);
-  const outOfRange = targets.find((target) => target !== null && tacticalDistanceFeet(state.combat, target) > rangeFeet);
+  const outOfRange = tacticalArea
+    ? undefined
+    : targets.find((target) => target !== null && tacticalDistanceFeet(state.combat, target) > rangeFeet);
   if (outOfRange) {
     const distanceFeet = tacticalDistanceFeet(state.combat, outOfRange);
     return rejection(
@@ -9685,6 +9982,18 @@ function resolveCastSpell(
       "spell_target_out_of_range",
       `${spell.definition.name} can currently resolve through ${rangeFeet} feet; target ${outOfRange.id} is ${distanceFeet} feet away.`
     );
+  }
+  if (spell.effect.resolution === "spell-attack") {
+    const coveredTarget = targets.find((target) => target && deriveTacticalCover(
+      state.combat.tactical.geometry,
+      state.combat.tactical.actorPosition,
+      state.combat.tactical.actorFootprint,
+      target.position,
+      target.footprint,
+    ).level === "total");
+    if (coveredTarget) {
+      return rejection(state, tool, "target_has_total_cover", "Canonical blocking geometry gives that spell target total cover from your position.");
+    }
   }
 
   const next = cloneCampaign(state);
@@ -9734,14 +10043,30 @@ function resolveCastSpell(
     let critical = false;
     let attackTotal: number | null = null;
     let saveTotal: number | null = null;
+    const cover = spell.effect.resolution === "spell-attack"
+      ? deriveTacticalCover(
+          state.combat.tactical.geometry,
+          state.combat.tactical.actorPosition,
+          state.combat.tactical.actorFootprint,
+          sourceTarget.position,
+          sourceTarget.footprint,
+        )
+      : null;
 
     if (spell.effect.resolution === "spell-attack") {
       const die = randomInt(1, 21);
       attackTotal = die + spellcasting.spellAttackBonus;
       critical = die === 20;
-      hit = die !== 1 && (critical || attackTotal >= targetView.armorClass);
+      const targetArmorClass = targetView.armorClass + (cover?.armorClassBonus ?? 0);
+      hit = die !== 1 && (critical || attackTotal >= targetArmorClass);
       rolls.push({ kind: `spell_attack_${index + 1}`, value: die, sides: 20 });
-      modifiers.push({ name: `spell_attack_bonus_${index + 1}`, value: spellcasting.spellAttackBonus });
+      modifiers.push(
+        { name: `spell_attack_bonus_${index + 1}`, value: spellcasting.spellAttackBonus },
+        { name: `spell_target_ac_${index + 1}`, value: targetArmorClass },
+        ...(cover && cover.armorClassBonus
+          ? [{ name: `spell_${cover.level}_cover_ac_${index + 1}`, value: cover.armorClassBonus }]
+          : []),
+      );
     } else if (spell.effect.resolution === "saving-throw") {
       const ability = spell.definition.savingThrowAbility;
       if (!ability) return rejection(state, tool, "content_tier_insufficient", `${spell.definition.name} has no structured saving throw ability.`);
@@ -9768,6 +10093,7 @@ function resolveCastSpell(
       hit,
       critical,
       attackTotal,
+      cover,
       successfulSave,
       saveTotal,
       damageRolled: rolled,
@@ -9791,7 +10117,7 @@ function resolveCastSpell(
 
   const totalDamage = targetResults.reduce((sum, result) => sum + Number(result.damageApplied ?? 0), 0);
   const slotText = selectedSlotLevel === null ? " as a cantrip" : ` with a level-${selectedSlotLevel} slot`;
-  const message = `${spell.definition.name} resolves${slotText}: ${totalDamage} total ${spell.effect.damageType.name.toLowerCase()} damage across ${targetResults.length} target selection${targetResults.length === 1 ? "" : "s"}.`
+  const message = `${spell.definition.name} resolves${slotText}: ${totalDamage} total ${spell.effect.damageType.name.toLowerCase()} damage across ${targetResults.length} engine-derived target${targetResults.length === 1 ? "" : "s"}.`
     + (spell.effect.hasDeferredProseEffects ? " Only the reviewed primary damage is applied; additional source-prose effects remain deferred." : "")
     + (defeatedAll ? " The encounter ends." : castingTime === "action" ? " The opposition now has the turn." : "");
   return commit(
@@ -9804,6 +10130,7 @@ function resolveCastSpell(
     {
       spell: spell.definition,
       slotLevel: selectedSlotLevel,
+      area: tacticalArea,
       targetResults,
       deferredProseEffects: spell.effect.hasDeferredProseEffects,
       range: { source: spell.definition.range, executableFeet: rangeFeet },
@@ -9814,7 +10141,10 @@ function resolveCastSpell(
     rolls,
     modifiers,
     changes,
-    synthesisEvidenceContentKeys,
+    [
+      ...synthesisEvidenceContentKeys,
+      ...(reviewedArea ? [reviewedArea.contentKey] : []),
+    ],
   );
 }
 
@@ -10299,6 +10629,16 @@ function executableSpellRangeFeet(definition: NormalizedSpell): number {
   return sourceDistance + (definition.area.size ?? 0);
 }
 
+function spellAreaAimRangeFeet(definition: NormalizedSpell): number {
+  const sourceDistance = definition.range.unit.toLocaleLowerCase("en-US") === "miles"
+    ? definition.range.distance * 5_280
+    : definition.range.distance;
+  const rangeText = definition.range.text.trim().toLocaleLowerCase("en-US");
+  if (rangeText === "touch") return 5;
+  if (rangeText === "self") return 0;
+  return sourceDistance;
+}
+
 export function deriveWeaponAttack(character: EngineCharacter, weaponId?: string): EngineWeaponAttack | null {
   const equippedWeapons = character.inventory
     .filter((item) => item.equipped && (item.slot === "mainhand" || item.slot === "offhand"))
@@ -10430,6 +10770,18 @@ function resolveCombatAction(
       );
     }
   }
+  const targetCover = isAttackAction && sourceTarget
+    ? deriveTacticalCover(
+        state.combat.tactical.geometry,
+        state.combat.tactical.actorPosition,
+        state.combat.tactical.actorFootprint,
+        sourceTarget.position,
+        sourceTarget.footprint,
+      )
+    : null;
+  if (targetCover?.level === "total") {
+    return rejection(state, tool, "target_has_total_cover", "Canonical blocking geometry gives that target total cover from your position.");
+  }
   const ammunition = isAttackAction && derivedAttack?.ammunitionId
     ? findAmmunition(state.character.inventory, derivedAttack.ammunitionId)
     : null;
@@ -10487,10 +10839,17 @@ function resolveCombatAction(
       : attackModifierQuery.mode === "advantage" ? Math.max(attackRoll, secondRoll) : Math.min(attackRoll, secondRoll);
     const total = effectiveRoll + derivedAttack.attackBonus;
     const critical = effectiveRoll === 20;
-    const hit = effectiveRoll !== 1 && (critical || total >= targetView.armorClass);
+    const targetArmorClass = targetView.armorClass + (targetCover?.armorClassBonus ?? 0);
+    const hit = effectiveRoll !== 1 && (critical || total >= targetArmorClass);
     rolls.push({ kind: "attack_d20", value: effectiveRoll, sides: 20 });
     if (secondRoll !== null) rolls.push({ kind: `attack_${attackModifierQuery.mode}_d20`, value: secondRoll, sides: 20 });
-    modifiers.push({ name: "attack_bonus", value: derivedAttack.attackBonus }, { name: "target_ac", value: targetView.armorClass });
+    modifiers.push(
+      { name: "attack_bonus", value: derivedAttack.attackBonus },
+      { name: "target_ac", value: targetArmorClass },
+      ...(targetCover && targetCover.armorClassBonus
+        ? [{ name: `${targetCover.level}_cover_ac`, value: targetCover.armorClassBonus }]
+        : []),
+    );
     if (hit) {
       const diceMatch = derivedAttack.damageDice.match(/^(\d+)d(\d+)$/i);
       const diceCount = diceMatch ? Number(diceMatch[1]) * (critical ? 2 : 1) : 1;
@@ -10562,6 +10921,7 @@ function resolveCombatAction(
     action: command.action,
     targetId: target?.id ?? null,
     derivedAttack,
+    cover: targetCover,
     combat: combatData(next.combat),
     effects: next.effects.filter((candidate) => candidate.status === "active"),
     character: characterData(next.character),
@@ -10595,6 +10955,19 @@ function resetControlledActorTurns(
       if (beforeCommanded) changes.push({ path: `/controlledActors/${actor.id}/commandedThisTurn`, before: true, after: false });
       if (beforeLastCommandId !== null) changes.push({ path: `/controlledActors/${actor.id}/lastCommandId`, before: beforeLastCommandId, after: null });
       if (beforeLastBehavior !== "idle") changes.push({ path: `/controlledActors/${actor.id}/lastBehavior`, before: beforeLastBehavior, after: "idle" });
+    }
+  }
+}
+
+function resetEnemyReactions(
+  combat: EngineCombat,
+  changes?: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  for (const enemy of combat.enemies) {
+    const before = { ...enemy.reaction };
+    enemy.reaction = { available: true, spent: false };
+    if (changes && (before.spent || !before.available)) {
+      changes.push({ path: `/combat/enemies/${enemy.id}/reaction`, before, after: enemy.reaction });
     }
   }
 }
@@ -11466,6 +11839,7 @@ function resolveAdvanceTurn(
     next.combat.activeActorId = next.actorId;
     if (next.combat.lifecycle) next.combat.lifecycle.initiative.activeIndex = next.combat.lifecycle.initiative.order.indexOf(next.actorId);
     resetTurnBudget(next.combat.turnBudget, next.character.speed);
+    resetEnemyReactions(next.combat, changes);
     resetControlledActorTurns(next, changes);
     if (next.character.hp === 0) spendTurnSlot(next.combat.turnBudget, "action");
     message += next.character.hp === 0
@@ -11953,7 +12327,9 @@ function resolveOneCreatureAttack(
   modifiers: Array<{ name: string; value: number }>,
   changes: Array<{ path: string; before: unknown; after: unknown }>,
   sourceCommandId: string,
-): { hit: boolean; message: string } {
+  damageSource = "enemy-multiattack",
+): { hit: boolean; message: string; critical: boolean; damageApplied: number; hpBefore: number; hpAfter: number } {
+  const hpBefore = state.character.hp;
   const attackRoll = randomInt(1, 21);
   const modifierQuery = queryModifiers(state.effects, state.character.id, "attack-roll");
   const secondRoll = modifierQuery.mode === "advantage" || modifierQuery.mode === "disadvantage"
@@ -11973,7 +12349,9 @@ function resolveOneCreatureAttack(
     { name: `enemy_attack_${sequenceNumber}_bonus`, value: attack.toHit },
     { name: `enemy_attack_${sequenceNumber}_armor_class`, value: state.character.ac }
   );
-  if (!hit) return { hit: false, message: `${attack.name} misses.` };
+  if (!hit) {
+    return { hit: false, message: `${attack.name} misses.`, critical, damageApplied: 0, hpBefore, hpAfter: hpBefore };
+  }
 
   const diceCount = attack.damage.diceCount * (critical ? 2 : 1);
   let damage = attack.damage.bonus;
@@ -11984,10 +12362,14 @@ function resolveOneCreatureAttack(
   }
   damage = Math.max(0, damage);
   modifiers.push({ name: `enemy_damage_${sequenceNumber}_bonus`, value: attack.damage.bonus });
-  applyCharacterDamage(state, damage, "enemy-multiattack", sourceCommandId, changes, rolls, modifiers, critical);
+  const applied = applyCharacterDamage(state, damage, damageSource, sourceCommandId, changes, rolls, modifiers, critical);
   return {
     hit: true,
     message: `${attack.name} ${critical ? "critically " : ""}hits for ${damage} ${attack.damage.typeName.toLocaleLowerCase("en-US")} damage.`,
+    critical,
+    damageApplied: applied.applied,
+    hpBefore: applied.beforeHp,
+    hpAfter: applied.afterHp,
   };
 }
 
@@ -12158,6 +12540,7 @@ function finishCreatureTurn(
   state.combat.round += 1;
   state.combat.activeActorId = state.actorId;
   resetTurnBudget(state.combat.turnBudget, state.character.speed);
+  resetEnemyReactions(state.combat, changes);
   resetControlledActorTurns(state, changes);
   if (state.character.hp === 0) spendTurnSlot(state.combat.turnBudget, "action");
   const beforeConditions = [...state.character.conditions];
@@ -15610,6 +15993,10 @@ function normalizeCombat(combat: EngineCombat | null | undefined, actorId = "act
       footprint,
       distanceFeet: 0,
       conditions: Array.isArray(enemy.conditions) ? enemy.conditions : [],
+      reaction: {
+        available: !Boolean(enemy.reaction?.spent),
+        spent: Boolean(enemy.reaction?.spent),
+      },
       actionResources: normalizeActionResources(enemy.actionResources),
       progression: normalizeCombatantProgression(enemy.progression),
     } satisfies EngineCombatant;
@@ -15847,7 +16234,51 @@ function normalizeMovementPlan(
     to: { ...candidate.to },
     path: candidate.path.filter(isTacticalPosition).map((position) => ({ ...position })),
     costFeet: Math.max(0, Math.trunc(candidate.costFeet)),
-    triggers: candidate.triggers.filter((trigger): trigger is EnginePathTrigger => Boolean(trigger && typeof trigger === "object" && (trigger as EnginePathTrigger).kind === "reach-boundary")).map((trigger) => ({ ...trigger })),
+    triggers: candidate.triggers.flatMap((trigger, index) => {
+      const normalized = normalizePathTrigger(trigger, index);
+      return normalized ? [normalized] : [];
+    }),
+  };
+}
+
+function normalizePathTrigger(value: unknown, index: number): EnginePathTrigger | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<EnginePathTrigger>;
+  if (
+    candidate.kind !== "reach-boundary"
+    || typeof candidate.enemyId !== "string"
+    || !Number.isInteger(candidate.segmentIndex)
+    || (candidate.boundary !== "entering-reach" && candidate.boundary !== "leaving-reach")
+    || typeof candidate.distanceBeforeFeet !== "number"
+    || typeof candidate.distanceAfterFeet !== "number"
+  ) return null;
+  const rawResolution = candidate.resolution && typeof candidate.resolution === "object"
+    ? candidate.resolution
+    : null;
+  const resolution = rawResolution
+    && ["resolved", "reaction_spent", "no_melee_attack"].includes(rawResolution.status)
+    ? {
+        status: rawResolution.status,
+        actionKey: typeof rawResolution.actionKey === "string" ? rawResolution.actionKey : null,
+        attackContentKey: typeof rawResolution.attackContentKey === "string" ? rawResolution.attackContentKey : null,
+        reactionSpent: Boolean(rawResolution.reactionSpent),
+        hit: typeof rawResolution.hit === "boolean" ? rawResolution.hit : null,
+        critical: typeof rawResolution.critical === "boolean" ? rawResolution.critical : null,
+        damageApplied: Math.max(0, Math.trunc(rawResolution.damageApplied ?? 0)),
+        hpBefore: Math.max(0, Math.trunc(rawResolution.hpBefore ?? 0)),
+        hpAfter: Math.max(0, Math.trunc(rawResolution.hpAfter ?? 0)),
+      } satisfies NonNullable<EnginePathTrigger["resolution"]>
+    : null;
+  return {
+    id: typeof candidate.id === "string" && candidate.id ? candidate.id : `legacy:${candidate.enemyId}:${candidate.segmentIndex}:${candidate.boundary}:${index}`,
+    kind: "reach-boundary",
+    enemyId: candidate.enemyId,
+    segmentIndex: Math.max(1, Math.trunc(candidate.segmentIndex!)),
+    boundary: candidate.boundary,
+    reachFeet: typeof candidate.reachFeet === "number" && candidate.reachFeet > 0 ? candidate.reachFeet : TACTICAL_REACH_FEET,
+    distanceBeforeFeet: Math.max(0, candidate.distanceBeforeFeet),
+    distanceAfterFeet: Math.max(0, candidate.distanceAfterFeet),
+    resolution,
   };
 }
 
@@ -16280,6 +16711,13 @@ function combatData(combat: EngineCombat): EngineCombatView {
   const enemies = materializeCombatants(combat.enemies).map((enemy) => ({
     ...enemy,
     distanceFeet: tacticalDistanceFeet(combat, enemy),
+    coverFromPlayer: deriveTacticalCover(
+      combat.tactical.geometry,
+      combat.tactical.actorPosition,
+      combat.tactical.actorFootprint,
+      enemy.position,
+      enemy.footprint,
+    ),
   }));
   return {
     status: combat.status,

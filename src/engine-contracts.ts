@@ -1416,6 +1416,12 @@ export const engineTacticalGeometryInputSchema = z.object({
 }).strict();
 export type EngineTacticalGeometryInput = z.infer<typeof engineTacticalGeometryInputSchema>;
 
+export const engineTacticalAreaAimSchema = z.object({
+  geometryRevision: z.number().int().nonnegative(),
+  aim: engineTacticalPositionSchema,
+}).strict();
+export type EngineTacticalAreaAim = z.infer<typeof engineTacticalAreaAimSchema>;
+
 export interface EngineTacticalGeometry {
   frameId: string;
   revision: number;
@@ -1430,14 +1436,52 @@ export interface EngineTacticalFootprint {
   height: number;
 }
 
+export type EngineTacticalCoverLevel = "none" | "half" | "three_quarters" | "total";
+
+export interface EngineTacticalCover {
+  geometryRevision: number;
+  level: EngineTacticalCoverLevel;
+  armorClassBonus: 0 | 2 | 5 | null;
+  blockedTargetCorners: number;
+  attackerCorner: { x: number; y: number };
+}
+
+export interface EngineTacticalAreaSnapshot {
+  geometryRevision: number;
+  frameId: string;
+  sourceShape: "sphere" | "cone" | "line";
+  shape: "circle" | "cone" | "line";
+  sizeFeet: number;
+  widthFeet: number | null;
+  origin: EngineTacticalPosition;
+  aim: EngineTacticalPosition;
+  cells: EngineTacticalPosition[];
+  targetIds: string[];
+  programContentKey: string;
+}
+
+export interface EnginePathTriggerResolution {
+  status: "resolved" | "reaction_spent" | "no_melee_attack";
+  actionKey: string | null;
+  attackContentKey: string | null;
+  reactionSpent: boolean;
+  hit: boolean | null;
+  critical: boolean | null;
+  damageApplied: number;
+  hpBefore: number;
+  hpAfter: number;
+}
+
 export interface EnginePathTrigger {
+  id: string;
   kind: "reach-boundary";
   enemyId: string;
   segmentIndex: number;
   boundary: "entering-reach" | "leaving-reach";
-  reachFeet: 5;
+  reachFeet: number;
   distanceBeforeFeet: number;
   distanceAfterFeet: number;
+  resolution: EnginePathTriggerResolution | null;
 }
 
 export interface EngineMovementPlan {
@@ -2080,6 +2124,7 @@ export const engineCommandSchema = z.discriminatedUnion("kind", [
       spellKey: engineSpellKeySchema,
       slotLevel: z.number().int().min(1).max(9).optional(),
       targetIds: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
+      area: engineTacticalAreaAimSchema.optional(),
       reactionId: z.string().trim().min(1).max(120).optional(),
     })
     .strict(),
@@ -2826,6 +2871,7 @@ export interface EngineCombatant {
   /** Derived compatibility projection; tactical positions are authoritative. */
   distanceFeet: number;
   conditions: string[];
+  reaction: EngineTurnBudgetSlot;
   actionResources: Record<string, EngineActionResource>;
   progression?: EngineCombatantProgression | null;
 }
@@ -2888,6 +2934,7 @@ export interface EngineCombatantView extends EngineCombatant {
   traits: NormalizedCreature["traits"];
   environments: NormalizedCreature["environments"];
   mechanicsStatus: "typed-statblock" | "basic-attacks-compiled" | "effect-programs-compiled";
+  coverFromPlayer?: EngineTacticalCover;
 }
 
 export type EngineControlledActorKind = "companion" | "summon";

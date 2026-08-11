@@ -939,6 +939,7 @@ export function createOpen5eCombatant(
     footprint,
     distanceFeet: Math.max(0, distanceFeet),
     conditions: [],
+    reaction: { available: true, spent: false },
     actionResources,
     progression: null,
   };

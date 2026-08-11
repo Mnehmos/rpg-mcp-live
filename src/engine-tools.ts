@@ -16,6 +16,7 @@ import {
   engineEncounterDecisionSchema,
   engineEncounterLifecycleProfileSchema,
   engineInventoryItemInputSchema,
+  engineTacticalAreaAimSchema,
   engineTacticalGeometryInputSchema,
   engineTacticalPositionSchema,
   engineToolNameSchema,
@@ -328,6 +329,7 @@ const toolArgumentSchemas: Record<EngineToolName, z.ZodTypeAny> = {
     spellKey: engineSpellKeySchema,
     slotLevel: z.number().int().min(1).max(9).optional(),
     targetIds: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
+    area: engineTacticalAreaAimSchema.optional(),
     reactionId: z.string().trim().min(1).max(120).optional(),
   }).strict(),
   reaction_response: z.object({
@@ -1166,13 +1168,32 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "cast_spell",
-    "Cast a learned or prepared Open5e or persisted runtime spell. The engine owns slots, action economy, attacks, saves, typed damage or healing, target count, concentration, reactions, and exact structured upcasting. Tier-0 prose is rejected without mutation.",
+    "Cast a learned or prepared Open5e or persisted runtime spell. For a reviewed area spell, provide the current geometry revision and one aim cell; the engine derives shape, size, affected actors, saves, and damage, and rejects caller-authored target lists. The engine owns slots, action economy, concentration, reactions, and exact structured upcasting. Tier-0 prose is rejected without mutation.",
     {
       type: "object",
       properties: {
         spellKey: { type: "string", description: "Exact open5e:spell or runtime:spell key from the character spell list." },
         slotLevel: { type: "integer", minimum: 1, maximum: 9, description: "Optional slot level. Omit to use the lowest legal available slot." },
-        targetIds: { type: "array", items: { type: "string" }, maxItems: 20, description: "Established combatant ids selected as affected targets." },
+        targetIds: { type: "array", items: { type: "string" }, maxItems: 20, description: "Established combatant ids for non-area spells only. Omit for reviewed area spells." },
+        area: {
+          type: "object",
+          properties: {
+            geometryRevision: { type: "integer", minimum: 0 },
+            aim: {
+              type: "object",
+              properties: {
+                frameId: { type: "string" },
+                x: { type: "integer" },
+                y: { type: "integer" },
+                z: { type: "integer", description: "Tactical spell areas are limited to z=0 in this slice." },
+              },
+              required: ["frameId", "x", "y", "z"],
+              additionalProperties: false,
+            },
+          },
+          required: ["geometryRevision", "aim"],
+          additionalProperties: false,
+        },
         reactionId: { type: "string", description: "Pending reaction id when resolving Shield through cast_spell." },
       },
       required: ["spellKey"],
@@ -1211,7 +1232,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   ),
   tool(
     "combat_move",
-    "Move the player along a bounded deterministic tactical path. The engine validates geometry revision, z=0 walking, footprint collision, corner clearance, and movement budget before committing.",
+    "Move the player along a bounded deterministic tactical path. The engine validates geometry revision, z=0 walking, footprint collision, corner clearance, and movement budget, then resolves ordered leaving-reach reactions exactly once in the same commit.",
     {
       type: "object",
       properties: {
@@ -1590,6 +1611,7 @@ export function commandForTool(toolName: EngineToolName, args: Record<string, un
         spellKey: args.spellKey,
         slotLevel: args.slotLevel,
         targetIds: args.targetIds ?? [],
+        area: args.area,
         reactionId: args.reactionId,
       });
     case "reaction_response":
