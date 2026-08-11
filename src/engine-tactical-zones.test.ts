@@ -418,6 +418,9 @@ describe("#175 persistent tactical zones", () => {
     const invalidShape = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     (invalidShape.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
     corruptions.push({ state: invalidShape, code: "invalid_tactical_zone_shape" });
+    const nonIncrementableRevision = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    nonIncrementableRevision.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER;
+    corruptions.push({ state: nonIncrementableRevision, code: "invalid_tactical_zone_shape" });
     const inactiveEncounter = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     inactiveEncounter.combat.status = "ended";
     corruptions.push({ state: inactiveEncounter, code: "invalid_tactical_zone_shape" });
@@ -650,6 +653,12 @@ describe("#175 persistent tactical zones", () => {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => {
           (state.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
+        },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER;
         },
       },
       {

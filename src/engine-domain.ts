@@ -8895,6 +8895,11 @@ function tacticalZoneStateIssue(
   const activeDefinitionKeys = new Set<EngineTacticalZoneDefinitionKey>();
   for (const zone of state.combat.tactical.zones) {
     if (
+      !Number.isSafeInteger(zone.revision)
+      || zone.revision < 0
+      || (zone.status === "active" && zone.revision >= Number.MAX_SAFE_INTEGER)
+    ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+    if (
       (zone.status === "active" && zone.endedReason !== null)
       || (zone.status === "expired" && zone.endedReason !== "expired")
       || (zone.status === "removed" && zone.endedReason !== "source-dead" && zone.endedReason !== "encounter-ended")
@@ -17295,8 +17300,9 @@ function normalizeTacticalZones(
       || new Set(raw.activeEffectIds).size !== raw.activeEffectIds.length
       || !["active", "expired", "removed"].includes(raw.status ?? "")
       || (raw.status !== "active" && (raw.affectedActorIds.length > 0 || raw.activeEffectIds.length > 0))
-      || !Number.isInteger(raw.revision)
+      || !Number.isSafeInteger(raw.revision)
       || raw.revision! < 0
+      || (raw.status === "active" && raw.revision! >= Number.MAX_SAFE_INTEGER)
       || !raw.provenance
       || typeof raw.provenance.sourceCommandId !== "string"
       || !raw.provenance.sourceCommandId.trim()
