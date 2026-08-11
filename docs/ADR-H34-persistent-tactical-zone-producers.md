@@ -45,6 +45,10 @@ remove every active effect from that zone. A stale geometry revision or an
 invalid persisted source, anchor, or shape rejects the owning command without
 mutation. Reconciliation is idempotent.
 
+Load normalization records malformed persisted zone authority as an integrity
+issue instead of silently discarding it. Commands then fail closed before an
+orphaned source-linked effect can influence another resolution.
+
 Zone reconciliation enriches the same accepted command result before the
 state and event are persisted. It does not increment campaign version again or
 append a second event. A rejected command performs no reconciliation and

@@ -324,6 +324,57 @@ describe("#175 persistent tactical zones", () => {
     reopened.close();
   });
 
+  it("fails closed after restart when persisted active zone authority is corrupt", () => {
+    for (const corruption of [
+      {
+        code: "invalid_tactical_zone_source",
+        apply: (state: LanternCampaignState) => { state.combat.tactical.zones[0]!.source.actorId = "invented-source"; },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          (state.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
+        },
+      },
+    ]) {
+      const state = encounter();
+      const created = apply(state, followingAura(state));
+      const corrupted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+      corruption.apply(corrupted);
+      const directory = mkdtempSync(join(tmpdir(), "lantern-corrupt-zones-"));
+      const databasePath = join(directory, "engine.db");
+      const request = context(corrupted);
+      const store = new LanternEngineStore(databasePath);
+      store.createCampaign(
+        { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+        corrupted,
+      );
+      store.close();
+
+      const reopened = new LanternEngineStore(databasePath);
+      const loaded = reopened.getCampaign(request);
+      expect(loaded.combat.tactical.zones).toEqual([]);
+      expect(loaded.combat.tactical.zoneIntegrityIssue).toMatchObject({ code: corruption.code });
+      expect(normalizeCampaignState(loaded).combat.tactical.zoneIntegrityIssue).toEqual(loaded.combat.tactical.zoneIntegrityIssue);
+      expect(loaded.effects.some((effect) => effect.status === "active" && effect.sourceRef.startsWith("tactical-zone:"))).toBe(true);
+      const before = JSON.stringify(loaded);
+      const command = engineCommandSchema.parse({ kind: "end_turn" });
+      const commandId = randomUUID();
+      const rejected = reopened.executeCommand({
+        context: request,
+        clientCommandId: commandId,
+        expectedCampaignVersion: loaded.version,
+        command,
+        tool: "end_turn",
+        resolve: (current) => resolveEngineCommand(current, request, commandId, command, "end_turn"),
+      });
+      expect(rejected).toMatchObject({ accepted: false, code: corruption.code, event: null });
+      expect(JSON.stringify(rejected.state)).toBe(before);
+      expect(reopened.listCampaignEvents(request)).toEqual([]);
+      reopened.close();
+    }
+  });
+
   it("advertises only the two reviewed definitions through the existing tool registry", () => {
     const state = encounter();
     const args = parseToolArguments("tactical_zone_create", {

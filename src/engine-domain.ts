@@ -92,6 +92,7 @@ import type {
   EngineTacticalZone,
   EngineTacticalZoneDefinitionKey,
   EngineTacticalZoneEndReason,
+  EngineTacticalZoneIntegrityIssue,
   EngineCombatTacticalState,
   EngineControlledActor,
   EngineControlledActorAttack,
@@ -8513,6 +8514,7 @@ function buildCombatTacticalState(
       actorFootprint: footprint,
       lastPlan: null,
       zones: [],
+      zoneIntegrityIssue: null,
     },
   };
 }
@@ -8867,6 +8869,7 @@ interface TacticalZoneReconcileResult {
 }
 
 function tacticalZoneStateIssue(state: LanternCampaignState): TacticalIssue | null {
+  if (state.combat.tactical.zoneIntegrityIssue) return state.combat.tactical.zoneIntegrityIssue;
   for (const zone of state.combat.tactical.zones) {
     if (zone.status !== "active") continue;
     const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
@@ -16775,6 +16778,7 @@ function emptyTacticalState(frameId = "none"): EngineCombatTacticalState {
     actorFootprint: { width: 1, height: 1 },
     lastPlan: null,
     zones: [],
+    zoneIntegrityIssue: null,
   };
 }
 
@@ -16999,13 +17003,15 @@ function normalizeCombatTactical(
     ? { ...candidate.actorPosition }
     : { frameId, x: 0, y: 0, z: 0 };
   if (positionFitsGeometry(actorPosition, normalizeFootprint(candidate.actorFootprint), geometry, [])) return fallback;
+  const normalizedZones = normalizeTacticalZones(candidate.zones, actorId, geometry);
   return {
     geometry,
     movementMode: "walking",
     actorPosition,
     actorFootprint: normalizeFootprint(candidate.actorFootprint),
     lastPlan: normalizeMovementPlan(candidate.lastPlan, actorId, geometry.revision, frameId),
-    zones: normalizeTacticalZones(candidate.zones, actorId, geometry),
+    zones: normalizedZones.zones,
+    zoneIntegrityIssue: normalizedZones.integrityIssue ?? normalizeTacticalZoneIntegrityIssue(candidate.zoneIntegrityIssue),
   };
 }
 
@@ -17013,10 +17019,17 @@ function normalizeTacticalZones(
   value: unknown,
   actorId: string,
   geometry: EngineTacticalGeometry,
-): EngineTacticalZone[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+): { zones: EngineTacticalZone[]; integrityIssue: EngineTacticalZoneIntegrityIssue | null } {
+  if (value === undefined || value === null) return { zones: [], integrityIssue: null };
+  if (!Array.isArray(value)) {
+    return { zones: [], integrityIssue: tacticalZoneNormalizationIssue({}, actorId) };
+  }
+  let integrityIssue: EngineTacticalZoneIntegrityIssue | null = null;
+  const zones = value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      integrityIssue ??= tacticalZoneNormalizationIssue({}, actorId);
+      return [];
+    }
     const raw = entry as Partial<EngineTacticalZone>;
     const definition = typeof raw.definitionKey === "string"
       ? reviewedTacticalZoneDefinition(raw.definitionKey)
@@ -17056,17 +17069,32 @@ function normalizeTacticalZones(
       || raw.provenance.sourceVersion < 0
       || typeof raw.provenance.rulesVersion !== "string"
       || raw.provenance.definitionRevision !== "tactical-zones-v1"
-    ) return [];
+    ) {
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId);
+      return [];
+    }
     if (definition.anchorKind === "stationary") {
-      if (raw.anchor.kind !== "stationary" || !isTacticalPosition(raw.anchor.position) || tacticalAimIssue(raw.anchor.position, geometry)) return [];
-    } else if (raw.anchor.kind !== "actor" || raw.anchor.actorId !== actorId) return [];
+      if (raw.anchor.kind !== "stationary" || !isTacticalPosition(raw.anchor.position) || tacticalAimIssue(raw.anchor.position, geometry)) {
+        integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId);
+        return [];
+      }
+    } else if (raw.anchor.kind !== "actor" || raw.anchor.actorId !== actorId) {
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId);
+      return [];
+    }
     const endedReason = raw.endedReason === "expired"
       || raw.endedReason === "source-dead"
       || raw.endedReason === "encounter-ended"
       ? raw.endedReason
       : null;
-    if (raw.status === "active" && endedReason !== null) return [];
-    if (raw.status !== "active" && endedReason === null) return [];
+    if (raw.status === "active" && endedReason !== null) {
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId);
+      return [];
+    }
+    if (raw.status !== "active" && endedReason === null) {
+      integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId);
+      return [];
+    }
     return [{
       version: 1,
       id: raw.id,
@@ -17097,6 +17125,42 @@ function normalizeTacticalZones(
       },
     } satisfies EngineTacticalZone];
   });
+  return { zones, integrityIssue };
+}
+
+function tacticalZoneNormalizationIssue(
+  zone: Partial<EngineTacticalZone>,
+  actorId: string,
+): EngineTacticalZoneIntegrityIssue {
+  return tacticalZoneIntegrityIssue(
+    !zone.source || zone.source.actorId !== actorId || zone.source.ref !== `actor:${actorId}`
+      ? "invalid_tactical_zone_source"
+      : "invalid_tactical_zone_shape",
+  );
+}
+
+function tacticalZoneIntegrityIssue(
+  code: EngineTacticalZoneIntegrityIssue["code"],
+): EngineTacticalZoneIntegrityIssue {
+  return code === "invalid_tactical_zone_source"
+    ? {
+        code: "invalid_tactical_zone_source",
+        message: "A persisted tactical zone has an invalid source; commands are disabled until the state is repaired.",
+      }
+    : {
+        code: "invalid_tactical_zone_shape",
+        message: "A persisted tactical zone has an invalid reviewed shape or anchor; commands are disabled until the state is repaired.",
+      };
+}
+
+function normalizeTacticalZoneIntegrityIssue(value: unknown): EngineTacticalZoneIntegrityIssue | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const code = (value as { code?: unknown }).code;
+  return code === "invalid_tactical_zone_source"
+    ? tacticalZoneIntegrityIssue(code)
+    : code === "invalid_tactical_zone_shape"
+      ? tacticalZoneIntegrityIssue(code)
+      : null;
 }
 
 function normalizeTacticalRectangle(value: unknown): EngineTacticalObstacle[] {

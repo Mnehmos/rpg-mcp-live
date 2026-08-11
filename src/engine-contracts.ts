@@ -1520,6 +1520,11 @@ export interface EngineTacticalZone {
   };
 }
 
+export interface EngineTacticalZoneIntegrityIssue {
+  code: "invalid_tactical_zone_source" | "invalid_tactical_zone_shape";
+  message: string;
+}
+
 export interface EnginePathTriggerResolution {
   status: "resolved" | "reaction_pending" | "reaction_spent" | "no_melee_attack" | "total_cover";
   actionKey: string | null;
@@ -1562,6 +1567,7 @@ export interface EngineCombatTacticalState {
   actorFootprint: EngineTacticalFootprint;
   lastPlan: EngineMovementPlan | null;
   zones: EngineTacticalZone[];
+  zoneIntegrityIssue: EngineTacticalZoneIntegrityIssue | null;
 }
 
 export const engineEncounterLifecycleProfileSchema = z.literal("guards-surrender-v1");
