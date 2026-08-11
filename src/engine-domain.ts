@@ -17986,6 +17986,7 @@ function normalizeCombat(
     activeActorId,
     status,
     campaignVersion,
+    round,
     sourceAlive,
     combat.encounterId ?? null,
     actorInitiativeModifier,
@@ -18054,6 +18055,7 @@ function normalizeBossTiming(
   combatStatus: EngineCombat["status"],
   lifecyclePhase: EngineEncounterLifecycle["phase"],
   campaignVersion: number,
+  combatRound: number,
   actorInitiativeModifier: number,
   combatLastAction: string | null,
 ): EngineBossTiming | null {
@@ -18198,6 +18200,8 @@ function normalizeBossTiming(
         && triggerIndex !== resumeIndex
         && resumeIndex === (triggerIndex + 1) % order.length;
       const wrapped = immediatelyResumes && resumeIndex <= triggerIndex;
+      const wrappedCycleValid = !wrapped
+        || (cycle >= 2 && combatRound >= 2 && cycle === combatRound);
       const crossesLairBoundary = immediatelyResumes && (wrapped
         ? lairOrderIndex === 0 || lairOrderIndex === order.length
         : lairOrderIndex > triggerIndex && lairOrderIndex <= resumeIndex);
@@ -18223,6 +18227,7 @@ function normalizeBossTiming(
               && !currentLegendaryAlreadyConsumed
               && (rawWindow.triggerActorId === source.id || remaining < legendary.action.cost);
       semanticWindowValid = immediatelyResumes
+        && wrappedCycleValid
         && legendaryResolutionValid
         && lairQueued === (crossesLairBoundary && lairAvailable)
         && (!legendaryQueued || legendaryResolution === "pending" || legendaryResolution === "used");
@@ -18351,6 +18356,7 @@ function normalizeEncounterLifecycle(
   activeActorId: string | null,
   combatStatus: EngineCombat["status"],
   campaignVersion: number,
+  combatRound: number,
   playerAlive: boolean,
   encounterId: string | null,
   actorInitiativeModifier: number,
@@ -18527,6 +18533,7 @@ function normalizeEncounterLifecycle(
       combatStatus,
       phase,
       campaignVersion,
+      combatRound,
       actorInitiativeModifier,
       combatLastAction,
     );

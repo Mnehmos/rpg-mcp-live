@@ -683,6 +683,27 @@ describe("reviewed boss-action timing", () => {
       lootClaimed: true,
       lastAction: "invalid_boss_state_quarantined",
     });
+
+    const firstRound = startBoss(fighter(), 20, 19);
+    expect(firstRound.accepted).toBe(true);
+    expect(firstRound.state.combat.lifecycle!.initiative.entries.every((entry) => entry.total > 20)).toBe(true);
+    expect(firstRound.state.combat.lifecycle?.bossTiming?.pendingWindow).toBeNull();
+    const forgedFirstRoundWrap = structuredClone(firstRound.state);
+    forgedFirstRoundWrap.combat.lifecycle!.bossTiming!.pendingWindow = {
+      id: randomUUID(),
+      triggerActorId: forgedFirstRoundWrap.combat.enemies[0]!.id,
+      resumeActorId: forgedFirstRoundWrap.actorId,
+      queue: ["lair"],
+      legendaryResolution: "not-offered",
+      openedAtVersion: forgedFirstRoundWrap.version,
+    };
+    expect(normalizeCampaignState(forgedFirstRoundWrap).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
   });
 
   it("quarantines cross-field boss lifecycle contradictions", () => {
