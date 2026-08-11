@@ -267,6 +267,18 @@ spending, and event evidence share the normal atomic command boundary. Any stale
 or invalid spatial request leaves state and version unchanged. ADR-H33 records
 the exact first-slice geometry and deferrals.
 
+Persistent tactical producers reuse that same authority. A zone-create command
+selects only `hindering-circle-v1` or `guiding-aura-v1`, supplies the current
+geometry revision, and supplies a center only for the stationary circle. The
+engine owns both 10-foot circles, their three-round duration, player source,
+effect operations, action cost, and all target membership. Enter, leave,
+re-entry, following movement, expiry, source death, and encounter-end cleanup
+update source-linked `EngineEffectInstance` evidence in the same accepted
+command and version. Stale geometry and invalid source or shape state reject
+without mutation. Caller-authored shapes, sources, targets,
+strength, damage, AC/DC, and scripts are rejected before mutation.
+ADR-H34 records the exact definitions and deferrals.
+
 ## Aggregate and events
 
 The current campaign aggregate is the operational source of truth in the engine service. Immutable events are evidence for audit, replay tests, debugging, and future migration. They are not a second competing state model.

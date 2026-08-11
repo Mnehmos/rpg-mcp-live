@@ -73,7 +73,7 @@ try {
   assert(engineHealth.status === "ok", "Engine health was not ok.");
   assert(engineHealth.rules?.packVersion === "open5e-v2-full-corpus-s8", "Engine did not boot the S8 corpus pack.");
   assert(engineHealth.rules.packHash === "fbd846cf7b7833560b22f4ebffaf950fb6b2adf62cf9c6fff469266325ac31fa", "Engine booted an unexpected pack hash.");
-  assert(engineHealth.toolCount === 76, "Engine tool count drifted.");
+  assert(engineHealth.toolCount === 77, "Engine tool count drifted.");
   const toolCatalog = await requestJson<{
     tools: Array<{ function: { name: string; parameters: Record<string, unknown> } }>;
   }>(
