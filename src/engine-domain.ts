@@ -10309,7 +10309,7 @@ function prepareReviewedBossTransition(
 ): void {
   const timing = activeBossTiming(state);
   const initiative = state.combat.lifecycle?.initiative;
-  if (!timing || !initiative || !reviewedBossCanAct(state, timing)) return;
+  if (!timing || !initiative) return;
   const order = initiative.order;
   const currentIndex = order.indexOf(triggerActorId);
   const nextIndex = order.indexOf(resumeActorId);
@@ -10319,6 +10319,13 @@ function prepareReviewedBossTransition(
   if (wrapped) {
     timing.lair.initiative.cycle += 1;
     timing.lair.available = true;
+  }
+  if (!reviewedBossCanAct(state, timing)) {
+    timing.pendingWindow = null;
+    if (resumeActorId === timing.sourceCombatantId) {
+      timing.legendary.remaining = timing.legendary.maximum;
+    }
+    return;
   }
   const boundaryIndex = Math.max(0, Math.min(order.length, timing.lair.initiative.orderIndex));
   const crossesLairBoundary = wrapped

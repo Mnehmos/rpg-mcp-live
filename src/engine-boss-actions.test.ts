@@ -794,6 +794,48 @@ describe("reviewed boss-action timing", () => {
     });
   });
 
+  it("keeps initiative bookkeeping valid while the boss is incapacitated and after recovery", () => {
+    const started = startBoss(fighter(), 18, 17);
+    expect(started.accepted).toBe(true);
+    expect(started.state.combat.lifecycle?.bossTiming?.pendingWindow?.queue).toEqual(["lair"]);
+    const initialPassed = apply(started.state, { kind: "boss_action", actionRef: PASS });
+    expect(initialPassed.accepted).toBe(true);
+    expect(initialPassed.state.combat.activeActorId).toBe(initialPassed.state.actorId);
+    expect(initialPassed.state.combat.lifecycle?.bossTiming?.lastCompletedWindow).not.toBeNull();
+
+    const stunned = structuredClone(initialPassed.state);
+    const sourceId = stunned.combat.enemies[0]!.id;
+    stunned.combat.enemies[0]!.conditions.push("stunned");
+    const handedOff = apply(stunned, { kind: "end_turn" });
+    expect(handedOff.accepted).toBe(true);
+    expect(handedOff.state.combat).toMatchObject({ status: "active", activeActorId: sourceId });
+    expect(handedOff.state.combat.lifecycle?.bossTiming).toMatchObject({
+      lair: { initiative: { cycle: 1 } },
+      pendingWindow: null,
+      lastCompletedWindow: null,
+    });
+    const restarted = normalizeCampaignState(structuredClone(handedOff.state));
+    expect(restarted.combat.lifecycle?.profile).toBe("adult-black-dragon-boss-v1");
+    expect(restarted.combat.enemies[0]!.conditions).toContain("stunned");
+
+    const recovered = structuredClone(restarted);
+    recovered.combat.enemies[0]!.conditions = [];
+    recovered.effects = recovered.effects.filter((effect) => !effect.targetRefs.includes(sourceId));
+    const ready = normalizeCampaignState(recovered);
+    ready.character.maxHp = 1_000;
+    ready.character.hp = 1_000;
+    const acted = apply(ready, { kind: "advance_turn", combatantId: sourceId, actionKey: "tail" });
+    expect(acted.accepted, `${acted.code}: ${acted.message}`).toBe(true);
+    expect(acted.state.combat).toMatchObject({ status: "active", activeActorId: acted.state.actorId, round: 2 });
+    expect(acted.state.combat.lifecycle?.bossTiming).toMatchObject({
+      lair: { initiative: { cycle: 2 } },
+      pendingWindow: { queue: ["lair"], legendaryResolution: "not-offered" },
+      lastCompletedWindow: null,
+    });
+    expect(normalizeCampaignState(structuredClone(acted.state)).combat.lifecycle?.profile)
+      .toBe("adult-black-dragon-boss-v1");
+  });
+
   it("quarantines cross-field boss lifecycle contradictions", () => {
     const started = startBoss(fighter());
     expect(started.accepted).toBe(true);
