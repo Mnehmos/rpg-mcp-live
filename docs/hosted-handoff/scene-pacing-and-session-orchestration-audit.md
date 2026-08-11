@@ -138,3 +138,56 @@ This document is read-only evidence. Production implementation begins only on
 a separate branch after this audit PR is accepted and merged. No DevWiki,
 Railway, workflow dispatch, live OpenRouter call, or unrelated issue work is
 authorized by this audit.
+
+## Reopened audit delta - 2026-08-11
+
+Status: implementation gate update after #108, #177, #179, and #180 shipped.
+Base inspected: `origin/main` at
+`8942bf9805bd5d166a877b1dcbd45b64ccb5e001`.
+
+The first #20 slice is present and replay-safe, but the production DM loop does
+not consume its pacing data. `buildDmContext` receives neither the persisted
+event ledger nor the active scene/resume projection, while the orchestration
+HTTP endpoint is a separate read path. The current negative-list definition of
+`meaningfulStateChanges` also resets the stall counter for bookkeeping such as
+`lastRoll` or an adjudication-history append even when the playable situation
+did not change.
+
+The later consequence work supplies the missing integration seam:
+
+- #179 binds checks to authoritative consequences or bounded fictional scene
+  moves, without making prose quality an engine gate;
+- committed events preserve rolls, typed effects, actor-safe state-change
+  evidence, scene-move category, and the next decision;
+- current campaign state already persists live failure pressure, time,
+  situation pressure/complications, actor knowledge, social relationships and
+  obligations, quests/deadlines, objects, and hooks;
+- #24's public narrator already receives only the actor-safe committed result.
+
+The reopened KISS boundary is therefore a derived view, not another truth
+store:
+
+1. Classify progress with a positive fiction-bearing taxonomy: position or
+   access, knowledge, time, pressure, resource/condition, relationship,
+   opportunity, world/object state, or quest/situation closure. Logs,
+   `lastRoll`, adjudication history, production-room records, and orchestration
+   bookkeeping do not count by themselves.
+2. Derive bounded `CausalReceipt`, actor-safe `CausalLens`, and live
+   `OpenThreads` views from persisted committed events plus current state. The
+   event ledger and domain records remain the only truth; restart recomputes the
+   same view and private/rejected model data is not an input.
+3. Supply that view to the normal private planner, committed public narrator,
+   orchestration/resume projection, and campaign-context read. This adds no
+   model call and does not block an honest commit because prose was mediocre.
+4. Treat authorized pressures, clues, consequences, hooks, and causal threads
+   as ingredients. A `reframe` may record that facilitation is needed without
+   selecting one forced story ref or replacing the immediate question with
+   engine-authored prose.
+5. Recap only durable consequence references (public facts, social records,
+   quests, world/object state, and committed scene moves), never the dialogue
+   transcript or private production-room trace.
+
+This pass does not add a plot planner, prose-quality score, random-event roll,
+canned NPC dialogue, hidden state mutation, continuous model call, or a second
+causal database. The DM remains the creative driver; the engine makes durable
+causality visible and difficult to lose.
