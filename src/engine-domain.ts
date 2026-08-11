@@ -18296,7 +18296,8 @@ function normalizeBossTiming(
     };
   }
   const pendingWindowRetainsResolution = pendingWindow !== null
-    && pendingWindow.legendaryResolution !== "pending";
+    && (pendingWindow.legendaryResolution === "used"
+      || pendingWindow.legendaryResolution === "passed");
   const lastActionCompletedBossWindow = combatLastAction === REVIEWED_LEGENDARY_ACTION_REF
     || combatLastAction === REVIEWED_LAIR_ACTION_REF
     || combatLastAction === `${REVIEWED_BOSS_PASS_REF}:legendary`

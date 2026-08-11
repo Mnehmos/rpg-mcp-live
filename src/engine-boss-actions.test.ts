@@ -869,6 +869,21 @@ describe("reviewed boss-action timing", () => {
     expect(repeated.accepted).toBe(false);
     expect(repeated.code).toBe("boss_action_off_timing");
     expect(repeated.state).toEqual(beforeRepeat);
+
+    const reopenedInitialWindow = structuredClone(passed.state);
+    reopenedInitialWindow.combat.lifecycle!.bossTiming!.lair.available = true;
+    reopenedInitialWindow.combat.lifecycle!.bossTiming!.lair.usedCycle = null;
+    reopenedInitialWindow.combat.lifecycle!.bossTiming!.pendingWindow = structuredClone(
+      started.state.combat.lifecycle!.bossTiming!.pendingWindow,
+    );
+    reopenedInitialWindow.combat.lifecycle!.bossTiming!.lastCompletedWindow = null;
+    expect(normalizeCampaignState(reopenedInitialWindow).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
   });
 
   it("preserves exactly-once damage/resource evidence across command replay and store restart", () => {
