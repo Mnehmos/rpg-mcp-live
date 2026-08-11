@@ -11,7 +11,8 @@ import {
 describe("The Sand Remembers doctrine", () => {
   it("tracks the complete amended product constitution", () => {
     const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-    const manifesto = readFileSync(resolve(repositoryRoot, CORE_DM_DOCTRINE_SOURCE), "utf8");
+    const manifesto = readFileSync(resolve(repositoryRoot, CORE_DM_DOCTRINE_SOURCE), "utf8")
+      .replace(/\r\n?/g, "\n");
 
     expect(manifesto.length).toBeGreaterThan(45_000);
     expect(manifesto).toContain("Status: normative Lantern product constitution");
