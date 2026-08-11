@@ -958,7 +958,7 @@ export const lanternToolDefinitions: EngineToolDefinition[] = [
   tool("drop_item", "Remove a quantity of an item from the player inventory.", { type: "object", properties: { itemId: { type: "string" }, quantity: { type: "integer", minimum: 1 } }, required: ["itemId"], additionalProperties: false }),
   tool(
     "use_item",
-    "Use one item from the authoritative inventory. Consumable effects and consumption commit atomically.",
+    "Use one reviewed item from the authoritative inventory. Healing, spell-scroll execution, action cost, and consumption commit atomically.",
     {
       type: "object",
       properties: { itemId: { type: "string", description: "The item id from inventory." } },

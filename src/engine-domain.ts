@@ -158,6 +158,7 @@ import type {
   EngineResolutionTool,
   EngineSessionView,
   EngineSpellReference,
+  EngineSpellScrollDefinition,
   EngineSpellcastingView,
   EngineToolName,
   EngineWorldContextView,
@@ -243,6 +244,7 @@ import {
   OPEN5E_CLASS_PRESETS,
   OPEN5E_DEFAULT_ABILITY_SCORES,
   OPEN5E_DEFAULT_TOOL_CHOICES,
+  OPEN5E_RULES_PACK_HASH,
   OPEN5E_RULES_VERSION,
   OPEN5E_SPECIES_PRESETS,
   abilityModifier as open5eAbilityModifier,
@@ -283,6 +285,9 @@ import {
   requireOpen5eLanguage,
   requireOpen5eSkill,
   requireOpen5eSpecies,
+  REVIEWED_CURE_WOUNDS_CONTENT_KEY,
+  REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY,
+  REVIEWED_FIRST_LEVEL_SCROLL_CONTENT_KEY,
 } from "./open5e-rules.js";
 
 export function defaultCampaignProfile(): EngineCampaignProfile {
@@ -4111,6 +4116,13 @@ const RUNTIME_ARCANE_SYNTHESIS_POLICY_REVISION = "runtime-arcane-synthesis-v2" a
 type EngineSpellRecord = NonNullable<ReturnType<typeof getOpen5eSpell>>;
 type RuntimeSpellDamageEffect = Extract<CompiledSpellEffect, { effectKind: "damage" }>;
 type RuntimeSpellHealingEffect = Extract<CompiledSpellEffect, { effectKind: "healing" }>;
+
+interface ReviewedSpellScrollUse {
+  command: Extract<EngineCommand, { kind: "use_item" }>;
+  item: EngineInventoryItem;
+  itemView: EngineInventoryItemView;
+  definition: EngineSpellScrollDefinition;
+}
 
 function titleCaseRuntimeSpellSchool(value: string): string {
   return value.length === 0 ? value : `${value[0]!.toLocaleUpperCase("en-US")}${value.slice(1)}`;
@@ -9815,6 +9827,7 @@ function resolveHealingSpell(
   spell: NonNullable<ReturnType<typeof getOpen5eSpell>>,
   spellcasting: NonNullable<EngineCharacter["spellcasting"]>,
   synthesisEvidenceContentKeys: string[] = [],
+  scrollUse?: ReviewedSpellScrollUse,
 ): EngineResolution {
   const effect = spell.effect;
   if (!effect || effect.effectKind !== "healing") {
@@ -9827,7 +9840,9 @@ function resolveHealingSpell(
   if (state.character.hp >= state.character.maxHp) {
     return rejection(state, tool, "already_full_health", "The target is already at full hit points.");
   }
-  const slotSelection = selectSpellSlot(spell.definition.level, command.slotLevel, spellcasting.slots);
+  const slotSelection = scrollUse
+    ? { slotLevel: null }
+    : selectSpellSlot(spell.definition.level, command.slotLevel, spellcasting.slots);
   if ("code" in slotSelection) return rejection(state, tool, slotSelection.code, slotSelection.message);
   const selectedSlotLevel = slotSelection.slotLevel;
   if (selectedSlotLevel !== null && selectedSlotLevel > spell.definition.level && !effect.slotLevelVariants[String(selectedSlotLevel)]) {
@@ -9847,7 +9862,7 @@ function resolveHealingSpell(
   modifiers.push({ name: `${ability}_modifier`, value: abilityBonus });
   const next = cloneCampaign(state);
   const changes: Array<{ path: string; before: unknown; after: unknown }> = [];
-  if (selectedSlotLevel !== null) {
+  if (!scrollUse && selectedSlotLevel !== null) {
     next.character.spellcasting!.slots[String(selectedSlotLevel)] -= 1;
     changes.push({
       path: `/character/spellcasting/slots/${selectedSlotLevel}`,
@@ -9868,21 +9883,50 @@ function resolveHealingSpell(
   if (healing.healed <= 0) {
     return rejection(state, tool, "already_full_health", "The target is already at full hit points.");
   }
+  if (scrollUse) {
+    const consumed = next.character.inventory.find((candidate) => candidate.id === scrollUse.item.id);
+    if (!consumed || consumed.quantity <= 0) {
+      return rejection(state, tool, "item_not_found", "That scroll is no longer in your inventory.");
+    }
+    consumed.quantity -= 1;
+    if (consumed.quantity <= 0) {
+      next.character.inventory = next.character.inventory.filter((candidate) => candidate.id !== scrollUse.item.id);
+    }
+    changes.push({ path: "/character/inventory", before: state.character.inventory, after: next.character.inventory });
+  }
   if (castingTime === "action") next.combat.activeActorId = firstLiveCombatantId(next.combat);
-  next.combat.lastAction = `cast:${spell.contentKey}`;
+  next.combat.lastAction = scrollUse
+    ? `use:${scrollUse.item.id}:${spell.contentKey}`
+    : `cast:${spell.contentKey}`;
   const slotText = selectedSlotLevel === null ? " as a cantrip" : ` with a level-${selectedSlotLevel} slot`;
   const turnText = castingTime === "action" ? " The opposition now has the turn." : "";
+  const message = scrollUse
+    ? `${scrollUse.itemView.name} casts ${spell.definition.name}: ${healing.healed} hit points restored. The scroll crumbles to dust.${turnText}`
+    : `${spell.definition.name} resolves${slotText}: ${healing.healed} hit points restored.${turnText}`;
   return commit(
     next,
     context,
     clientCommandId,
-    command,
+    scrollUse?.command ?? command,
     tool,
-    `${spell.definition.name} resolves${slotText}: ${healing.healed} hit points restored.${turnText}`,
+    message,
     {
+      ...(scrollUse ? {
+        resource: {
+          kind: "spell-scroll",
+          policyRevision: scrollUse.definition.policyRevision,
+          activationPolicy: scrollUse.definition.activationPolicy,
+        },
+        item: scrollUse.itemView,
+        sourceItem: {
+          contentKey: scrollUse.definition.sourceItemContentKey,
+          packHash: scrollUse.definition.packHash,
+        },
+      } : {}),
       spell: spell.definition,
+      spellReference: { contentKey: spell.contentKey, packHash: spell.packHash },
       effectKind: "healing",
-      slotLevel: selectedSlotLevel,
+      slotLevel: scrollUse ? null : selectedSlotLevel,
       targetId: state.character.id,
       healing,
       range: { source: spell.definition.range, executableFeet: executableSpellRangeFeet(spell.definition) },
@@ -9890,11 +9934,13 @@ function resolveHealingSpell(
       character: characterData(next.character, next.runtimeContent),
       deferredProseEffects: effect.hasDeferredProseEffects,
     },
-    "spell_healing",
+    scrollUse ? "spell_scroll_used" : "spell_healing",
     rolls,
     modifiers,
     changes,
-    synthesisEvidenceContentKeys,
+    scrollUse
+      ? [scrollUse.definition.sourceItemContentKey, scrollUse.definition.spellContentKey]
+      : synthesisEvidenceContentKeys,
   );
 }
 
@@ -13073,6 +13119,9 @@ function resolveUseItem(
   if (!itemExecutionAllowed(itemView, "use")) {
     return rejection(state, tool, "content_tier_insufficient", "That item's supplied or catalog mechanics are not reviewed for use execution.");
   }
+  if (itemView.effectKey === REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY) {
+    return resolveReviewedSpellScroll(state, context, clientCommandId, command, tool, item, itemView);
+  }
   if (itemView.effectKey === "lantern-ward-v1") {
     if (!item.equipped) return rejection(state, tool, "item_not_equipped", "Equip the Lantern Ward before spending its charge.");
     const currentCharges = item.charges?.current ?? 1;
@@ -13136,6 +13185,97 @@ function resolveUseItem(
       ...changes,
       { path: "/character/inventory", before: state.character.inventory, after: next.character.inventory },
     ]
+  );
+}
+
+function resolveReviewedSpellScroll(
+  state: LanternCampaignState,
+  context: RequestContext,
+  clientCommandId: string,
+  command: Extract<EngineCommand, { kind: "use_item" }>,
+  tool: EngineToolName | "declare" | "listen",
+  item: EngineInventoryItem,
+  itemView: EngineInventoryItemView,
+): EngineResolution {
+  const definition = itemView.spellScroll;
+  if (
+    !definition
+    || itemView.kind !== "consumable"
+    || item.quantity <= 0
+    || definition.policyRevision !== "spell-scroll-v1"
+    || definition.activationPolicy !== "class-list-v1"
+    || definition.sourceItemContentKey !== REVIEWED_FIRST_LEVEL_SCROLL_CONTENT_KEY
+    || definition.spellContentKey !== REVIEWED_CURE_WOUNDS_CONTENT_KEY
+  ) {
+    return rejection(state, tool, "content_tier_insufficient", "That scroll does not have the reviewed Cure Wounds execution record.");
+  }
+
+  const campaignPackHash = state.rulesVersion.startsWith("open5e-pack@")
+    ? state.rulesVersion.slice("open5e-pack@".length)
+    : OPEN5E_RULES_PACK_HASH;
+  if (definition.packHash !== campaignPackHash) {
+    return rejection(state, tool, "content_pack_mismatch", "That scroll is pinned to a different content pack and requires an explicit repin.");
+  }
+  const sourceItem = getOpen5eEquipment(definition.sourceItemContentKey, definition.packHash);
+  const spell = getOpen5eSpell(definition.spellContentKey, definition.packHash);
+  if (!sourceItem || !spell) {
+    return rejection(state, tool, "content_not_installed", "That scroll's reviewed item or spell content is not installed at its pinned pack hash.");
+  }
+  const effect = spell.effect;
+  if (
+    sourceItem.contentKey !== REVIEWED_FIRST_LEVEL_SCROLL_CONTENT_KEY
+    || sourceItem.categoryKey !== "scroll"
+    || spell.contentKey !== REVIEWED_CURE_WOUNDS_CONTENT_KEY
+    || spell.definition.level !== 1
+    || spell.definition.castingTime !== "action"
+    || spell.definition.targetType !== "creature"
+    || spell.definition.targetCount !== 1
+    || spell.definition.range.text.trim().toLocaleLowerCase("en-US") !== "touch"
+    || !effect
+    || effect.effectKind !== "healing"
+    || effect.targetPolicy !== "single-creature"
+  ) {
+    return rejection(state, tool, "content_tier_insufficient", "That scroll's pinned content no longer matches the reviewed first-level Cure Wounds policy.");
+  }
+
+  const spellcasting = state.character.spellcasting;
+  const progression = getOpen5eSpellProgression(state.character.className, definition.packHash);
+  const classList = getOpen5eSpellList(state.character.className, definition.packHash);
+  if (!state.character.created || !spellcasting || !progression) {
+    return rejection(state, tool, "spellcasting_unavailable", "This character does not have an installed spellcasting progression.");
+  }
+  if (!classList) {
+    return rejection(state, tool, "class_spell_list_unavailable", `No reviewed spell list is installed for ${state.character.className}.`);
+  }
+  if (!classList.spells.some((candidate) => candidate.contentKey === spell.contentKey)) {
+    return rejection(state, tool, "spell_not_on_class_list", `${spell.definition.name} is not on the installed ${classList.className} spell list.`);
+  }
+  if (spell.definition.level > highestAvailableSlotLevel(spellcasting.slotMaximums)) {
+    return rejection(state, tool, "spell_level_unavailable", `${spell.definition.name} is above the highest spell level this character can normally cast.`);
+  }
+  if (state.combat.status !== "active") {
+    return rejection(state, tool, "no_active_combat", "Reviewed spell-scroll effects currently resolve in an active encounter.");
+  }
+  if (hasRuntimeCondition(state, state.character.id, "unconscious")) {
+    return rejection(state, tool, "unconscious", "You cannot read a spell scroll while unconscious.");
+  }
+  if (state.combat.activeActorId !== state.actorId) {
+    return rejection(state, tool, "off_turn", "It is not your turn.");
+  }
+  if (state.combat.turnBudget.action.spent) {
+    return rejection(state, tool, "action_already_used", "Your action is already spent this turn.");
+  }
+
+  return resolveHealingSpell(
+    state,
+    context,
+    clientCommandId,
+    { kind: "cast_spell", spellKey: spell.contentKey, targetIds: [] },
+    tool,
+    spell,
+    spellcasting,
+    [],
+    { command, item, itemView, definition },
   );
 }
 
@@ -15297,7 +15437,11 @@ function itemExecutionAllowed(item: EngineInventoryItemView, operation: "equip" 
     if (item.definitionSource === "authored") return tier === 2;
     return tier === 2 || (item.definitionSource === "open5e" && (item.kind === "weapon" || item.kind === "armor"));
   }
-  return tier === 2 && (item.effectKey === "lantern-ward-v1" || (item.kind === "consumable" && Boolean(item.healing)));
+  return tier === 2 && (
+    item.effectKey === "lantern-ward-v1"
+    || (item.effectKey === REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY && item.kind === "consumable" && Boolean(item.spellScroll))
+    || (item.kind === "consumable" && Boolean(item.healing))
+  );
 }
 
 function normalizedProperties(item: EngineItemDefinitionLike): string[] {

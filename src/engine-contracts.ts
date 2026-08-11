@@ -156,7 +156,7 @@ const engineAuthoredItemDefinitionSchema = z.object({
   armorClass: z.number().int().nonnegative().optional(),
   containerCapacity: z.number().nonnegative().optional(),
   ammunitionId: z.string().trim().min(1).max(120).optional(),
-  effectKey: z.enum(["lantern-ward-v1"]).optional(),
+  effectKey: z.enum(["lantern-ward-v1", "spell-scroll-cure-wounds-v1"]).optional(),
   isMagic: z.boolean().optional(),
   mechanicsTier: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional(),
 }).strict();
@@ -2456,7 +2456,9 @@ export interface EngineItemDefinition {
   armorClass?: number;
   containerCapacity?: number;
   ammunitionId?: string;
-  effectKey?: "lantern-ward-v1";
+  effectKey?: "lantern-ward-v1" | "spell-scroll-cure-wounds-v1";
+  /** Server-derived execution record. Callers select only a reviewed effect key. */
+  spellScroll?: EngineSpellScrollDefinition;
   armorProfile?: {
     category: "light" | "medium" | "heavy";
     base: number;
@@ -2468,6 +2470,14 @@ export interface EngineItemDefinition {
   isMagic?: boolean;
   rarity?: { key: string; name: string; rank: number };
   mechanicsTier?: 0 | 1 | 2;
+}
+
+export interface EngineSpellScrollDefinition {
+  policyRevision: "spell-scroll-v1";
+  sourceItemContentKey: string;
+  spellContentKey: string;
+  packHash: string;
+  activationPolicy: "class-list-v1";
 }
 
 export interface EngineInventoryItem {

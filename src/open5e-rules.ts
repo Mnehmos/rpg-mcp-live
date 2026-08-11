@@ -6,6 +6,7 @@ import type {
   EngineItemChargeState,
   EngineItemOwnerRef,
   EngineItemProvenance,
+  EngineSpellScrollDefinition,
   EngineItemTheftProvenance,
   EngineInventoryItem,
   EngineInventoryItemInput,
@@ -46,8 +47,13 @@ import type {
 const rulesKernel = loadActiveRulesKernel();
 
 export const OPEN5E_RULES_VERSION = rulesKernel.rulesVersion;
+export const OPEN5E_RULES_PACK_HASH = rulesKernel.packHash;
 export const OPEN5E_API_VERSION = rulesKernel.apiVersion;
 export const OPEN5E_SOURCE_DOCUMENT = rulesKernel.sourceDocument;
+
+export const REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY = "spell-scroll-cure-wounds-v1" as const;
+export const REVIEWED_FIRST_LEVEL_SCROLL_CONTENT_KEY = "open5e:magic-item:5e-2014:srd-2014:srd_spell-scroll-1st-level" as const;
+export const REVIEWED_CURE_WOUNDS_CONTENT_KEY = "open5e:spell:5e-2014:srd-2014:srd_cure-wounds" as const;
 
 export const ENGINE_ABILITIES: EngineAbility[] = ["str", "dex", "con", "int", "wis", "cha"];
 
@@ -1079,13 +1085,18 @@ function normalizeAuthoredDefinition(raw: Record<string, unknown>): EngineItemDe
   const weight = typeof raw.weight === "number" && Number.isFinite(raw.weight)
     ? Math.max(0, raw.weight)
     : 0;
+  const effectKey = raw.effectKey === "lantern-ward-v1"
+    ? "lantern-ward-v1"
+    : raw.effectKey === REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY
+      ? REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY
+      : undefined;
   return {
     name,
     kind,
     weight,
     healing: finiteNonnegativeInteger(raw.healing),
     description: typeof raw.description === "string" ? raw.description : "",
-    attunementRequired: raw.attunementRequired === true,
+    attunementRequired: effectKey === REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY ? false : raw.attunementRequired === true,
     valueCopper: finiteNonnegativeInteger(raw.valueCopper) ?? 0,
     properties: Array.isArray(raw.properties)
       ? raw.properties.filter((value): value is string => typeof value === "string")
@@ -1096,11 +1107,28 @@ function normalizeAuthoredDefinition(raw: Record<string, unknown>): EngineItemDe
       ? Math.max(0, raw.containerCapacity)
       : undefined,
     ammunitionId: typeof raw.ammunitionId === "string" && raw.ammunitionId.trim() ? raw.ammunitionId.trim() : undefined,
-    effectKey: raw.effectKey === "lantern-ward-v1" ? "lantern-ward-v1" : undefined,
-    isMagic: raw.isMagic === true,
+    effectKey,
+    spellScroll: effectKey === REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY
+      ? reviewedCureWoundsScrollDefinition(raw.spellScroll)
+      : undefined,
+    isMagic: effectKey === REVIEWED_CURE_WOUNDS_SCROLL_EFFECT_KEY || raw.isMagic === true,
     mechanicsTier: raw.mechanicsTier === 0 || raw.mechanicsTier === 1 || raw.mechanicsTier === 2
       ? raw.mechanicsTier
       : 2,
+  };
+}
+
+function reviewedCureWoundsScrollDefinition(value: unknown): EngineSpellScrollDefinition {
+  const persisted = isRecord(value) ? value : null;
+  const packHash = typeof persisted?.packHash === "string" && /^[a-f0-9]{64}$/.test(persisted.packHash)
+    ? persisted.packHash
+    : rulesKernel.packHash;
+  return {
+    policyRevision: "spell-scroll-v1",
+    sourceItemContentKey: REVIEWED_FIRST_LEVEL_SCROLL_CONTENT_KEY,
+    spellContentKey: REVIEWED_CURE_WOUNDS_CONTENT_KEY,
+    packHash,
+    activationPolicy: "class-list-v1",
   };
 }
 
