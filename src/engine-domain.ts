@@ -12355,7 +12355,22 @@ function resolvePartyGroupCheck(
   if ("accepted" in derived) return derived;
   const assistance = Math.min(2, Math.max(0, command.actorIds.length - 1));
   const modifier = derived.modifier + assistance;
-  const roll = randomInt(1, 21);
+  const modifierQuery = queryModifiers(state.effects, state.character.id, "ability-check");
+  const modifierEffectIds = new Set(modifierQuery.effectIds);
+  const advantageSources = state.effects.filter((effect) =>
+    modifierEffectIds.has(effect.id)
+    && effect.operations.some((operation) => operation.kind === "advantage" && operation.category === "ability-check")
+  ).map((effect) => effect.id);
+  const disadvantageSources = state.effects.filter((effect) =>
+    modifierEffectIds.has(effect.id)
+    && effect.operations.some((operation) => operation.kind === "disadvantage" && operation.category === "ability-check")
+  ).map((effect) => effect.id);
+  const mode: EngineCheckEvidence["mode"] = modifierQuery.mode;
+  const firstRoll = randomInt(1, 21);
+  const secondRoll = mode === "advantage" || mode === "disadvantage" ? randomInt(1, 21) : null;
+  const roll = secondRoll === null
+    ? firstRoll
+    : mode === "advantage" ? Math.max(firstRoll, secondRoll) : Math.min(firstRoll, secondRoll);
   const dc = state.combat.status === "active" ? 14 : 12;
   const total = roll + modifier;
   const success = total >= dc;
@@ -12369,9 +12384,9 @@ function resolvePartyGroupCheck(
     expertise: derived.expertise,
     modifier,
     modifierSources: [...derived.modifierSources, ...command.actorIds.slice(1).map((actorId) => `party-assistance:${actorId}`), "party-group-check-v1"],
-    advantageSources: [],
-    disadvantageSources: [],
-    mode: "normal",
+    advantageSources,
+    disadvantageSources,
+    mode,
     informationPolicy: "public",
     formulaRevision: "party-group-check-v1",
   };
@@ -12405,7 +12420,10 @@ function resolvePartyGroupCheck(
     success,
     policy: "party-group-check-v1",
     assistanceCost: combatAssistance ? "one-action-per-participant" : "none-out-of-combat",
-  }, success ? "success" : "failure", [{ kind: "d20", value: roll, sides: 20 }], [{ name: `${command.ability}_modifier`, value: derived.modifier }, { name: "party_assistance", value: assistance }, { name: "dc", value: dc }], [
+  }, success ? "success" : "failure", [
+    { kind: "d20", value: roll, sides: 20 },
+    ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
+  ], [{ name: `${command.ability}_modifier`, value: derived.modifier }, { name: "party_assistance", value: assistance }, { name: "dc", value: dc }], [
     ...stateChanges,
   ], [], undefined, check);
 }
@@ -17237,6 +17255,10 @@ function normalizeTacticalZones(
       || Boolean(tacticalAimIssue(raw.currentCenter, geometry))
       || !Array.isArray(raw.affectedActorIds)
       || !Array.isArray(raw.activeEffectIds)
+      || raw.affectedActorIds.some((id) => typeof id !== "string")
+      || raw.activeEffectIds.some((id) => typeof id !== "string")
+      || new Set(raw.affectedActorIds).size !== raw.affectedActorIds.length
+      || new Set(raw.activeEffectIds).size !== raw.activeEffectIds.length
       || !["active", "expired", "removed"].includes(raw.status ?? "")
       || !Number.isInteger(raw.revision)
       || raw.revision! < 0

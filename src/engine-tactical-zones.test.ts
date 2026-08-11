@@ -169,6 +169,49 @@ describe("#175 persistent tactical zones", () => {
     });
   });
 
+  it("applies zone advantage and disadvantage to the party leader's group check", () => {
+    for (const scenario of [
+      { command: followingAura, mode: "advantage" as const, selectedRoll: 17 },
+      { command: stationaryZone, mode: "disadvantage" as const, selectedRoll: 4 },
+    ]) {
+      const state = encounter([{ x: 0, y: 2 }]);
+      const companion = apply(state, { kind: "controlled_actor_create", profileId: "familiar-scout-v1" });
+      expect(companion.accepted).toBe(true);
+      const party = apply(companion.state, { kind: "party_create" });
+      expect(party.accepted).toBe(true);
+      const created = apply(party.state, scenario.command(party.state));
+      expect(created.accepted).toBe(true);
+      const nextRound = advanceToNextPlayerRound(created.state);
+      const zoneEffectId = nextRound.effects.find((effect) =>
+        effect.status === "active"
+        && effect.sourceRef.startsWith("tactical-zone:")
+        && effect.targetRefs.includes(nextRound.character.id)
+      )!.id;
+
+      queuedRolls.push(4, 17);
+      const checked = apply(nextRound, {
+        kind: "party_group_check",
+        ability: "wis",
+        goal: "Search the zone together.",
+        actorIds: [nextRound.actorId, nextRound.controlledActors[0]!.id],
+      });
+
+      expect(checked.accepted).toBe(true);
+      expect(checked.state.lastRoll).toBe(scenario.selectedRoll);
+      expect(checked.event?.check).toMatchObject({
+        actorId: nextRound.actorId,
+        mode: scenario.mode,
+        advantageSources: scenario.mode === "advantage" ? [zoneEffectId] : [],
+        disadvantageSources: scenario.mode === "disadvantage" ? [zoneEffectId] : [],
+        formulaRevision: "party-group-check-v1",
+      });
+      expect(checked.event?.rolls).toEqual([
+        { kind: "d20", value: scenario.selectedRoll, sides: 20 },
+        { kind: `d20_${scenario.mode}`, value: 17, sides: 20 },
+      ]);
+    }
+  });
+
   it("moves a source-following aura, removes leavers once, and reapplies re-entrants once", () => {
     const state = encounter();
     const firstEnemy = state.combat.enemies[0]!;
@@ -559,6 +602,20 @@ describe("#175 persistent tactical zones", () => {
       {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => { state.combat.status = "ended"; },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          const zone = state.combat.tactical.zones[0]!;
+          zone.affectedActorIds.push(zone.affectedActorIds[0]!);
+        },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          const zone = state.combat.tactical.zones[0]!;
+          zone.activeEffectIds.push(zone.activeEffectIds[0]!);
+        },
       },
     ]) {
       const state = encounter();
