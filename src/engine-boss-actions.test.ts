@@ -323,6 +323,81 @@ describe("reviewed boss-action timing", () => {
     });
   });
 
+  it("terminalizes a boss opportunity-reaction death after decline or an ineffective Shield", () => {
+    const started = startBoss(wizard());
+    expect(started.accepted).toBe(true);
+    const frameId = started.state.combat.tactical.geometry.frameId;
+    const origin = started.state.combat.tactical.actorPosition;
+    const path = [1, 2, 3].map((offset) => ({
+      frameId,
+      x: origin.x - offset,
+      y: origin.y,
+      z: 0 as const,
+    }));
+    const offered = apply(started.state, {
+      kind: "combat_move",
+      geometryRevision: started.state.combat.tactical.geometry.revision,
+      destination: path.at(-1)!,
+      path,
+    });
+    expect(offered).toMatchObject({
+      accepted: true,
+      event: { outcome: "combat_move_reaction_offered" },
+      state: { combat: { pendingReaction: { resumeMode: "continue-character-turn", critical: true } } },
+    });
+    const pending = offered.state.combat.pendingReaction!;
+    const primedForDeath = () => {
+      const state = structuredClone(offered.state);
+      state.character.hp = 0;
+      state.character.lifecycleState = "dying";
+      state.character.deathSaveSuccesses = 0;
+      state.character.deathSaveFailures = 1;
+      return state;
+    };
+
+    const declined = apply(primedForDeath(), {
+      kind: "reaction_response",
+      reactionId: pending.id,
+      decision: "decline",
+    });
+    expect(declined).toMatchObject({
+      accepted: true,
+      event: { outcome: "dead" },
+      state: {
+        combat: { status: "ended", activeActorId: null, pendingReaction: null },
+        character: { lifecycleState: "dead" },
+      },
+    });
+    expect(declined.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_defeated",
+      objective: { status: "failed" },
+    });
+    expect(normalizeCampaignState(structuredClone(declined.state)).combat.lifecycle?.outcome).toBe("player_defeated");
+
+    const shielded = apply(primedForDeath(), {
+      kind: "reaction_response",
+      reactionId: pending.id,
+      decision: "accept",
+      spellKey: SHIELD,
+    });
+    expect(shielded).toMatchObject({
+      accepted: true,
+      event: { outcome: "dead" },
+      data: { hitAfter: true },
+      state: {
+        combat: { status: "ended", activeActorId: null, pendingReaction: null },
+        character: { lifecycleState: "dead" },
+      },
+    });
+    expect(shielded.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_defeated",
+      objective: { status: "failed" },
+    });
+    expect(normalizeCampaignState(structuredClone(shielded.state)).combat.lifecycle?.outcome).toBe("player_defeated");
+  });
+
   it("preserves an explicit nonlethal final strike as a subdued boss outcome", () => {
     const started = startBoss(fighter());
     expect(started.accepted).toBe(true);

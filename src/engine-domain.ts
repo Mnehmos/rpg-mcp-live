@@ -11682,6 +11682,14 @@ function pendingReactionTurnSuffix(
         ? " The next reviewed boss window opens."
         : " Initiative resumes.";
   }
+  if (pending.resumeMode === "continue-character-turn") {
+    const beforeLifecycle = structuredClone(state.combat.lifecycle);
+    const terminal = finishBossEncounterIfPlayerDied(state, changes);
+    if (JSON.stringify(beforeLifecycle) !== JSON.stringify(state.combat.lifecycle)) {
+      changes.push({ path: "/combat/lifecycle", before: beforeLifecycle, after: state.combat.lifecycle });
+    }
+    if (terminal) return " The encounter ends with the character's death.";
+  }
   return state.character.hp === 0
     ? " Your movement ends here because you are unconscious."
     : " You may continue your turn from this position.";
