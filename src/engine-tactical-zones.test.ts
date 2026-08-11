@@ -434,6 +434,9 @@ describe("#175 persistent tactical zones", () => {
     const nonIncrementableRevision = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     nonIncrementableRevision.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER;
     corruptions.push({ state: nonIncrementableRevision, code: "invalid_tactical_zone_shape" });
+    const insufficientRevisionHeadroom = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    insufficientRevisionHeadroom.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER - 1;
+    corruptions.push({ state: insufficientRevisionHeadroom, code: "invalid_tactical_zone_shape" });
     const inactiveEncounter = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     inactiveEncounter.combat.status = "ended";
     corruptions.push({ state: inactiveEncounter, code: "invalid_tactical_zone_shape" });
@@ -783,6 +786,12 @@ describe("#175 persistent tactical zones", () => {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => {
           state.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER;
+        },
+      },
+      {
+        code: "invalid_tactical_zone_shape",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.zones[0]!.revision = Number.MAX_SAFE_INTEGER - 1;
         },
       },
       {

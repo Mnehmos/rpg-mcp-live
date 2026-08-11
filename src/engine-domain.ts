@@ -8899,7 +8899,7 @@ function tacticalZoneStateIssue(
     if (
       !Number.isSafeInteger(zone.revision)
       || zone.revision < (validateEffectProjection ? 1 : 0)
-      || (zone.status === "active" && zone.revision >= Number.MAX_SAFE_INTEGER)
+      || (zone.status === "active" && zone.revision >= Number.MAX_SAFE_INTEGER - 1)
     ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
     if (
       (zone.status === "active" && zone.endedReason !== null)
@@ -17308,7 +17308,7 @@ function normalizeTacticalZones(
       || (raw.status !== "active" && (raw.affectedActorIds.length > 0 || raw.activeEffectIds.length > 0))
       || !Number.isSafeInteger(raw.revision)
       || raw.revision! < 1
-      || (raw.status === "active" && raw.revision! >= Number.MAX_SAFE_INTEGER)
+      || (raw.status === "active" && raw.revision! >= Number.MAX_SAFE_INTEGER - 1)
       || !raw.provenance
       || typeof raw.provenance.sourceCommandId !== "string"
       || !raw.provenance.sourceCommandId.trim()
