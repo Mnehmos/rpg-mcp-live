@@ -27,6 +27,7 @@ const LAIR_ACID_GEYSER = "boss:adult-black-dragon:lair:acid-geyser-v1";
 const PASS = "boss:window:pass";
 const SHIELD = "open5e:spell:5e-2014:srd-2014:srd_shield";
 const FIRE_BOLT = "open5e:spell:5e-2014:srd-2014:srd_fire-bolt";
+const CURE_WOUNDS = "open5e:spell:5e-2014:srd-2014:srd_cure-wounds";
 
 function context(state: LanternCampaignState): RequestContext {
   return {
@@ -62,6 +63,21 @@ function wizard(): LanternCampaignState {
     { kind: "character_create", name: "Boss Ward", species: "human", className: "wizard" },
     { kind: "learn_spell", spellKey: SHIELD },
     { kind: "prepare_spell", spellKey: SHIELD, prepared: true },
+    { kind: "tutorial_advance" },
+    { kind: "tutorial_advance" },
+  ] as EngineCommand[]) {
+    const result = apply(state, command);
+    expect(result.accepted).toBe(true);
+    state = result.state;
+  }
+  return state;
+}
+
+function cleric(): LanternCampaignState {
+  let state = createInitialCampaign("boss-cleric-account", "boss-cleric-actor");
+  for (const command of [
+    { kind: "character_create", name: "Boss Healer", species: "human", className: "cleric" },
+    { kind: "prepare_spell", spellKey: CURE_WOUNDS, prepared: true },
     { kind: "tutorial_advance" },
     { kind: "tutorial_advance" },
   ] as EngineCommand[]) {
@@ -399,6 +415,32 @@ describe("reviewed boss-action timing", () => {
       .toEqual(cast.state.combat.lifecycle?.bossTiming?.pendingWindow);
   });
 
+  it("routes action-time healing through the same reviewed boss window", () => {
+    const state = cleric();
+    state.character.hp = Math.max(1, state.character.maxHp - 4);
+    const started = startBoss(state, 20, 17);
+    expect(started.accepted).toBe(true);
+    expect(started.state.combat.lifecycle?.bossTiming?.pendingWindow?.queue).toEqual(["lair"]);
+    const initialWindowPassed = apply(started.state, { kind: "boss_action", actionRef: PASS });
+    expect(initialWindowPassed.accepted).toBe(true);
+    expect(initialWindowPassed.state.combat.activeActorId).toBe(initialWindowPassed.state.actorId);
+    queuedRolls.push(1);
+    const healed = apply(initialWindowPassed.state, { kind: "cast_spell", spellKey: CURE_WOUNDS, targetIds: [] });
+
+    expect(healed.accepted, `${healed.code}: ${healed.message}`).toBe(true);
+    const sourceId = healed.state.combat.enemies[0]!.id;
+    expect(healed.state.combat.activeActorId).toBe(sourceId);
+    expect(healed.state.combat.lifecycle?.initiative.activeIndex)
+      .toBe(healed.state.combat.lifecycle?.initiative.order.indexOf(sourceId));
+    expect(healed.state.combat.lifecycle?.bossTiming?.pendingWindow).toMatchObject({
+      triggerActorId: healed.state.actorId,
+      resumeActorId: sourceId,
+      queue: ["legendary"],
+    });
+    expect(normalizeCampaignState(structuredClone(healed.state)).combat.lifecycle?.bossTiming?.pendingWindow)
+      .toEqual(healed.state.combat.lifecycle?.bossTiming?.pendingWindow);
+  });
+
   it("records player surrender as a failed, non-lootable boss outcome", () => {
     const started = startBoss(establishGuard(fighter()));
     expect(started.accepted).toBe(true);
@@ -425,6 +467,40 @@ describe("reviewed boss-action timing", () => {
     const loot = apply(reloaded, { kind: "loot", items: [], rewardXp: 1_000, rewardCopper: 1_000 });
     expect(loot).toMatchObject({ accepted: false, code: "boss_outcome_not_lootable", event: null });
     expect(loot.state).toEqual(beforeLoot);
+  });
+
+  it("preserves a terminal player defeat caused by a boss window", () => {
+    const opened = openLegendaryAndLairWindow(fighter());
+    opened.state.character.hp = 0;
+    opened.state.character.lifecycleState = "dying";
+    opened.state.character.deathSaveFailures = 2;
+    opened.state.character.conditions = [...new Set([...opened.state.character.conditions, "unconscious"])];
+    opened.state.character.deathRecord = {
+      source: "damage",
+      sourceCommandId: randomUUID(),
+      sourceVersion: opened.state.version,
+      occurredAt: new Date().toISOString(),
+    };
+    queuedRolls.push(20, 8, 8, 8, 8);
+    const defeated = apply(opened.state, {
+      kind: "boss_action",
+      actionRef: LEGENDARY_TAIL,
+      targetId: opened.state.actorId,
+    });
+
+    expect(defeated.accepted).toBe(true);
+    expect(defeated.state.character.lifecycleState).toBe("dead");
+    expect(defeated.state.combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_defeated",
+      objective: { status: "failed" },
+      bossTiming: { pendingWindow: null, lastCompletedWindow: null },
+    });
+    expect(normalizeCampaignState(structuredClone(defeated.state)).combat.lifecycle).toMatchObject({
+      phase: "terminal",
+      outcome: "player_defeated",
+      objective: { status: "failed" },
+    });
   });
 
   it("routes death-save handoffs through boss timing and terminalizes death-save death", () => {
@@ -670,6 +746,13 @@ describe("reviewed boss-action timing", () => {
     expect(spawned.accepted).toBe(false);
     expect(spawned.code).toBe("boss_profile_fixed_roster");
     expect(spawned.state).toEqual(fixedRosterBefore);
+    const progressed = apply(fixedRoster.state, {
+      kind: "npc_advance",
+      combatantId: fixedRoster.state.combat.enemies[0]!.id,
+      templateId: "veteran",
+    });
+    expect(progressed).toMatchObject({ accepted: false, code: "boss_profile_progression_forbidden", event: null });
+    expect(progressed.state).toEqual(fixedRosterBefore);
 
     const ended = openLegendaryAndLairWindow(fighter());
     for (const [command, code] of [

@@ -7208,6 +7208,9 @@ function resolveNpcAdvance(
   tool: EngineToolName | "declare" | "listen"
 ): EngineResolution {
   if (state.combat.status !== "active") return rejection(state, tool, "no_active_combat", "NPC progression requires an active encounter.");
+  if (state.combat.lifecycle?.profile === REVIEWED_BOSS_PROFILE) {
+    return rejection(state, tool, "boss_profile_progression_forbidden", "The reviewed boss profile has fixed mechanics and cannot receive a generic progression template.");
+  }
   const target = state.combat.enemies.find((enemy) => enemy.id === command.combatantId);
   if (!target) return rejection(state, tool, "combatant_not_found", "That combatant is not in the active encounter.");
   if (!target.alive) return rejection(state, tool, "combatant_not_live", "A defeated combatant cannot be progressed.");
@@ -10355,6 +10358,21 @@ function handoffPlayerInitiative(state: LanternCampaignState): string | null {
   return nextActor;
 }
 
+function handoffPlayerActionInitiative(
+  state: LanternCampaignState,
+  changes: Array<{ path: string; before: unknown; after: unknown }>,
+): void {
+  const activeActorBefore = state.combat.activeActorId;
+  const lifecycleBefore = structuredClone(state.combat.lifecycle);
+  handoffPlayerInitiative(state);
+  if (activeActorBefore !== state.combat.activeActorId) {
+    changes.push({ path: "/combat/activeActorId", before: activeActorBefore, after: state.combat.activeActorId });
+  }
+  if (JSON.stringify(lifecycleBefore) !== JSON.stringify(state.combat.lifecycle)) {
+    changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: state.combat.lifecycle });
+  }
+}
+
 function completeReviewedBossWindow(
   state: LanternCampaignState,
   resolvedKind: EngineBossActionWindowKind,
@@ -11424,15 +11442,7 @@ function resolveCastSpell(
     changes.push({ path: "/combat/status", before: "active", after: "ended" });
     if (bossOutcome) changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
   } else if (castingTime === "action") {
-    const activeActorBefore = next.combat.activeActorId;
-    const lifecycleBefore = structuredClone(next.combat.lifecycle);
-    handoffPlayerInitiative(next);
-    if (activeActorBefore !== next.combat.activeActorId) {
-      changes.push({ path: "/combat/activeActorId", before: activeActorBefore, after: next.combat.activeActorId });
-    }
-    if (JSON.stringify(lifecycleBefore) !== JSON.stringify(next.combat.lifecycle)) {
-      changes.push({ path: "/combat/lifecycle", before: lifecycleBefore, after: next.combat.lifecycle });
-    }
+    handoffPlayerActionInitiative(next, changes);
   }
   next.combat.lastAction = `cast:${spell.contentKey}`;
 
@@ -11545,7 +11555,7 @@ function resolveHealingSpell(
     }
     changes.push({ path: "/character/inventory", before: state.character.inventory, after: next.character.inventory });
   }
-  if (castingTime === "action") next.combat.activeActorId = firstLiveCombatantId(next.combat);
+  if (castingTime === "action") handoffPlayerActionInitiative(next, changes);
   next.combat.lastAction = scrollUse
     ? `use:${scrollUse.item.id}:${spell.contentKey}`
     : `cast:${spell.contentKey}`;
@@ -18282,7 +18292,12 @@ function normalizeBossTiming(
     || combatLastAction === `${REVIEWED_BOSS_PASS_REF}:legendary`
     || combatLastAction === `${REVIEWED_BOSS_PASS_REF}:lair`
     || combatLastAction?.startsWith("boss:window:reaction:") === true;
-  if (lastActionCompletedBossWindow && lastCompletedWindow === null && !pendingWindowRetainsResolution) return null;
+  if (
+    lifecyclePhase === "active"
+    && lastActionCompletedBossWindow
+    && lastCompletedWindow === null
+    && !pendingWindowRetainsResolution
+  ) return null;
   return {
     revision: "boss-timing-v1",
     sourceCombatantId: candidate.sourceCombatantId,
