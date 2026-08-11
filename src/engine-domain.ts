@@ -8875,9 +8875,17 @@ function tacticalZoneStateIssue(
   validateEffectProjection: boolean,
 ): TacticalIssue | null {
   if (state.combat.tactical.zoneIntegrityIssue) return state.combat.tactical.zoneIntegrityIssue;
+  const activeZoneIds = new Set<string>();
+  const activeDefinitionKeys = new Set<EngineTacticalZoneDefinitionKey>();
   for (const zone of state.combat.tactical.zones) {
     if (zone.status !== "active") continue;
     const definition = reviewedTacticalZoneDefinition(zone.definitionKey);
+    if (
+      activeZoneIds.has(zone.id)
+      || activeDefinitionKeys.has(zone.definitionKey)
+    ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+    activeZoneIds.add(zone.id);
+    activeDefinitionKeys.add(zone.definitionKey);
     if (zone.geometryRevision !== state.combat.tactical.geometry.revision) {
       return { code: "stale_tactical_geometry", message: "An active tactical zone references stale geometry; the command cannot mutate state." };
     }
@@ -9121,7 +9129,7 @@ function reconcileTacticalZones(
         provenance: {
           sourceContentKey: null,
           sourceCommandId,
-          rulesVersion: state.rulesVersion,
+          rulesVersion: zone.provenance.rulesVersion,
           formulaRevision: "tactical-zone-effects-v1",
         },
       });
@@ -17141,6 +17149,8 @@ function normalizeTacticalZones(
     return { zones: [], integrityIssue: tacticalZoneNormalizationIssue({}, actorId) };
   }
   let integrityIssue: EngineTacticalZoneIntegrityIssue | null = null;
+  const zoneIds = new Set<string>();
+  const activeDefinitionKeys = new Set<EngineTacticalZoneDefinitionKey>();
   const zones = value.flatMap((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       integrityIssue ??= tacticalZoneNormalizationIssue({}, actorId);
@@ -17212,6 +17222,15 @@ function normalizeTacticalZones(
       integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId);
       return [];
     }
+    if (
+      zoneIds.has(raw.id)
+      || (raw.status === "active" && activeDefinitionKeys.has(definition.key))
+    ) {
+      integrityIssue ??= tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
+      return [];
+    }
+    zoneIds.add(raw.id);
+    if (raw.status === "active") activeDefinitionKeys.add(definition.key);
     return [{
       version: 1,
       id: raw.id,

@@ -55,8 +55,10 @@ active-effect ids, and provenance of their canonical active zone. A mismatch
 or an orphan in the reserved `tactical-zone:` source namespace rejects without
 mutation. Effect provenance is compared to the zone's historical creation
 provenance, so a reviewed campaign content re-pin does not rewrite past
-evidence or disable an otherwise valid active zone. An active zone whose start
-round is later than the authoritative combat round is invalid.
+evidence or disable an otherwise valid active zone; effects created later by
+that zone inherit the same historical provenance. An active zone whose start
+round is later than the authoritative combat round is invalid. Zone identities
+are unique, and at most one active zone may use each reviewed definition.
 
 Zone reconciliation enriches the same accepted command result before the
 state and event are persisted. It does not increment campaign version again or

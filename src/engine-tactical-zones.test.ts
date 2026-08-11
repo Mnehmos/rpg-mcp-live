@@ -337,7 +337,16 @@ describe("#175 persistent tactical zones", () => {
     const repinned = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     repinned.rulesVersion = `${historicalRulesVersion}:reviewed-repin`;
 
-    const continued = apply(repinned, { kind: "end_turn" });
+    const enteringEnemyId = repinned.combat.enemies[1]!.id;
+    const moved = move(repinned, 3, 0);
+    expect(moved.accepted).toBe(true);
+    expect(moved.state.effects.find((effect) =>
+      effect.status === "active"
+      && effect.sourceRef.startsWith("tactical-zone:")
+      && effect.targetRefs.includes(enteringEnemyId)
+    )?.provenance.rulesVersion).toBe(historicalRulesVersion);
+
+    const continued = apply(moved.state, { kind: "end_turn" });
     expect(continued.accepted).toBe(true);
     expect(continued.state.rulesVersion).toBe(repinned.rulesVersion);
     expect(continued.state.combat.tactical.zones[0]!.provenance.rulesVersion).toBe(historicalRulesVersion);
@@ -345,6 +354,62 @@ describe("#175 persistent tactical zones", () => {
       .toEqual(expect.arrayContaining([
         expect.objectContaining({ provenance: expect.objectContaining({ rulesVersion: historicalRulesVersion }) }),
       ]));
+  });
+
+  it("fails closed after restart on duplicate active zone ids or definitions", () => {
+    for (const duplicate of [
+      (state: LanternCampaignState) => {
+        state.combat.tactical.zones.push(structuredClone(state.combat.tactical.zones[0]!));
+      },
+      (state: LanternCampaignState) => {
+        const original = state.combat.tactical.zones[0]!;
+        const copy = structuredClone(original);
+        copy.id = `${original.id}:duplicate-definition`;
+        const copiedEffects = state.effects
+          .filter((effect) => effect.status === "active" && effect.sourceRef === `tactical-zone:${original.id}`)
+          .map((effect) => ({
+            ...structuredClone(effect),
+            id: `${effect.id}:duplicate-definition`,
+            sourceRef: `tactical-zone:${copy.id}`,
+          }));
+        copy.activeEffectIds = copiedEffects.map((effect) => effect.id).sort();
+        state.combat.tactical.zones.push(copy);
+        state.effects.push(...copiedEffects);
+      },
+    ]) {
+      const state = encounter();
+      const created = apply(state, followingAura(state));
+      const corrupted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+      duplicate(corrupted);
+      const directory = mkdtempSync(join(tmpdir(), "lantern-duplicate-zones-"));
+      const databasePath = join(directory, "engine.db");
+      const request = context(corrupted);
+      const store = new LanternEngineStore(databasePath);
+      store.createCampaign(
+        { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+        corrupted,
+      );
+      store.close();
+
+      const reopened = new LanternEngineStore(databasePath);
+      const loaded = reopened.getCampaign(request);
+      expect(loaded.combat.tactical.zoneIntegrityIssue).toMatchObject({ code: "invalid_tactical_zone_shape" });
+      const before = JSON.stringify(loaded);
+      const command = engineCommandSchema.parse({ kind: "end_turn" });
+      const commandId = randomUUID();
+      const rejected = reopened.executeCommand({
+        context: request,
+        clientCommandId: commandId,
+        expectedCampaignVersion: loaded.version,
+        command,
+        tool: "end_turn",
+        resolve: (current) => resolveEngineCommand(current, request, commandId, command, "end_turn"),
+      });
+      expect(rejected).toMatchObject({ accepted: false, code: "invalid_tactical_zone_shape", event: null });
+      expect(JSON.stringify(rejected.state)).toBe(before);
+      expect(reopened.listCampaignEvents(request)).toEqual([]);
+      reopened.close();
+    }
   });
 
   it("fails closed after restart when persisted active zone authority is corrupt", () => {
