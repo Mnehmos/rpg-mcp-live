@@ -18500,7 +18500,7 @@ function normalizeEncounterLifecycle(
       ? objectiveStatus === "succeeded"
       : objectiveStatus === "failed";
     const terminalActorsValid = outcome === "killed" || outcome === "subdued"
-      ? playerAlive && source?.alive === false
+      ? playerAlive && source?.alive === false && source.hp === 0
       : outcome === "player_surrendered"
         ? playerAlive && source?.alive === true
         : outcome === "player_defeated" && !playerAlive && source?.alive === true;

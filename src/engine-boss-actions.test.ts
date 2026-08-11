@@ -723,6 +723,13 @@ describe("reviewed boss-action timing", () => {
     rejectLifecycle((state) => { state.combat.lifecycle!.outcome = null; });
     rejectLifecycle((state) => { state.combat.lifecycle!.outcomeId = "invented-outcome"; });
     rejectLifecycle((state) => { state.combat.lifecycle!.objective.status = "pending"; });
+    rejectLifecycle((state) => { state.combat.enemies[0]!.hp = 1; });
+    rejectLifecycle((state) => {
+      state.combat.lifecycle!.outcome = "subdued";
+      state.combat.lifecycle!.outcomeId = `${state.combat.encounterId}:subdued`;
+      state.combat.lifecycle!.nonlethalDefeatIds = [state.combat.enemies[0]!.id];
+      state.combat.enemies[0]!.hp = 1;
+    });
     rejectLifecycle((state) => { state.combat.enemies[0]!.packHash = "missing-reviewed-pack"; });
     rejectLifecycle((state) => {
       state.combat.enemies[0]!.progression = {
