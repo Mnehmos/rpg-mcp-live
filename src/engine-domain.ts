@@ -17877,16 +17877,48 @@ function normalizeCombat(
   });
   syncDerivedCombatDistances(tactical, enemies);
   const activeActorId = combat.activeActorId ?? null;
+  const lifecycle = normalizeEncounterLifecycle(combat.lifecycle, enemies, actorId, activeActorId, status, campaignVersion);
+  const pendingReaction = normalizePendingReaction(combat.pendingReaction);
+  const rawLifecycle = combat.lifecycle && typeof combat.lifecycle === "object" && !Array.isArray(combat.lifecycle)
+    ? combat.lifecycle as Partial<EngineEncounterLifecycle>
+    : null;
+  const rawReaction = combat.pendingReaction && typeof combat.pendingReaction === "object" && !Array.isArray(combat.pendingReaction)
+    ? combat.pendingReaction as Partial<EnginePendingReaction>
+    : null;
+  const claimsReviewedBoss = rawLifecycle?.profile === REVIEWED_BOSS_PROFILE;
+  const claimsBossReaction = rawReaction?.resumeMode === "finish-boss-window"
+    || typeof rawReaction?.bossWindowId === "string";
+  const bossWindow = lifecycle?.profile === REVIEWED_BOSS_PROFILE ? lifecycle.bossTiming?.pendingWindow : null;
+  const bossWindowAwaitsReaction = bossWindow?.queue[0] === "legendary"
+    && lifecycle?.bossTiming?.legendary.lastConsumedWindowId === bossWindow.id;
+  const invalidBossState = (claimsReviewedBoss && lifecycle?.profile !== REVIEWED_BOSS_PROFILE)
+    || ((claimsBossReaction || bossWindowAwaitsReaction) && !restoredBossReactionMatchesWindow(pendingReaction, lifecycle, actorId));
+  if (invalidBossState) {
+    return {
+      status: "ended",
+      encounterId: combat.encounterId ?? null,
+      encounterName: combat.encounterName ?? null,
+      lifecycle: null,
+      round,
+      activeActorId: null,
+      turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
+      tactical,
+      pendingReaction: null,
+      enemies,
+      lootClaimed: combat.lootClaimed ?? false,
+      lastAction: "invalid_boss_state_quarantined",
+    };
+  }
   return {
     status,
     encounterId: combat.encounterId ?? null,
     encounterName: combat.encounterName ?? null,
-    lifecycle: normalizeEncounterLifecycle(combat.lifecycle, enemies, actorId, activeActorId, status, campaignVersion),
+    lifecycle,
     round,
     activeActorId,
     turnBudget: normalizeTurnBudget(combat.turnBudget, movementFeet),
     tactical,
-    pendingReaction: normalizePendingReaction(combat.pendingReaction),
+    pendingReaction,
     enemies,
     lootClaimed: combat.lootClaimed ?? false,
     lastAction: combat.lastAction ?? null,
@@ -18646,6 +18678,26 @@ function normalizePendingReaction(value: unknown): EnginePendingReaction | null 
     bossWindowId: typeof candidate.bossWindowId === "string" ? candidate.bossWindowId : null,
     resumeToken: candidate.resumeToken,
   };
+}
+
+function restoredBossReactionMatchesWindow(
+  reaction: EnginePendingReaction | null,
+  lifecycle: EngineEncounterLifecycle | null,
+  actorId: string,
+): boolean {
+  if (!reaction || reaction.resumeMode !== "finish-boss-window" || lifecycle?.profile !== REVIEWED_BOSS_PROFILE) return false;
+  const timing = lifecycle.bossTiming;
+  const window = timing?.pendingWindow;
+  return reaction.status === "offered"
+    && reaction.kind === "incoming-hit"
+    && reaction.actorId === actorId
+    && reaction.attackerId === timing?.sourceCombatantId
+    && reaction.sourceActionKey === REVIEWED_TAIL_ATTACK_CONTENT_KEY
+    && reaction.movementTriggerId === null
+    && reaction.bossWindowId !== null
+    && reaction.bossWindowId === window?.id
+    && window.queue[0] === "legendary"
+    && timing?.legendary.lastConsumedWindowId === window.id;
 }
 
 function normalizeActionResources(

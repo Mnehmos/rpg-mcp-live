@@ -199,6 +199,32 @@ describe("reviewed boss-action timing", () => {
     });
     expect(blocked).toMatchObject({ accepted: false, code: "boss_reaction_resume_invalid", event: null });
     expect(blocked.state).toEqual(mismatchedBefore);
+    expect(normalizeCampaignState(mismatched).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
+    const mismatchedConsumption = structuredClone(offered.state);
+    mismatchedConsumption.combat.lifecycle!.bossTiming!.legendary.lastConsumedWindowId = "invented-window";
+    expect(normalizeCampaignState(mismatchedConsumption).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
+    const missingBossBinding = structuredClone(offered.state);
+    missingBossBinding.combat.pendingReaction!.resumeMode = "finish-creature-turn";
+    missingBossBinding.combat.pendingReaction!.bossWindowId = null;
+    expect(normalizeCampaignState(missingBossBinding).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
     const restarted = normalizeCampaignState(JSON.parse(JSON.stringify(offered.state)) as LanternCampaignState);
     expect(restarted.combat.pendingReaction).toEqual(offered.state.combat.pendingReaction);
 
@@ -305,7 +331,21 @@ describe("reviewed boss-action timing", () => {
     const rejectWindow = (mutate: (state: LanternCampaignState) => void) => {
       const corrupted = structuredClone(ended.state);
       mutate(corrupted);
-      expect(normalizeCampaignState(corrupted).combat.lifecycle).toBeNull();
+      const quarantined = normalizeCampaignState(corrupted);
+      expect(quarantined.combat).toMatchObject({
+        status: "ended",
+        activeActorId: null,
+        lifecycle: null,
+        pendingReaction: null,
+        lastAction: "invalid_boss_state_quarantined",
+      });
+      const blocked = apply(quarantined, {
+        kind: "spawn_creature",
+        creatureKey: GOBLIN,
+        count: 1,
+      });
+      expect(blocked).toMatchObject({ accepted: false, code: "no_active_combat", event: null });
+      expect(blocked.state).toEqual(quarantined);
     };
 
     rejectWindow((state) => { state.combat.lifecycle!.bossTiming!.pendingWindow!.triggerActorId = sourceId; });
@@ -476,24 +516,42 @@ describe("reviewed boss-action timing", () => {
     expect(normalized.combat.lifecycle?.bossTiming).toEqual(committed.state.combat.lifecycle?.bossTiming);
     const corrupted = JSON.parse(JSON.stringify(committed.state)) as LanternCampaignState;
     corrupted.combat.lifecycle!.bossTiming!.sourceCombatantId = "invented-source";
-    expect(normalizeCampaignState(corrupted).combat.lifecycle).toBeNull();
+    expect(normalizeCampaignState(corrupted).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      pendingReaction: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
 
     const missingPlayer = structuredClone(committed.state);
     const sourceId = missingPlayer.combat.enemies[0]!.id;
     missingPlayer.combat.lifecycle!.initiative.entries = missingPlayer.combat.lifecycle!.initiative.entries
       .filter((entry) => entry.actorId === sourceId);
     missingPlayer.combat.lifecycle!.initiative.order = [sourceId];
-    expect(normalizeCampaignState(missingPlayer).combat.lifecycle).toBeNull();
+    expect(normalizeCampaignState(missingPlayer).combat).toMatchObject({
+      status: "ended",
+      lifecycle: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
 
     const duplicateSource = structuredClone(committed.state);
     const sourceEntry = duplicateSource.combat.lifecycle!.initiative.entries.find((entry) => entry.actorId === sourceId)!;
     duplicateSource.combat.lifecycle!.initiative.entries = [sourceEntry, structuredClone(sourceEntry)];
     duplicateSource.combat.lifecycle!.initiative.order = [sourceId, sourceId];
-    expect(normalizeCampaignState(duplicateSource).combat.lifecycle).toBeNull();
+    expect(normalizeCampaignState(duplicateSource).combat).toMatchObject({
+      status: "ended",
+      lifecycle: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
 
     const mismatchedOrder = structuredClone(committed.state);
     mismatchedOrder.combat.lifecycle!.initiative.order = [mismatchedOrder.actorId, "invented-actor"];
-    expect(normalizeCampaignState(mismatchedOrder).combat.lifecycle).toBeNull();
+    expect(normalizeCampaignState(mismatchedOrder).combat).toMatchObject({
+      status: "ended",
+      lifecycle: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
 
     store.close();
     const reopened = new LanternEngineStore(databasePath);
