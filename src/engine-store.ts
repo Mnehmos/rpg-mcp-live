@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import type { NarrationEnvelope } from "./ai-contracts.js";
 import type { Open5ePackDescriptor } from "./content/pack.js";
-import { cloneCampaign, normalizeCampaignState, toSessionView } from "./engine-domain.js";
+import { cloneCampaign, normalizeCampaignState, rejectInvalidTacticalZonePersistence, toSessionView } from "./engine-domain.js";
 import {
   emptyProductionRoomState,
   parseProductionRoomState,
@@ -822,10 +822,23 @@ export class LanternEngineStore {
           );
       }
 
-      const rawResolution = input.resolve(current);
+      let boundaryRejected = false;
+      let rawResolution = rejectInvalidTacticalZonePersistence(current, input.tool);
+      if (rawResolution) {
+        boundaryRejected = true;
+      } else {
+        rawResolution = input.resolve(current);
+        if (rawResolution.accepted && !rawResolution.readOnly) {
+          const postResolutionRejection = rejectInvalidTacticalZonePersistence(current, input.tool, rawResolution.state);
+          if (postResolutionRejection) {
+            rawResolution = postResolutionRejection;
+            boundaryRejected = true;
+          }
+        }
+      }
       // Boundary rejections must not copy the sensitive player text into the
       // ordinary campaign log or advance persistence as a side effect.
-      const persistPlayerTurn = Boolean(input.playerText && rawResolution.code !== "experience_boundary_blocked");
+      const persistPlayerTurn = Boolean(input.playerText && !boundaryRejected && rawResolution.code !== "experience_boundary_blocked");
       const resolution = persistPlayerTurn ? appendPlayerTurn(current, rawResolution, input.playerText!) : rawResolution;
       if ((!resolution.readOnly && resolution.accepted) || persistPlayerTurn) {
         this.writeState(resolution.state);

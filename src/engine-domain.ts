@@ -15,6 +15,7 @@ import type {
   CompiledSpellEffect,
   NormalizedSpell,
 } from "./content/schema.js";
+import { loadRulesKernelForPackHash } from "./content/rules-kernel.js";
 import type {
   EngineAbility,
   EngineAdjudicationAttempt,
@@ -3543,8 +3544,8 @@ export function resolveEngineCommand(
   playerText?: string,
   internalAuthority?: EngineInternalAuthority,
 ): EngineResolution {
-  const beforeZoneIssue = tacticalZoneStateIssue(state, true);
-  if (beforeZoneIssue) return rejection(state, tool, beforeZoneIssue.code, beforeZoneIssue.message);
+  const beforeZoneRejection = rejectInvalidTacticalZonePersistence(state, tool);
+  if (beforeZoneRejection) return beforeZoneRejection;
   const resolution = resolveEngineCommandCore(state, context, clientCommandId, command, tool, playerText, internalAuthority);
   if (resolution.accepted && !resolution.readOnly) {
     // Movement and other accepted mutations are reconciled immediately below,
@@ -8897,6 +8898,8 @@ function tacticalZoneStateIssue(
       || !Number.isInteger(zone.provenance.sourceVersion)
       || zone.provenance.sourceVersion < 0
       || zone.provenance.sourceVersion > state.version
+      || !installedTacticalZoneRulesVersion(zone.provenance.rulesVersion)
+      || zone.provenance.definitionRevision !== "tactical-zones-v1"
     ) {
       return { code: "invalid_tactical_zone_source", message: "An active tactical zone has impossible creation provenance; the command cannot mutate state." };
     }
@@ -8916,6 +8919,22 @@ function tacticalZoneStateIssue(
     }
   }
   return validateEffectProjection ? tacticalZoneEffectStateIssue(state) : null;
+}
+
+function installedTacticalZoneRulesVersion(rulesVersion: unknown): rulesVersion is string {
+  if (typeof rulesVersion !== "string" || !rulesVersion.startsWith("open5e-pack@")) return false;
+  const packHash = rulesVersion.slice("open5e-pack@".length);
+  if (!/^[a-f0-9]{64}$/.test(packHash)) return false;
+  return loadRulesKernelForPackHash(packHash)?.rulesVersion === rulesVersion;
+}
+
+export function rejectInvalidTacticalZonePersistence(
+  current: LanternCampaignState,
+  tool: EngineResolutionTool,
+  candidate: LanternCampaignState = current,
+): EngineResolution | null {
+  const issue = tacticalZoneStateIssue(candidate, true);
+  return issue ? rejection(current, tool, issue.code, issue.message) : null;
 }
 
 function tacticalZoneEffectSourceRef(zoneId: string): string {
@@ -17219,7 +17238,7 @@ function normalizeTacticalZones(
       || !Number.isInteger(raw.provenance.sourceVersion)
       || raw.provenance.sourceVersion < 0
       || raw.provenance.sourceVersion > campaignVersion
-      || typeof raw.provenance.rulesVersion !== "string"
+      || !installedTacticalZoneRulesVersion(raw.provenance.rulesVersion)
       || raw.provenance.definitionRevision !== "tactical-zones-v1"
     ) {
       integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
@@ -17305,6 +17324,7 @@ function tacticalZoneNormalizationIssue(
       || !Number.isInteger(provenance.sourceVersion)
       || provenance.sourceVersion < 0
       || provenance.sourceVersion > campaignVersion
+      || !installedTacticalZoneRulesVersion(provenance.rulesVersion)
       ? "invalid_tactical_zone_source"
       : "invalid_tactical_zone_shape",
   );

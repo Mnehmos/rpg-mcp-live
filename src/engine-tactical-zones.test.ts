@@ -15,6 +15,7 @@ import {
   createInitialCampaign,
   normalizeCampaignState,
   resolveEngineCommand,
+  resolveProductionRoomEnter,
 } from "./engine-domain.js";
 import {
   engineCommandSchema,
@@ -296,6 +297,17 @@ describe("#175 persistent tactical zones", () => {
     const futureVersionProvenance = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     futureVersionProvenance.combat.tactical.zones[0]!.provenance.sourceVersion = futureVersionProvenance.version + 1;
     corruptions.push({ state: futureVersionProvenance, code: "invalid_tactical_zone_source" });
+    const blankRulesProvenance = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    blankRulesProvenance.combat.tactical.zones[0]!.provenance.rulesVersion = "";
+    blankRulesProvenance.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:"))
+      .forEach((effect) => { effect.provenance.rulesVersion = ""; });
+    corruptions.push({ state: blankRulesProvenance, code: "invalid_tactical_zone_source" });
+    const inventedRulesProvenance = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    const inventedRulesVersion = `open5e-pack@${"0".repeat(64)}`;
+    inventedRulesProvenance.combat.tactical.zones[0]!.provenance.rulesVersion = inventedRulesVersion;
+    inventedRulesProvenance.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:"))
+      .forEach((effect) => { effect.provenance.rulesVersion = inventedRulesVersion; });
+    corruptions.push({ state: inventedRulesProvenance, code: "invalid_tactical_zone_source" });
     const invalidShape = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
     (invalidShape.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
     corruptions.push({ state: invalidShape, code: "invalid_tactical_zone_shape" });
@@ -471,6 +483,23 @@ describe("#175 persistent tactical zones", () => {
         apply: (state: LanternCampaignState) => { state.combat.tactical.zones[0]!.provenance.sourceVersion = state.version + 1; },
       },
       {
+        code: "invalid_tactical_zone_source",
+        apply: (state: LanternCampaignState) => {
+          state.combat.tactical.zones[0]!.provenance.rulesVersion = "";
+          state.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:"))
+            .forEach((effect) => { effect.provenance.rulesVersion = ""; });
+        },
+      },
+      {
+        code: "invalid_tactical_zone_source",
+        apply: (state: LanternCampaignState) => {
+          const invented = `open5e-pack@${"0".repeat(64)}`;
+          state.combat.tactical.zones[0]!.provenance.rulesVersion = invented;
+          state.effects.filter((effect) => effect.sourceRef.startsWith("tactical-zone:"))
+            .forEach((effect) => { effect.provenance.rulesVersion = invented; });
+        },
+      },
+      {
         code: "invalid_tactical_zone_shape",
         apply: (state: LanternCampaignState) => {
           (state.combat.tactical.zones[0]!.shape as { kind: "circle"; radiusFeet: number }).radiusFeet = 15;
@@ -632,6 +661,48 @@ describe("#175 persistent tactical zones", () => {
       expect(reopened.listCampaignEvents(request)).toEqual([]);
       reopened.close();
     }
+  });
+
+  it("guards direct persisted resolvers before their callback or player text can mutate state", () => {
+    const state = encounter();
+    const created = apply(state, followingAura(state));
+    const corrupted = JSON.parse(JSON.stringify(created.state)) as LanternCampaignState;
+    corrupted.effects.find((effect) => effect.sourceRef.startsWith("tactical-zone:"))!.operations = [
+      { kind: "disadvantage", category: "ability-check" },
+    ];
+    const directory = mkdtempSync(join(tmpdir(), "lantern-zone-store-boundary-"));
+    const databasePath = join(directory, "engine.db");
+    const request = context(corrupted);
+    const store = new LanternEngineStore(databasePath);
+    store.createCampaign(
+      { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+      corrupted,
+    );
+    const loaded = store.getCampaign(request);
+    const before = JSON.stringify(loaded);
+    const command = { kind: "production_room_enter" } as const;
+    const commandId = randomUUID();
+    let resolverInvoked = false;
+
+    const rejected = store.executeCommand({
+      context: request,
+      clientCommandId: commandId,
+      expectedCampaignVersion: loaded.version,
+      command,
+      tool: "production_room",
+      playerText: "This text must not be appended when zone integrity fails.",
+      resolve: (current) => {
+        resolverInvoked = true;
+        return resolveProductionRoomEnter(current, request, commandId);
+      },
+    });
+
+    expect(resolverInvoked).toBe(false);
+    expect(rejected).toMatchObject({ accepted: false, code: "invalid_tactical_zone_effect", event: null });
+    expect(JSON.stringify(rejected.state)).toBe(before);
+    expect(JSON.stringify(store.getCampaign(request))).toBe(before);
+    expect(store.listCampaignEvents(request)).toEqual([]);
+    store.close();
   });
 
   it("advertises only the two reviewed definitions through the existing tool registry", () => {
