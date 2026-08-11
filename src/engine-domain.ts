@@ -18141,6 +18141,7 @@ function normalizeBossTiming(
     || enemies.length !== 1
     || !source
     || !sourceView
+    || source.hp > sourceView.maxHp
     || !exactInitiativeRoster
     || !activeInitiativeValid
     || !reviewedBossTailBinding(source)
@@ -18512,7 +18513,9 @@ function normalizeEncounterLifecycle(
         ? playerAlive && source?.alive === true
         : outcome === "player_defeated" && !playerAlive && source?.alive === true;
     const terminalNonlethalValid = outcome === "subdued"
-      ? Boolean(source && nonlethalDefeatIds.includes(source.id))
+      ? Boolean(source
+        && nonlethalDefeatIds.includes(source.id)
+        && source.conditions.includes("unconscious"))
       : outcome === "killed"
         ? Boolean(source && !nonlethalDefeatIds.includes(source.id))
         : true;

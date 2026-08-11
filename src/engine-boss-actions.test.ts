@@ -341,6 +341,19 @@ describe("reviewed boss-action timing", () => {
       bossTiming: { pendingWindow: null },
     });
     expect(normalizeCampaignState(JSON.parse(JSON.stringify(subdued.state)) as LanternCampaignState).combat.lifecycle?.outcome).toBe("subdued");
+
+    const consciousSubdued = structuredClone(subdued.state);
+    consciousSubdued.combat.enemies[0]!.conditions = consciousSubdued.combat.enemies[0]!.conditions
+      .filter((condition) => condition !== "unconscious");
+    consciousSubdued.effects = consciousSubdued.effects.filter((effect) =>
+      !effect.targetRefs.includes(dragon.id)
+    );
+    expect(normalizeCampaignState(consciousSubdued).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
   });
 
   it("terminalizes reviewed boss defeats from spell and controlled-actor damage", () => {
@@ -709,6 +722,14 @@ describe("reviewed boss-action timing", () => {
   it("quarantines cross-field boss lifecycle contradictions", () => {
     const started = startBoss(fighter());
     expect(started.accepted).toBe(true);
+    const overMaximumHp = structuredClone(started.state);
+    overMaximumHp.combat.enemies[0]!.hp = 196;
+    expect(normalizeCampaignState(overMaximumHp).combat).toMatchObject({
+      status: "ended",
+      activeActorId: null,
+      lifecycle: null,
+      lastAction: "invalid_boss_state_quarantined",
+    });
     const terminal = structuredClone(started.state);
     terminal.combat.status = "ended";
     terminal.combat.activeActorId = null;
