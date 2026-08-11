@@ -172,6 +172,10 @@ describe("#175 persistent tactical zones", () => {
       advantageSources: [],
       disadvantageSources: [characterEffectId],
     });
+    expect(checked.event?.rolls).toEqual([
+      { kind: "d20", value: 18, sides: 20 },
+      { kind: "d20_disadvantage", value: 3, sides: 20 },
+    ]);
     expect(created.event?.stateChanges.map((change) => change.path)).toEqual(expect.arrayContaining([
       "/combat/tactical/zones",
       "/effects",
@@ -220,7 +224,7 @@ describe("#175 persistent tactical zones", () => {
         formulaRevision: "party-group-check-v1",
       });
       expect(checked.event?.rolls).toEqual([
-        { kind: "d20", value: scenario.selectedRoll, sides: 20 },
+        { kind: "d20", value: 4, sides: 20 },
         { kind: `d20_${scenario.mode}`, value: 17, sides: 20 },
       ]);
     }

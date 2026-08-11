@@ -915,7 +915,7 @@ function resolveOpposedCheck(
     withheld ? { informationPolicy: "withheld", outcome } : fullData,
     outcome,
     [
-      { kind: "d20", value: roll, sides: 20 },
+      { kind: "d20", value: firstRoll, sides: 20 },
       ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
       { kind: "opposed_d20", value: opponentRoll, sides: 20 },
     ],
@@ -6363,7 +6363,7 @@ function resolveSocialCheck(
     { npc: nextNpc ?? npc, goal: command.goal, roll, modifier, dc: SOCIAL_CHECK_DC, dcProvenance: "reviewed-challenge:social-check-v1:dc-band-v1", total, success, attribution, social: projectSocialForActor(context.actorId, next) },
     success ? "social_success" : "social_failure",
     [
-      { kind: "social_d20", value: roll, sides: 20 },
+      { kind: "social_d20", value: firstRoll, sides: 20 },
       ...(secondRoll === null ? [] : [{ kind: `social_${modifierQuery.mode}_d20`, value: secondRoll, sides: 20 }]),
     ],
     [{ name: command.ability + "_modifier", value: modifier }, { name: "social_dc", value: SOCIAL_CHECK_DC }],
@@ -8401,7 +8401,7 @@ function resolveCheck(
     data,
     outcome,
     [
-      { kind: passive ? "passive_score" : "d20", value: roll, sides: passive ? undefined : 20 },
+      { kind: passive ? "passive_score" : "d20", value: firstRoll, sides: passive ? undefined : 20 },
       ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
     ],
     [{ name: ability + "_modifier", value: derived.modifier }, { name: "dc", value: dc }],
@@ -12440,7 +12440,7 @@ function resolvePartyGroupCheck(
     policy: "party-group-check-v1",
     assistanceCost: combatAssistance ? "one-action-per-participant" : "none-out-of-combat",
   }, success ? "success" : "failure", [
-    { kind: "d20", value: roll, sides: 20 },
+    { kind: "d20", value: firstRoll, sides: 20 },
     ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
   ], [{ name: `${command.ability}_modifier`, value: derived.modifier }, { name: "party_assistance", value: assistance }, { name: "dc", value: dc }], [
     ...stateChanges,
