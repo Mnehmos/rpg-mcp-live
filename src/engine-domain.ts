@@ -8898,7 +8898,7 @@ function tacticalZoneStateIssue(
   for (const zone of state.combat.tactical.zones) {
     if (
       !Number.isSafeInteger(zone.revision)
-      || zone.revision < 0
+      || zone.revision < (validateEffectProjection ? 1 : 0)
       || (zone.status === "active" && zone.revision >= Number.MAX_SAFE_INTEGER)
     ) return tacticalZoneIntegrityIssue("invalid_tactical_zone_shape");
     if (
@@ -17307,7 +17307,7 @@ function normalizeTacticalZones(
       || !["active", "expired", "removed"].includes(raw.status ?? "")
       || (raw.status !== "active" && (raw.affectedActorIds.length > 0 || raw.activeEffectIds.length > 0))
       || !Number.isSafeInteger(raw.revision)
-      || raw.revision! < 0
+      || raw.revision! < 1
       || (raw.status === "active" && raw.revision! >= Number.MAX_SAFE_INTEGER)
       || !raw.provenance
       || typeof raw.provenance.sourceCommandId !== "string"

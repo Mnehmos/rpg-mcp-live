@@ -636,6 +636,56 @@ describe("#175 persistent tactical zones", () => {
     reopened.close();
   });
 
+  it("fails closed after restart on an impossible zero-revision empty zone", () => {
+    const state = encounter([{ x: -6, y: -6 }]);
+    state.combat.tactical.geometry.bounds.maxX = 20;
+    state.combat.tactical.geometry.bounds.maxY = 20;
+    const command = {
+      ...stationaryZone(state),
+      center: { frameId: state.combat.tactical.geometry.frameId, x: 15, y: 15, z: 0 },
+    } satisfies Extract<EngineCommand, { kind: "tactical_zone_create" }>;
+    const created = apply(state, command);
+    expect(created.accepted).toBe(true);
+    expect(created.state.combat.tactical.zones[0]).toMatchObject({
+      revision: 1,
+      affectedActorIds: [],
+      activeEffectIds: [],
+    });
+    expect(created.state.effects.some((effect) => effect.sourceRef.startsWith("tactical-zone:"))).toBe(false);
+
+    const corrupted = structuredClone(created.state);
+    corrupted.combat.tactical.zones[0]!.revision = 0;
+    const directory = mkdtempSync(join(tmpdir(), "lantern-zero-revision-zone-"));
+    const databasePath = join(directory, "engine.db");
+    const request = context(corrupted);
+    const store = new LanternEngineStore(databasePath);
+    store.createCampaign(
+      { requestId: randomUUID(), accountId: corrupted.accountId, actorId: corrupted.actorId, capabilities: ["player", "dm"] },
+      corrupted,
+    );
+    store.close();
+
+    const reopened = new LanternEngineStore(databasePath);
+    const loaded = reopened.getCampaign(request);
+    expect(loaded.combat.tactical.zones).toEqual([]);
+    expect(loaded.combat.tactical.zoneIntegrityIssue).toMatchObject({ code: "invalid_tactical_zone_shape" });
+    const before = JSON.stringify(loaded);
+    const nextCommand = engineCommandSchema.parse({ kind: "end_turn" });
+    const commandId = randomUUID();
+    const rejected = reopened.executeCommand({
+      context: request,
+      clientCommandId: commandId,
+      expectedCampaignVersion: loaded.version,
+      command: nextCommand,
+      tool: "end_turn",
+      resolve: (current) => resolveEngineCommand(current, request, commandId, nextCommand, "end_turn"),
+    });
+    expect(rejected).toMatchObject({ accepted: false, code: "invalid_tactical_zone_shape", event: null });
+    expect(JSON.stringify(rejected.state)).toBe(before);
+    expect(reopened.listCampaignEvents(request)).toEqual([]);
+    reopened.close();
+  });
+
   it("fails closed after restart on duplicate active zone ids or definitions", () => {
     for (const duplicate of [
       (state: LanternCampaignState) => {
