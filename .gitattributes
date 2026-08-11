@@ -1,1 +1,5 @@
 content/open5e/** text eol=lf
+
+# Importable Node CLI modules require LF so their shebangs parse on every OS.
+tools/ci/native-railway-evidence.mjs text eol=lf
+tools/ci/production-release-evidence.mjs text eol=lf
