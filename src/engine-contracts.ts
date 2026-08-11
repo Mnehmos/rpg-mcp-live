@@ -1857,6 +1857,9 @@ export interface EngineCheckEvidence {
   opponentSkill?: string;
   opponentModifier?: number;
   opponentTotal?: number;
+  opponentAdvantageSources?: string[];
+  opponentDisadvantageSources?: string[];
+  opponentMode?: "normal" | "advantage" | "disadvantage" | "cancelled";
   attribution?: EngineSocialCheckAttribution;
   informationPolicy: "public" | "withheld";
   formulaRevision: string;

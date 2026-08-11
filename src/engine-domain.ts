@@ -868,7 +868,15 @@ function resolveOpposedCheck(
   const firstRoll = randomInt(1, 21);
   const secondRoll = mode !== "normal" && mode !== "cancelled" ? randomInt(1, 21) : null;
   const roll = secondRoll === null ? firstRoll : mode === "advantage" ? Math.max(firstRoll, secondRoll) : Math.min(firstRoll, secondRoll);
-  const opponentRoll = randomInt(1, 21);
+  const opponentModifierQuery = queryModifiers(state.effects, opponent.id, "ability-check");
+  const opponentMode: EngineCheckEvidence["mode"] = opponentModifierQuery.mode;
+  const opponentFirstRoll = randomInt(1, 21);
+  const opponentSecondRoll = opponentMode === "advantage" || opponentMode === "disadvantage" ? randomInt(1, 21) : null;
+  const opponentRoll = opponentSecondRoll === null
+    ? opponentFirstRoll
+    : opponentMode === "advantage"
+      ? Math.max(opponentFirstRoll, opponentSecondRoll)
+      : Math.min(opponentFirstRoll, opponentSecondRoll);
   const opponentModifier = opponentView.skillBonusesAll[definition.opposed?.skill ?? "perception"] ?? opponentView.abilityModifiers[definition.opposed?.ability ?? "wis"];
   const opponentTotal = opponentRoll + opponentModifier;
   const total = roll + derived.modifier;
@@ -896,6 +904,9 @@ function resolveOpposedCheck(
     opponentSkill: definition.opposed?.skill,
     opponentModifier,
     opponentTotal,
+    opponentAdvantageSources: [...opponentModifierQuery.advantageEffectIds],
+    opponentDisadvantageSources: [...opponentModifierQuery.disadvantageEffectIds],
+    opponentMode,
     informationPolicy: decision.informationPolicy,
     formulaRevision: "checks-v1",
   };
@@ -917,7 +928,8 @@ function resolveOpposedCheck(
     [
       { kind: "d20", value: firstRoll, sides: 20 },
       ...(secondRoll === null ? [] : [{ kind: `d20_${mode}`, value: secondRoll, sides: 20 }]),
-      { kind: "opposed_d20", value: opponentRoll, sides: 20 },
+      { kind: "opposed_d20", value: opponentFirstRoll, sides: 20 },
+      ...(opponentSecondRoll === null ? [] : [{ kind: `opposed_${opponentMode}_d20`, value: opponentSecondRoll, sides: 20 }]),
     ],
     [
       { name: actorCheck.ability + "_modifier", value: derived.modifier },
@@ -16475,6 +16487,9 @@ function redactWithheldCheck<T>(check: T): T {
     disadvantageSources: [],
     opponentModifier: undefined,
     opponentTotal: undefined,
+    opponentAdvantageSources: [],
+    opponentDisadvantageSources: [],
+    opponentMode: undefined,
   } as T;
 }
 

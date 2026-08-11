@@ -230,6 +230,51 @@ describe("#175 persistent tactical zones", () => {
     }
   });
 
+  it("applies zone modifiers independently to both sides of an opposed check", () => {
+    const state = encounter([{ x: 0, y: 2 }]);
+    const opponentId = state.combat.enemies[0]!.id;
+    const created = apply(state, stationaryZone(state));
+    expect(created.accepted).toBe(true);
+    const zone = created.state.combat.tactical.zones[0]!;
+    const actorEffectId = created.state.effects.find((effect) =>
+      effect.status === "active"
+      && effect.sourceRef === `tactical-zone:${zone.id}`
+      && effect.targetRefs.includes(state.character.id)
+    )!.id;
+    const opponentEffectId = created.state.effects.find((effect) =>
+      effect.status === "active"
+      && effect.sourceRef === `tactical-zone:${zone.id}`
+      && effect.targetRefs.includes(opponentId)
+    )!.id;
+
+    queuedRolls.push(19, 12, 18, 2);
+    const checked = apply(created.state, {
+      kind: "challenge_attempt",
+      challengeId: "stealth-perception-v1",
+      goal: "Slip past the hindered guard.",
+      approach: "Move through the edge of the circle.",
+      opponentId,
+    });
+
+    expect(checked.accepted).toBe(true);
+    expect(checked.event?.check).toMatchObject({
+      kind: "opposed-check",
+      mode: "disadvantage",
+      advantageSources: [],
+      disadvantageSources: [actorEffectId],
+      opponentId,
+      opponentMode: "disadvantage",
+      opponentAdvantageSources: [],
+      opponentDisadvantageSources: [opponentEffectId],
+    });
+    expect(checked.event?.rolls).toEqual([
+      { kind: "d20", value: 19, sides: 20 },
+      { kind: "d20_disadvantage", value: 12, sides: 20 },
+      { kind: "opposed_d20", value: 18, sides: 20 },
+      { kind: "opposed_disadvantage_d20", value: 2, sides: 20 },
+    ]);
+  });
+
   it("moves a source-following aura, removes leavers once, and reapplies re-entrants once", () => {
     const state = encounter();
     const firstEnemy = state.combat.enemies[0]!;
