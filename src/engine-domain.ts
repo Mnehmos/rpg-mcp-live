@@ -8954,10 +8954,14 @@ function tacticalZoneStateIssue(
 }
 
 function installedTacticalZoneRulesVersion(rulesVersion: unknown): rulesVersion is string {
-  if (typeof rulesVersion !== "string" || !rulesVersion.startsWith("open5e-pack@")) return false;
+  if (!validTacticalZoneRulesVersion(rulesVersion)) return false;
   const packHash = rulesVersion.slice("open5e-pack@".length);
-  if (!/^[a-f0-9]{64}$/.test(packHash)) return false;
   return loadRulesKernelForPackHash(packHash) !== null;
+}
+
+function validTacticalZoneRulesVersion(rulesVersion: unknown): rulesVersion is string {
+  return typeof rulesVersion === "string"
+    && /^open5e-pack@[a-f0-9]{64}$/.test(rulesVersion);
 }
 
 export function rejectInvalidTacticalZonePersistence(
@@ -17311,7 +17315,8 @@ function normalizeTacticalZones(
       || !Number.isInteger(raw.provenance.sourceVersion)
       || raw.provenance.sourceVersion < 0
       || raw.provenance.sourceVersion > campaignVersion
-      || !installedTacticalZoneRulesVersion(raw.provenance.rulesVersion)
+      || !validTacticalZoneRulesVersion(raw.provenance.rulesVersion)
+      || (raw.status === "active" && !installedTacticalZoneRulesVersion(raw.provenance.rulesVersion))
       || raw.provenance.definitionRevision !== "tactical-zones-v1"
     ) {
       integrityIssue ??= tacticalZoneNormalizationIssue(raw, actorId, campaignVersion);
@@ -17397,7 +17402,8 @@ function tacticalZoneNormalizationIssue(
       || !Number.isInteger(provenance.sourceVersion)
       || provenance.sourceVersion < 0
       || provenance.sourceVersion > campaignVersion
-      || !installedTacticalZoneRulesVersion(provenance.rulesVersion)
+      || !validTacticalZoneRulesVersion(provenance.rulesVersion)
+      || (zone.status === "active" && !installedTacticalZoneRulesVersion(provenance.rulesVersion))
       ? "invalid_tactical_zone_source"
       : "invalid_tactical_zone_shape",
   );

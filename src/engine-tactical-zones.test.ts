@@ -575,6 +575,67 @@ describe("#175 persistent tactical zones", () => {
     expect(apply(normalized, { kind: "end_turn" }).accepted).toBe(true);
   });
 
+  it("preserves inert terminal-zone history after its rules pack is retired", () => {
+    const state = encounter([{ x: 0, y: 1 }]);
+    const created = apply(state, stationaryZone(state));
+    const killReady = advanceToNextPlayerRound(created.state);
+    killReady.combat.enemies[0]!.hp = 1;
+    queuedRolls.push(20);
+    const ended = apply(killReady, {
+      kind: "combat_action",
+      action: "attack",
+      targetId: killReady.combat.enemies[0]!.id,
+    });
+    expect(ended.accepted).toBe(true);
+    expect(ended.state.combat.status).toBe("ended");
+    expect(ended.state.combat.tactical.zones[0]).toMatchObject({
+      status: "removed",
+      endedReason: "encounter-ended",
+      affectedActorIds: [],
+      activeEffectIds: [],
+    });
+
+    const retiredRulesVersion = `open5e-pack@${"0".repeat(64)}`;
+    const terminal = structuredClone(ended.state);
+    terminal.combat.tactical.zones[0]!.provenance.rulesVersion = retiredRulesVersion;
+    const normalized = normalizeCampaignState(terminal);
+    expect(normalized.combat.tactical.zoneIntegrityIssue).toBeNull();
+    expect(normalized.combat.tactical.zones[0]!.provenance.rulesVersion).toBe(retiredRulesVersion);
+
+    const directory = mkdtempSync(join(tmpdir(), "lantern-retired-terminal-zone-"));
+    const databasePath = join(directory, "engine.db");
+    const request = context(terminal);
+    const store = new LanternEngineStore(databasePath);
+    store.createCampaign(
+      { requestId: randomUUID(), accountId: terminal.accountId, actorId: terminal.actorId, capabilities: ["player", "dm"] },
+      terminal,
+    );
+    store.close();
+
+    const reopened = new LanternEngineStore(databasePath);
+    const loaded = reopened.getCampaign(request);
+    expect(loaded.combat.tactical.zoneIntegrityIssue).toBeNull();
+    expect(loaded.combat.tactical.zones[0]!.provenance.rulesVersion).toBe(retiredRulesVersion);
+    const command = engineCommandSchema.parse({
+      kind: "roll_check",
+      ability: "wis",
+      goal: "Recall the concluded encounter.",
+      passive: true,
+    });
+    const commandId = randomUUID();
+    const continued = reopened.executeCommand({
+      context: request,
+      clientCommandId: commandId,
+      expectedCampaignVersion: loaded.version,
+      command,
+      tool: "roll_check",
+      resolve: (current) => resolveEngineCommand(current, request, commandId, command, "roll_check"),
+    });
+    expect(continued.accepted).toBe(true);
+    expect(continued.state.combat.tactical.zones[0]!.provenance.rulesVersion).toBe(retiredRulesVersion);
+    reopened.close();
+  });
+
   it("fails closed after restart on duplicate active zone ids or definitions", () => {
     for (const duplicate of [
       (state: LanternCampaignState) => {
