@@ -178,6 +178,14 @@ jobs:
         if: env.SKIP != 'true'
         run: npm run test:gauntlet:ci
 
+      - name: Resolve reference engine main SHA
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "REFERENCE_ENGINE_SHA=$(gh api repos/Mnehmos/mnehmos.rpg.mcp/git/ref/heads/main --jq '.object.sha')" >> "$GITHUB_ENV"
+
       - name: Read engine health
         if: env.SKIP != 'true'
         env:
@@ -186,7 +194,7 @@ jobs:
           for i in $(seq 1 60); do
             resp=$(curl -fsS "$REFERENCE_ENGINE_STAGING_URL/health" || true)
             if echo "$resp" | jq -e \
-              --arg sha "$SHA" \
+              --arg sha "$REFERENCE_ENGINE_SHA" \
               '.status == "ok" and .service == "rpg-mcp" and .environment == "staging" and .deployment.commitSha == $sha' >/dev/null; then
               printf '%s\n' "$resp" > engine-health.json
               echo "$resp" | jq '{status,service,environment,rules,toolCount}'
@@ -242,11 +250,12 @@ jobs:
             --arg ids "$RAILWAY_DEPLOYMENT_IDS" \
             --arg sha "$SHA" \
             --arg ref "$DEPLOYMENT_REF" \
-            --arg environment "$DEPLOYMENT_ENVIRONMENT" \
-            --arg creator "$DEPLOYMENT_CREATOR" \
+             --arg environment "$DEPLOYMENT_ENVIRONMENT" \
+             --arg creator "$DEPLOYMENT_CREATOR" \
+             --arg referenceSha "$REFERENCE_ENGINE_SHA" \
              --arg referenceEngineUrl "$REFERENCE_ENGINE_STAGING_URL" \
              --arg webUrl "$WEB_STAGING_URL" \
-             '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,ref:$ref,environment:$environment,creator:$creator,referenceEngineHealth:"pass",webHealth:"pass",invariants:"pass",evaluation:"pass",productionRef:$sha,referenceEngineUrl:$referenceEngineUrl,webUrl:$webUrl}' \
+             '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,ref:$ref,environment:$environment,creator:$creator,referenceEngineSha:$referenceSha,referenceEngineHealth:"pass",webHealth:"pass",invariants:"pass",evaluation:"pass",productionRef:$sha,referenceEngineUrl:$referenceEngineUrl,webUrl:$webUrl}' \
             > staging-promotion-evidence.json
 
       - name: Upload staging promotion evidence
