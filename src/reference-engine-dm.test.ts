@@ -45,6 +45,34 @@ function setUpRoutedCampaign(store: ReferenceEngineStore) {
   });
 }
 
+/**
+ * resolveTurn now fetches the fully-hydrated character sheet up front (to
+ * give the model accurate saves/skills context instead of the reference
+ * engine's bare record), on top of the existing fetch after the turn
+ * completes -- every test with a routed characterId needs these fixtures
+ * for both calls, not just the post-turn one.
+ */
+function characterFixture(characterClass = "fighter") {
+  return {
+    id: "char-1",
+    name: "Hero",
+    race: "human",
+    characterClass,
+    stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+    hp: 10,
+    maxHp: 10,
+    ac: 10,
+    level: 1,
+    xp: 0,
+  };
+}
+
+const CHARACTER_FIXTURES = {
+  "character_manage.get": () => characterFixture(),
+  "narrative_manage.search": () => ({ notes: [] }),
+  "inventory_manage.get_detailed": () => ({ inventory: [] }),
+};
+
 describe("ReferenceDungeonMaster", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -76,24 +104,11 @@ describe("ReferenceDungeonMaster", () => {
 
     let capturedArgs: Record<string, unknown> | null = null;
     const client = fakeClient({
+      ...CHARACTER_FIXTURES,
       "combat_action.attack": (args) => {
         capturedArgs = args;
         return { success: true, damage: 6 };
       },
-      "character_manage.get": () => ({
-        id: "char-1",
-        name: "Hero",
-        race: "human",
-        characterClass: "fighter",
-        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
-        hp: 10,
-        maxHp: 10,
-        ac: 10,
-        level: 1,
-        xp: 0,
-      }),
-      "narrative_manage.search": () => ({ notes: [] }),
-      "inventory_manage.get_detailed": () => ({ inventory: [] }),
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -142,6 +157,81 @@ describe("ReferenceDungeonMaster", () => {
     );
   });
 
+  it("gives the model the hydrated saving-throw proficiencies", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "character_manage.get": () => characterFixture("barbarian"),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let firstMessages: Array<{ role: string; content: string | null }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { body: string }) => {
+        firstMessages = (JSON.parse(init.body) as { messages: Array<{ role: string; content: string | null }> }).messages;
+        return openRouterMessage("The sheet is ready.");
+      })
+    );
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "What are my saving throws?");
+
+    const sheetMessage = firstMessages.find(
+      (message) => message.role === "system" && message.content?.startsWith("CURRENT CHARACTER SHEET")
+    );
+    expect(sheetMessage?.content).toContain("STR +5 (proficient)");
+    expect(sheetMessage?.content).toContain("CON +4 (proficient)");
+  });
+
+  it("includes prior player and narration messages in the next model request", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    store.appendLogMessages("account-1", "campaign-1", [
+      { id: "prior-player", kind: "player", text: "I enter the archive.", createdAt: "2026-01-01T00:00:00.000Z" },
+      { id: "prior-narration", kind: "narration", text: "Dust swirls beneath the shelves.", createdAt: "2026-01-01T00:00:01.000Z" },
+    ]);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let firstMessages: Array<{ role: string; content: string | null }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { body: string }) => {
+        firstMessages = (JSON.parse(init.body) as { messages: Array<{ role: string; content: string | null }> }).messages;
+        return openRouterMessage("You search the archive.");
+      })
+    );
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I search the archive.");
+
+    expect(firstMessages).toEqual(
+      expect.arrayContaining([
+        { role: "user", content: "I enter the archive." },
+        { role: "assistant", content: "Dust swirls beneath the shelves." },
+        { role: "user", content: "I search the archive." },
+      ])
+    );
+  });
+
   it("rejects a characterId the model invented instead of learned from a tool result this turn", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -150,21 +240,8 @@ describe("ReferenceDungeonMaster", () => {
 
     const updateHandler = vi.fn(() => ({ id: "someone-elses-character", hp: 0 }));
     const client = fakeClient({
+      ...CHARACTER_FIXTURES,
       "character_manage.update": updateHandler,
-      "character_manage.get": () => ({
-        id: "char-1",
-        name: "Hero",
-        race: "human",
-        characterClass: "fighter",
-        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
-        hp: 10,
-        maxHp: 10,
-        ac: 10,
-        level: 1,
-        xp: 0,
-      }),
-      "narrative_manage.search": () => ({ notes: [] }),
-      "inventory_manage.get_detailed": () => ({ inventory: [] }),
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -218,25 +295,12 @@ describe("ReferenceDungeonMaster", () => {
 
     let capturedAttackArgs: Record<string, unknown> | null = null;
     const client = fakeClient({
+      ...CHARACTER_FIXTURES,
       "character_manage.create": () => ({ id: "npc-999", name: "Goblin" }),
       "combat_action.attack": (args) => {
         capturedAttackArgs = args;
         return { success: true, damage: 4 };
       },
-      "character_manage.get": () => ({
-        id: "char-1",
-        name: "Hero",
-        race: "human",
-        characterClass: "fighter",
-        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
-        hp: 10,
-        maxHp: 10,
-        ac: 10,
-        level: 1,
-        xp: 0,
-      }),
-      "narrative_manage.search": () => ({ notes: [] }),
-      "inventory_manage.get_detailed": () => ({ inventory: [] }),
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -285,20 +349,7 @@ describe("ReferenceDungeonMaster", () => {
     setUpRoutedCampaign(store);
 
     const client = fakeClient({
-      "character_manage.get": () => ({
-        id: "char-1",
-        name: "Hero",
-        race: "human",
-        characterClass: "fighter",
-        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
-        hp: 10,
-        maxHp: 10,
-        ac: 10,
-        level: 1,
-        xp: 0,
-      }),
-      "narrative_manage.search": () => ({ notes: [] }),
-      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      ...CHARACTER_FIXTURES,
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -328,7 +379,7 @@ describe("ReferenceDungeonMaster", () => {
     const store = new ReferenceEngineStore(gameStore.getRawDb());
     setUpRoutedCampaign(store);
 
-    const client = fakeClient({});
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
       apiKey: "key",
@@ -353,6 +404,7 @@ describe("ReferenceDungeonMaster", () => {
     setUpRoutedCampaign(store);
 
     const client = fakeClient({
+      ...CHARACTER_FIXTURES,
       "combat_action.dodge": () => ({ success: true }),
     });
     const adapter = new ReferenceEngineAdapter(client, store);
@@ -381,7 +433,7 @@ describe("ReferenceDungeonMaster", () => {
     const store = new ReferenceEngineStore(gameStore.getRawDb());
     setUpRoutedCampaign(store);
 
-    const client = fakeClient({});
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
       apiKey: "key",
@@ -407,20 +459,7 @@ describe("ReferenceDungeonMaster", () => {
     setUpRoutedCampaign(store);
 
     const client = fakeClient({
-      "character_manage.get": () => ({
-        id: "char-1",
-        name: "Hero",
-        race: "human",
-        characterClass: "fighter",
-        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
-        hp: 10,
-        maxHp: 10,
-        ac: 10,
-        level: 1,
-        xp: 0,
-      }),
-      "narrative_manage.search": () => ({ notes: [] }),
-      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      ...CHARACTER_FIXTURES,
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -468,20 +507,7 @@ describe("ReferenceDungeonMaster", () => {
     store.setDocket("account-1", "campaign-1", "secrets", "The innkeeper is a spy.");
 
     const client = fakeClient({
-      "character_manage.get": () => ({
-        id: "char-1",
-        name: "Hero",
-        race: "human",
-        characterClass: "fighter",
-        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
-        hp: 10,
-        maxHp: 10,
-        ac: 10,
-        level: 1,
-        xp: 0,
-      }),
-      "narrative_manage.search": () => ({ notes: [] }),
-      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      ...CHARACTER_FIXTURES,
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
