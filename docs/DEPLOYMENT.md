@@ -32,33 +32,18 @@ Responsibilities:
 - player-owned campaign list, create/open flow, and confirmation-gated deletion;
 - authenticated proxy to the private engine.
 
-## Private engine service
-
-- Service: `lantern-engine`
-- Service ID: `2536aaf9-66c7-42ec-ada5-4966579ac31f`
-- Private hostname: `lantern-engine.railway.internal`
-- Port: `8080`
-- Current verified deployment: `a4a50b7f-53ed-4bae-8c62-473b0b92e033` (`SUCCESS`)
-- Volume: `lantern-engine-volume`
-- Volume ID: `664e9ba1-0dd5-48c0-90f5-f080619c9b10`
-- Mount: `/app/data`
-- Database: `/app/data/lantern-engine.db`
-- Start command: `npm run start:engine`
-- Health path: `/health`
-
-The engine has no public domain. The web service reaches `http://lantern-engine.railway.internal:8080` with the shared internal token.
-
-## Reference-engine A/B service (ADR-H13 override, 2026-08-11)
+## Reference engine service
 
 - Service: `mnehmos-rpg-mcp`
 - Service ID: `87690d39-ce48-44b7-8fbb-7f86b6d1f47e`
-- Public domain (temporary, used for live verification during development): https://mnehmos-rpg-mcp-production.up.railway.app — remove this domain once the web service is confirmed reaching it over the private network, since it needs no public exposure in normal operation.
+- Private hostname: `mnehmos-rpg-mcp.railway.internal`
 - Volume: `mnehmos-rpg-mcp-volume`, mounted at `/app/data`
 - Start command: `node dist/server/index.js --http`
 - Health path: `/health`
-- Source: `Mnehmos/rpg-mcp` (a clone of the reference engine with an added Streamable-HTTP transport; the canonical repo at `F:\Github\mnehmos.rpg.mcp` has no HTTP transport)
+- Source: `Mnehmos/mnehmos.rpg.mcp`
+- MCP path: `/mcp`
 
-Not the default backend — campaigns opt in per-campaign via `POST /api/campaigns/:id/engine-backend`. See `docs/ADR-H13-reference-engine-boundary.md`'s 2026-08-11 update for why this service exists despite that ADR's original "do not deploy" decision, and `src/reference-engine-store.ts` for the tenant-isolation mechanism that makes it safe to do so.
+This is the only gameplay backend. The web service reaches `http://mnehmos-rpg-mcp.railway.internal:3000/mcp` with `REFERENCE_ENGINE_TOKEN`. There is no Lantern engine service or backend switch.
 
 ## Rules identities
 
@@ -102,15 +87,14 @@ Railway SSH access for the release audit uses the dedicated account key named `r
 
 ## Secret placement
 
-Engine only:
+Reference engine only:
 
-- `ENGINE_INTERNAL_TOKEN`;
+- `RPG_MCP_TRANSPORT_TOKEN`;
 - `OPENROUTER_API_KEY`;
 - any provider-side usage/telemetry secret.
 
 Web only:
 
-- `ENGINE_SHARED_SECRET`;
 - `REFERENCE_ENGINE_TOKEN` (matches `RPG_MCP_TRANSPORT_TOKEN` set on the `mnehmos-rpg-mcp` service);
 - Clerk publishable and secret keys;
 - Stripe secret key, price ID and webhook secret.
@@ -119,12 +103,14 @@ Never copy provider, Clerk secret, Stripe secret or webhook values into browser 
 
 ## Non-secret configuration
 
-Engine baseline:
+Reference engine baseline:
 
 ~~~text
 NODE_ENV=production
 ENGINE_PORT=8080
-ENGINE_DATABASE_PATH=/app/data/lantern-engine.db
+RPG_DATA_DIR=/app/data
+RPG_MCP_TRANSPORT_TOKEN=<secret>
+PORT=3000
 OPENROUTER_MODEL=openai/gpt-5.6-luna
 OPENROUTER_REASONING_EFFORT=medium
 OPENROUTER_MAX_TOKENS=2500
@@ -144,9 +130,7 @@ Web baseline:
 ~~~text
 NODE_ENV=production
 DEV_AUTH_BYPASS=false
-ENGINE_URL=http://lantern-engine.railway.internal:8080
-ENGINE_TIMEOUT_MS=30000
-REFERENCE_ENGINE_URL=http://mnehmos-rpg-mcp.railway.internal:3000
+REFERENCE_ENGINE_URL=http://mnehmos-rpg-mcp.railway.internal:3000/mcp
 REFERENCE_ENGINE_TIMEOUT_MS=30000
 ~~~
 

@@ -23,9 +23,6 @@ const openRouterReasoningEffort = readString("OPENROUTER_REASONING_EFFORT", "med
 const openRouterMaxTokens = Number.parseInt(readString("OPENROUTER_MAX_TOKENS", "900"), 10);
 const openRouterSiteUrl = readString("OPENROUTER_SITE_URL");
 const openRouterAppName = readString("OPENROUTER_APP_NAME", "Lantern Table");
-const engineUrl = readString("ENGINE_URL", "http://localhost:3100");
-const engineSharedSecret = readString("ENGINE_SHARED_SECRET");
-const engineTimeoutMs = Number.parseInt(readString("ENGINE_TIMEOUT_MS", "30000"), 10);
 const referenceEngineUrl = readString("REFERENCE_ENGINE_URL");
 const referenceEngineToken = readString("REFERENCE_ENGINE_TOKEN");
 const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TIMEOUT_MS", "30000"), 10);
@@ -56,10 +53,6 @@ export const config = Object.freeze({
   openRouterSiteUrl,
   openRouterAppName,
   openRouterConfigured: Boolean(openRouterApiKey),
-  engineUrl: engineUrl.replace(/\/$/, ""),
-  engineSharedSecret,
-  engineTimeoutMs,
-  engineConfigured: Boolean(engineUrl),
   referenceEngineUrl: referenceEngineUrl.replace(/\/$/, ""),
   referenceEngineToken,
   referenceEngineTimeoutMs,
