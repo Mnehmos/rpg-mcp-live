@@ -48,6 +48,18 @@ Responsibilities:
 
 The engine has no public domain. The web service reaches `http://lantern-engine.railway.internal:8080` with the shared internal token.
 
+## Reference-engine A/B service (ADR-H13 override, 2026-08-11)
+
+- Service: `mnehmos-rpg-mcp`
+- Service ID: `87690d39-ce48-44b7-8fbb-7f86b6d1f47e`
+- Public domain (temporary, used for live verification during development): https://mnehmos-rpg-mcp-production.up.railway.app — remove this domain once the web service is confirmed reaching it over the private network, since it needs no public exposure in normal operation.
+- Volume: `mnehmos-rpg-mcp-volume`, mounted at `/app/data`
+- Start command: `node dist/server/index.js --http`
+- Health path: `/health`
+- Source: `Mnehmos/rpg-mcp` (a clone of the reference engine with an added Streamable-HTTP transport; the canonical repo at `F:\Github\mnehmos.rpg.mcp` has no HTTP transport)
+
+Not the default backend — campaigns opt in per-campaign via `POST /api/campaigns/:id/engine-backend`. See `docs/ADR-H13-reference-engine-boundary.md`'s 2026-08-11 update for why this service exists despite that ADR's original "do not deploy" decision, and `src/reference-engine-store.ts` for the tenant-isolation mechanism that makes it safe to do so.
+
 ## Rules identities
 
 Pre-release executable identity:
@@ -99,6 +111,7 @@ Engine only:
 Web only:
 
 - `ENGINE_SHARED_SECRET`;
+- `REFERENCE_ENGINE_TOKEN` (matches `RPG_MCP_TRANSPORT_TOKEN` set on the `mnehmos-rpg-mcp` service);
 - Clerk publishable and secret keys;
 - Stripe secret key, price ID and webhook secret.
 
@@ -133,7 +146,11 @@ NODE_ENV=production
 DEV_AUTH_BYPASS=false
 ENGINE_URL=http://lantern-engine.railway.internal:8080
 ENGINE_TIMEOUT_MS=30000
+REFERENCE_ENGINE_URL=http://mnehmos-rpg-mcp.railway.internal:3000
+REFERENCE_ENGINE_TIMEOUT_MS=30000
 ~~~
+
+`REFERENCE_ENGINE_TOKEN` is a secret (see Secret placement above) and is not shown in this baseline block.
 
 Do not broaden the document/license ceiling during the S8 migration. OGL rollout is a separate product/legal decision with its own attribution check.
 

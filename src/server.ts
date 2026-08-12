@@ -12,6 +12,11 @@ import { productionRoomNarrationReleaseRequestSchema } from "./engine-production
 import { orchestrationDecisionRequestSchema } from "./engine-orchestration.js";
 import { gameActionSchema } from "./game.js";
 import { GameStore } from "./store.js";
+import { ReferenceEngineClient } from "./reference-engine-client.js";
+import { ReferenceEngineStore } from "./reference-engine-store.js";
+import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
+import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
+import { ReferenceDmProviderUnavailableError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -24,6 +29,35 @@ const engineClient = new LanternEngineClient({
   sharedSecret: config.engineSharedSecret,
   timeoutMs: config.engineTimeoutMs,
 });
+// ADR-H13 override (accepted 2026-08-11): A/B routing to the mnehmos-rpg-mcp
+// reference engine. referenceEngineStore always exists (routing defaults to
+// "lantern" with no network calls); referenceEngineAdapter is only present
+// when the backend is actually configured on this deployment.
+const referenceEngineStore = new ReferenceEngineStore(store.getRawDb());
+const referenceEngineClient = config.referenceEngineConfigured
+  ? new ReferenceEngineClient({
+      baseUrl: config.referenceEngineUrl,
+      authToken: config.referenceEngineToken,
+      timeoutMs: config.referenceEngineTimeoutMs,
+    })
+  : null;
+const referenceEngineAdapter = referenceEngineClient
+  ? new ReferenceEngineAdapter(referenceEngineClient, referenceEngineStore)
+  : null;
+const referenceDungeonMaster = referenceEngineClient && referenceEngineAdapter && config.openRouterConfigured
+  ? new ReferenceDungeonMaster(
+      referenceEngineClient,
+      referenceEngineStore,
+      new ReferenceEngineToolCatalog(referenceEngineClient),
+      referenceEngineAdapter,
+      {
+        apiKey: config.openRouterApiKey,
+        baseUrl: config.openRouterBaseUrl,
+        model: config.openRouterModel,
+        timeoutMs: 60_000,
+      }
+    )
+  : null;
 const app = express();
 const commandRequestSchema = z
   .object({
@@ -91,6 +125,7 @@ const noteCreateRequestSchema = z
     text: z.string().trim().min(1).max(4_000),
   })
   .strict();
+const engineBackendRequestSchema = z.object({ backend: z.enum(["lantern", "reference"]) }).strict();
 
 function clerkFrontendOrigin(): string | null {
   if (!config.clerkPublishableKey) return null;
@@ -171,6 +206,41 @@ async function sendCampaignCommand(
     return;
   }
 
+  if (resolveEngineBackend(userId, campaignId) === "reference") {
+    if (!parsed.data.playerText) {
+      response.status(400).json({
+        code: "structured_actions_not_available",
+        error: "The reference-engine backend only supports free-text turns right now.",
+      });
+      return;
+    }
+    if (!referenceDungeonMaster) {
+      response.status(503).json({
+        code: "reference_engine_unavailable",
+        error: "The reference-engine DM is not configured on this deployment (needs OpenRouter + the reference engine URL/token).",
+      });
+      return;
+    }
+    try {
+      const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, parsed.data.playerText);
+      response.json({ ...result, subscription: store.getSubscription(userId) });
+    } catch (error) {
+      if (error instanceof ReferenceEngineNotRoutedError) {
+        sendReferenceEngineError(response, error);
+        return;
+      }
+      if (error instanceof ReferenceDmProviderUnavailableError) {
+        console.error(error.message);
+        response.status(502).json({
+          code: "reference_dm_unavailable",
+          error: "The reference-engine DM could not resolve this turn. Try again shortly.",
+        });
+        return;
+      }
+      sendReferenceEngineError(response, error);
+    }
+    return;
+  }
   try {
     const abortController = new AbortController();
     request.once("aborted", () => abortController.abort());
@@ -184,6 +254,36 @@ async function sendCampaignCommand(
     console.error(error instanceof Error ? error.message : "Unable to reach the Lantern engine.");
     response.status(502).json({ code: "engine_unavailable", error: "The Lantern engine is unavailable. Try again shortly." });
   }
+}
+
+function resolveEngineBackend(userId: string, campaignId: string): "lantern" | "reference" {
+  return referenceEngineStore.resolveBackend(userId, campaignId);
+}
+
+function requireReferenceAdapter(response: Response): ReferenceEngineAdapter | null {
+  if (!referenceEngineAdapter) {
+    response.status(503).json({
+      code: "reference_engine_unavailable",
+      error: "The reference-engine backend is not configured on this deployment.",
+    });
+    return null;
+  }
+  return referenceEngineAdapter;
+}
+
+function sendReferenceEngineError(response: Response, error: unknown): void {
+  if (error instanceof ReferenceEngineNotRoutedError) {
+    response.status(404).json({ code: "campaign_not_found", error: error.message });
+    return;
+  }
+  if (error instanceof ReferenceEngineUnsupportedError) {
+    response.status(409).json({ code: "unsupported_on_reference_backend", error: error.message });
+    return;
+  }
+  console.error(error instanceof Error ? error.message : "Unable to reach the reference engine.");
+  response
+    .status(502)
+    .json({ code: "reference_engine_unavailable", error: "The reference engine is unavailable. Try again shortly." });
 }
 
 app.get("/api/health", async (_request, response) => {
@@ -257,11 +357,49 @@ app.get("/favicon.ico", (_request, response) => {
 });
 app.use(express.static(publicDirectory, { extensions: ["html"] }));
 
+/**
+ * Merges lantern-engine campaigns with reference-engine-routed campaigns for
+ * this account. Degrades gracefully if the reference engine is unreachable —
+ * a reference-engine outage should not take down the lantern campaign list.
+ */
+async function listAllCampaigns(userId: string) {
+  const lanternCampaigns = (await engineClient.listCampaigns(userId, userId)).map((campaign) => ({
+    ...campaign,
+    engineBackend: "lantern" as const,
+  }));
+  if (!referenceEngineAdapter) return lanternCampaigns;
+  try {
+    const referenceCampaigns = (await referenceEngineAdapter.listCampaigns(userId, userId)).map((campaign) => ({
+      ...campaign,
+      engineBackend: "reference" as const,
+    }));
+    return [...lanternCampaigns, ...referenceCampaigns];
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Unable to reach the reference engine.");
+    return lanternCampaigns;
+  }
+}
+
+async function getAnyCampaign(userId: string, campaignId: string) {
+  if (resolveEngineBackend(userId, campaignId) === "reference") {
+    if (!referenceEngineAdapter) throw new ReferenceEngineNotRoutedError(campaignId);
+    const result = await referenceEngineAdapter.getCampaign(userId, userId, campaignId);
+    return {
+      campaign: result.campaign,
+      state: null as unknown,
+      engineBackend: "reference" as const,
+      dockets: result.dockets,
+    };
+  }
+  const result = await engineClient.getCampaign(userId, userId, campaignId);
+  return { ...result, engineBackend: "lantern" as const, dockets: undefined as Record<string, string> | undefined };
+}
+
 app.get("/api/session", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
-    const campaigns = await engineClient.listCampaigns(userId, userId);
+    const campaigns = await listAllCampaigns(userId);
     const requestedCampaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
     const selectedCampaign = requestedCampaignId
       ? campaigns.find((campaign) => campaign.id === requestedCampaignId) ?? null
@@ -275,10 +413,12 @@ app.get("/api/session", async (request, response) => {
       });
       return;
     }
-    const result = selectedCampaign ? await engineClient.getCampaign(userId, userId, selectedCampaign.id) : null;
+    const result = selectedCampaign ? await getAnyCampaign(userId, selectedCampaign.id) : null;
     response.json({
       session: result?.campaign ?? null,
       state: result?.state ?? null,
+      engineBackend: result?.engineBackend ?? null,
+      dockets: result?.dockets ?? null,
       campaigns,
       activeCampaignId: selectedCampaign?.id ?? null,
       setupRequired: !result,
@@ -293,7 +433,7 @@ app.get("/api/campaigns", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
-    const campaigns = await engineClient.listCampaigns(userId, userId);
+    const campaigns = await listAllCampaigns(userId);
     response.json({ campaigns, subscription: store.getSubscription(userId) });
   } catch (error) {
     sendWebEngineError(response, error);
@@ -347,10 +487,43 @@ app.get("/api/campaigns/:campaignId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
-    const result = await engineClient.getCampaign(userId, userId, request.params.campaignId);
-    response.json({ campaign: result.campaign, state: result.state, subscription: store.getSubscription(userId) });
+    const result = await getAnyCampaign(userId, request.params.campaignId);
+    response.json({
+      campaign: result.campaign,
+      state: result.state,
+      engineBackend: result.engineBackend,
+      dockets: result.dockets ?? null,
+      subscription: store.getSubscription(userId),
+    });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
+  }
+});
+
+app.post("/api/campaigns/:campaignId/engine-backend", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const parsed = engineBackendRequestSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ code: "invalid_engine_backend", error: "Provide backend: 'lantern' or 'reference'." });
+    return;
+  }
+  if (parsed.data.backend === "lantern") {
+    referenceEngineStore.setBackend(userId, request.params.campaignId, "lantern");
+    response.json({ backend: "lantern" });
+    return;
+  }
+  const adapter = requireReferenceAdapter(response);
+  if (!adapter) return;
+  try {
+    await adapter.ensureReferenceSession(userId, request.params.campaignId);
+    response.json({ backend: "reference" });
+  } catch (error) {
+    sendReferenceEngineError(response, error);
   }
 });
 
@@ -385,13 +558,24 @@ app.delete("/api/campaigns/:campaignId", async (request, response) => {
     return;
   }
   try {
+    if (resolveEngineBackend(userId, request.params.campaignId) === "reference") {
+      const adapter = requireReferenceAdapter(response);
+      if (!adapter) return;
+      const deleted = await adapter.deleteCampaign(userId, request.params.campaignId);
+      response.json({ ...deleted, campaigns: await listAllCampaigns(userId), subscription: store.getSubscription(userId) });
+      return;
+    }
     const deleted = await engineClient.deleteCampaign(userId, userId, request.params.campaignId, parsed.data);
     response.json({
       ...deleted,
-      campaigns: await engineClient.listCampaigns(userId, userId),
+      campaigns: await listAllCampaigns(userId),
       subscription: store.getSubscription(userId),
     });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
   }
 });
@@ -441,6 +625,27 @@ app.post("/api/campaigns/:campaignId/character", async (request, response) => {
     return;
   }
   try {
+    if (resolveEngineBackend(userId, request.params.campaignId) === "reference") {
+      const adapter = requireReferenceAdapter(response);
+      if (!adapter) return;
+      // The reference engine takes free-form species/class strings, not Open5e
+      // content-pack keys; best-effort derive them from the key suffix (e.g.
+      // "open5e:species:human" -> "human"). It does not validate against SRD
+      // content packs the way lantern-engine does.
+      const result = await adapter.executeToolCall(userId, userId, request.params.campaignId, {
+        clientCommandId: parsed.data.clientCommandId,
+        expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+        toolName: "character_create",
+        arguments: {
+          name: parsed.data.name,
+          species: parsed.data.speciesKey.split(":").pop(),
+          className: parsed.data.classKey.split(":").pop(),
+          abilityScores: parsed.data.abilityScores,
+        },
+      });
+      response.json({ ...result, subscription: store.getSubscription(userId) });
+      return;
+    }
     const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
@@ -466,6 +671,10 @@ app.post("/api/campaigns/:campaignId/character", async (request, response) => {
     }
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
   }
 });
@@ -612,6 +821,24 @@ app.patch("/api/campaigns/:campaignId/character", async (request, response) => {
     return;
   }
   try {
+    if (resolveEngineBackend(userId, request.params.campaignId) === "reference") {
+      const adapter = requireReferenceAdapter(response);
+      if (!adapter) return;
+      const result = await adapter.updateCharacterDetails(userId, userId, request.params.campaignId, {
+        name: parsed.data.name,
+        background: parsed.data.background,
+        alignment: parsed.data.alignment,
+        description: parsed.data.description,
+        details: parsed.data.details,
+      });
+      response.json({
+        campaign: result.campaign,
+        dockets: result.dockets,
+        engineBackend: "reference",
+        subscription: store.getSubscription(userId),
+      });
+      return;
+    }
     const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
@@ -630,6 +857,10 @@ app.patch("/api/campaigns/:campaignId/character", async (request, response) => {
     }
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError || error instanceof ReferenceEngineUnsupportedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
   }
 });
@@ -659,18 +890,30 @@ app.post("/api/campaigns/:campaignId/inventory", async (request, response) => {
       : parsed.data.action === "drop"
         ? { itemId: parsed.data.itemId, quantity: parsed.data.quantity ?? 1 }
         : { itemId: parsed.data.itemId };
-    const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, {
+    const toolCallRequest = {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
       toolName,
       arguments: argumentsForTool,
-    });
+    } as const;
+    if (resolveEngineBackend(userId, request.params.campaignId) === "reference") {
+      const adapter = requireReferenceAdapter(response);
+      if (!adapter) return;
+      const result = await adapter.executeToolCall(userId, userId, request.params.campaignId, toolCallRequest);
+      response.json({ ...result, subscription: store.getSubscription(userId) });
+      return;
+    }
+    const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, toolCallRequest);
     if (result.commandResult) {
       response.json({ ...result.commandResult, subscription: store.getSubscription(userId) });
       return;
     }
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
   }
 });
@@ -684,18 +927,30 @@ app.post("/api/campaigns/:campaignId/notes", async (request, response) => {
     return;
   }
   try {
-    const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, {
+    const toolCallRequest = {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
       toolName: "player_note_add",
       arguments: { text: parsed.data.text, source: "player" },
-    });
+    } as const;
+    if (resolveEngineBackend(userId, request.params.campaignId) === "reference") {
+      const adapter = requireReferenceAdapter(response);
+      if (!adapter) return;
+      const result = await adapter.executeToolCall(userId, userId, request.params.campaignId, toolCallRequest);
+      response.json({ ...result, subscription: store.getSubscription(userId) });
+      return;
+    }
+    const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, toolCallRequest);
     if (result.commandResult) {
       response.json({ ...result.commandResult, subscription: store.getSubscription(userId) });
       return;
     }
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
   }
 });
