@@ -351,6 +351,15 @@ export class GameStore {
     this.db.close();
   }
 
+  /**
+   * Exposes the underlying connection so sibling stores (e.g. ReferenceEngineStore)
+   * can share one open handle to the same database file instead of opening a second
+   * connection to it.
+   */
+  public getRawDb(): Database.Database {
+    return this.db;
+  }
+
   private executeCommand(input: ExecuteCommandInput): GameCommandResult {
     const transaction = this.db.transaction((): GameCommandResult => {
       const existing = this.db

@@ -1,0 +1,280 @@
+import { randomUUID } from "node:crypto";
+import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
+import type { ReferenceEngineClient } from "./reference-engine-client.js";
+import { DOCKET_NAMES, type DocketName, type ReferenceEngineStore, type StoredLogMessage } from "./reference-engine-store.js";
+import type { ReferenceEngineToolCatalog, OpenRouterToolDefinition } from "./reference-engine-tools.js";
+import type { EngineSessionView } from "./engine-contracts.js";
+
+/**
+ * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
+ * engine" — the reference engine (mnehmos-rpg-mcp) never calls an LLM
+ * itself; only this orchestrator does, and it lives entirely in the web
+ * service, structurally separate from both engine processes. This file is
+ * the ONLY place in the reference-engine integration that talks to an LLM
+ * provider.
+ *
+ * Deliberately simpler than LanternDungeonMaster (src/engine-dm.ts): the
+ * reference engine has no staged-effects/atomic-commit model — each tool
+ * call mutates its state immediately — so there is no transactional replay/
+ * idempotency ledger here yet. A resubmitted clientCommandId will re-run the
+ * turn rather than replay a stored result. That's a known, disclosed MVP gap.
+ */
+
+export class ReferenceDmProviderUnavailableError extends Error {
+  public constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "The reference-engine DM could not resolve this turn.");
+    this.name = "ReferenceDmProviderUnavailableError";
+    this.cause = cause;
+  }
+}
+
+export interface ReferenceTurnResult {
+  campaignId: string;
+  clientCommandId: string;
+  campaignVersion: number;
+  narration: { text: string; proposedFacts: []; suggestedActions: [] };
+  narrationSource: "llm";
+  session: EngineSessionView;
+  replayed: false;
+}
+
+interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+}
+
+const MAX_TOOL_ROUNDS = 6;
+
+const SYSTEM_PROMPT = [
+  "You are the Dungeon Master for a tabletop RPG session, running on the reference rules engine.",
+  "You may call the provided tools to change game state (combat, inventory, movement, character updates, notes).",
+  "The engine validates and executes every tool call; you never mutate state directly, only through tools.",
+  "Do not invent characterId/worldId/partyId values — omit them and the engine will fill in the correct ones for this session.",
+  "When you are done taking actions for this turn, respond with plain narration text (no further tool calls) describing what happened, written for the player.",
+  "Keep narration grounded only in what the tools actually returned. Do not narrate outcomes that no tool call confirmed.",
+  "You also keep six narrative memory documents via read_docket/write_docket: state (current scene summary), player (character personality/backstory/lore prose), npcs (notes on NPCs met), journal (session-by-session recap), campaign (premise/setting/tone), and secrets (DM-only facts the player hasn't learned).",
+  "Never put mechanical numbers (hp, ac, ability scores, inventory, gold, xp) in a docket — those are owned by the engine tools and read from there, not from dockets.",
+  "Never reveal the contents of the secrets docket in narration or in any other docket a player can see — it exists only for your own continuity.",
+].join(" ");
+
+const DOCKET_TOOLS: OpenRouterToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "read_docket",
+      description:
+        "Read one of your six narrative memory documents (state, player, npcs, journal, secrets, campaign). Returns the raw markdown content, or an empty string if never written.",
+      parameters: {
+        type: "object",
+        properties: { name: { type: "string", enum: DOCKET_NAMES, description: "Which docket to read." } },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_docket",
+      description:
+        "Fully replace one of your six narrative memory documents with new markdown content. This is a full overwrite, not an append — read the current content first if you want to preserve it. Never write mechanical stats here.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", enum: DOCKET_NAMES, description: "Which docket to write." },
+          content: { type: "string", description: "The new full markdown content for this docket." },
+        },
+        required: ["name", "content"],
+      },
+    },
+  },
+];
+
+function isDocketName(value: unknown): value is DocketName {
+  return typeof value === "string" && (DOCKET_NAMES as readonly string[]).includes(value);
+}
+
+export class ReferenceDungeonMaster {
+  public constructor(
+    private readonly client: ReferenceEngineClient,
+    private readonly store: ReferenceEngineStore,
+    private readonly catalog: ReferenceEngineToolCatalog,
+    private readonly adapter: ReferenceEngineAdapter,
+    private readonly openRouter: { apiKey: string; baseUrl: string; model: string; timeoutMs: number }
+  ) {}
+
+  public async resolveTurn(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    playerText: string
+  ): Promise<ReferenceTurnResult> {
+    const routing = this.store.getRouting(accountId, campaignId);
+    if (!routing || routing.backend !== "reference") throw new ReferenceEngineNotRoutedError(campaignId);
+
+    const clientCommandId = randomUUID();
+    const tools = [...(await this.catalog.getTools()), ...DOCKET_TOOLS];
+    // worldId/partyId/sessionId scope which game/tenant a call touches, so
+    // they're forced to this campaign's IDs regardless of what the model
+    // supplied — never trust the model's own tenant-scoping fields (same
+    // rule the adapter follows for real client requests). characterId is
+    // filled only when missing: many tools legitimately target a different
+    // character/NPC within the same session (e.g. combat_action on an enemy
+    // the model itself spawned).
+    const forcedArgs: Record<string, unknown> = {
+      sessionId: `lantern:${accountId}:${campaignId}`,
+      worldId: routing.referenceWorldId ?? undefined,
+      partyId: routing.referencePartyId ?? undefined,
+    };
+    const fillOnlyArgs: Record<string, unknown> = {
+      characterId: routing.referenceCharacterId ?? undefined,
+    };
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: playerText },
+    ];
+
+    let narrationText: string | null = null;
+    try {
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+        const completion = await this.chatCompletion(messages, tools);
+        const toolCalls = completion.tool_calls ?? [];
+        if (toolCalls.length === 0) {
+          narrationText = completion.content?.trim() || null;
+          break;
+        }
+        messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
+        for (const call of toolCalls) {
+          const resultText =
+            call.function.name === "read_docket" || call.function.name === "write_docket"
+              ? this.handleDocketTool(accountId, campaignId, call.function.name, parseArguments(call.function.arguments))
+              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs);
+          messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
+        }
+      }
+    } catch (error) {
+      throw new ReferenceDmProviderUnavailableError(error);
+    }
+
+    if (!narrationText) {
+      throw new ReferenceDmProviderUnavailableError(
+        new Error("The reference-engine DM did not produce narration within the tool-call round budget.")
+      );
+    }
+
+    const version = this.store.bumpVersion(accountId, campaignId);
+    const now = new Date().toISOString();
+    const logMessages: StoredLogMessage[] = [
+      { id: randomUUID(), kind: "player", text: playerText, createdAt: now },
+      { id: randomUUID(), kind: "narration", text: narrationText, createdAt: new Date().toISOString() },
+    ];
+    this.store.appendLogMessages(accountId, campaignId, logMessages);
+
+    const { campaign } = await this.adapter.getCampaign(accountId, actorId, campaignId);
+
+    return {
+      campaignId,
+      clientCommandId,
+      campaignVersion: version,
+      narration: { text: narrationText, proposedFacts: [], suggestedActions: [] },
+      narrationSource: "llm",
+      session: campaign,
+      replayed: false,
+    };
+  }
+
+  private async callRemoteTool(
+    rawArguments: string,
+    toolName: string,
+    forcedArgs: Record<string, unknown>,
+    fillOnlyArgs: Record<string, unknown>
+  ): Promise<string> {
+    const args = forceArgs(fillMissingArgs(parseArguments(rawArguments), fillOnlyArgs), forcedArgs);
+    const result = await this.client.callTool(toolName, args);
+    return result.text || JSON.stringify(result.payload ?? {});
+  }
+
+  /**
+   * read_docket/write_docket never reach the remote reference engine — they're
+   * resolved directly against ReferenceEngineStore. secrets is readable and
+   * writable here (the model needs its own secrets in context); the
+   * player-facing exclusion happens only at the API boundary
+   * (ReferenceEngineAdapter.getCampaign), never here.
+   */
+  private handleDocketTool(
+    accountId: string,
+    campaignId: string,
+    toolName: "read_docket" | "write_docket",
+    args: Record<string, unknown>
+  ): string {
+    if (!isDocketName(args.name)) {
+      return JSON.stringify({ error: `Unknown docket name. Valid names: ${DOCKET_NAMES.join(", ")}` });
+    }
+    if (toolName === "read_docket") {
+      return this.store.getDocket(accountId, campaignId, args.name) || "(empty)";
+    }
+    const content = typeof args.content === "string" ? args.content : "";
+    this.store.setDocket(accountId, campaignId, args.name, content);
+    return JSON.stringify({ success: true, docket: args.name });
+  }
+
+  private async chatCompletion(
+    messages: ChatMessage[],
+    tools: OpenRouterToolDefinition[]
+  ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
+    const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.openRouter.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.openRouter.model,
+        messages,
+        tools,
+        tool_choice: "auto",
+      }),
+      signal: this.openRouter.timeoutMs > 0 ? AbortSignal.timeout(this.openRouter.timeoutMs) : undefined,
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`OpenRouter request failed with status ${response.status}: ${body.slice(0, 500)}`);
+    }
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] } }>;
+    };
+    const message = data.choices?.[0]?.message;
+    if (!message) throw new Error("OpenRouter response had no choices.");
+    return { content: message.content ?? null, tool_calls: message.tool_calls };
+  }
+}
+
+function parseArguments(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function fillMissingArgs(args: Record<string, unknown>, fillers: Record<string, unknown>): Record<string, unknown> {
+  const merged = { ...args };
+  for (const [key, value] of Object.entries(fillers)) {
+    if (value === undefined) continue;
+    if (merged[key] === undefined || merged[key] === null || merged[key] === "") merged[key] = value;
+  }
+  return merged;
+}
+
+/** Unconditionally overrides tenant-scoping fields — never trust the model's own values for these. */
+function forceArgs(args: Record<string, unknown>, forced: Record<string, unknown>): Record<string, unknown> {
+  const merged = { ...args };
+  for (const [key, value] of Object.entries(forced)) {
+    if (value === undefined) continue;
+    merged[key] = value;
+  }
+  return merged;
+}

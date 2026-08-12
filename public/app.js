@@ -27,7 +27,7 @@ import { projectCustodyActors } from "./custody-status.mjs";
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -1334,8 +1334,9 @@ import { projectCustodyActors } from "./custody-status.mjs";
       var profile = campaign.campaign || {};
       var rules = campaign.contentPolicy && campaign.contentPolicy.gamesystem ? " / " + campaign.contentPolicy.gamesystem : "";
       var campaignName = profile.name || "Unnamed Campaign";
+      var backendBadge = campaign.engineBackend === "reference" ? " / REFERENCE" : "";
       return '<article class="campaign-card' + (active ? ' active' : '') + '">' +
-        '<button class="campaign-card-open" type="button" data-campaign-id="' + escapeHtml(campaign.id) + '" aria-label="Open ' + escapeHtml(campaignName) + '"><span><strong>' + escapeHtml(campaignName) + '</strong><small>' + escapeHtml(titleCase(campaign.phase || "character_creation") + ' / v' + (campaign.version || 0) + ' / ' + (profile.setting || "Open fantasy") + rules) + '</small></span><span class="campaign-arrow">-&gt;</span></button>' +
+        '<button class="campaign-card-open" type="button" data-campaign-id="' + escapeHtml(campaign.id) + '" aria-label="Open ' + escapeHtml(campaignName) + '"><span><strong>' + escapeHtml(campaignName) + '</strong><small>' + escapeHtml(titleCase(campaign.phase || "character_creation") + ' / v' + (campaign.version || 0) + ' / ' + (profile.setting || "Open fantasy") + rules + backendBadge) + '</small></span><span class="campaign-arrow">-&gt;</span></button>' +
         '<div class="campaign-card-actions"><button class="campaign-delete-button" type="button" data-delete-campaign-id="' + escapeHtml(campaign.id) + '" aria-label="Delete ' + escapeHtml(campaignName) + '">Delete</button></div>' +
         '</article>';
     }).join("");
@@ -1457,6 +1458,7 @@ import { projectCustodyActors } from "./custody-status.mjs";
     var previousSessionId = state.session && state.session.id;
     if (payload && payload.state) state.engineState = payload.state;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "subscription")) state.subscription = payload.subscription;
+    if (payload && Object.prototype.hasOwnProperty.call(payload, "engineBackend")) state.engineBackend = payload.engineBackend;
     state.session = session || null;
     if (session && session.id) writeActiveCampaignId(session.id);
     if (previousSessionId !== (state.session && state.session.id)) {
@@ -1464,6 +1466,11 @@ import { projectCustodyActors } from "./custody-status.mjs";
       state.characterOptionsCampaignId = null;
     }
     renderOnboarding(payload || {});
+    var backendToggle = $("#engine-backend-toggle");
+    if (backendToggle) {
+      backendToggle.hidden = !session;
+      setText("#engine-backend-label", state.engineBackend === "reference" ? "Reference" : "Lantern");
+    }
     if (!session) return;
     if (session.phase === "character_creation") loadCharacterOptions(session.id);
     var snapshot = payload.state || state.engineState || {};
@@ -2614,6 +2621,23 @@ import { projectCustodyActors } from "./custody-status.mjs";
     document.querySelectorAll('[data-action="open-auth"]').forEach(function (button) { button.addEventListener("click", openAuth); });
     document.querySelectorAll('[data-action="close-auth"]').forEach(function (button) { button.addEventListener("click", closeAuth); });
     document.querySelectorAll('[data-action="open-attribution"]').forEach(function (button) { button.addEventListener("click", openAttribution); });
+    document.querySelectorAll('[data-action="toggle-engine-backend"]').forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (!state.session) return;
+        var nextBackend = state.engineBackend === "reference" ? "lantern" : "reference";
+        requestJson("/api/campaigns/" + encodeURIComponent(state.session.id) + "/engine-backend", {
+          method: "POST",
+          body: JSON.stringify({ backend: nextBackend }),
+        }).then(function (result) {
+          if (!result.response.ok) {
+            showToast((result.data && result.data.error) || "Could not switch engine backend.");
+            return;
+          }
+          showToast("Switched to the " + (nextBackend === "reference" ? "reference" : "lantern") + " engine.");
+          refreshSession();
+        });
+      });
+    });
     document.querySelectorAll('[data-action="close-attribution"]').forEach(function (button) { button.addEventListener("click", closeAttribution); });
     document.querySelectorAll('[data-action="close-delete-campaign"]').forEach(function (button) { button.addEventListener("click", closeDeleteCampaign); });
     document.querySelectorAll('[data-action="confirm-delete-campaign"]').forEach(function (button) { button.addEventListener("click", deleteCampaign); });

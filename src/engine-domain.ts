@@ -17190,7 +17190,7 @@ function normalizeFeatureReferences(value: unknown): EngineFeatureReference[] {
   return references;
 }
 
-function hydrateCharacter(character: EngineCharacter): EngineCharacter {
+export function hydrateCharacter(character: EngineCharacter): EngineCharacter {
   const classEngineKey = character.className.trim().toLocaleLowerCase("en-US");
   const speciesEngineKey = character.species.trim().toLocaleLowerCase("en-US");
   const classPreset = OPEN5E_CLASS_PRESETS[classEngineKey] ?? OPEN5E_CLASS_PRESETS.fighter;
