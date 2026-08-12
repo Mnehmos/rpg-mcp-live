@@ -278,6 +278,74 @@ describe("ReferenceDungeonMaster", () => {
     expect(capturedAttackArgs).toMatchObject({ characterId: "npc-999" });
   });
 
+  it("retries once after OpenRouter returns an empty choices array, then succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 1,
+        xp: 0,
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call === 1) return Response.json({ id: "gen-1", choices: [] });
+      return openRouterMessage("The room is quiet.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.narration.text).toBe("The room is quiet.");
+  });
+
+  it("throws ReferenceDmProviderUnavailableError when the retry also returns an empty choices array", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({});
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    const fetchMock = vi.fn(async () => Response.json({ id: "gen-x", choices: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.")).rejects.toThrow(
+      ReferenceDmProviderUnavailableError
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("throws ReferenceDmProviderUnavailableError if no narration is produced within the round budget", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));
