@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { loadActiveOpen5eContentPack } from "./content/pack.js";
 import { Open5eContentResolver } from "./content/resolve.js";
-import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand, toSessionView } from "./engine-domain.js";
+import { createInitialCampaign, normalizeCampaignState, resolveEngineCommand, rollAbilityScoreDraft, toSessionView } from "./engine-domain.js";
 import { executeReadTool, lanternToolDefinitions } from "./engine-tools.js";
 import { EngineVersionConflictError, LanternEngineStore } from "./engine-store.js";
 import type { CreateCampaignContext, RequestContext } from "./engine-contracts.js";
@@ -1000,6 +1000,18 @@ describe("Lantern engine boundary", () => {
     );
     expect(sandbox.state.phase).toBe("sandbox");
     expect(sandbox.state.tutorialStep).toBe(2);
+  });
+
+  it("rollAbilityScoreDraft produces a standalone draft usable without any campaign state (reference-engine backend)", () => {
+    const draft = rollAbilityScoreDraft("rolled");
+
+    expect(draft.method).toBe("rolled");
+    expect(draft.scores).toHaveLength(6);
+    expect(draft.rolls).toHaveLength(6);
+    for (const roll of draft.rolls) {
+      expect(roll.dice).toHaveLength(4);
+      expect(roll.total).toBe(roll.dice.reduce((sum, die) => sum + die, 0) - roll.dropped);
+    }
   });
 
   it("rolls and validates a player-assigned ability-score set before canonical creation", () => {
