@@ -1850,7 +1850,35 @@ import { projectCustodyActors } from "./custody-status.mjs";
     });
   }
 
+  function campaignEngineBackend(campaignId) {
+    var known = state.campaigns.find(function (campaign) { return campaign.id === campaignId; });
+    if (known) return known.engineBackend;
+    // Fall back to the currently-rendered campaign's backend only when it's
+    // actually the one being reconciled (state.campaigns may not be loaded
+    // yet, e.g. right after sign-in).
+    if (state.session && state.session.id === campaignId) return state.engineBackend;
+    return undefined;
+  }
+
   function reconcilePendingCommand(campaignId, clientCommandId) {
+    if (campaignEngineBackend(campaignId) === "reference") {
+      // Reference-backend commands resolve synchronously inside the
+      // original POST /commands call -- there is no async job for
+      // GET /commands/:id to ever find (that endpoint only knows about
+      // Lantern's command queue). If we're reconciling at all, the original
+      // request's outcome was already lost (network drop, page reload) or it
+      // failed; either way there's nothing left to poll for, so report it as
+      // not committed immediately instead of hammering an endpoint that can
+      // only ever 404. Every call site above funnels through here, so this
+      // one check covers all of them. Mirrors the confirmedMissing branch
+      // below exactly, just without ever polling for it.
+      clearPendingCommand(clientCommandId);
+      state.pendingPlayerText = null;
+      renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+      setStatus("That turn was not committed; you can try again.", "ready");
+      showToast("The server confirmed that turn was not committed.");
+      return Promise.resolve(false);
+    }
     var attempts = 0;
     var maxAttempts = 80;
     var pollDelayMs = 1500;
@@ -1982,17 +2010,6 @@ import { projectCustodyActors } from "./custody-status.mjs";
         return reconcilePendingCommand(campaignId, commandId);
       }
       if (result.response.status >= 500 || result.response.status === 408 || result.response.status === 429) {
-        // Reference-backend turns resolve synchronously within the POST
-        // itself -- there is no async job for GET /commands/:id to ever find,
-        // that endpoint only knows about Lantern commands. Polling it here
-        // would just 404 for up to two minutes on every failure. A 5xx/408/
-        // 429 on that backend means the turn definitively did not commit, so
-        // report it immediately instead of reconciling.
-        if (state.engineBackend === "reference") {
-          var refFailure = new Error(result.data.error || "That action could not be resolved.");
-          refFailure.reconcile = false;
-          throw refFailure;
-        }
         return reconcilePendingCommand(campaignId, commandId);
       }
       if (!result.response.ok) {
