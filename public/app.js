@@ -1982,6 +1982,17 @@ import { projectCustodyActors } from "./custody-status.mjs";
         return reconcilePendingCommand(campaignId, commandId);
       }
       if (result.response.status >= 500 || result.response.status === 408 || result.response.status === 429) {
+        // Reference-backend turns resolve synchronously within the POST
+        // itself -- there is no async job for GET /commands/:id to ever find,
+        // that endpoint only knows about Lantern commands. Polling it here
+        // would just 404 for up to two minutes on every failure. A 5xx/408/
+        // 429 on that backend means the turn definitively did not commit, so
+        // report it immediately instead of reconciling.
+        if (state.engineBackend === "reference") {
+          var refFailure = new Error(result.data.error || "That action could not be resolved.");
+          refFailure.reconcile = false;
+          throw refFailure;
+        }
         return reconcilePendingCommand(campaignId, commandId);
       }
       if (!result.response.ok) {

@@ -244,7 +244,28 @@ export class ReferenceDungeonMaster {
     return JSON.stringify({ success: true, docket: args.name });
   }
 
+  /**
+   * A provider occasionally returns 200 with an empty choices array (seen
+   * live: "OpenRouter response had no choices", no further detail) — a
+   * transient upstream hiccup, not something retrying the exact same request
+   * can't plausibly fix. One retry here is worth it: the alternative is
+   * losing the player's whole turn (they'd have to retype it) over what's
+   * often a one-off blip.
+   */
   private async chatCompletion(
+    messages: ChatMessage[],
+    tools: OpenRouterToolDefinition[]
+  ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
+    try {
+      return await this.chatCompletionOnce(messages, tools);
+    } catch (error) {
+      if (!(error instanceof EmptyCompletionError)) throw error;
+      console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
+      return await this.chatCompletionOnce(messages, tools);
+    }
+  }
+
+  private async chatCompletionOnce(
     messages: ChatMessage[],
     tools: OpenRouterToolDefinition[]
   ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
@@ -267,13 +288,21 @@ export class ReferenceDungeonMaster {
       throw new Error(`OpenRouter request failed with status ${response.status}: ${body.slice(0, 500)}`);
     }
     const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] } }>;
+      id?: string;
+      choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] }; finish_reason?: string }>;
+      error?: { message?: string; code?: unknown };
     };
     const message = data.choices?.[0]?.message;
-    if (!message) throw new Error("OpenRouter response had no choices.");
+    if (!message) {
+      throw new EmptyCompletionError(
+        `id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} error=${JSON.stringify(data.error ?? null)}`
+      );
+    }
     return { content: message.content ?? null, tool_calls: message.tool_calls };
   }
 }
+
+class EmptyCompletionError extends Error {}
 
 function parseArguments(raw: string): Record<string, unknown> {
   try {
