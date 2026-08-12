@@ -3,7 +3,7 @@ import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./referen
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
 import { DOCKET_NAMES, type DocketName, type ReferenceEngineStore, type StoredLogMessage } from "./reference-engine-store.js";
 import type { ReferenceEngineToolCatalog, OpenRouterToolDefinition } from "./reference-engine-tools.js";
-import type { EngineSessionView } from "./engine-contracts.js";
+import type { EngineAbility, EngineCharacterView, EngineSessionView } from "./engine-contracts.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -145,8 +145,38 @@ export class ReferenceDungeonMaster {
     const knownCharacterIds = new Set<string>();
     if (routing.referenceCharacterId) knownCharacterIds.add(routing.referenceCharacterId);
 
+    // character_manage.get (a raw call straight to the reference engine, not
+    // routed through the adapter) returns the engine's bare mechanical
+    // record, which has no saving-throw/skill proficiency flags at all —
+    // that derivation only happens in ReferenceEngineAdapter.buildState()
+    // via hydrateCharacter, for the player-facing sheet. Without this, the
+    // model would only ever see the same incomplete record and (confirmed
+    // live) tell the player their save proficiencies "aren't currently
+    // recorded" even though the real sheet has them. Fetching the fully-
+    // hydrated view once up front and handing it over as context means the
+    // model never needs to guess, and never needs an extra tool round just
+    // to ask.
+    const sheetContext = routing.referenceCharacterId
+      ? formatCharacterSheetContext((await this.adapter.getCampaign(accountId, actorId, campaignId)).campaign.character)
+      : null;
+
+    // Prior turns are never replayed as actual tool-call/tool-result pairs
+    // here (that history isn't retained — see this file's class doc "known,
+    // disclosed MVP gap" note), only as narration text. That's sufficient
+    // for narrative continuity, which is what was actually missing: without
+    // this, every turn started a brand-new conversation with just the
+    // current playerText, so the model had no memory of anything said or
+    // narrated before it and would confabulate ("this is the first
+    // conversation turn") rather than recall it.
+    const priorLog = this.store.getLogMessages(accountId, campaignId);
+    const historyMessages: ChatMessage[] = priorLog
+      .filter((entry): entry is StoredLogMessage & { kind: "player" | "narration" } => entry.kind === "player" || entry.kind === "narration")
+      .map((entry) => ({ role: entry.kind === "player" ? "user" : "assistant", content: entry.text }) as ChatMessage);
+
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
+      ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
+      ...historyMessages,
       { role: "user", content: playerText },
     ];
 
@@ -303,6 +333,42 @@ export class ReferenceDungeonMaster {
 }
 
 class EmptyCompletionError extends Error {}
+
+const ABILITY_ORDER: EngineAbility[] = ["str", "dex", "con", "int", "wis", "cha"];
+
+function formatModifier(value: number): string {
+  return value >= 0 ? `+${value}` : `${value}`;
+}
+
+/**
+ * Renders the fully SRD-derived character sheet (saves/skills/proficiency
+ * bonus/hit die — the fields hydrateCharacter computes for the player-facing
+ * view but the reference engine's own raw character_manage record doesn't
+ * track) as plain text context for the model, so it has accurate answers
+ * without needing to guess or report a gap that isn't really there.
+ */
+function formatCharacterSheetContext(character: EngineCharacterView): string {
+  const saves = ABILITY_ORDER.map((ability) => {
+    const proficient = character.derived.savingThrowProficiencies.includes(ability);
+    return `${ability.toUpperCase()} ${formatModifier(character.savingThrows[ability])}${proficient ? " (proficient)" : ""}`;
+  }).join(", ");
+  const proficientSkills = Object.entries(character.skills)
+    .filter(([, skill]) => skill.proficient || skill.expertise)
+    .map(([name, skill]) => `${name}${skill.expertise ? " (expertise)" : ""}`)
+    .join(", ");
+  const abilities = ABILITY_ORDER.map(
+    (ability) => `${ability.toUpperCase()} ${character.abilities[ability]} (${formatModifier(character.abilityModifiers[ability])})`
+  ).join(", ");
+
+  return [
+    "CURRENT CHARACTER SHEET (authoritative — already fully derived from SRD rules; trust this over anything a character_manage tool call returns, which tracks raw mechanical state but not proficiency flags):",
+    `${character.name} — ${character.species} ${character.className}, level ${character.level}, background ${character.background}, alignment ${character.alignment}.`,
+    `HP ${character.hp}/${character.maxHp} | AC ${character.ac} | Proficiency bonus ${formatModifier(character.proficiencyBonus)} | Hit die d${character.hitDie}`,
+    `Ability scores: ${abilities}`,
+    `Saving throws: ${saves}`,
+    `Skill proficiencies: ${proficientSkills || "none"}`,
+  ].join("\n");
+}
 
 function parseArguments(raw: string): Record<string, unknown> {
   try {
