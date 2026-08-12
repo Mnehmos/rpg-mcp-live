@@ -1468,7 +1468,10 @@ import { projectCustodyActors } from "./custody-status.mjs";
     renderOnboarding(payload || {});
     var backendToggle = $("#engine-backend-toggle");
     if (backendToggle) {
-      backendToggle.hidden = !session;
+      // Lantern is unwired from the live product for now (2026-08-12): every
+      // campaign runs on the reference engine, so there's nothing to toggle.
+      // Revert this line to `!session` to bring the switcher back.
+      backendToggle.hidden = true;
       setText("#engine-backend-label", state.engineBackend === "reference" ? "Reference" : "Lantern");
     }
     if (!session) return;

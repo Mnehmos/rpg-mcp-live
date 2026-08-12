@@ -469,17 +469,25 @@ app.post("/api/campaigns", async (request, response) => {
     response.status(400).json({ code: "invalid_campaign", error: "A campaign needs a name, premise, setting, and tone." });
     return;
   }
+  // Lantern is unwired from campaign creation for now (2026-08-12): every new
+  // campaign is created directly on the reference engine so players never
+  // land on a Lantern campaign that then needs a manual "switch engine"
+  // detour. Existing Lantern campaigns already in an account keep working
+  // unchanged (see listAllCampaigns/getAnyCampaign) — nothing here touches
+  // them.
+  const adapter = requireReferenceAdapter(response);
+  if (!adapter) return;
   try {
-    const result = await engineClient.createCampaign(userId, userId, parsed.data);
+    const result = await adapter.createCampaign(userId, userId, parsed.data);
     response.status(201).json({
       session: result.campaign,
-      state: result.state,
+      state: null,
       campaign: result.campaign,
-      campaigns: await engineClient.listCampaigns(userId, userId),
+      campaigns: await listAllCampaigns(userId),
       subscription: store.getSubscription(userId),
     });
   } catch (error) {
-    sendWebEngineError(response, error);
+    sendReferenceEngineError(response, error);
   }
 });
 

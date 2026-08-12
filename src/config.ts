@@ -25,10 +25,10 @@ const openRouterSiteUrl = readString("OPENROUTER_SITE_URL");
 const openRouterAppName = readString("OPENROUTER_APP_NAME", "Lantern Table");
 const engineUrl = readString("ENGINE_URL", "http://localhost:3100");
 const engineSharedSecret = readString("ENGINE_SHARED_SECRET");
-const engineTimeoutMs = Number.parseInt(readString("ENGINE_TIMEOUT_MS", "30_000"), 10);
+const engineTimeoutMs = Number.parseInt(readString("ENGINE_TIMEOUT_MS", "30000"), 10);
 const referenceEngineUrl = readString("REFERENCE_ENGINE_URL");
 const referenceEngineToken = readString("REFERENCE_ENGINE_TOKEN");
-const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TIMEOUT_MS", "30_000"), 10);
+const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TIMEOUT_MS", "30000"), 10);
 
 if (Boolean(clerkPublishableKey) !== Boolean(clerkSecretKey)) {
   console.warn("Clerk is partially configured; both Clerk keys are required for server auth.");
