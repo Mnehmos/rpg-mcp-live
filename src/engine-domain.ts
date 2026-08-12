@@ -16140,6 +16140,27 @@ function rollAbilityScore(): { dice: [number, number, number, number]; dropped: 
   };
 }
 
+/**
+ * Rolls six ability-score sets (4d6, drop lowest) and shapes them into the
+ * same abilityScoreDraft record resolveCharacterRollStats stores on Lantern
+ * campaigns. Exported standalone (no LanternCampaignState/commit involved)
+ * so the reference-engine backend — which has no equivalent server-side
+ * concept, per ADR-H13 — can offer the same rolling mechanic purely
+ * client-session-side: the draft is handed back in the HTTP response and
+ * never persisted, since character_create on that backend already accepts
+ * abilityScores directly rather than referencing a stored draft id.
+ */
+export function rollAbilityScoreDraft(method: "rolled" = "rolled") {
+  const rolls = Array.from({ length: 6 }, rollAbilityScore);
+  return {
+    id: randomUUID(),
+    method,
+    scores: rolls.map((roll) => roll.total),
+    rolls,
+    createdAt: new Date().toISOString(),
+  } as const;
+}
+
 function resolveCharacterRollStats(
   state: LanternCampaignState,
   context: RequestContext,
@@ -16154,14 +16175,7 @@ function resolveCharacterRollStats(
     return rejection(state, tool, "ability_scores_already_rolled", "Your ability scores are already rolled. Assign those six values, or start a new campaign to roll again.");
   }
 
-  const rolls = Array.from({ length: 6 }, rollAbilityScore);
-  const draft = {
-    id: randomUUID(),
-    method: command.method,
-    scores: rolls.map((roll) => roll.total),
-    rolls,
-    createdAt: new Date().toISOString(),
-  } as const;
+  const draft = rollAbilityScoreDraft(command.method);
   const next = cloneCampaign(state);
   next.characterCreation = { abilityScoreDraft: draft };
   return commit(
@@ -16173,7 +16187,7 @@ function resolveCharacterRollStats(
     "The engine rolled six ability scores using 4d6, dropping the lowest die. Assign each result to an ability before entering the world.",
     { abilityScoreDraft: draft },
     "ability_scores_rolled",
-    rolls.flatMap((roll) => roll.dice.map((value) => ({ kind: "ability_score_die", value, sides: 6 }))),
+    draft.rolls.flatMap((roll) => roll.dice.map((value) => ({ kind: "ability_score_die", value, sides: 6 }))),
     [],
     [{ path: "/characterCreation/abilityScoreDraft", before: state.characterCreation.abilityScoreDraft, after: draft }]
   );

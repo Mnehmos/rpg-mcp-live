@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { deploymentIdentity } from "./deployment-identity.js";
 import { EngineHttpError, LanternEngineClient } from "./engine-client.js";
 import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema, engineProductionRoomEnterRequestSchema } from "./engine-contracts.js";
+import { rollAbilityScoreDraft } from "./engine-domain.js";
 import { productionRoomNarrationReleaseRequestSchema } from "./engine-production-room.js";
 import { orchestrationDecisionRequestSchema } from "./engine-orchestration.js";
 import { gameActionSchema } from "./game.js";
@@ -445,7 +446,13 @@ app.get("/api/character-options", async (request, response) => {
   if (!userId) return;
   try {
     const campaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : undefined;
-    response.json({ options: await engineClient.getCharacterOptions(userId, userId, campaignId) });
+    // A reference-backend campaignId only exists on the reference engine —
+    // Lantern has never heard of it, so passing it through 404s there. The
+    // reference backend doesn't validate against per-campaign content packs
+    // anyway (see the character-create handler below), so the generic/
+    // unscoped catalog is exactly what it needs.
+    const lanternCampaignId = campaignId && resolveEngineBackend(userId, campaignId) === "reference" ? undefined : campaignId;
+    response.json({ options: await engineClient.getCharacterOptions(userId, userId, lanternCampaignId) });
   } catch (error) {
     sendWebEngineError(response, error);
   }
@@ -715,6 +722,23 @@ app.post("/api/campaigns/:campaignId/character/roll-stats", async (request, resp
     return;
   }
   try {
+    if (resolveEngineBackend(userId, request.params.campaignId) === "reference") {
+      const adapter = requireReferenceAdapter(response);
+      if (!adapter) return;
+      // The reference engine has no rolling/draft concept of its own (ADR-H13):
+      // character_create there already takes abilityScores directly rather
+      // than referencing a stored draft id, so the roll only needs to exist
+      // for this one response — the frontend holds it client-side until the
+      // character is actually submitted.
+      const draft = rollAbilityScoreDraft("rolled");
+      const { campaign } = await adapter.getCampaign(userId, userId, request.params.campaignId);
+      response.json({
+        session: campaign,
+        state: { characterCreation: { abilityScoreDraft: draft } },
+        subscription: store.getSubscription(userId),
+      });
+      return;
+    }
     const result = await engineClient.executeToolCall(userId, userId, request.params.campaignId, {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
@@ -727,6 +751,10 @@ app.post("/api/campaigns/:campaignId/character/roll-stats", async (request, resp
     }
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
+    if (error instanceof ReferenceEngineNotRoutedError) {
+      sendReferenceEngineError(response, error);
+      return;
+    }
     sendWebEngineError(response, error);
   }
 });
