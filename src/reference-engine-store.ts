@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-export type EngineBackend = "lantern" | "reference";
+export type EngineBackend = "reference";
 
 export interface StoredLogMessage {
   id: string;
@@ -56,7 +56,7 @@ export class ReferenceEngineStore {
       CREATE TABLE IF NOT EXISTS reference_engine_sessions (
         user_id TEXT NOT NULL,
         campaign_id TEXT NOT NULL,
-        backend TEXT NOT NULL DEFAULT 'lantern',
+        backend TEXT NOT NULL DEFAULT 'reference',
         reference_world_id TEXT,
         reference_party_id TEXT,
         reference_session_id TEXT,
@@ -162,7 +162,7 @@ export class ReferenceEngineStore {
   }
 
   public resolveBackend(userId: string, campaignId: string): EngineBackend {
-    return this.getRouting(userId, campaignId)?.backend ?? "lantern";
+    return this.getRouting(userId, campaignId)?.backend ?? "reference";
   }
 
   public setBackend(userId: string, campaignId: string, backend: EngineBackend): void {
@@ -271,7 +271,7 @@ export class ReferenceEngineStore {
 
 function mapRouting(row: RoutingRow): ReferenceEngineRouting {
   return {
-    backend: row.backend,
+    backend: "reference",
     referenceWorldId: row.reference_world_id,
     referencePartyId: row.reference_party_id,
     referenceSessionId: row.reference_session_id,

@@ -65,6 +65,24 @@ export class ReferenceEngineClient {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
   }
 
+  public async health(): Promise<Record<string, unknown>> {
+    const healthUrl = this.baseUrl.replace(/\/mcp$/i, "/health");
+    const response = await fetch(healthUrl, {
+      method: "GET",
+      headers: { authorization: `Bearer ${this.options.authToken}` },
+      signal: this.options.timeoutMs > 0 ? AbortSignal.timeout(this.options.timeoutMs) : undefined,
+    });
+    const raw = await response.text();
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      payload = { raw };
+    }
+    if (!response.ok) throw new ReferenceEngineError(response.status);
+    return payload;
+  }
+
   public async callTool(name: string, args: Record<string, unknown>): Promise<ReferenceToolCallResult> {
     await this.ensureInitialized();
     const response = await this.send("tools/call", { name, arguments: args });

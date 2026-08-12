@@ -12,9 +12,9 @@ function createTestStore(): ReferenceEngineStore {
 }
 
 describe("ReferenceEngineStore", () => {
-  it("defaults to the lantern backend when no routing row exists", () => {
+  it("defaults to the reference backend when no routing row exists", () => {
     const store = createTestStore();
-    expect(store.resolveBackend("user-1", "campaign-1")).toBe("lantern");
+    expect(store.resolveBackend("user-1", "campaign-1")).toBe("reference");
     expect(store.getRouting("user-1", "campaign-1")).toBeNull();
   });
 
@@ -55,22 +55,22 @@ describe("ReferenceEngineStore", () => {
   it("keeps routing isolated per user and per campaign", () => {
     const store = createTestStore();
     store.setBackend("user-1", "campaign-1", "reference");
-    store.setBackend("user-1", "campaign-2", "lantern");
+    store.setBackend("user-1", "campaign-2", "reference");
     store.setBackend("user-2", "campaign-1", "reference");
     store.setReferenceIds("user-1", "campaign-1", { worldId: "world-user1-camp1" });
     store.setReferenceIds("user-2", "campaign-1", { worldId: "world-user2-camp1" });
 
     expect(store.resolveBackend("user-1", "campaign-1")).toBe("reference");
-    expect(store.resolveBackend("user-1", "campaign-2")).toBe("lantern");
+    expect(store.resolveBackend("user-1", "campaign-2")).toBe("reference");
     expect(store.getRouting("user-1", "campaign-1")?.referenceWorldId).toBe("world-user1-camp1");
     expect(store.getRouting("user-2", "campaign-1")?.referenceWorldId).toBe("world-user2-camp1");
   });
 
-  it("removes a routing row on delete, reverting to the lantern default", () => {
+  it("removes a routing row on delete, reverting to the reference default", () => {
     const store = createTestStore();
     store.setBackend("user-1", "campaign-1", "reference");
     store.deleteRouting("user-1", "campaign-1");
-    expect(store.resolveBackend("user-1", "campaign-1")).toBe("lantern");
+    expect(store.resolveBackend("user-1", "campaign-1")).toBe("reference");
   });
 
   it("stores the campaign profile and starts version at 0", () => {

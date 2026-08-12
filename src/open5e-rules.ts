@@ -387,15 +387,18 @@ export function copperFromDenominations(gold: number, silver: number, copper: nu
 export function buildSkillSheet(
   abilities: Record<EngineAbility, number>,
   proficientSkills: string[],
-  level: number
+  level: number,
+  expertiseSkills: string[] = []
 ): Record<string, EngineSkill> {
   const bonus = proficiencyBonus(level);
   return Object.fromEntries(
     Object.entries(OPEN5E_SKILLS).map(([skill, ability]) => [skill, {
         ability,
         proficient: proficientSkills.includes(skill),
-        expertise: false,
-        bonus: abilityModifier(abilities[ability]) + (proficientSkills.includes(skill) ? bonus : 0),
+        expertise: expertiseSkills.includes(skill),
+        bonus: abilityModifier(abilities[ability])
+          + (proficientSkills.includes(skill) ? bonus : 0)
+          + (expertiseSkills.includes(skill) ? bonus : 0),
       }])
   ) as Record<string, EngineSkill>;
 }

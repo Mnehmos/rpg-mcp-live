@@ -35,7 +35,7 @@ jobs:
       (github.event_name == 'status' &&
        github.event.state == 'success' &&
        github.event.sender.login == 'railway-app[bot]' &&
-       (github.event.context == 'RPG MCP Live - lantern-engine' ||
+       (github.event.context == 'RPG MCP Live - mnehmos-rpg-mcp' ||
         github.event.context == 'RPG MCP Live - rpg-mcp-live'))
     env:
       SHA: ${{ github.event.deployment.sha || github.event.sha }}
@@ -181,13 +181,13 @@ jobs:
       - name: Read engine health
         if: env.SKIP != 'true'
         env:
-          ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
+          REFERENCE_ENGINE_STAGING_URL: ${{ vars.REFERENCE_ENGINE_STAGING_URL }}
         run: |
           for i in $(seq 1 60); do
-            resp=$(curl -fsS "$ENGINE_STAGING_URL/health" || true)
+            resp=$(curl -fsS "$REFERENCE_ENGINE_STAGING_URL/health" || true)
             if echo "$resp" | jq -e \
               --arg sha "$SHA" \
-              '.status == "ok" and .service == "lantern-engine" and .environment == "staging" and .deployment.commitSha == $sha' >/dev/null; then
+              '.status == "ok" and .service == "rpg-mcp" and .environment == "staging" and .deployment.commitSha == $sha' >/dev/null; then
               printf '%s\n' "$resp" > engine-health.json
               echo "$resp" | jq '{status,service,environment,rules,toolCount}'
               exit 0
@@ -207,10 +207,10 @@ jobs:
             if echo "$resp" | jq -e \
               --arg sha "$SHA" \
               '.status == "ok" and .service == "rpg-mcp-live-web" and .environment == "staging" and .deployment.commitSha == $sha and
-               .integrations.lanternEngine == true and .engine.service == "lantern-engine" and
+                .integrations.referenceEngine == true and .engine.service == "rpg-mcp" and
                .engine.environment == "staging" and .engine.deployment.commitSha == $sha' >/dev/null; then
               printf '%s\n' "$resp" > web-health.json
-              echo "$resp" | jq '{status,service,environment,integrations:{lanternEngine:.integrations.lanternEngine}}'
+              echo "$resp" | jq '{status,service,environment,integrations:{referenceEngine:.integrations.referenceEngine}}'
               exit 0
             fi
             sleep 5
@@ -235,7 +235,7 @@ jobs:
       - name: Write staging promotion evidence
         if: env.SKIP != 'true'
         env:
-          ENGINE_STAGING_URL: ${{ vars.ENGINE_STAGING_URL }}
+          REFERENCE_ENGINE_STAGING_URL: ${{ vars.REFERENCE_ENGINE_STAGING_URL }}
           WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
         run: |
           jq -n \
@@ -244,9 +244,9 @@ jobs:
             --arg ref "$DEPLOYMENT_REF" \
             --arg environment "$DEPLOYMENT_ENVIRONMENT" \
             --arg creator "$DEPLOYMENT_CREATOR" \
-            --arg engineUrl "$ENGINE_STAGING_URL" \
-            --arg webUrl "$WEB_STAGING_URL" \
-            '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,ref:$ref,environment:$environment,creator:$creator,engineHealth:"pass",webHealth:"pass",invariants:"pass",evaluation:"pass",productionRef:$sha,engineUrl:$engineUrl,webUrl:$webUrl}' \
+             --arg referenceEngineUrl "$REFERENCE_ENGINE_STAGING_URL" \
+             --arg webUrl "$WEB_STAGING_URL" \
+             '{controller:"railway-native-github-autodeploy",deploymentIds:($ids|split(",")),sha:$sha,ref:$ref,environment:$environment,creator:$creator,referenceEngineHealth:"pass",webHealth:"pass",invariants:"pass",evaluation:"pass",productionRef:$sha,referenceEngineUrl:$referenceEngineUrl,webUrl:$webUrl}' \
             > staging-promotion-evidence.json
 
       - name: Upload staging promotion evidence

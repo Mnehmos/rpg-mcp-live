@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { createInitialCampaign, hydrateCharacter, toSessionView } from "./engine-domain.js";
-import { abilityModifier, open5eCharacterContentKey, open5eClassSourceKey, OPEN5E_RULES_PACK_HASH } from "./open5e-rules.js";
+import { abilityModifier, buildSavingThrows, buildSkillSheet, open5eCharacterContentKey, open5eClassSourceKey, OPEN5E_RULES_PACK_HASH } from "./open5e-rules.js";
 import {
   engineCampaignProfileSchema,
   engineCharacterDetailsSchema,
   type EngineCampaignCreate,
   type EngineCampaignDeletionResult,
   type EngineCampaignProfile,
+  type EngineAbility,
   type EngineCharacterDetails,
   type EngineContentReference,
   type EngineInventoryItem,
@@ -74,6 +75,13 @@ interface ReferenceCharacterRecord {
   currency?: { copper?: number };
   background?: string;
   alignment?: string;
+  skillProficiencies?: string[];
+  saveProficiencies?: string[];
+  expertise?: string[];
+  armorProficiencies?: string[];
+  weaponProficiencies?: string[];
+  toolProficiencies?: string[];
+  languages?: string[];
 }
 
 interface ReferenceNoteRecord {
@@ -135,8 +143,9 @@ function mapReferenceInventory(entries: ReferenceInventoryEntry[]): EngineInvent
  */
 function resolveContentRef(kind: "class" | "species", name: string): EngineContentReference | null {
   try {
+    const normalizedName = name.trim().toLocaleLowerCase("en-US").replace(/^srd[-_:]/, "");
     const sourceKey =
-      kind === "class" ? open5eClassSourceKey(name) : `srd_${name.trim().toLocaleLowerCase("en-US").replaceAll(" ", "-")}`;
+      kind === "class" ? open5eClassSourceKey(normalizedName) : `srd_${normalizedName.replaceAll(" ", "-")}`;
     return { contentKey: open5eCharacterContentKey(kind, sourceKey), packHash: OPEN5E_RULES_PACK_HASH };
   } catch {
     return null;
@@ -406,7 +415,16 @@ export class ReferenceEngineAdapter {
       name: string;
       species?: string;
       className?: string;
+      background?: string;
+      alignment?: string;
       abilityScores?: Record<string, number>;
+      skillProficiencies?: string[];
+      saveProficiencies?: string[];
+      expertise?: string[];
+      armorProficiencies?: string[];
+      weaponProficiencies?: string[];
+      toolProficiencies?: string[];
+      languages?: string[];
     };
     const sessionId = referenceSessionId(accountId, campaignId);
     const result = await this.client.callTool("character_manage", {
@@ -414,8 +432,17 @@ export class ReferenceEngineAdapter {
       name: args.name,
       race: args.species ?? "human",
       class: args.className ?? "fighter",
+      background: args.background,
+      alignment: args.alignment,
       characterType: "pc",
       stats: args.abilityScores,
+      skillProficiencies: args.skillProficiencies,
+      saveProficiencies: args.saveProficiencies,
+      expertise: args.expertise,
+      armorProficiencies: args.armorProficiencies,
+      weaponProficiencies: args.weaponProficiencies,
+      toolProficiencies: args.toolProficiencies,
+      languages: args.languages,
       sessionId,
     });
     const character = result.payload as ReferenceCharacterRecord;
@@ -633,6 +660,12 @@ export class ReferenceEngineAdapter {
         background: character.background ?? state.character.background,
         alignment: character.alignment ?? state.character.alignment,
       };
+      state.character.skills = buildSkillSheet(
+        state.character.abilities,
+        character.skillProficiencies ?? [],
+        character.level,
+        character.expertise ?? []
+      );
 
       const inventoryResult = await this.client.callTool("inventory_manage", {
         action: "get_detailed",
@@ -661,7 +694,20 @@ export class ReferenceEngineAdapter {
       clearable.hitDie = undefined;
       clearable.size = undefined;
       clearable.speed = undefined;
-      clearable.proficiencies = undefined;
+      const hasReferenceProficiencyData = Boolean(
+        (character.armorProficiencies?.length ?? 0)
+        || (character.weaponProficiencies?.length ?? 0)
+        || (character.toolProficiencies?.length ?? 0)
+        || (character.languages?.length ?? 0)
+      );
+      clearable.proficiencies = hasReferenceProficiencyData
+        ? {
+            armor: character.armorProficiencies ?? [],
+            weapons: character.weaponProficiencies ?? [],
+            tools: character.toolProficiencies ?? [],
+            languages: character.languages ?? [],
+          }
+        : undefined;
       state.character.features = [];
 
       // hydrateCharacter derives saves/skills/proficiencyBonus/size/speed/
@@ -675,6 +721,21 @@ export class ReferenceEngineAdapter {
       const authoritativeHp = state.character.hp;
       const authoritativeMaxHp = state.character.maxHp;
       state.character = hydrateCharacter(state.character);
+      if (character.saveProficiencies?.length) {
+        state.character.savingThrows = buildSavingThrows(
+          state.character.abilities,
+          character.saveProficiencies as EngineAbility[],
+          state.character.level
+        );
+      }
+      if (hasReferenceProficiencyData) {
+        state.character.proficiencies = {
+          armor: character.armorProficiencies ?? [],
+          weapons: character.weaponProficiencies ?? [],
+          tools: character.toolProficiencies ?? [],
+          languages: character.languages ?? [],
+        };
+      }
       state.character.ac = authoritativeAc;
       state.character.hp = authoritativeHp;
       state.character.maxHp = authoritativeMaxHp;

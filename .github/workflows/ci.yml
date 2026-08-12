@@ -48,5 +48,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Two-service HTTP smoke
+      - name: Reference-engine HTTP smoke
         run: npm run smoke:http

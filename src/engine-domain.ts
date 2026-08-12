@@ -17229,6 +17229,9 @@ export function hydrateCharacter(character: EngineCharacter): EngineCharacter {
   const proficientSkills = Object.entries(character.skills ?? {})
     .filter(([, skill]) => skill.proficient)
     .map(([skill]) => skill);
+  const expertiseSkills = Object.entries(character.skills ?? {})
+    .filter(([, skill]) => skill.expertise)
+    .map(([skill]) => skill);
   const skillNames = proficientSkills.length ? proficientSkills : defaultSkillProficiencies(classEngineKey);
   const hitDie = character.hitDie ?? classProfile?.hitDie ?? classPreset.hitDie;
   const maxHp = Math.max(1, hitDie * level + open5eAbilityModifier(abilities.con) * level);
@@ -17244,7 +17247,7 @@ export function hydrateCharacter(character: EngineCharacter): EngineCharacter {
   };
   character.proficiencyBonus = open5eProficiencyBonus(level);
   character.savingThrows = buildSavingThrows(abilities, classProfile?.savingThrows ?? classPreset.savingThrows, level);
-  character.skills = buildSkillSheet(abilities, skillNames, level);
+  character.skills = buildSkillSheet(abilities, skillNames, level, expertiseSkills);
   character.size = character.size ?? speciesProfile?.size ?? speciesPreset.size;
   character.speed = character.speed ?? speciesProfile?.speedFeet ?? speciesPreset.speed;
   character.hitDie = hitDie;

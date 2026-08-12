@@ -340,33 +340,40 @@ function formatModifier(value: number): string {
   return value >= 0 ? `+${value}` : `${value}`;
 }
 
-/**
- * Renders the fully SRD-derived character sheet (saves/skills/proficiency
- * bonus/hit die — the fields hydrateCharacter computes for the player-facing
- * view but the reference engine's own raw character_manage record doesn't
- * track) as plain text context for the model, so it has accurate answers
- * without needing to guess or report a gap that isn't really there.
- */
+/** Renders the same server-owned character projection that the UI receives. */
 function formatCharacterSheetContext(character: EngineCharacterView): string {
   const saves = ABILITY_ORDER.map((ability) => {
     const proficient = character.derived.savingThrowProficiencies.includes(ability);
     return `${ability.toUpperCase()} ${formatModifier(character.savingThrows[ability])}${proficient ? " (proficient)" : ""}`;
   }).join(", ");
-  const proficientSkills = Object.entries(character.skills)
-    .filter(([, skill]) => skill.proficient || skill.expertise)
-    .map(([name, skill]) => `${name}${skill.expertise ? " (expertise)" : ""}`)
+  const skills = Object.entries(character.skills)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, skill]) => `${name} ${formatModifier(skill.bonus)}${skill.proficient ? " (proficient)" : ""}${skill.expertise ? " (expertise)" : ""}`)
     .join(", ");
   const abilities = ABILITY_ORDER.map(
     (ability) => `${ability.toUpperCase()} ${character.abilities[ability]} (${formatModifier(character.abilityModifiers[ability])})`
   ).join(", ");
+  const inventory = character.inventory
+    .map((item) => `${item.authoredDefinition?.name ?? item.id} x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
+    .join(", ");
+  const currency = character.derived.currencyBreakdown;
+  const spells = character.spellcasting
+    ? `ability ${character.spellcasting.ability}, save DC ${character.spellcasting.spellSaveDc}, attack ${formatModifier(character.spellcasting.spellAttackBonus)}, known ${character.spellcasting.knownSpells.map((spell) => spell.name).join(", ") || "none"}`
+    : "none";
 
   return [
-    "CURRENT CHARACTER SHEET (authoritative — already fully derived from SRD rules; trust this over anything a character_manage tool call returns, which tracks raw mechanical state but not proficiency flags):",
+    "CURRENT CHARACTER SHEET (authoritative server projection of reference-engine state plus pinned rules derivation; do not infer missing fields):",
     `${character.name} — ${character.species} ${character.className}, level ${character.level}, background ${character.background}, alignment ${character.alignment}.`,
-    `HP ${character.hp}/${character.maxHp} | AC ${character.ac} | Proficiency bonus ${formatModifier(character.proficiencyBonus)} | Hit die d${character.hitDie}`,
+    `HP ${character.hp}/${character.maxHp} | AC ${character.ac} | Proficiency bonus ${formatModifier(character.proficiencyBonus)} | Hit die d${character.hitDie} | Size ${character.size} | Speed ${character.speed} ft`,
     `Ability scores: ${abilities}`,
     `Saving throws: ${saves}`,
-    `Skill proficiencies: ${proficientSkills || "none"}`,
+    `Skills: ${skills || "none"}`,
+    `Proficiencies: armor ${character.proficiencies.armor.join(", ") || "none"}; weapons ${character.proficiencies.weapons.join(", ") || "none"}; tools ${character.proficiencies.tools.join(", ") || "none"}; languages ${character.proficiencies.languages.join(", ") || "none"}`,
+    `Features: ${character.features.join(", ") || "none"}`,
+    `Derived: initiative ${formatModifier(character.derived.initiative)} | passive perception ${character.derived.passivePerception} | carry ${character.derived.carryWeight}/${character.derived.carryCapacity} lb | currency ${currency.gold} gp, ${currency.silver} sp, ${currency.copper} cp`,
+    `Inventory: ${inventory || "none"}`,
+    `Spellcasting: ${spells}`,
+    `Conditions: ${character.conditions.join(", ") || "none"}`,
   ].join("\n");
 }
 

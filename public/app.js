@@ -1466,14 +1466,6 @@ import { projectCustodyActors } from "./custody-status.mjs";
       state.characterOptionsCampaignId = null;
     }
     renderOnboarding(payload || {});
-    var backendToggle = $("#engine-backend-toggle");
-    if (backendToggle) {
-      // Lantern is unwired from the live product for now (2026-08-12): every
-      // campaign runs on the reference engine, so there's nothing to toggle.
-      // Revert this line to `!session` to bring the switcher back.
-      backendToggle.hidden = true;
-      setText("#engine-backend-label", state.engineBackend === "reference" ? "Reference" : "Lantern");
-    }
     if (!session) return;
     if (session.phase === "character_creation") loadCharacterOptions(session.id);
     var snapshot = payload.state || state.engineState || {};
@@ -2652,23 +2644,6 @@ import { projectCustodyActors } from "./custody-status.mjs";
     document.querySelectorAll('[data-action="open-auth"]').forEach(function (button) { button.addEventListener("click", openAuth); });
     document.querySelectorAll('[data-action="close-auth"]').forEach(function (button) { button.addEventListener("click", closeAuth); });
     document.querySelectorAll('[data-action="open-attribution"]').forEach(function (button) { button.addEventListener("click", openAttribution); });
-    document.querySelectorAll('[data-action="toggle-engine-backend"]').forEach(function (button) {
-      button.addEventListener("click", function () {
-        if (!state.session) return;
-        var nextBackend = state.engineBackend === "reference" ? "lantern" : "reference";
-        requestJson("/api/campaigns/" + encodeURIComponent(state.session.id) + "/engine-backend", {
-          method: "POST",
-          body: JSON.stringify({ backend: nextBackend }),
-        }).then(function (result) {
-          if (!result.response.ok) {
-            showToast((result.data && result.data.error) || "Could not switch engine backend.");
-            return;
-          }
-          showToast("Switched to the " + (nextBackend === "reference" ? "reference" : "lantern") + " engine.");
-          refreshSession();
-        });
-      });
-    });
     document.querySelectorAll('[data-action="close-attribution"]').forEach(function (button) { button.addEventListener("click", closeAttribution); });
     document.querySelectorAll('[data-action="close-delete-campaign"]').forEach(function (button) { button.addEventListener("click", closeDeleteCampaign); });
     document.querySelectorAll('[data-action="confirm-delete-campaign"]').forEach(function (button) { button.addEventListener("click", deleteCampaign); });
