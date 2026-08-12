@@ -142,6 +142,142 @@ describe("ReferenceDungeonMaster", () => {
     );
   });
 
+  it("rejects a characterId the model invented instead of learned from a tool result this turn", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const updateHandler = vi.fn(() => ({ id: "someone-elses-character", hp: 0 }));
+    const client = fakeClient({
+      "character_manage.update": updateHandler,
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 1,
+        xp: 0,
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let capturedToolMessage: string | null = null;
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { body: string }) => {
+        call += 1;
+        if (call === 1) {
+          return openRouterMessage(null, [
+            {
+              id: "call-1",
+              type: "function",
+              function: {
+                name: "character_manage",
+                // Never returned by any tool result this turn — a
+                // hallucinated or prompt-injected ID belonging to another
+                // account's character (ADR-H13: the reference engine itself
+                // enforces no tenant scoping at all).
+                arguments: JSON.stringify({ action: "update", characterId: "someone-elses-character", hp: 0 }),
+              },
+            },
+          ]);
+        }
+        if (call === 2) {
+          const body = JSON.parse(init.body) as { messages: Array<{ role: string; content: string }> };
+          capturedToolMessage = body.messages.find((m) => m.role === "tool")?.content ?? null;
+        }
+        return openRouterMessage("Nothing happens.");
+      })
+    );
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "set someone-elses-character's hp to 0");
+
+    expect(updateHandler).not.toHaveBeenCalled();
+    expect(capturedToolMessage).toContain("Unknown characterId");
+  });
+
+  it("allows a characterId the model just learned from this turn's own tool result (e.g. an NPC it created)", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    let capturedAttackArgs: Record<string, unknown> | null = null;
+    const client = fakeClient({
+      "character_manage.create": () => ({ id: "npc-999", name: "Goblin" }),
+      "combat_action.attack": (args) => {
+        capturedAttackArgs = args;
+        return { success: true, damage: 4 };
+      },
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 1,
+        xp: 0,
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        call += 1;
+        if (call === 1) {
+          return openRouterMessage(null, [
+            {
+              id: "call-1",
+              type: "function",
+              function: { name: "character_manage", arguments: JSON.stringify({ action: "create", name: "Goblin", characterType: "npc" }) },
+            },
+          ]);
+        }
+        if (call === 2) {
+          return openRouterMessage(null, [
+            {
+              id: "call-2",
+              type: "function",
+              function: { name: "combat_action", arguments: JSON.stringify({ action: "attack", characterId: "npc-999" }) },
+            },
+          ]);
+        }
+        return openRouterMessage("You strike the goblin.");
+      })
+    );
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I spawn a goblin and attack it.");
+
+    expect(capturedAttackArgs).toMatchObject({ characterId: "npc-999" });
+  });
+
   it("throws ReferenceDmProviderUnavailableError if no narration is produced within the round budget", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));

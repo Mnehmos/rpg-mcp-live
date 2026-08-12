@@ -76,6 +76,31 @@ describe("ReferenceEngineToolCatalog", () => {
     expect(tool?.function.name).toBe("character_manage");
   });
 
+  it("converts an unrecognized field type (e.g. the reference engine's 'any') to an empty schema instead of an invalid JSON Schema type", async () => {
+    const COMBAT_MANAGE_SCHEMA = {
+      toolName: "combat_manage",
+      description: "Manage combat.",
+      inputSchema: {
+        action: { type: "string", description: "Action" },
+        participants: { type: "array", itemType: { type: "any" }, optional: true },
+        terrain: { type: "any", optional: true },
+      },
+    };
+    const client = fakeClient({ combat_manage: COMBAT_MANAGE_SCHEMA });
+    const catalog = new ReferenceEngineToolCatalog(client, ["combat_manage"]);
+
+    const [tool] = await catalog.getTools();
+
+    expect(tool.function.parameters.properties.terrain).toEqual({ description: undefined });
+    expect(tool.function.parameters.properties.participants).toMatchObject({
+      type: "array",
+      items: { description: undefined },
+    });
+    // Neither should contain a literal `type: "any"` anywhere — that's what
+    // OpenAI's function-calling validator rejects.
+    expect(JSON.stringify(tool.function.parameters)).not.toContain('"any"');
+  });
+
   it("returns undefined from getTool for a name not in the catalog", async () => {
     const client = fakeClient({ character_manage: CHARACTER_MANAGE_SCHEMA });
     const catalog = new ReferenceEngineToolCatalog(client, ["character_manage"]);

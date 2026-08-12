@@ -68,6 +68,8 @@ export interface OpenRouterToolDefinition {
   };
 }
 
+const JSON_SCHEMA_TYPES = new Set(["string", "number", "integer", "boolean", "array", "object", "null"]);
+
 function convertField(field: ReferenceSchemaField): Record<string, unknown> {
   if (field.values) {
     return { type: "string", enum: field.values, description: field.description };
@@ -89,6 +91,16 @@ function convertField(field: ReferenceSchemaField): Record<string, unknown> {
     return { type: "object", description: field.description, properties, required };
   }
   const jsonType = field.type === "enum" ? "string" : field.type;
+  if (!JSON_SCHEMA_TYPES.has(jsonType)) {
+    // The reference engine's schema reporter has no JSON Schema equivalent
+    // for its own "any" fields (e.g. combat_manage's terrain/participants/
+    // savingThrow, backed by z.any()). Passing that through as a literal
+    // `type: "any"` gets the whole tool definition rejected by OpenAI's
+    // function-calling validator ("'any' is not valid under any of the
+    // given schemas"). An empty schema has no `type` constraint and is
+    // valid JSON Schema for "accepts anything".
+    return { description: field.description };
+  }
   return { type: jsonType, description: field.description };
 }
 

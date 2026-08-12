@@ -130,6 +130,20 @@ export class ReferenceDungeonMaster {
     const fillOnlyArgs: Record<string, unknown> = {
       characterId: routing.referenceCharacterId ?? undefined,
     };
+    // The reference engine has zero tenant isolation (ADR-H13): any
+    // characterId the model supplies is otherwise forwarded as-is, and a
+    // prompt-injected or hallucinated ID belonging to a *different* account's
+    // character would be honored just as readily as this campaign's own.
+    // worldId/partyId close this for tools scoped by party, but characterId
+    // itself is deliberately fill-only (many tools target an NPC/enemy the
+    // model just created in this same session, not always the player's own
+    // PC) — so it can't be blanket-forced. Instead, only allow characterId
+    // values the model has actually learned from a real tool result in this
+    // turn (or the player's own bound character); anything else is rejected
+    // before it reaches the network, the same "engine validates, never
+    // trusts the model" discipline the adapter already applies elsewhere.
+    const knownCharacterIds = new Set<string>();
+    if (routing.referenceCharacterId) knownCharacterIds.add(routing.referenceCharacterId);
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
@@ -150,7 +164,7 @@ export class ReferenceDungeonMaster {
           const resultText =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.handleDocketTool(accountId, campaignId, call.function.name, parseArguments(call.function.arguments))
-              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs);
+              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds);
           messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
         }
       }
@@ -189,10 +203,20 @@ export class ReferenceDungeonMaster {
     rawArguments: string,
     toolName: string,
     forcedArgs: Record<string, unknown>,
-    fillOnlyArgs: Record<string, unknown>
+    fillOnlyArgs: Record<string, unknown>,
+    knownCharacterIds: Set<string>
   ): Promise<string> {
     const args = forceArgs(fillMissingArgs(parseArguments(rawArguments), fillOnlyArgs), forcedArgs);
+    const requestedCharacterId = args.characterId;
+    if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
+      return JSON.stringify({
+        error:
+          "Unknown characterId. Only use a characterId you learned from an actual tool result earlier in this turn " +
+          "(e.g. from create/list/get), or omit it to target your own character.",
+      });
+    }
     const result = await this.client.callTool(toolName, args);
+    collectCharacterIds(result.payload, knownCharacterIds);
     return result.text || JSON.stringify(result.payload ?? {});
   }
 
@@ -277,4 +301,27 @@ function forceArgs(args: Record<string, unknown>, forced: Record<string, unknown
     merged[key] = value;
   }
   return merged;
+}
+
+/**
+ * Recursively walks a tool result payload and records every string value
+ * found under a key literally named "id" (case-insensitive) into `sink` —
+ * this is how a characterId the model just legitimately learned (e.g. from
+ * character_manage create/list/get, or an NPC id embedded in a combat/party
+ * result) becomes usable in a later tool call this same turn. Deliberately
+ * broad (any "id" field, not just ones we know are characters) since the
+ * reference engine's response shapes aren't uniform across tools and an
+ * over-inclusive allowlist only widens what the model may legitimately
+ * reference, never what it may forge.
+ */
+function collectCharacterIds(value: unknown, sink: Set<string>, depth = 0): void {
+  if (depth > 6 || value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectCharacterIds(item, sink, depth + 1);
+    return;
+  }
+  for (const [key, sub] of Object.entries(value as Record<string, unknown>)) {
+    if (key.toLowerCase() === "id" && typeof sub === "string" && sub) sink.add(sub);
+    collectCharacterIds(sub, sink, depth + 1);
+  }
 }

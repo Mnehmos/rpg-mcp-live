@@ -469,6 +469,29 @@ app.post("/api/campaigns", async (request, response) => {
     response.status(400).json({ code: "invalid_campaign", error: "A campaign needs a name, premise, setting, and tone." });
     return;
   }
+  // Lantern is unwired from campaign creation for now (2026-08-12): when the
+  // reference engine is configured on this deployment, every new campaign is
+  // created directly on it so players never land on a Lantern campaign that
+  // then needs a manual "switch engine" detour. Existing Lantern campaigns
+  // already in an account keep working unchanged (see
+  // listAllCampaigns/getAnyCampaign) — nothing here touches them. Deployments
+  // without a reference engine configured (e.g. CI, local dev) still create
+  // on Lantern, same as before.
+  if (referenceEngineAdapter) {
+    try {
+      const result = await referenceEngineAdapter.createCampaign(userId, userId, parsed.data);
+      response.status(201).json({
+        session: result.campaign,
+        state: null,
+        campaign: result.campaign,
+        campaigns: await listAllCampaigns(userId),
+        subscription: store.getSubscription(userId),
+      });
+    } catch (error) {
+      sendReferenceEngineError(response, error);
+    }
+    return;
+  }
   try {
     const result = await engineClient.createCampaign(userId, userId, parsed.data);
     response.status(201).json({
