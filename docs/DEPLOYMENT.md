@@ -1,6 +1,6 @@
 # Deployment Handoff
 
-Status: S8/S9 and campaign-manager deletion flow deployed; legacy campaigns migrated and audited; authenticated browser acceptance pending  
+Status: reference-engine-only cutover candidate; paired reference service and web health must be verified together before production promotion  
 Date: 2026-08-07  
 Repository: `F:\Github\rpg mcp live`
 
@@ -30,7 +30,7 @@ Responsibilities:
 - Stripe Checkout, webhook state and billing portal;
 - content-source catalog and attribution rendering;
 - player-owned campaign list, create/open flow, and confirmation-gated deletion;
-- authenticated proxy to the private engine.
+- authenticated proxy to the reference engine.
 
 ## Reference engine service
 
