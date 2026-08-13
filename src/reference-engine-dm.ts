@@ -74,6 +74,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Never ask the player to provide a missing location, NPC, enemy, or situation merely because it has not been established. Invent a fitting one from the campaign profile, player intent, and current pressures, then commit it before narration.",
   "Do not wait for the engine to reject an absent fact and do not answer with a deterministic absence check. Treat every player intent as an invitation to author the next playable situation; inspect current state, make the creative decision, call the relevant tools, and keep the flow in-world.",
   "Use spatial_manage generate and move for places and player placement; npc_manage create or spawn_manage for NPCs and populated locations; combat_manage spawn_quick_enemy or spawn_manage for enemies and encounters; item_manage and inventory_manage for authored objects and possession; quest_manage for durable quests; and scene_manage set for the DM-authored shared scene frame.",
+  "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
   "For every turn that advances the shared fiction, commit the new or changed world facts through the appropriate engine tools, then commit the resulting DM scene with scene_manage action set using the player's character as a participant. Only after those tool results succeed may you narrate them.",
   "Be decisive and economical: use the smallest complete set of tool calls for the current turn, batch independent calls when possible, do not reread every continuity docket or rewrite unchanged dockets, and do not repeat a tool call after a successful result. Once the scene is committed, stop calling tools and narrate.",
@@ -332,7 +333,11 @@ export class ReferenceDungeonMaster {
     knownCharacterIds: Set<string>,
     tenant: TenantIdentity
   ): Promise<ReferenceToolOutcome> {
-    const args = forceArgs(fillMissingArgs(parseArguments(rawArguments), fillOnlyArgs), forcedArgs);
+    const parsedArgs = parseArguments(rawArguments);
+    const combatArgs = toolName === "combat_action"
+      ? fillMissingArgs(parsedArgs, { actorId: fillOnlyArgs.characterId })
+      : parsedArgs;
+    const args = forceArgs(fillMissingArgs(combatArgs, fillOnlyArgs), forcedArgs);
     const requestedCharacterId = args.characterId;
     if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
       const text = JSON.stringify({
@@ -464,6 +469,7 @@ function formatCharacterSheetContext(character: EngineCharacterView): string {
 
   return [
     "CURRENT CHARACTER SHEET (authoritative server projection of reference-engine state plus pinned rules derivation; do not infer missing fields):",
+    `Player character id: ${character.id} (use this exact id for combat participants and actorId; never invent another id).`,
     `${character.name} — ${character.species} ${character.className}, level ${character.level}, background ${character.background}, alignment ${character.alignment}.`,
     `HP ${character.hp}/${character.maxHp} | AC ${character.ac} | Proficiency bonus ${formatModifier(character.proficiencyBonus)} | Hit die d${character.hitDie} | Size ${character.size} | Speed ${character.speed} ft`,
     `Ability scores: ${abilities}`,
