@@ -1,7 +1,7 @@
 # Deployment Handoff
 
-Status: reference-engine-only cutover candidate; paired reference service and web health must be verified together before production promotion  
-Date: 2026-08-07  
+Status: reference-engine-only runtime deployed to staging and production; tenant-isolation hardening remains open
+Date: 2026-08-13
 Repository: `F:\Github\rpg mcp live`
 
 ## Railway project
@@ -11,14 +11,14 @@ Repository: `F:\Github\rpg mcp live`
 - Environment: production
 - Region: us-west2
 
-These identifiers and deployment records were refreshed during the 2026-08-07 release. Refresh them again before the next release.
+These identifiers and deployment records were refreshed during the 2026-08-13 reference-only cutover. Refresh them again before the next release.
 
 ## Public web service
 
 - Service: `rpg-mcp-live`
 - Service ID: `8dd2fefa-966f-4709-8476-2896876a28f7`
 - Public domain: https://rpg-mcp-live-production.up.railway.app
-- Current verified deployment: `11c55560-3d12-4815-9b13-eced61300469` (`SUCCESS`)
+- Current verified deployment: query Railway before release; the deployment ID changes per environment and manual redeploy.
 - Volume: `rpg-mcp-live-volume`
 - Recorded mount: `/app/data`
 - Start command: `npm run start:web`
@@ -37,6 +37,7 @@ Responsibilities:
 - Service: `mnehmos-rpg-mcp`
 - Service ID: `87690d39-ce48-44b7-8fbb-7f86b6d1f47e`
 - Private hostname: `mnehmos-rpg-mcp.railway.internal`
+- Staging service: `mnehmos-rpg-mcp-staging` (`62653549-7804-4ef9-8f9e-d44002246fff`)
 - Volume: `mnehmos-rpg-mcp-volume`, mounted at `/app/data`
 - Start command: `node dist/server/index.js --http`
 - Health path: `/health`
@@ -44,6 +45,8 @@ Responsibilities:
 - MCP path: `/mcp`
 
 This is the only gameplay backend. The web service reaches `http://mnehmos-rpg-mcp.railway.internal:3000/mcp` with `REFERENCE_ENGINE_TOKEN`. There is no Lantern engine service or backend switch.
+
+The reference engine main identity is `e16711f4b78ff23d20439ee1b6668eb6f0baae5a`. Staging uses the environment-specific private hostname for `mnehmos-rpg-mcp-staging`; do not use the production hostname from staging.
 
 ## Rules identities
 
@@ -159,6 +162,8 @@ Checkout success redirects are not entitlement proof. Keep the product in test m
 - A production-copy dry-run migrated 4/4 campaigns, preserved the 38 original-event digest exactly, passed `quick_check`, and resolved all 42 resulting events.
 
 ## Hosted release record and repeatable runbook
+
+The numbered S8 migration steps below are the historical Lantern-engine release record. They are retained as audit evidence and must not be executed against the current `mnehmos-rpg-mcp` service. Current releases use the paired reference-engine health checks and the protected GitHub/Railway flow described above.
 
 ### 1. Inspect without mutation - completed
 

@@ -27,6 +27,14 @@ The team pays a small porting cost up front, but gains explicit tenant context, 
 
 Golden-path success in the reference server is evidence for design, not proof of Lantern support. Reference defects are acceptance tests and guardrails, not an old-repository repair backlog.
 
+## Update, 2026-08-13: Reference-Only Hosted Runtime
+
+The 2026-08-11 A/B override was superseded by the reference-only cutover. `mnehmos-rpg-mcp` is now the only gameplay backend in Railway staging and production; `lantern-engine` is removed from both environments. `rpg-mcp-live` owns authentication, billing, the browser API, and the adapter/projection boundary.
+
+The current web path uses the reference engine for campaign, character, inventory, notes, and DM reads. The browser is presentation-only. The web service never uses browser state as model context, and the model never receives authority from prose.
+
+The old mitigation claim that the adapter alone closes the reference engine's context risk is no longer sufficient. The DM can call reference tools through the host client, and the reference engine still has global persistence assumptions. Tenant isolation is an explicit open hardening item. A future tenant-isolation change must add authenticated tenant context at the transport boundary, scope every tenant-owned repository query, and add cross-tenant negative tests before this ADR can be considered complete.
+
 ## Rejected alternatives
 
 - Deploy the reference server behind Railway: carries global state and unrestricted tools.
@@ -37,9 +45,8 @@ Golden-path success in the reference server is evidence for design, not proof of
 
 The first rejected alternative above — "deploy the reference server behind Railway: carries global state and unrestricted tools" — is exactly what is now deployed: `mnehmos-rpg-mcp` runs as a Railway service inside this project, and real campaigns can be routed to it for A/B comparison against lantern-engine (`src/reference-engine-*.ts`).
 
-This is a knowing override, not a quiet reversal. The risk this ADR named is real and was verified, not assumed: the reference engine's SQLite layer has no tenant/session scoping at all (confirmed by reading its storage layer), and `session_manage.initialize` will hand a caller "whichever world/party is first in the database" if IDs aren't passed explicitly. The mitigation is that **the reference engine is never called by anything except this one adapter** — real users only ever talk to Lantern's own REST API. `ReferenceEngineStore` (`src/reference-engine-store.ts`) is the single place account+campaign IDs are bound to reference-engine world/party/character IDs; the adapter always resolves through it and never accepts a client-supplied raw reference-engine ID, which closes the specific leak path this ADR was worried about without requiring any change to the reference engine itself.
+This is a knowing override, not a quiet reversal. The risk this ADR named is real and was verified, not assumed: the reference engine's SQLite layer has no tenant/session scoping at all (confirmed by reading its storage layer), and `session_manage.initialize` will hand a caller "whichever world/party is first in the database" if IDs aren't passed explicitly. The original A/B mitigation was not sufficient for the current runtime because the DM also calls reference tools through the host client. Tenant isolation is therefore an open hardening requirement, not a closed property of `ReferenceEngineStore`.
 
 The other two rejected alternatives — importing the whole reference runtime, and repairing every reference edge case first — remain rejected. Nothing about Lantern's own engine boundary changed: `lantern-engine` is still the default and primary backend; the reference engine is an opt-in, per-campaign alternative for comparison, not a replacement.
 
 What still carries the risk this ADR described, disclosed rather than hidden: campaigns routed to the reference backend inherit its documented gameplay bugs (see `docs/REFERENCE-ENGINE.md`'s "Behavioral evidence from the reference playtest") — rejected moves that still mutate persisted state, custom damage overrides bypassing character math, rewards that report success without applying. This is not a repaired reference server; it's the same one, used deliberately and narrowly.
-

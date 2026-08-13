@@ -3,9 +3,17 @@
 Status: accepted boundary  
 Date: 2026-08-06
 
+## Current Hosted Status (2026-08-13)
+
+The previous reference-only boundary has been deliberately overridden for the hosted runtime. `mnehmos-rpg-mcp` is now the deployed gameplay backend in staging and production. The web service calls it through the Streamable HTTP MCP endpoint and the browser receives a server-side projection of reference-engine state.
+
+This does not erase the risks documented below. Tenant isolation, authenticated per-user context, and a fully constrained tool facade remain hardening work. The reference engine's shared transport token authenticates the web service, not an individual player. Until that audit is complete, do not describe the reference engine as tenant-isolated merely because the web adapter binds account and campaign IDs locally.
+
+Currency and carrying capacity are reference-engine authority. The reference engine stores currency denominations and derives carrying capacity as `Strength * 15` pounds. The web adapter converts denominations to the host's copper projection for compatibility. The UI and DM must consume the same adapter projection; neither may retain Lantern shell defaults.
+
 ## Purpose
 
-F:\Github\mnehmos.rpg.mcp is the reference engine for Lantern. It tells the team what the game can feel like, which rules behaviors are worth preserving, and which edge cases must not be repeated. It is not the Lantern backend.
+F:\Github\mnehmos.rpg.mcp is the reference engine for Lantern. It tells the team what the game can feel like, which rules behaviors are worth preserving, and which edge cases must not be repeated. The current hosted deployment also runs this engine behind the web adapter; the original boundary language below is retained as historical design context and risk analysis.
 
 The relationship is:
 
