@@ -2,9 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import {
   composerSubmission,
   settleComposer,
+  shouldSubmitOnEnter,
 } from "./turn-composer.js";
 
 describe("turn composer", () => {
+  it("submits on plain Enter but preserves modified and composed input", () => {
+    expect(shouldSubmitOnEnter({ key: "Enter" })).toBe(true);
+    expect(shouldSubmitOnEnter({ key: "Enter", shiftKey: true })).toBe(false);
+    expect(shouldSubmitOnEnter({ key: "Enter", ctrlKey: true })).toBe(false);
+    expect(shouldSubmitOnEnter({ key: "Enter", isComposing: true })).toBe(false);
+    expect(shouldSubmitOnEnter({ key: "a" })).toBe(false);
+  });
+
   it("clears the successful turn and resets its counter", () => {
     const input = { value: "I distract the lanista.", maxLength: 2000 };
     const counter = { textContent: "23 / 2000" };

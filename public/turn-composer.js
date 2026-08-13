@@ -8,6 +8,18 @@ export function updateComposerCounter(input, counter) {
   if (input && counter) counter.textContent = input.value.length + " / " + input.maxLength;
 }
 
+export function shouldSubmitOnEnter(event) {
+  return Boolean(
+    event
+    && event.key === "Enter"
+    && !event.shiftKey
+    && !event.altKey
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.isComposing
+  );
+}
+
 export function settleComposer(input, counter, sent) {
   if (!sent) return false;
   input.value = "";
