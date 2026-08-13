@@ -72,7 +72,7 @@ interface ReferenceCharacterRecord {
   ac: number;
   level: number;
   xp: number;
-  currency?: { copper?: number };
+  currency?: { gold?: number; silver?: number; copper?: number };
   background?: string;
   alignment?: string;
   skillProficiencies?: string[];
@@ -150,6 +150,17 @@ function resolveContentRef(kind: "class" | "species", name: string): EngineConte
   } catch {
     return null;
   }
+}
+
+function referenceCurrencyToCopper(currency: ReferenceCharacterRecord["currency"]): number {
+  if (!currency) return 0;
+  if (currency.gold !== undefined || currency.silver !== undefined) {
+    return Math.max(0, Math.trunc(currency.gold ?? 0)) * 100
+      + Math.max(0, Math.trunc(currency.silver ?? 0)) * 10
+      + Math.max(0, Math.trunc(currency.copper ?? 0));
+  }
+  // Legacy reference records stored total copper under currency.copper.
+  return Math.max(0, Math.trunc(currency.copper ?? 0));
 }
 
 function referenceSessionId(accountId: string, campaignId: string): string {
@@ -635,6 +646,7 @@ export class ReferenceEngineAdapter {
         sessionId,
       });
       const character = result.payload as ReferenceCharacterRecord;
+      const referenceCurrencyCopper = referenceCurrencyToCopper(character.currency);
       state.character = {
         ...state.character,
         id: character.id,
@@ -656,7 +668,8 @@ export class ReferenceEngineAdapter {
         maxHp: character.maxHp,
         ac: character.ac,
         xp: character.xp,
-        gold: character.currency?.copper ? Math.floor(character.currency.copper / 100) : state.character.gold,
+        currency: { copper: referenceCurrencyCopper },
+        gold: Math.floor(referenceCurrencyCopper / 100),
         background: character.background ?? state.character.background,
         alignment: character.alignment ?? state.character.alignment,
       };
