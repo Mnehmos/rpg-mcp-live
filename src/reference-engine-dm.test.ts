@@ -6,12 +6,9 @@ import { GameStore } from "./store.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
 import {
-  authoredOpeningRepairInstruction,
   ReferenceDmProviderUnavailableError,
   ReferenceDungeonMaster,
   REFERENCE_DM_SYSTEM_PROMPT,
-  requiresAuthoredOpeningState,
-  type AuthoredSceneState,
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
@@ -552,36 +549,11 @@ describe("ReferenceDungeonMaster", () => {
 });
 
 describe("reference DM scene authoring contract", () => {
-  it("requires a persisted opening room before the first player turn", () => {
-    expect(requiresAuthoredOpeningState("I observe the current moment.", [])).toBe(true);
-    expect(requiresAuthoredOpeningState("I listen carefully.", [
-      { id: "player-1", kind: "player", text: "I enter.", createdAt: "now" },
-    ])).toBe(false);
-    expect(requiresAuthoredOpeningState("Open the first situation and establish the campaign's opening scene.", [
-      { id: "player-1", kind: "player", text: "I enter.", createdAt: "now" },
-    ])).toBe(true);
-  });
-
-  it("tells the provider exactly how to repair narration that skipped state", () => {
-    const scene: AuthoredSceneState = {
-      generatedRoom: true,
-      movedCharacter: false,
-      committedScene: false,
-      roomId: "room-1",
-      roomName: "The Salt Archive",
-      description: "A flooded archive beneath the quay.",
-      sceneId: null,
-    };
-    const instruction = authoredOpeningRepairInstruction(scene);
-
-    expect(instruction).toContain("spatial_manage action move");
-    expect(instruction).toContain("generated roomId");
-    expect(instruction).toContain("Do not say that no location exists");
-  });
-
   it("makes creative scene authoring and MCP commitment explicit", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Invent places, people, pressures, clues");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("There are no rooms, locations, NPCs, enemies, items, quests, clues");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not wait for the engine to reject an absent fact");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Treat every player intent as an invitation to author");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("scene_manage action set");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player drives what happens next");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
@@ -589,28 +561,7 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
   });
 
-  it("does not release narration-only output for the first suggested action", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-opening-guard-"));
-    const gameStore = new GameStore(join(directory, "game.db"));
-    const store = new ReferenceEngineStore(gameStore.getRawDb());
-    setUpRoutedCampaign(store);
-    const client = fakeClient(CHARACTER_FIXTURES);
-    const adapter = new ReferenceEngineAdapter(client, store);
-    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
-      apiKey: "key",
-      baseUrl: "https://openrouter.example/api/v1",
-      model: "test-model",
-      timeoutMs: 5000,
-    });
-
-    vi.stubGlobal("fetch", vi.fn(async () => openRouterMessage("No room or specific location has been established.")));
-
-    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I observe the current moment.")).rejects.toThrow(
-      "before committing a newly generated persistent room"
-    );
-  });
-
-  it("commits the generated room and player placement before releasing opening narration", async () => {
+  it("records the DM's tool-authored opening scene in state memory", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-opening-commit-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
