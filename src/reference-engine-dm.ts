@@ -233,12 +233,18 @@ export class ReferenceDungeonMaster {
 
     let narrationText: string | null = null;
     try {
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+      // Reserve one completion after the final allowed tool-bearing round so
+      // the DM can narrate the authored result instead of exhausting the
+      // budget immediately after a valid tool call.
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
         const completion = await this.chatCompletion(messages, tools);
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
           narrationText = candidate || null;
+          break;
+        }
+        if (round === MAX_TOOL_ROUNDS) {
           break;
         }
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });

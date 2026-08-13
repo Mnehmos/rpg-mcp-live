@@ -660,9 +660,10 @@ describe("reference DM scene authoring contract", () => {
     expect(remoteCalls).toEqual(["spatial_manage.generate", "spatial_manage.move", "scene_manage.set"]);
   });
 
-  it("lets a long creative tool-first turn reach narration", async () => {
-    // A DM can spend several rounds authoring a scene before it has enough
-    // confirmed material to narrate; this protects the fluid tool-first loop.
+  it("lets the maximum creative tool-first turn reach narration", async () => {
+    // A DM can spend the full tool-round budget authoring a scene before it
+    // has enough confirmed material to narrate; the loop reserves one final
+    // completion for the fluid tool-first response.
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-long-authoring-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
@@ -682,7 +683,7 @@ describe("reference DM scene authoring contract", () => {
     let call = 0;
     const fetchMock = vi.fn(async () => {
       call += 1;
-      if (call <= 7) {
+      if (call <= 12) {
         return openRouterMessage(null, [
           {
             id: `creative-tool-${call}`,
@@ -702,7 +703,7 @@ describe("reference DM scene authoring contract", () => {
       "I improvise a careful route through the newly forming chamber."
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(fetchMock).toHaveBeenCalledTimes(13);
     expect(result.narration.text).toContain("chamber");
   });
 });
