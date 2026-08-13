@@ -559,6 +559,55 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not narrate that absence");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("make it playable through the engine");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("returned encounterId and participant ids");
+  });
+
+  it("fills only the player's combat actor id while leaving other tool ids model-driven", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-combat-actor-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "combat_action.attack": (args) => ({
+        success: true,
+        hit: false,
+        actorId: args.actorId,
+        targetId: args.targetId,
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "attack-1",
+          type: "function",
+          function: {
+            name: "combat_action",
+            arguments: JSON.stringify({ action: "attack", encounterId: "encounter-1", targetId: "enemy-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The bolt glances off the drowned figure.");
+    }));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I fire at the drowned figure.");
+
+    expect(client.callTool).toHaveBeenCalledWith(
+      "combat_action",
+      expect.objectContaining({ actorId: "char-1", targetId: "enemy-1", encounterId: "encounter-1" }),
+      expect.anything(),
+    );
   });
 
   it("records the DM's tool-authored opening scene in state memory", async () => {
