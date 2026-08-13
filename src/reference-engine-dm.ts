@@ -66,7 +66,7 @@ export interface AuthoredSceneState {
 // NPC/object creation, scene commitment, continuity writes, and then a final
 // narration response. This is only a runaway-loop bound; it is not a
 // deterministic test for whether a player turn is allowed.
-const MAX_TOOL_ROUNDS = 12;
+const MAX_TOOL_ROUNDS = 16;
 
 export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Every player turn is intent, not a pre-existing world description. The player drives what happens next; you invent the concrete world that makes that intent playable.",
@@ -76,6 +76,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Use spatial_manage generate and move for places and player placement; npc_manage create or spawn_manage for NPCs and populated locations; combat_manage spawn_quick_enemy or spawn_manage for enemies and encounters; item_manage and inventory_manage for authored objects and possession; quest_manage for durable quests; and scene_manage set for the DM-authored shared scene frame.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
   "For every turn that advances the shared fiction, commit the new or changed world facts through the appropriate engine tools, then commit the resulting DM scene with scene_manage action set using the player's character as a participant. Only after those tool results succeed may you narrate them.",
+  "Be decisive and economical: use the smallest complete set of tool calls for the current turn, batch independent calls when possible, do not reread every continuity docket or rewrite unchanged dockets, and do not repeat a tool call after a successful result. Once the scene is committed, stop calling tools and narrate.",
   "If a tool rejects an authoring attempt, repair the tool call or narrate the failed action without claiming the rejected fact became real. Never substitute a docket entry or prose for an engine commitment.",
 ].join(" ");
 
@@ -232,6 +233,8 @@ export class ReferenceDungeonMaster {
     ];
 
     let narrationText: string | null = null;
+    let toolRoundCount = 0;
+    const toolCallNames: string[] = [];
     try {
       // Reserve one completion after the final allowed tool-bearing round so
       // the DM can narrate the authored result instead of exhausting the
@@ -244,6 +247,8 @@ export class ReferenceDungeonMaster {
           narrationText = candidate || null;
           break;
         }
+        toolRoundCount = round + 1;
+        toolCallNames.push(...toolCalls.map((call) => call.function.name));
         if (round === MAX_TOOL_ROUNDS) {
           break;
         }
@@ -264,7 +269,9 @@ export class ReferenceDungeonMaster {
 
     if (!narrationText) {
       throw new ReferenceDmProviderUnavailableError(
-        new Error("The reference-engine DM did not produce narration within the tool-call round budget.")
+        new Error(
+          `The reference-engine DM did not produce narration within the tool-call round budget (toolRounds=${toolRoundCount}, toolCalls=${toolCallNames.join(",") || "none"}).`
+        )
       );
     }
 

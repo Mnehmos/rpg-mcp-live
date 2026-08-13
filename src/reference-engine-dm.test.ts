@@ -683,7 +683,7 @@ describe("reference DM scene authoring contract", () => {
     let call = 0;
     const fetchMock = vi.fn(async () => {
       call += 1;
-      if (call <= 12) {
+      if (call <= 16) {
         return openRouterMessage(null, [
           {
             id: `creative-tool-${call}`,
@@ -703,7 +703,7 @@ describe("reference DM scene authoring contract", () => {
       "I improvise a careful route through the newly forming chamber."
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(13);
+    expect(fetchMock).toHaveBeenCalledTimes(17);
     expect(result.narration.text).toContain("chamber");
   });
 });
