@@ -26,7 +26,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 30); do
+          # The staging verifier advances production before its own check run
+          # reaches completed/success. Allow time for that final check state
+          # and artifact publication to propagate through the Checks API.
+          for attempt in $(seq 1 240); do
             checks=$(gh api --paginate --slurp \
               "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")
 
@@ -46,12 +49,12 @@ jobs:
               exit 1
             fi
 
-            if [ "$attempt" -eq 30 ]; then
-              echo "::error::The exact SHA never received a successful staging promotion gate."
+            if [ "$attempt" -eq 240 ]; then
+              echo "::error::The exact SHA never received a successful staging promotion gate within 20 minutes."
               exit 1
             fi
-            echo "Waiting for the staging promotion gate to complete (attempt $attempt/30)."
-            sleep 2
+            echo "Waiting for the staging promotion gate to complete (attempt $attempt/240)."
+            sleep 5
           done
 
       - name: Checkout
