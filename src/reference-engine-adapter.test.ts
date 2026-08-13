@@ -91,6 +91,7 @@ describe("ReferenceEngineAdapter", () => {
           ac: 10,
           level: 1,
           xp: 0,
+          currency: { gold: 10, silver: 0, copper: 0 },
         };
       },
       "party_manage.add_member": (args) => {
@@ -110,6 +111,7 @@ describe("ReferenceEngineAdapter", () => {
         ac: 10,
         level: 1,
         xp: 0,
+        currency: { gold: 10, silver: 0, copper: 0 },
       }),
       "narrative_manage.search": () => ({ notes: [] }),
       "inventory_manage.get_detailed": () => ({ inventory: [] }),
@@ -126,10 +128,22 @@ describe("ReferenceEngineAdapter", () => {
     expect(result.accepted).toBe(true);
     expect(addMemberCalled).toBe(true);
     expect(result.campaignVersion).toBe(1);
-    const character = (result.data as { character: { name: string; abilities: unknown; abilityModifiers: Record<string, number> } }).character;
+    const character = (result.data as {
+      character: {
+        name: string;
+        abilities: unknown;
+        abilityModifiers: Record<string, number>;
+        gold: number;
+        currency: { copper: number };
+        derived: { carryCapacity: number };
+      };
+    }).character;
     expect(character.name).toBe("Hero");
     expect(character.abilityModifiers.str).toBe(3); // (16-10)/2 = 3
     expect(character.abilityModifiers.cha).toBe(-1); // floor((8-10)/2) = -1
+    expect(character.gold).toBe(10);
+    expect(character.currency.copper).toBe(1000);
+    expect(character.derived.carryCapacity).toBe(240);
 
     expect(store.getRouting("account-1", "campaign-1")?.referenceCharacterId).toBe("char-1");
   });
