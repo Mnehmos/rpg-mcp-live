@@ -164,9 +164,6 @@ function referenceCurrencyToCopper(currency: ReferenceCharacterRecord["currency"
   return Math.max(0, Math.trunc(currency.copper ?? 0));
 }
 
-function referenceSessionId(accountId: string, campaignId: string): string {
-  return `lantern:${accountId}:${campaignId}`;
-}
 
 /**
  * Minimal frontmatter parser for LLM-authored dockets: a leading `---`
@@ -352,19 +349,16 @@ export class ReferenceEngineAdapter {
     if (existing?.referenceWorldId) return;
 
     const name = profile?.name ?? "Unnamed Campaign";
-    const sessionId = referenceSessionId(accountId, campaignId);
     const init = await this.client.callTool("session_manage", {
       action: "initialize",
       createNew: true,
       worldName: `${name} World`,
       partyName: `${name} Party`,
-      sessionId,
     }, this.tenantFor(accountId, campaignId, existing));
     const initData = init.payload as { worldId: string; partyId: string };
     this.store.setReferenceIds(accountId, campaignId, {
       worldId: initData.worldId,
       partyId: initData.partyId,
-      sessionId,
     });
   }
 
@@ -392,6 +386,25 @@ export class ReferenceEngineAdapter {
 
   public async deleteCampaign(accountId: string, campaignId: string): Promise<EngineCampaignDeletionResult> {
     const routing = this.requireRouting(accountId, campaignId);
+
+    // Erase the engine-side game state before dropping the routing row. Doing
+    // it in this order matters: the routing row is the only record that this
+    // account owns this campaign, so losing it first would leave an orphaned
+    // database with no way to attribute — or erase — it.
+    //
+    // A failure here is logged rather than thrown. The user asked to delete a
+    // campaign; refusing because the engine was briefly unreachable would
+    // leave them unable to remove it at all, and the routing row is what makes
+    // the campaign reachable.
+    try {
+      await this.client.deleteCampaignData(this.tenantFor(accountId, campaignId, routing));
+    } catch (error) {
+      console.error(
+        `Failed to erase reference-engine data for campaign ${campaignId}:`,
+        error instanceof Error ? error.message : error
+      );
+    }
+
     this.store.deleteRouting(accountId, campaignId);
     return {
       deleted: true,
@@ -459,7 +472,6 @@ export class ReferenceEngineAdapter {
       toolProficiencies?: string[];
       languages?: string[];
     };
-    const sessionId = referenceSessionId(accountId, campaignId);
     const result = await this.client.callTool("character_manage", {
       action: "create",
       name: args.name,
@@ -476,7 +488,6 @@ export class ReferenceEngineAdapter {
       weaponProficiencies: args.weaponProficiencies,
       toolProficiencies: args.toolProficiencies,
       languages: args.languages,
-      sessionId,
     }, this.tenantFor(accountId, campaignId, routing));
     const character = result.payload as ReferenceCharacterRecord;
     this.store.setReferenceIds(accountId, campaignId, { characterId: character.id });
@@ -487,7 +498,6 @@ export class ReferenceEngineAdapter {
         partyId: routing.referencePartyId,
         characterId: character.id,
         role: "leader",
-        sessionId,
       }, this.tenantFor(accountId, campaignId, routing));
     }
 
@@ -534,7 +544,6 @@ export class ReferenceEngineAdapter {
       itemId: args.itemId,
       slot: args.slot,
       quantity: args.quantity,
-      sessionId: referenceSessionId(accountId, campaignId),
     }, this.tenantFor(accountId, campaignId, routing));
     const version = this.store.bumpVersion(accountId, campaignId);
     return {
@@ -563,7 +572,6 @@ export class ReferenceEngineAdapter {
       type: "session_log",
       content: args.text,
       visibility: args.source === "dm" ? "dm_only" : "player_visible",
-      sessionId: referenceSessionId(accountId, campaignId),
     }, this.tenantFor(accountId, campaignId, routing));
     const version = this.store.bumpVersion(accountId, campaignId);
     const view = await this.buildSessionView(accountId, actorId, campaignId, { ...routing, version });
@@ -609,7 +617,6 @@ export class ReferenceEngineAdapter {
         name: update.name,
         background: update.background,
         alignment: update.alignment,
-        sessionId: referenceSessionId(accountId, campaignId),
       }, this.tenantFor(accountId, campaignId, routing));
     }
 
@@ -659,13 +666,11 @@ export class ReferenceEngineAdapter {
     );
     state.version = routing.version;
 
-    const sessionId = referenceSessionId(accountId, campaignId);
 
     if (routing.referenceCharacterId) {
       const result = await this.client.callTool("character_manage", {
         action: "get",
         characterId: routing.referenceCharacterId,
-        sessionId,
       }, this.tenantFor(accountId, campaignId, routing));
       const character = result.payload as ReferenceCharacterRecord;
       const referenceCurrencyCopper = referenceCurrencyToCopper(character.currency);
@@ -705,7 +710,6 @@ export class ReferenceEngineAdapter {
       const inventoryResult = await this.client.callTool("inventory_manage", {
         action: "get_detailed",
         characterId: routing.referenceCharacterId,
-        sessionId,
       }, this.tenantFor(accountId, campaignId, routing));
       const inventoryPayload = inventoryResult.payload as { inventory?: ReferenceInventoryEntry[] };
       state.character.inventory = mapReferenceInventory(inventoryPayload?.inventory ?? []);
@@ -807,7 +811,6 @@ export class ReferenceEngineAdapter {
         worldId: routing.referenceWorldId,
         type: "session_log",
         limit: 40,
-        sessionId,
       }, this.tenantFor(accountId, campaignId, routing));
       const payload = result.payload as { notes?: ReferenceNoteRecord[] };
       const notes: EngineNote[] = (payload?.notes ?? []).map((note) => ({

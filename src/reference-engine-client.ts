@@ -99,6 +99,32 @@ export class ReferenceEngineClient {
    * Omitting it is correct only for genuinely tenant-agnostic meta-tools
    * (load_tool_schema, search_tools), which the engine serves without a scope.
    */
+  /**
+   * Erases a campaign's game state in the reference engine.
+   *
+   * Targets the engine's `/campaign` route rather than a tool: erasure is not
+   * a capability the model should be able to reach, and this way it cannot —
+   * the route is not part of the MCP tool surface at all. The campaign erased
+   * is whichever one the signed tenant context names, so a caller cannot name
+   * someone else's.
+   */
+  public async deleteCampaignData(tenant: TenantIdentity): Promise<{ deleted: boolean }> {
+    if (!this.options.tenantSecret) {
+      throw new Error("Cannot delete campaign data without REFERENCE_ENGINE_TENANT_SECRET.");
+    }
+    const url = this.baseUrl.replace(/\/mcp$/i, "/campaign");
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${this.options.authToken}`,
+        "x-rpg-tenant": signTenantToken(tenant, this.options.tenantSecret),
+      },
+      signal: this.options.timeoutMs > 0 ? AbortSignal.timeout(this.options.timeoutMs) : undefined,
+    });
+    if (!response.ok) throw new ReferenceEngineError(response.status);
+    return (await response.json()) as { deleted: boolean };
+  }
+
   public async callTool(
     name: string,
     args: Record<string, unknown>,

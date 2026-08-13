@@ -124,7 +124,6 @@ export class ReferenceDungeonMaster {
     // character/NPC within the same session (e.g. combat_action on an enemy
     // the model itself spawned).
     const forcedArgs: Record<string, unknown> = {
-      sessionId: `lantern:${accountId}:${campaignId}`,
       worldId: routing.referenceWorldId ?? undefined,
       partyId: routing.referencePartyId ?? undefined,
     };
