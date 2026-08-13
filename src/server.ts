@@ -11,7 +11,12 @@ import { rollAbilityScoreDraft } from "./engine-domain.js";
 import { gameActionSchema } from "./game.js";
 import { GameStore } from "./store.js";
 import { open5eCharacterOptions } from "./open5e-rules.js";
-import { buildOpen5eContentCatalog, type DeploymentContentPolicy } from "./content/catalog.js";
+import {
+  buildOpen5eContentCatalog,
+  CampaignContentPolicyError,
+  validateCampaignContentPolicy,
+  type DeploymentContentPolicy,
+} from "./content/catalog.js";
 import { loadInstalledOpen5ePackRegistry } from "./content/registry.js";
 import { contentSecurityPolicy } from "./security-headers.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
@@ -421,8 +426,30 @@ app.post("/api/campaigns", async (request, response) => {
     response.status(400).json({ code: "invalid_campaign", error: "A campaign needs a name, premise, setting, and tone." });
     return;
   }
+  // The browser picks sources and licenses from the catalog, so the request
+  // carries a content policy. It is validated against the deployment policy
+  // before being stored: the payload is client-controlled, and without this a
+  // crafted request could enable documents or licenses this deployment is not
+  // permitted to serve.
+  let profile = parsed.data;
   try {
-    const result = await referenceEngineAdapter.createCampaign(userId, userId, parsed.data);
+    profile = {
+      ...parsed.data,
+      contentPolicy: validateCampaignContentPolicy(
+        contentRegistry.activePack,
+        deploymentContentPolicy,
+        parsed.data.contentPolicy ?? referenceContentCatalog.defaultPolicy
+      ),
+    };
+  } catch (error) {
+    if (error instanceof CampaignContentPolicyError) {
+      response.status(400).json({ code: error.code, error: error.message });
+      return;
+    }
+    throw error;
+  }
+  try {
+    const result = await referenceEngineAdapter.createCampaign(userId, userId, profile);
     response.status(201).json({
       session: result.campaign,
       state: null,
