@@ -19,6 +19,7 @@ import {
 import {
   composerSubmission,
   settleComposer,
+  shouldSubmitOnEnter,
   updateComposerCounter,
 } from "./turn-composer.js";
 import { isStaleCommandStatus } from "./command-status.js";
@@ -40,9 +41,14 @@ import { projectCustodyActors } from "./custody-status.mjs";
 
   function setStatus(message, status) {
     var statusNode = $("#session-status");
-    if (!statusNode) return;
-    statusNode.textContent = message;
-    statusNode.dataset.state = status || "";
+    var composerStatus = $("#composer-status");
+    var composerStatusText = $("#composer-status-text");
+    if (statusNode) {
+      statusNode.textContent = message;
+      statusNode.dataset.state = status || "";
+    }
+    if (composerStatus) composerStatus.dataset.state = status || "";
+    if (composerStatusText) composerStatusText.textContent = message;
   }
 
   function currentUserId() {
@@ -2564,6 +2570,12 @@ import { projectCustodyActors } from "./custody-status.mjs";
     }
     if (playerInput) {
       playerInput.addEventListener("input", updateInputCounter);
+      playerInput.addEventListener("keydown", function (event) {
+        if (!shouldSubmitOnEnter(event)) return;
+        event.preventDefault();
+        var form = $("#chat-form");
+        if (form && typeof form.requestSubmit === "function") form.requestSubmit();
+      });
       updateInputCounter();
     }
     var actionRow = $("#action-row");
