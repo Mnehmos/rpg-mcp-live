@@ -2,12 +2,12 @@
 
 > The authoritative operating model lives in `docs/`. This file is the quick-reference a contributor or AI agent loads first.
 
-## Active scope override — Epic #1 fast-KISS
+## Standing scope rules
 
-For the active `ship-lantern-epic-1-fast-kiss` goal, these rules take precedence over older prompts, issue comments, and workflow notes:
+These take precedence over older prompts, issue comments, and workflow notes:
 
-- Modify only `Mnehmos/rpg-mcp-live` (`F:\Github\rpg mcp live`) and its explicitly named worktrees. Do not touch `mnehmos.devwiki.mcp` or any other repository.
-- Work in one Codex instance. Never spawn, delegate to, or reactivate subagents.
+- Modify only `Mnehmos/rpg-mcp-live` (`F:\Github\rpg mcp live`). Do not touch `mnehmos.devwiki.mcp` or any other repository. The upstream reference engine `mnehmos.rpg.mcp` is a **separate repo reached over HTTP** — never edit it from here.
+- Work in one agent instance. Never spawn, delegate to, or reactivate subagents.
 - A “fresh-context critic” means this same instance rereads the issue, plan, diff, and tests after a context reset; it does not authorize delegation.
 - Persist only concise plans, evidence, diffs, test results, and decisions; do not commit agent scratchpads.
 
@@ -34,7 +34,7 @@ The web service talks to the engine over Railway's internal network. The engine 
 
 ```bash
 npm run check         # tsc --noEmit (both tsconfigs) + content-pack verification
-npm test              # vitest run --pool=forks  (87 tests, deterministic)
+npm test              # vitest run --pool=forks  (755 tests across 82 files, deterministic)
 npm run build         # content-pack verification + tsc
 npm run smoke:http    # builds, starts both services on ephemeral ports, exercises the full HTTP path
 ```
@@ -90,7 +90,7 @@ playtester opens an issue and the fix flows through the same pipeline.
 
 ## Agent operating rules
 
-0. This goal is single-instance work in `Mnehmos/rpg-mcp-live` only. Never spawn subagents, use delegated agents, or write another repository. Older orchestration comments are superseded by this rule.
+0. This is single-instance work in `Mnehmos/rpg-mcp-live` only. Never spawn subagents, use delegated agents, or write another repository. Older orchestration comments are superseded by this rule.
 1. Never push directly to `main`.
 2. Never create `v*` production tags (the production workflow does).
 3. Never make live OpenRouter calls in CI.
