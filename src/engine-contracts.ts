@@ -3780,7 +3780,10 @@ export interface EngineToolDisclosure {
 
 export interface EngineToolCallDisclosure {
   name: string;
+  /** Sanitized arguments the host actually sent, or attempted to send, to the engine. */
   arguments: Record<string, unknown>;
+  /** Original model arguments when host-side scoping or defaults changed them. */
+  requestedArguments?: Record<string, unknown>;
   result: unknown;
   accepted: boolean;
 }

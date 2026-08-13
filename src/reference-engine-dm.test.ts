@@ -158,7 +158,19 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.narrationSource).toBe("llm");
     expect(result.toolDisclosure).toMatchObject({
       spoilerWarning: expect.stringContaining("Spoiler warning"),
-      calls: [{ name: "combat_action", accepted: true, arguments: { action: "attack", targetId: "goblin-1" } }],
+      calls: [{
+        name: "combat_action",
+        accepted: true,
+        arguments: {
+          action: "attack",
+          targetId: "goblin-1",
+          actorId: "char-1",
+          characterId: "char-1",
+          worldId: "world-1",
+          partyId: "party-1",
+        },
+        requestedArguments: { action: "attack", targetId: "goblin-1", worldId: "wrong-world" },
+      }],
     });
     expect(result.toolDisclosure?.calls[0]?.result).toEqual({ success: true, damage: 6 });
     expect(result.campaignVersion).toBe(1);
@@ -699,6 +711,46 @@ describe("ReferenceDungeonMaster", () => {
     const remoteCalls = (client.callTool as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0] as string);
     expect(remoteCalls).not.toContain("write_docket");
     expect(remoteCalls).not.toContain("read_docket");
+  });
+
+  it("marks an invalid docket call rejected in its disclosure", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-invalid-docket-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "invalid-docket",
+          type: "function",
+          function: {
+            name: "write_docket",
+            arguments: JSON.stringify({ name: "rumors", content: "A false lead." }),
+          },
+        }]);
+      }
+      return openRouterMessage("The false lead is discarded.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Record the rumor.");
+
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({
+      name: "write_docket",
+      accepted: false,
+      arguments: { name: "rumors", content: "A false lead." },
+      result: expect.stringContaining("Unknown docket name"),
+    });
   });
 
   it("read_docket can read back the secrets docket for the model's own context", async () => {

@@ -57,6 +57,7 @@ interface ReferenceToolOutcome {
   text: string;
   accepted: boolean;
   payload: unknown;
+  effectiveArguments: Record<string, unknown>;
 }
 
 function storedToolCallId(entryId: string, index: number): string {
@@ -102,7 +103,7 @@ function replayStoredHistory(
         type: "function" as const,
         function: {
           name: call.name,
-          arguments: JSON.stringify(call.arguments),
+          arguments: JSON.stringify(call.requestedArguments ?? call.arguments),
         },
       };
     });
@@ -147,13 +148,17 @@ function makeToolCallDisclosure(
   outcome: ReferenceToolOutcome
 ): EngineToolCallDisclosure {
   const secretDocket = args.name === "secrets" && (toolName === "read_docket" || toolName === "write_docket");
-  const safeArguments = sanitizeToolDisclosureValue(args, false) as Record<string, unknown>;
+  const safeArguments = sanitizeToolDisclosureValue(outcome.effectiveArguments, false) as Record<string, unknown>;
+  const safeRequestedArguments = sanitizeToolDisclosureValue(args, false) as Record<string, unknown>;
   if (toolName === "write_docket" && args.name === "secrets") {
     safeArguments.content = "[DM-only content withheld]";
+    safeRequestedArguments.content = "[DM-only content withheld]";
   }
+  const argumentsChanged = JSON.stringify(args) !== JSON.stringify(outcome.effectiveArguments);
   return {
     name: toolName,
     arguments: safeArguments,
+    ...(argumentsChanged ? { requestedArguments: safeRequestedArguments } : {}),
     result: sanitizeToolDisclosureValue(outcome.payload ?? outcome.text, secretDocket),
     accepted: outcome.accepted,
   };
@@ -363,7 +368,7 @@ export class ReferenceDungeonMaster {
           const callArgs = parseArguments(call.function.arguments);
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
-              ? { text: this.handleDocketTool(accountId, campaignId, call.function.name, callArgs), accepted: true, payload: null }
+              ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
               : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant);
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
@@ -461,7 +466,7 @@ export class ReferenceDungeonMaster {
           "Unknown characterId. Only use a characterId learned from an accepted tool result in this campaign or current turn " +
           "(e.g. from create/list/get), or omit it to target your own character.",
       });
-      return { text, accepted: false, payload: { error: "unknown_character_id" } };
+      return { text, accepted: false, payload: { error: "unknown_character_id" }, effectiveArguments: args };
     }
     const result = await this.client.callTool(toolName, args, tenant);
     collectCharacterIds(result.payload, knownCharacterIds);
@@ -469,6 +474,21 @@ export class ReferenceDungeonMaster {
       text: result.text || JSON.stringify(result.payload ?? {}),
       accepted: remoteResultAccepted(result.payload, result.isError),
       payload: result.payload,
+      effectiveArguments: args,
+    };
+  }
+
+  private callDocketTool(
+    accountId: string,
+    campaignId: string,
+    toolName: "read_docket" | "write_docket",
+    args: Record<string, unknown>
+  ): ReferenceToolOutcome {
+    return {
+      text: this.handleDocketTool(accountId, campaignId, toolName, args),
+      accepted: isDocketName(args.name),
+      payload: null,
+      effectiveArguments: args,
     };
   }
 
