@@ -10,7 +10,10 @@ import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacter
 import { rollAbilityScoreDraft } from "./engine-domain.js";
 import { gameActionSchema } from "./game.js";
 import { GameStore } from "./store.js";
-import { OPEN5E_RULES_PACK_HASH, OPEN5E_RULES_VERSION, open5eCharacterOptions } from "./open5e-rules.js";
+import { open5eCharacterOptions } from "./open5e-rules.js";
+import { buildOpen5eContentCatalog, type DeploymentContentPolicy } from "./content/catalog.js";
+import { loadInstalledOpen5ePackRegistry } from "./content/registry.js";
+import { contentSecurityPolicy } from "./security-headers.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
@@ -55,20 +58,26 @@ const referenceDungeonMaster = config.openRouterConfigured
     )
   : null;
 const app = express();
-const referenceContentCatalog = {
-  packHash: OPEN5E_RULES_PACK_HASH,
-  rulesVersion: OPEN5E_RULES_VERSION,
-  packVersion: OPEN5E_RULES_VERSION,
-  defaultPolicy: {
-    gamesystem: "5e-2014",
-    baseDocumentKey: "srd-2014",
-    allowedDocumentKeys: ["srd-2014"],
-    allowedLicenseKeys: ["cc-by-40", "cc0"],
-  },
-  allowedGamesystems: ["5e-2014"],
-  allowedLicenseKeys: ["cc-by-40", "cc0"],
-  documents: [],
-} as const;
+/**
+ * Built from the installed Open5e pack rather than hand-written.
+ *
+ * This was a hardcoded stub with `documents: []` — a leftover from the
+ * reference-only runtime migration, when the catalog stopped being built by
+ * the Lantern engine and nothing took over. An empty document list makes every
+ * dropdown in the campaign form empty: the UI only offers a game system that
+ * has at least one base-capable document, so with no documents there is no
+ * system to pick and no rules base to pick either.
+ */
+const contentRegistry = await loadInstalledOpen5ePackRegistry();
+const deploymentContentPolicy: DeploymentContentPolicy = {
+  defaultGamesystem: config.contentGamesystem,
+  defaultBaseDocument: config.contentDefaultBaseDocument,
+  allowedGamesystems: config.contentAllowedGamesystems,
+  allowedLicenses: config.contentAllowedLicenses,
+  allowedDocuments: config.contentAllowedDocuments,
+  baseDocuments: config.contentBaseDocuments,
+};
+const referenceContentCatalog = buildOpen5eContentCatalog(contentRegistry.activePack, deploymentContentPolicy);
 
 function contentKeySuffix(value: string): string {
   return value.split(":").pop()?.trim() || value.trim();
@@ -173,22 +182,7 @@ if (config.clerkConfigured) {
 }
 
 app.use((_request, response, next) => {
-  const allowedClerkOrigin = clerkOrigin ? " " + clerkOrigin : "";
-  const allowedClerkImageOrigins = clerkOrigin ? " https://img.clerk.com https://images.clerk.dev" : "";
-  response.setHeader(
-    "Content-Security-Policy",
-    [
-      "default-src 'self'",
-      "base-uri 'self'",
-      "object-src 'none'",
-      "script-src 'self'" + allowedClerkOrigin,
-      "style-src 'self' 'unsafe-inline'" + allowedClerkOrigin,
-      "img-src 'self' data:" + allowedClerkOrigin + allowedClerkImageOrigins,
-      "connect-src 'self'" + allowedClerkOrigin,
-      "frame-src 'self'" + allowedClerkOrigin + " https://*.stripe.com",
-      "worker-src 'self' blob:",
-    ].join("; ")
-  );
+  response.setHeader("Content-Security-Policy", contentSecurityPolicy(clerkOrigin));
   response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   response.setHeader("X-Content-Type-Options", "nosniff");
   next();
