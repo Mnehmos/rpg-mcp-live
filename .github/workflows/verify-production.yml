@@ -196,9 +196,10 @@ jobs:
             resp=$(curl -fsS "$WEB_PRODUCTION_URL/api/health" || true)
             if echo "$resp" | jq -e \
               --arg sha "$SHA" \
+              --arg engineSha "$REFERENCE_ENGINE_SHA" \
               '.status == "ok" and .service == "rpg-mcp-live-web" and .environment == "production" and .deployment.commitSha == $sha and
                 .integrations.referenceEngine == true and .engine.service == "rpg-mcp" and
-               .engine.environment == "production" and .engine.deployment.commitSha == $sha' >/dev/null; then
+               .engine.environment == "production" and .engine.deployment.commitSha == $engineSha' >/dev/null; then
               printf '%s\n' "$resp" > web-health.json
                echo "$resp" | jq '{status,service,environment,integrations:{referenceEngine:.integrations.referenceEngine}}'
               exit 0
