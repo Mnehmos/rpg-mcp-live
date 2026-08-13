@@ -19,6 +19,7 @@ import {
 } from "./content/catalog.js";
 import { loadInstalledOpen5ePackRegistry } from "./content/registry.js";
 import { contentSecurityPolicy } from "./security-headers.js";
+import { characterOptionPolicy } from "./character-option-policy.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
@@ -409,7 +410,15 @@ app.get("/api/campaigns", async (request, response) => {
 app.get("/api/character-options", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  response.json({ options: open5eCharacterOptions() });
+  // The client sends ?campaignId= and caches per campaign; the server used to
+  // ignore it and return every option in the rules kernel, so a campaign that
+  // enabled only SRD sources still offered options from documents it had not
+  // enabled. getRouting is scoped by user, so an unknown or foreign campaign
+  // id simply falls back to the deployment default.
+  const campaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
+  const routing = campaignId ? referenceEngineStore.getRouting(userId, campaignId) : null;
+  const policy = characterOptionPolicy(routing?.campaignProfileJson, referenceContentCatalog.defaultPolicy);
+  response.json({ options: open5eCharacterOptions(policy) });
 });
 
 app.get("/api/content-catalog", async (request, response) => {
