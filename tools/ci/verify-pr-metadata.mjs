@@ -33,6 +33,7 @@ if (!pr) {
 
 const title = (pr.title || "").trim();
 const body = (pr.body || "").trim();
+const isDependabot = pr.user?.login === "dependabot[bot]";
 
 let failures = [];
 
@@ -58,10 +59,14 @@ if (!titleRe.test(title)) {
 
 const requiredSections = ["## Risk", "## Acceptance criteria", "## Verification"];
 
-const missingSections = requiredSections.filter((heading) => !body.toLowerCase().includes(heading.toLowerCase()));
+if (!isDependabot) {
+  const missingSections = requiredSections.filter((heading) => !body.toLowerCase().includes(heading.toLowerCase()));
 
-if (missingSections.length > 0) {
-  failures.push(`PR body is missing required sections:\n   ${missingSections.join("\n   ")}`);
+  if (missingSections.length > 0) {
+    failures.push(`PR body is missing required sections:\n   ${missingSections.join("\n   ")}`);
+  }
+} else {
+  console.log("✓ Dependabot PR detected — human-authored body sections are not required.");
 }
 
 // ---------------------------------------------------------------------------
