@@ -2,7 +2,13 @@
 
 ## Required CI
 
-`.github/workflows/ci.yml` runs one required job — `CI / required` — on every PR and push to `main`.
+The `production` branch uses the same required check name as a short promotion
+gate: it waits for the exact SHA's successful `Verify staging and promote exact
+SHA` check, then lets Railway's production **Wait for CI** gate proceed. It does
+not repeat install, typecheck, tests, build, or HTTP smoke already completed
+before staging promotion.
+
+`.github/workflows/ci.yml` runs one required job — `CI / required` — on every PR and push to `main` or `production`. Production pushes take the short promotion path described above.
 
 Steps:
 
@@ -44,6 +50,8 @@ assertions, a stable baseline digest, and separate pending human scorecards.
 The same command also runs the random-event regression fixtures: stable table
 and context provenance, actor/object reuse and instantiation, retry/restart
 idempotency, noncombat continuation, and rejection of narrator substitution.
+These files are included in the repository-wide `npm test` required check;
+staging verification does not install dependencies and run them a second time.
 Live-provider evaluation remains opt-in and budget-capped through
 `live-eval.yml`; it is never a required CI or deployment step.
 
@@ -81,11 +89,12 @@ successful suite lets Railway build the repository using the service-specific
 
 `.github/workflows/verify-staging.yml` listens only for Railway's successful
 `deployment_status` events. It verifies the Railway environment deployment's
-exact 40-character SHA, runs the deterministic staging evaluation, reads both
-service health endpoints, and advances the `production` branch ref directly
-to that SHA with the narrowly scoped `PRODUCTION_PROMOTION_TOKEN`. It has no
-Railway token, does not call GraphQL, does not upload source, and never calls
-`railway up`.
+exact 40-character SHA, reads both service health endpoints, and advances the
+`production` branch ref directly to that SHA with the narrowly scoped
+`PRODUCTION_PROMOTION_TOKEN`. The required main-branch CI has already run the
+full test suite, including the deterministic evaluation files. The verifier
+has no Railway token, does not call GraphQL, does not upload source, and never
+calls `railway up`.
 
 ## Production deployment
 

@@ -50,10 +50,12 @@ Because the repo uses **squash merge** and the PR title **is** the commit messag
 4. After CI succeeds, Railway builds/deploys the connected repository for both
    staging services and records the exact merge SHA.
 5. `verify-staging.yml` verifies the successful staging environment deployment,
-   runs invariant and deterministic evaluation, checks both health endpoints, and updates the
-   `production` ref directly to that SHA without creating a commit.
-6. The production push runs CI; Railway waits for it, then deploys both
-   production services natively from the `production` branch.
+   checks both health endpoints, and updates the `production` ref directly to
+   that SHA without creating a commit. The required main-branch CI already
+   covers the full test suite, including deterministic evaluation.
+6. The production push runs the short promotion CI gate, which confirms the
+   exact SHA's successful staging verifier; Railway waits for it, then deploys
+   both production services natively from the `production` branch.
 7. `verify-production.yml` checks both production health endpoints and publishes
    the manifest, annotated tag, and GitHub release. Each verified SHA uses the
    immutable tag `v<package-version>-<full-production-sha>`. A repeated event
