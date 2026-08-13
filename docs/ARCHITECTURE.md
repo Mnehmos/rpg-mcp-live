@@ -3,6 +3,29 @@
 Status: S0-S9 architecture deployed on Railway; authenticated browser acceptance pending  
 Date: 2026-08-07
 
+## Current Deployment Override (2026-08-13)
+
+The hosted runtime has completed the reference-engine cutover. The current topology is:
+
+~~~text
+Player browser
+  -> rpg-mcp-live web service
+      -> Clerk / Stripe / browser-safe HTTP API
+      -> private MCP HTTP call with REFERENCE_ENGINE_TOKEN
+          -> mnehmos-rpg-mcp reference engine
+              -> persistent SQLite volume
+              -> reference-engine tools and DM reads
+              -> authoritative character, inventory, and campaign state
+~~~
+
+`lantern-engine` is no longer attached to staging or production. `mnehmos-rpg-mcp` is the only gameplay backend. The historical Lantern-engine topology and design sections below remain for decision history, but they are not current deployment instructions.
+
+Current release identities:
+
+- Web host main: `db5475e6f33977a996db73f527186be35f0ee1c3`;
+- Reference engine main: `e16711f4b78ff23d20439ee1b6668eb6f0baae5a`;
+- Staging and production both report healthy web/reference-engine pairs.
+
 ## Decision in one sentence
 
 Lantern is two small Railway services: a public web/application service and a private authoritative engine service. The existing mnehmos.rpg.mcp repository remains a behavioral reference and rules laboratory, not a production dependency or deployment target.
