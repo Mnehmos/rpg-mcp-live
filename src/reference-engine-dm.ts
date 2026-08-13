@@ -62,7 +62,11 @@ export interface AuthoredSceneState {
   sceneId: string | null;
 }
 
-const MAX_TOOL_ROUNDS = 6;
+// Creative scene authoring can legitimately need room generation, placement,
+// NPC/object creation, scene commitment, continuity writes, and then a final
+// narration response. This is only a runaway-loop bound; it is not a
+// deterministic test for whether a player turn is allowed.
+const MAX_TOOL_ROUNDS = 12;
 
 export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Every player turn is intent, not a pre-existing world description. The player drives what happens next; you invent the concrete world that makes that intent playable.",

@@ -659,4 +659,48 @@ describe("reference DM scene authoring contract", () => {
       .map((call) => `${call[0]}.${(call[1] as Record<string, unknown>).action}`);
     expect(remoteCalls).toEqual(["spatial_manage.generate", "spatial_manage.move", "scene_manage.set"]);
   });
+
+  it("lets a long creative tool-first turn reach narration", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-long-authoring-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "combat_action.dodge": () => ({ success: true }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call <= 7) {
+        return openRouterMessage(null, [
+          {
+            id: `creative-tool-${call}`,
+            type: "function",
+            function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) },
+          },
+        ]);
+      }
+      return openRouterMessage("The chamber settles into a shape you can finally explore.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dm.resolveTurn(
+      "account-1",
+      "actor-1",
+      "campaign-1",
+      "I improvise a careful route through the newly forming chamber."
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(result.narration.text).toContain("chamber");
+  });
 });
