@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { signTenantToken, type TenantIdentity } from "./reference-engine-tenant.js";
 
 /**
  * Pure MCP JSON-RPC transport to the mnehmos-rpg-mcp reference engine
@@ -12,6 +13,12 @@ export interface ReferenceEngineClientOptions {
   baseUrl: string;
   authToken: string;
   timeoutMs: number;
+  /**
+   * Shared secret for signing the per-call tenant context. Must match the
+   * engine's RPG_MCP_TENANT_SECRET. When absent, calls are sent unscoped and
+   * the engine will refuse any tool that touches tenant-owned storage.
+   */
+  tenantSecret?: string;
 }
 
 export class ReferenceEngineError extends Error {
@@ -83,9 +90,22 @@ export class ReferenceEngineClient {
     return payload;
   }
 
-  public async callTool(name: string, args: Record<string, unknown>): Promise<ReferenceToolCallResult> {
+  /**
+   * `tenant` is required for any tool that touches campaign state. It is
+   * deliberately a separate argument rather than a field on `args`: `args` is
+   * assembled from model output, and the whole point of the signed context is
+   * that the model cannot influence which tenant a call resolves to.
+   *
+   * Omitting it is correct only for genuinely tenant-agnostic meta-tools
+   * (load_tool_schema, search_tools), which the engine serves without a scope.
+   */
+  public async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    tenant?: TenantIdentity
+  ): Promise<ReferenceToolCallResult> {
     await this.ensureInitialized();
-    const response = await this.send("tools/call", { name, arguments: args });
+    const response = await this.send("tools/call", { name, arguments: args }, tenant);
     const result = response.result as
       | { content?: Array<{ type: string; text?: string }>; isError?: boolean }
       | undefined;
@@ -119,8 +139,12 @@ export class ReferenceEngineClient {
     await this.sendNotification("notifications/initialized", {});
   }
 
-  private async send(method: string, params: Record<string, unknown>): Promise<JsonRpcResponse> {
-    const response = await this.post({ jsonrpc: "2.0", id: randomUUID(), method, params });
+  private async send(
+    method: string,
+    params: Record<string, unknown>,
+    tenant?: TenantIdentity
+  ): Promise<JsonRpcResponse> {
+    const response = await this.post({ jsonrpc: "2.0", id: randomUUID(), method, params }, tenant);
     const body = await parseJsonRpcBody(response);
     if (!response.ok) {
       throw new ReferenceEngineError(response.status, body?.error);
@@ -139,14 +163,18 @@ export class ReferenceEngineClient {
     }
   }
 
-  private post(body: Record<string, unknown>): Promise<Response> {
+  private post(body: Record<string, unknown>, tenant?: TenantIdentity): Promise<Response> {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${this.options.authToken}`,
+    };
+    if (tenant && this.options.tenantSecret) {
+      headers["x-rpg-tenant"] = signTenantToken(tenant, this.options.tenantSecret);
+    }
     return fetch(this.baseUrl, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        authorization: `Bearer ${this.options.authToken}`,
-      },
+      headers,
       body: JSON.stringify(body),
       signal: this.options.timeoutMs > 0 ? AbortSignal.timeout(this.options.timeoutMs) : undefined,
     });

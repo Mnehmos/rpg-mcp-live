@@ -27,10 +27,17 @@ const referenceEngineStore = new ReferenceEngineStore(store.getRawDb());
 if (!config.referenceEngineConfigured) {
   throw new Error("REFERENCE_ENGINE_URL and REFERENCE_ENGINE_TOKEN are required; the Lantern engine is not wired.");
 }
+if (!config.referenceEngineTenantScoped) {
+  console.warn(
+    "REFERENCE_ENGINE_TENANT_SECRET is not set; reference-engine calls will be sent unscoped " +
+      "and the engine will refuse any tool that touches campaign state."
+  );
+}
 const referenceEngineClient = new ReferenceEngineClient({
   baseUrl: config.referenceEngineUrl,
   authToken: config.referenceEngineToken,
   timeoutMs: config.referenceEngineTimeoutMs,
+  tenantSecret: config.referenceEngineTenantSecret,
 });
 const referenceEngineAdapter = new ReferenceEngineAdapter(referenceEngineClient, referenceEngineStore);
 const referenceDungeonMaster = config.openRouterConfigured

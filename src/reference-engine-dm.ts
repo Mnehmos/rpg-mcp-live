@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
+import type { TenantIdentity } from "./reference-engine-tenant.js";
 import { DOCKET_NAMES, type DocketName, type ReferenceEngineStore, type StoredLogMessage } from "./reference-engine-store.js";
 import type { ReferenceEngineToolCatalog, OpenRouterToolDefinition } from "./reference-engine-tools.js";
 import type { EngineAbility, EngineCharacterView, EngineSessionView } from "./engine-contracts.js";
@@ -130,6 +131,15 @@ export class ReferenceDungeonMaster {
     const fillOnlyArgs: Record<string, unknown> = {
       characterId: routing.referenceCharacterId ?? undefined,
     };
+    // The tenant this turn acts for, derived from the authenticated web
+    // session — never from anything the model produced. Signed per outbound
+    // call by ReferenceEngineClient so the engine can verify it.
+    const tenant: TenantIdentity = {
+      accountId,
+      campaignId,
+      worldId: routing.referenceWorldId ?? undefined,
+      partyId: routing.referencePartyId ?? undefined,
+    };
     // The reference engine has zero tenant isolation (ADR-H13): any
     // characterId the model supplies is otherwise forwarded as-is, and a
     // prompt-injected or hallucinated ID belonging to a *different* account's
@@ -194,7 +204,7 @@ export class ReferenceDungeonMaster {
           const resultText =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.handleDocketTool(accountId, campaignId, call.function.name, parseArguments(call.function.arguments))
-              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds);
+              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant);
           messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
         }
       }
@@ -234,7 +244,8 @@ export class ReferenceDungeonMaster {
     toolName: string,
     forcedArgs: Record<string, unknown>,
     fillOnlyArgs: Record<string, unknown>,
-    knownCharacterIds: Set<string>
+    knownCharacterIds: Set<string>,
+    tenant: TenantIdentity
   ): Promise<string> {
     const args = forceArgs(fillMissingArgs(parseArguments(rawArguments), fillOnlyArgs), forcedArgs);
     const requestedCharacterId = args.characterId;
@@ -245,7 +256,7 @@ export class ReferenceDungeonMaster {
           "(e.g. from create/list/get), or omit it to target your own character.",
       });
     }
-    const result = await this.client.callTool(toolName, args);
+    const result = await this.client.callTool(toolName, args, tenant);
     collectCharacterIds(result.payload, knownCharacterIds);
     return result.text || JSON.stringify(result.payload ?? {});
   }

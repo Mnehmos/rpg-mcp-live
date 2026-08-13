@@ -26,6 +26,10 @@ const openRouterAppName = readString("OPENROUTER_APP_NAME", "Lantern Table");
 const referenceEngineUrl = readString("REFERENCE_ENGINE_URL");
 const referenceEngineToken = readString("REFERENCE_ENGINE_TOKEN");
 const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TIMEOUT_MS", "30000"), 10);
+// Must hold the same value as the engine's RPG_MCP_TENANT_SECRET, and a
+// different value per environment — a shared staging/production secret would
+// let a staging compromise mint production tenant contexts.
+const referenceEngineTenantSecret = readString("REFERENCE_ENGINE_TENANT_SECRET");
 
 if (Boolean(clerkPublishableKey) !== Boolean(clerkSecretKey)) {
   console.warn("Clerk is partially configured; both Clerk keys are required for server auth.");
@@ -56,7 +60,9 @@ export const config = Object.freeze({
   referenceEngineUrl: referenceEngineUrl.replace(/\/$/, ""),
   referenceEngineToken,
   referenceEngineTimeoutMs,
+  referenceEngineTenantSecret,
   referenceEngineConfigured: Boolean(referenceEngineUrl && referenceEngineToken),
+  referenceEngineTenantScoped: Boolean(referenceEngineTenantSecret),
   subscriptionLabel: readString("SUBSCRIPTION_LABEL", "Player Pass"),
   subscriptionPriceLabel: readString("SUBSCRIPTION_PRICE_LABEL", "$5 / month"),
   devAuthBypass: !nodeEnv || nodeEnv !== "production" ? readBoolean("DEV_AUTH_BYPASS", false) : false,

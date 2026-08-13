@@ -19,6 +19,7 @@ import {
   type LanternCampaignState,
 } from "./engine-contracts.js";
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
+import type { TenantIdentity } from "./reference-engine-tenant.js";
 import { ReferenceEngineStore, type ReferenceEngineRouting } from "./reference-engine-store.js";
 
 /**
@@ -319,6 +320,27 @@ export class ReferenceEngineAdapter {
    * createCampaign (always a fresh campaignId) and by the engine-backend
    * switch route (an existing campaignId that may already have one).
    */
+  /**
+   * The tenant an outbound engine call acts for.
+   *
+   * accountId/campaignId come from the authenticated request, and worldId/
+   * partyId from this store's routing row — never from request arguments. The
+   * routing row is the only binding between a Lantern account and a set of
+   * reference-engine IDs, so it stays the sole authority for that mapping.
+   */
+  private tenantFor(
+    accountId: string,
+    campaignId: string,
+    routing?: ReferenceEngineRouting | null
+  ): TenantIdentity {
+    return {
+      accountId,
+      campaignId,
+      worldId: routing?.referenceWorldId ?? undefined,
+      partyId: routing?.referencePartyId ?? undefined,
+    };
+  }
+
   public async ensureReferenceSession(
     accountId: string,
     campaignId: string,
@@ -337,7 +359,7 @@ export class ReferenceEngineAdapter {
       worldName: `${name} World`,
       partyName: `${name} Party`,
       sessionId,
-    });
+    }, this.tenantFor(accountId, campaignId, existing));
     const initData = init.payload as { worldId: string; partyId: string };
     this.store.setReferenceIds(accountId, campaignId, {
       worldId: initData.worldId,
@@ -455,7 +477,7 @@ export class ReferenceEngineAdapter {
       toolProficiencies: args.toolProficiencies,
       languages: args.languages,
       sessionId,
-    });
+    }, this.tenantFor(accountId, campaignId, routing));
     const character = result.payload as ReferenceCharacterRecord;
     this.store.setReferenceIds(accountId, campaignId, { characterId: character.id });
 
@@ -466,7 +488,7 @@ export class ReferenceEngineAdapter {
         characterId: character.id,
         role: "leader",
         sessionId,
-      });
+      }, this.tenantFor(accountId, campaignId, routing));
     }
 
     const version = this.store.bumpVersion(accountId, campaignId);
@@ -513,7 +535,7 @@ export class ReferenceEngineAdapter {
       slot: args.slot,
       quantity: args.quantity,
       sessionId: referenceSessionId(accountId, campaignId),
-    });
+    }, this.tenantFor(accountId, campaignId, routing));
     const version = this.store.bumpVersion(accountId, campaignId);
     return {
       tool: request.toolName,
@@ -542,7 +564,7 @@ export class ReferenceEngineAdapter {
       content: args.text,
       visibility: args.source === "dm" ? "dm_only" : "player_visible",
       sessionId: referenceSessionId(accountId, campaignId),
-    });
+    }, this.tenantFor(accountId, campaignId, routing));
     const version = this.store.bumpVersion(accountId, campaignId);
     const view = await this.buildSessionView(accountId, actorId, campaignId, { ...routing, version });
     return {
@@ -588,7 +610,7 @@ export class ReferenceEngineAdapter {
         background: update.background,
         alignment: update.alignment,
         sessionId: referenceSessionId(accountId, campaignId),
-      });
+      }, this.tenantFor(accountId, campaignId, routing));
     }
 
     if (update.description !== undefined || update.details) {
@@ -644,7 +666,7 @@ export class ReferenceEngineAdapter {
         action: "get",
         characterId: routing.referenceCharacterId,
         sessionId,
-      });
+      }, this.tenantFor(accountId, campaignId, routing));
       const character = result.payload as ReferenceCharacterRecord;
       const referenceCurrencyCopper = referenceCurrencyToCopper(character.currency);
       state.character = {
@@ -684,7 +706,7 @@ export class ReferenceEngineAdapter {
         action: "get_detailed",
         characterId: routing.referenceCharacterId,
         sessionId,
-      });
+      }, this.tenantFor(accountId, campaignId, routing));
       const inventoryPayload = inventoryResult.payload as { inventory?: ReferenceInventoryEntry[] };
       state.character.inventory = mapReferenceInventory(inventoryPayload?.inventory ?? []);
 
@@ -786,7 +808,7 @@ export class ReferenceEngineAdapter {
         type: "session_log",
         limit: 40,
         sessionId,
-      });
+      }, this.tenantFor(accountId, campaignId, routing));
       const payload = result.payload as { notes?: ReferenceNoteRecord[] };
       const notes: EngineNote[] = (payload?.notes ?? []).map((note) => ({
         id: note.id,
