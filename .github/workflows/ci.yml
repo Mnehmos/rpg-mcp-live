@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  checks: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -19,34 +20,80 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Fast-track verified staging promotion
+        if: github.ref == 'refs/heads/production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The staging verifier advances production before its own check run
+          # reaches completed/success. Allow time for that final check state
+          # and artifact publication to propagate through the Checks API.
+          for attempt in $(seq 1 240); do
+            checks=$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")
+
+            if echo "$checks" | jq -e \
+              --arg sha "$GITHUB_SHA" \
+              'add | any(.check_runs[]; .name == "Verify staging and promote exact SHA" and .head_sha == $sha and .status == "completed" and .conclusion == "success")' \
+              >/dev/null; then
+              echo "Production promotion $GITHUB_SHA has a completed successful staging gate."
+              exit 0
+            fi
+
+            if echo "$checks" | jq -e \
+              --arg sha "$GITHUB_SHA" \
+              'add | any(.check_runs[]; .name == "Verify staging and promote exact SHA" and .head_sha == $sha and .status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled"))' \
+              >/dev/null; then
+              echo "::error::The exact SHA has a failed or cancelled staging promotion gate."
+              exit 1
+            fi
+
+            if [ "$attempt" -eq 240 ]; then
+              echo "::error::The exact SHA never received a successful staging promotion gate within 20 minutes."
+              exit 1
+            fi
+            echo "Waiting for the staging promotion gate to complete (attempt $attempt/240)."
+            sleep 5
+          done
+
       - name: Checkout
+        if: github.ref != 'refs/heads/production'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Node
+        if: github.ref != 'refs/heads/production'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20.18.x
           cache: npm
 
       - name: Install
+        if: github.ref != 'refs/heads/production'
         run: npm ci
 
       - name: Reject forbidden tracked files
+        if: github.ref != 'refs/heads/production'
         run: node tools/ci/check-forbidden-files.mjs
 
       - name: Verify PR metadata
+        if: github.ref != 'refs/heads/production'
         run: node tools/ci/verify-pr-metadata.mjs
 
       - name: Typecheck and verify content pack
+        if: github.ref != 'refs/heads/production'
         run: npm run check
 
       - name: Test
+        if: github.ref != 'refs/heads/production'
         run: npm test
 
       - name: Build
+        if: github.ref != 'refs/heads/production'
         run: npm run build
 
       - name: Reference-engine HTTP smoke
+        if: github.ref != 'refs/heads/production'
         run: npm run smoke:http

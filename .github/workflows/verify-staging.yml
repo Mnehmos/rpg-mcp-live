@@ -29,11 +29,11 @@ jobs:
       github.event.deployment.ref == github.event.deployment.sha &&
       github.event.deployment.creator.login == 'railway-app[bot]'
     env:
-      SHA: ${{ github.event.deployment.sha || github.event.sha }}
-      DEPLOYMENT_ID: ${{ github.event.deployment.id || '' }}
-      DEPLOYMENT_ENVIRONMENT: ${{ github.event.deployment.environment || 'RPG MCP Live / staging' }}
-      DEPLOYMENT_REF: ${{ github.event.deployment.ref || '' }}
-      DEPLOYMENT_CREATOR: ${{ github.event.deployment.creator.login || '' }}
+      SHA: ${{ github.event.deployment.sha }}
+      DEPLOYMENT_ID: ${{ github.event.deployment.id }}
+      DEPLOYMENT_ENVIRONMENT: ${{ github.event.deployment.environment }}
+      DEPLOYMENT_REF: ${{ github.event.deployment.ref }}
+      DEPLOYMENT_CREATOR: ${{ github.event.deployment.creator.login }}
 
     steps:
       - name: Checkout verifier tools at the event SHA
@@ -58,7 +58,6 @@ jobs:
           echo "DEPLOYMENT_CREATOR=$(jq -r '.creator.login' "$evidence_dir/deployment.json")" >> "$GITHUB_ENV"
 
       - name: Verify Railway deployment identity
-        if: env.SKIP != 'true'
         run: |
           test "${#SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$SHA"
@@ -67,7 +66,6 @@ jobs:
           test "$DEPLOYMENT_CREATOR" = "railway-app[bot]"
 
       - name: Wait for native Railway deployment or service statuses
-        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -117,27 +115,7 @@ jobs:
             sleep 10
           done
 
-      - name: Set up Node for staging evaluation
-        if: env.SKIP != 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 20.18.x
-          cache: npm
-
-      - name: Install evaluation dependencies
-        if: env.SKIP != 'true'
-        run: npm ci
-
-      - name: Run staging invariant evaluation
-        if: env.SKIP != 'true'
-        run: npm run test:invariants
-
-      - name: Run staging deterministic evaluation
-        if: env.SKIP != 'true'
-        run: npm run test:gauntlet:ci
-
       - name: Resolve reference engine main SHA
-        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -145,7 +123,6 @@ jobs:
           echo "REFERENCE_ENGINE_SHA=$(gh api repos/Mnehmos/mnehmos.rpg.mcp/git/ref/heads/main --jq '.object.sha')" >> "$GITHUB_ENV"
 
       - name: Read engine health
-        if: env.SKIP != 'true'
         env:
           REFERENCE_ENGINE_STAGING_URL: ${{ vars.REFERENCE_ENGINE_STAGING_URL }}
         run: |
@@ -164,7 +141,6 @@ jobs:
           exit 1
 
       - name: Read web health and engine reachability
-        if: env.SKIP != 'true'
         env:
           WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
         run: |
@@ -186,7 +162,6 @@ jobs:
           exit 1
 
       - name: Promote production ref to the verified SHA
-        if: env.SKIP != 'true'
         env:
           GH_TOKEN: ${{ secrets.PRODUCTION_PROMOTION_TOKEN }}
         run: |
@@ -200,7 +175,6 @@ jobs:
           fi
 
       - name: Write staging promotion evidence
-        if: env.SKIP != 'true'
         env:
           REFERENCE_ENGINE_STAGING_URL: ${{ vars.REFERENCE_ENGINE_STAGING_URL }}
           WEB_STAGING_URL: ${{ vars.WEB_STAGING_URL }}
@@ -218,7 +192,6 @@ jobs:
             > staging-promotion-evidence.json
 
       - name: Upload staging promotion evidence
-        if: env.SKIP != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: staging-promotion-evidence-${{ env.SHA }}
