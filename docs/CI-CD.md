@@ -91,10 +91,13 @@ successful suite lets Railway build the repository using the service-specific
 `deployment_status` events. It verifies the Railway environment deployment's
 exact 40-character SHA, reads both service health endpoints, and advances the
 `production` branch ref directly to that SHA with the narrowly scoped
-`PRODUCTION_PROMOTION_TOKEN`. The required main-branch CI has already run the
-full test suite, including the deterministic evaluation files. The verifier
-has no Railway token, does not call GraphQL, does not upload source, and never
-calls `railway up`.
+`PRODUCTION_PROMOTION_TOKEN`. The verifier deliberately does not declare a
+GitHub Actions `environment`; doing so would create a second, generic
+`staging` deployment record beside Railway's canonical `RPG MCP Live / staging`
+record. The required main-branch CI has already run the full test suite,
+including the deterministic evaluation files. The verifier has no Railway
+token, does not call GraphQL, does not upload source, and never calls
+`railway up`.
 
 ## Production deployment
 
@@ -103,6 +106,11 @@ branch is `production`. Native autodeploy and **Wait for CI** are enabled for
 both production instances. A direct ref update from the verified staging SHA
 starts production CI; after it passes, Railway natively deploys that SHA and
 `verify-production.yml` checks health and publishes the release manifest/tag.
+The verifier also avoids a GitHub Actions `production` environment so the
+deployment page has one canonical Railway production record rather than a
+second workflow-owned record. Release evidence remains a separate workflow
+step and can be diagnosed in Actions without being mistaken for a Railway
+runtime failure.
 
 ## Production migration
 

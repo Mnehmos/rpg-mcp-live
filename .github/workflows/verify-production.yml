@@ -21,7 +21,6 @@ jobs:
     name: Verify native production deployment
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    environment: production
     # Only aggregate deployment success is eligible. Service commit statuses
     # are still read later as evidence, but do not start a second verifier.
     if: >

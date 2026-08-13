@@ -68,8 +68,9 @@ const SECTIONS = [
   { types: ["test"], heading: "Tests" },
   { types: ["ci", "ops"], heading: "Infrastructure" },
   { types: ["build"], heading: "Build" },
+  { types: ["chore", "style"], heading: "Maintenance" },
+  { types: ["revert"], heading: "Reverted" },
 ];
-// Skipped types: chore, style, revert (internal noise)
 
 // ---------------------------------------------------------------------------
 // Get commit range

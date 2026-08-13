@@ -22,7 +22,6 @@ jobs:
     name: Verify staging and promote exact SHA
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    environment: staging
     if: >
       github.event.deployment_status.state == 'success' &&
       github.event.deployment.environment == 'RPG MCP Live / staging' &&
