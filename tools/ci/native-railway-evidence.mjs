@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 
 export const RAILWAY_BOT = "railway-app[bot]";
 export const RAILWAY_SERVICE_CONTEXTS = Object.freeze([
-  "RPG MCP Live - lantern-engine",
   "RPG MCP Live - rpg-mcp-live",
 ]);
 
