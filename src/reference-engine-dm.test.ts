@@ -244,6 +244,196 @@ describe("ReferenceDungeonMaster", () => {
     );
   });
 
+  it("replays prior accepted and rejected tool calls in API-valid message order", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-tool-history-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    store.appendLogMessages("account-1", "campaign-1", [
+      { id: "prior-player", kind: "player", text: "I enter the drowned chapel.", createdAt: "2026-01-01T00:00:00.000Z" },
+      {
+        id: "prior-tools",
+        kind: "tool",
+        text: "The DM consulted the game world.",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        toolDisclosure: {
+          spoilerWarning: "Spoilers",
+          calls: [
+            {
+              name: "spatial_manage",
+              arguments: { action: "generate", name: "Drowned Chapel" },
+              result: { success: true, roomId: "room-1" },
+              accepted: true,
+            },
+            {
+              name: "scene_manage",
+              arguments: { action: "set", roomId: "missing-room" },
+              result: { error: "room not found" },
+              accepted: false,
+            },
+          ],
+        },
+      },
+      { id: "prior-narration", kind: "narration", text: "Black water laps over the chapel floor.", createdAt: "2026-01-01T00:00:02.000Z" },
+    ]);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    type CapturedMessage = {
+      role: string;
+      content: string | null;
+      tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>;
+      tool_call_id?: string;
+    };
+    let firstMessages: CapturedMessage[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      firstMessages = (JSON.parse(init.body) as { messages: CapturedMessage[] }).messages;
+      return openRouterMessage("The chapel waits in silence.");
+    }));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I listen at the altar.");
+
+    const priorPlayerIndex = firstMessages.findIndex((message) => message.content === "I enter the drowned chapel.");
+    const replayedAssistant = firstMessages[priorPlayerIndex + 1];
+    const replayedAcceptedResult = firstMessages[priorPlayerIndex + 2];
+    const replayedRejectedResult = firstMessages[priorPlayerIndex + 3];
+    expect(replayedAssistant).toMatchObject({
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        { function: { name: "spatial_manage", arguments: JSON.stringify({ action: "generate", name: "Drowned Chapel" }) } },
+        { function: { name: "scene_manage", arguments: JSON.stringify({ action: "set", roomId: "missing-room" }) } },
+      ],
+    });
+    expect(replayedAcceptedResult).toEqual({
+      role: "tool",
+      tool_call_id: replayedAssistant?.tool_calls?.[0]?.id,
+      content: JSON.stringify({ success: true, roomId: "room-1" }),
+    });
+    expect(replayedRejectedResult).toEqual({
+      role: "tool",
+      tool_call_id: replayedAssistant?.tool_calls?.[1]?.id,
+      content: JSON.stringify({ error: "room not found" }),
+    });
+    expect(firstMessages[priorPlayerIndex + 4]).toEqual({
+      role: "assistant",
+      content: "Black water laps over the chapel floor.",
+    });
+    expect(firstMessages[priorPlayerIndex + 5]).toEqual({
+      role: "user",
+      content: "I listen at the altar.",
+    });
+  });
+
+  it("accepts a character id learned from an accepted prior-turn tool result", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-prior-character-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    store.appendLogMessages("account-1", "campaign-1", [{
+      id: "prior-combat-tools",
+      kind: "tool",
+      text: "The DM consulted the game world.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      toolDisclosure: {
+        spoilerWarning: "Spoilers",
+        calls: [{
+          name: "combat_manage",
+          arguments: { action: "spawn_quick_enemy", creature: "zombie" },
+          result: {
+            success: true,
+            encounterId: "encounter-1",
+            enemies: [{ id: "enemy-1", name: "Drowned Raider" }],
+          },
+          accepted: true,
+        }],
+      },
+    }]);
+
+    const attackHandler = vi.fn(() => ({ success: true, damage: 5 }));
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "combat_action.attack": attackHandler,
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "current-attack",
+          type: "function",
+          function: {
+            name: "combat_action",
+            arguments: JSON.stringify({ action: "attack", characterId: "enemy-1", encounterId: "encounter-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("Your blade bites into the drowned raider.");
+    }));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I attack the drowned raider.");
+
+    expect(attackHandler).toHaveBeenCalledWith(expect.objectContaining({ characterId: "enemy-1" }));
+  });
+
+  it("bounds replayed tool results and marks truncation explicitly", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-tool-history-cap-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    store.appendLogMessages("account-1", "campaign-1", [{
+      id: "large-tool-result",
+      kind: "tool",
+      text: "The DM consulted the game world.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      toolDisclosure: {
+        spoilerWarning: "Spoilers",
+        calls: [{
+          name: "combat_map",
+          arguments: { action: "render", encounterId: "encounter-1" },
+          result: { renderedMap: "x".repeat(5_000) },
+          accepted: true,
+        }],
+      },
+    }]);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let replayedResult = "";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      const messages = (JSON.parse(init.body) as { messages: Array<{ role: string; content: string }> }).messages;
+      replayedResult = messages.find((message) => message.role === "tool")?.content ?? "";
+      return openRouterMessage("The map settles into focus.");
+    }));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Study the battlefield.");
+
+    expect(replayedResult.length).toBeLessThanOrEqual(4_000);
+    expect(replayedResult).toContain("[result truncated for context; call the tool again for the full payload]");
+  });
+
   it("rejects a characterId the model invented instead of learned from a tool result this turn", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));

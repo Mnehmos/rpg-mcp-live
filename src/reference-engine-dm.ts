@@ -59,6 +59,65 @@ interface ReferenceToolOutcome {
   payload: unknown;
 }
 
+function storedToolCallId(entryId: string, index: number): string {
+  const safeEntryId = entryId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48) || "entry";
+  return `history_${safeEntryId}_${index + 1}`;
+}
+
+const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = 4_000;
+const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
+
+function serializeStoredToolResult(result: unknown): string {
+  const serialized = typeof result === "string" ? result : JSON.stringify(result) ?? "null";
+  if (serialized.length <= MAX_REPLAYED_TOOL_RESULT_CHARACTERS) return serialized;
+  return serialized.slice(0, MAX_REPLAYED_TOOL_RESULT_CHARACTERS - REPLAY_TRUNCATION_MARKER.length)
+    + REPLAY_TRUNCATION_MARKER;
+}
+
+/**
+ * Reconstruct the assistant/tool exchanges that produced prior narration.
+ * Only accepted engine results extend the cross-turn character allowlist;
+ * model-supplied arguments and rejected results never grant authority.
+ */
+function replayStoredHistory(
+  priorLog: readonly StoredLogMessage[],
+  knownCharacterIds: Set<string>
+): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  for (const entry of priorLog) {
+    if (entry.kind === "player") {
+      messages.push({ role: "user", content: entry.text });
+      continue;
+    }
+    if (entry.kind === "narration") {
+      messages.push({ role: "assistant", content: entry.text });
+      continue;
+    }
+    if (entry.kind !== "tool" || !entry.toolDisclosure?.calls.length) continue;
+
+    const toolCalls = entry.toolDisclosure.calls.map((call, index) => {
+      if (call.accepted) collectCharacterIds(call.result, knownCharacterIds);
+      return {
+        id: storedToolCallId(entry.id, index),
+        type: "function" as const,
+        function: {
+          name: call.name,
+          arguments: JSON.stringify(call.arguments),
+        },
+      };
+    });
+    messages.push({ role: "assistant", content: null, tool_calls: toolCalls });
+    entry.toolDisclosure.calls.forEach((call, index) => {
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCalls[index]!.id,
+        content: serializeStoredToolResult(call.result),
+      });
+    });
+  }
+  return messages;
+}
+
 const TOOL_DISCLOSURE_WARNING =
   "Spoiler warning: the DM used game tools to author or resolve this moment. Expand the calls to see newly created locations, characters, enemies, items, rolls, and state changes.";
 const SENSITIVE_DISCLOSURE_KEY = /^(?:api[_-]?key|authorization|cookie|credential|password|secret|token)$/i;
@@ -235,10 +294,11 @@ export class ReferenceDungeonMaster {
     // itself is deliberately fill-only (many tools target an NPC/enemy the
     // model just created in this same session, not always the player's own
     // PC) — so it can't be blanket-forced. Instead, only allow characterId
-    // values the model has actually learned from a real tool result in this
-    // turn (or the player's own bound character); anything else is rejected
-    // before it reaches the network, the same "engine validates, never
-    // trusts the model" discipline the adapter already applies elsewhere.
+    // values the model has actually learned from an accepted result in this
+    // campaign's replayed history or the current turn (plus the player's own
+    // bound character); anything else is rejected before it reaches the
+    // network, the same "engine validates, never trusts the model" discipline
+    // the adapter already applies elsewhere.
     const knownCharacterIds = new Set<string>();
     if (routing.referenceCharacterId) knownCharacterIds.add(routing.referenceCharacterId);
 
@@ -257,21 +317,16 @@ export class ReferenceDungeonMaster {
       ? formatCharacterSheetContext((await this.adapter.getCampaign(accountId, actorId, campaignId)).campaign.character)
       : null;
 
-    // Prior turns are never replayed as actual tool-call/tool-result pairs
-    // here (that history isn't retained — see this file's class doc "known,
-    // disclosed MVP gap" note), only as narration text. That's sufficient
-    // for narrative continuity, which is what was actually missing: without
-    // this, every turn started a brand-new conversation with just the
-    // current playerText, so the model had no memory of anything said or
-    // narrated before it and would confabulate ("this is the first
-    // conversation turn") rather than recall it.
     const priorLog = this.store.getLogMessages(accountId, campaignId);
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
-    const historyMessages: ChatMessage[] = priorLog
-      .filter((entry): entry is StoredLogMessage & { kind: "player" | "narration" } => entry.kind === "player" || entry.kind === "narration")
-      .map((entry) => ({ role: entry.kind === "player" ? "user" : "assistant", content: entry.text }) as ChatMessage);
+    // Replay the actual assistant/tool exchange, not a prose-only rewrite of
+    // prior turns. Besides restoring the model's own successful tool-use
+    // pattern, accepted engine results safely carry discovered NPC/enemy IDs
+    // across turns. Rejected results and model arguments never seed the
+    // allowlist.
+    const historyMessages = replayStoredHistory(priorLog, knownCharacterIds);
 
     const messages: ChatMessage[] = [
       { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
@@ -403,7 +458,7 @@ export class ReferenceDungeonMaster {
     if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
       const text = JSON.stringify({
         error:
-          "Unknown characterId. Only use a characterId you learned from an actual tool result earlier in this turn " +
+          "Unknown characterId. Only use a characterId learned from an accepted tool result in this campaign or current turn " +
           "(e.g. from create/list/get), or omit it to target your own character.",
       });
       return { text, accepted: false, payload: { error: "unknown_character_id" } };
