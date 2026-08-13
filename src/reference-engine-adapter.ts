@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createInitialCampaign, hydrateCharacter, toSessionView } from "./engine-domain.js";
-import { abilityModifier, buildSavingThrows, buildSkillSheet, open5eCharacterContentKey, open5eClassSourceKey, OPEN5E_RULES_PACK_HASH } from "./open5e-rules.js";
+import { abilityModifier, buildSavingThrows, buildSkillSheet, open5eCharacterContentKey, open5eClassSourceKey, OPEN5E_RULES_PACK_HASH, OPEN5E_RULES_VERSION } from "./open5e-rules.js";
 import {
   engineCampaignProfileSchema,
   engineCharacterDetailsSchema,
@@ -657,12 +657,19 @@ export class ReferenceEngineAdapter {
   ): Promise<LanternCampaignState> {
     const profile = (routing.campaignProfileJson
       ? JSON.parse(routing.campaignProfileJson)
-      : undefined) as EngineCampaignProfile | undefined;
+      : undefined) as EngineCampaignCreate | undefined;
+    // Rehydrate the content policy chosen at creation. Omitting it here falls
+    // back to defaultContentPolicy(), so a campaign created with non-default
+    // sources or licenses silently reverted to the defaults on every read —
+    // attribution and mechanics would then disagree with what the player
+    // actually picked.
     const state = createInitialCampaign(
       accountId,
       actorId,
       campaignId as ReturnType<typeof randomUUID>,
-      profile
+      profile,
+      OPEN5E_RULES_VERSION,
+      profile?.contentPolicy
     );
     state.version = routing.version;
 
