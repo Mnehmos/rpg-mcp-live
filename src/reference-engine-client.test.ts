@@ -137,3 +137,93 @@ describe("extractEmbeddedJson", () => {
     expect(extractEmbeddedJson('<!-- FOO_JSON\n{"a":1}\nFOO_JSON -->')).toEqual({ a: 1 });
   });
 });
+
+describe("ReferenceEngineClient tenant context", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function capture(
+    options: { tenantSecret?: string },
+    call: (client: ReferenceEngineClient) => Promise<unknown>
+  ): Promise<Headers[]> {
+    const headers: Headers[] = [];
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      headers.push(new Headers(init?.headers));
+      if (body.method === "initialize") {
+        return jsonRpcResponse(body.id as string, { protocolVersion: "2025-06-18", capabilities: {} });
+      }
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return jsonRpcResponse(body.id as string, { content: [{ type: "text", text: "ok" }] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ReferenceEngineClient({
+      baseUrl: "http://reference-engine.example/mcp",
+      authToken: "service-token",
+      timeoutMs: 5000,
+      ...options,
+    });
+    await call(client);
+    return headers;
+  }
+
+  function decodePayload(header: string): Record<string, unknown> {
+    const [encoded] = header.split(".");
+    return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
+  }
+
+  it("sends a signed x-rpg-tenant header naming the campaign for a scoped call", async () => {
+    const headers = await capture({ tenantSecret: "shared-secret" }, (client) =>
+      client.callTool("character_manage", { action: "get" }, { accountId: "acct-1", campaignId: "camp-1" })
+    );
+
+    const toolCall = headers[headers.length - 1];
+    const token = toolCall.get("x-rpg-tenant");
+    expect(token).toBeTruthy();
+    expect(decodePayload(token!)).toMatchObject({ accountId: "acct-1", campaignId: "camp-1" });
+  });
+
+  it("still sends the service auth token alongside the tenant context", async () => {
+    const headers = await capture({ tenantSecret: "shared-secret" }, (client) =>
+      client.callTool("character_manage", { action: "get" }, { accountId: "acct-1", campaignId: "camp-1" })
+    );
+
+    // The two answer different questions and both must be present: one proves
+    // the caller is this service, the other names the customer.
+    expect(headers[headers.length - 1].get("authorization")).toBe("Bearer service-token");
+  });
+
+  it("omits the tenant header for tenant-agnostic meta-tool calls", async () => {
+    // The tool catalog loads schemas before any campaign is in play. Sending a
+    // fabricated tenant here would be worse than sending none.
+    const headers = await capture({ tenantSecret: "shared-secret" }, (client) =>
+      client.callTool("load_tool_schema", { toolName: "character_manage" })
+    );
+
+    expect(headers[headers.length - 1].get("x-rpg-tenant")).toBeNull();
+  });
+
+  it("omits the tenant header when no secret is configured, rather than sending an unsigned one", async () => {
+    const headers = await capture({}, (client) =>
+      client.callTool("character_manage", { action: "get" }, { accountId: "acct-1", campaignId: "camp-1" })
+    );
+
+    // Fail closed at the engine (which refuses unscoped data access) rather
+    // than inventing a context the engine would have to trust blindly.
+    expect(headers[headers.length - 1].get("x-rpg-tenant")).toBeNull();
+  });
+
+  it("scopes each call independently so two campaigns never share a token", async () => {
+    const headers = await capture({ tenantSecret: "shared-secret" }, async (client) => {
+      await client.callTool("character_manage", { action: "get" }, { accountId: "acct-1", campaignId: "camp-1" });
+      await client.callTool("character_manage", { action: "get" }, { accountId: "acct-2", campaignId: "camp-2" });
+    });
+
+    const tokens = headers.map((h) => h.get("x-rpg-tenant")).filter(Boolean) as string[];
+    expect(tokens).toHaveLength(2);
+    expect(decodePayload(tokens[0])).toMatchObject({ accountId: "acct-1", campaignId: "camp-1" });
+    expect(decodePayload(tokens[1])).toMatchObject({ accountId: "acct-2", campaignId: "camp-2" });
+  });
+});
