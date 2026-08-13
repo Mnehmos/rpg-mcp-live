@@ -554,6 +554,47 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.toolDisclosure?.calls[0]?.result).toBe("[DM-only content withheld]");
     expect(JSON.stringify(result.session.log)).not.toContain("The innkeeper is a spy.");
   });
+
+  it("redacts secrets-docket write content from the player disclosure", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-secret-disclosure-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [
+          {
+            id: "call-1",
+            type: "function",
+            function: {
+              name: "write_docket",
+              arguments: JSON.stringify({ name: "secrets", content: "The vault opens at midnight." }),
+            },
+          },
+        ]);
+      }
+      return openRouterMessage("You keep the revelation to yourself.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Record the hidden omen.");
+
+    expect(result.toolDisclosure?.calls[0]?.arguments).toEqual({
+      name: "secrets",
+      content: "[DM-only content withheld]",
+    });
+    expect(JSON.stringify(result.session.log)).not.toContain("The vault opens at midnight.");
+  });
 });
 
 describe("reference DM scene authoring contract", () => {
