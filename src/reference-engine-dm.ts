@@ -62,7 +62,11 @@ export interface AuthoredSceneState {
   sceneId: string | null;
 }
 
-const MAX_TOOL_ROUNDS = 6;
+// Creative scene authoring can legitimately need room generation, placement,
+// NPC/object creation, scene commitment, continuity writes, and then a final
+// narration response. This is only a runaway-loop bound; it is not a
+// deterministic test for whether a player turn is allowed.
+const MAX_TOOL_ROUNDS = 12;
 
 export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Every player turn is intent, not a pre-existing world description. The player drives what happens next; you invent the concrete world that makes that intent playable.",
@@ -229,12 +233,18 @@ export class ReferenceDungeonMaster {
 
     let narrationText: string | null = null;
     try {
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+      // Reserve one completion after the final allowed tool-bearing round so
+      // the DM can narrate the authored result instead of exhausting the
+      // budget immediately after a valid tool call.
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
         const completion = await this.chatCompletion(messages, tools);
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
           narrationText = candidate || null;
+          break;
+        }
+        if (round === MAX_TOOL_ROUNDS) {
           break;
         }
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
