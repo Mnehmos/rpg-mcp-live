@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
+import { REFERENCE_ENGINE_TOOL_NAMES, ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 
 // Fixture captured live from the deployed mnehmos-rpg-mcp service's load_tool_schema.
@@ -38,6 +38,11 @@ function fakeClient(schemasByTool: Record<string, unknown>): ReferenceEngineClie
 }
 
 describe("ReferenceEngineToolCatalog", () => {
+  it("exposes the DM world-authoring tools", () => {
+    expect(REFERENCE_ENGINE_TOOL_NAMES).toContain("scene_manage");
+    expect(REFERENCE_ENGINE_TOOL_NAMES).toContain("spawn_manage");
+  });
+
   it("converts the reference engine's custom schema format to OpenRouter tool-call format", async () => {
     const client = fakeClient({ character_manage: CHARACTER_MANAGE_SCHEMA });
     const catalog = new ReferenceEngineToolCatalog(client, ["character_manage"]);
