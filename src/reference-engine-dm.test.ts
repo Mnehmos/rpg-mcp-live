@@ -566,9 +566,11 @@ describe("reference DM scene authoring contract", () => {
     const scene: AuthoredSceneState = {
       generatedRoom: true,
       movedCharacter: false,
+      committedScene: false,
       roomId: "room-1",
       roomName: "The Salt Archive",
       description: "A flooded archive beneath the quay.",
+      sceneId: null,
     };
     const instruction = authoredOpeningRepairInstruction(scene);
 
@@ -579,6 +581,9 @@ describe("reference DM scene authoring contract", () => {
 
   it("makes creative scene authoring and MCP commitment explicit", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Invent places, people, pressures, clues");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("There are no rooms, locations, NPCs, enemies, items, quests, clues");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("scene_manage action set");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player drives what happens next");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not narrate that absence");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
@@ -623,6 +628,10 @@ describe("reference DM scene authoring contract", () => {
         newRoomId: args.roomId,
         newRoomName: "The Salt Archive",
       }),
+      "scene_manage.set": () => ({
+        success: true,
+        sceneId: "scene-1",
+      }),
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -666,6 +675,24 @@ describe("reference DM scene authoring contract", () => {
             },
           ]);
         }
+        if (call === 3) {
+          return openRouterMessage(null, [
+            {
+              id: "commit-scene",
+              type: "function",
+              function: {
+                name: "scene_manage",
+                arguments: JSON.stringify({
+                  action: "set",
+                  title: "The Salt Archive",
+                  placeLabel: "The Salt Archive",
+                  narration: "Mara arrives at the Salt Archive, where dark water laps at the broken shelves.",
+                  participants: ["char-1"],
+                }),
+              },
+            },
+          ]);
+        }
         return openRouterMessage("Mara arrives at the Salt Archive, where dark water laps at the broken shelves.");
       })
     );
@@ -675,9 +702,10 @@ describe("reference DM scene authoring contract", () => {
     expect(result.narration.text).toContain("Salt Archive");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Room id: room-1");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Player placed here this turn: yes");
+    expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Shared scene committed this turn: yes");
     const remoteCalls = (client.callTool as ReturnType<typeof vi.fn>).mock.calls
-      .filter((call) => call[0] === "spatial_manage")
-      .map((call) => (call[1] as Record<string, unknown>).action);
-    expect(remoteCalls).toEqual(["generate", "move"]);
+      .filter((call) => ["spatial_manage", "scene_manage"].includes(call[0] as string))
+      .map((call) => `${call[0]}.${(call[1] as Record<string, unknown>).action}`);
+    expect(remoteCalls).toEqual(["spatial_manage.generate", "spatial_manage.move", "scene_manage.set"]);
   });
 });

@@ -21,6 +21,8 @@ export const REFERENCE_ENGINE_TOOL_NAMES = [
   "world_manage",
   "world_map",
   "spatial_manage",
+  "spawn_manage",
+  "scene_manage",
   "quest_manage",
   "npc_manage",
   "aura_manage",

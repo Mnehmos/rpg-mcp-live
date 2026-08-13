@@ -55,21 +55,34 @@ interface ReferenceToolOutcome {
 export interface AuthoredSceneState {
   generatedRoom: boolean;
   movedCharacter: boolean;
+  committedScene: boolean;
   roomId: string | null;
   roomName: string | null;
   description: string | null;
+  sceneId: string | null;
 }
 
 const MAX_TOOL_ROUNDS = 6;
 
+export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
+  "Every player turn is intent, not a pre-existing world description. The player drives what happens next; you invent the concrete world that makes that intent playable.",
+  "There are no rooms, locations, NPCs, enemies, items, quests, clues, or other world facts until the DM authors them through an RPG MCP tool and a successful tool result commits them to engine state.",
+  "Never ask the player to provide a missing location, NPC, enemy, or situation merely because it has not been established. Invent a fitting one from the campaign profile, player intent, and current pressures, then commit it before narration.",
+  "Use spatial_manage generate and move for places and player placement; npc_manage create or spawn_manage for NPCs and populated locations; combat_manage spawn_quick_enemy or spawn_manage for enemies and encounters; item_manage and inventory_manage for authored objects and possession; quest_manage for durable quests; and scene_manage set for the DM-authored shared scene frame.",
+  "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
+  "For every turn that advances the shared fiction, commit the new or changed world facts through the appropriate engine tools, then commit the resulting DM scene with scene_manage action set using the player's character as a participant. Only after those tool results succeed may you narrate them.",
+  "If a tool rejects an authoring attempt, repair the tool call or narrate the failed action without claiming the rejected fact became real. Never substitute a docket entry or prose for an engine commitment.",
+].join(" ");
+
 export const REFERENCE_DM_SYSTEM_PROMPT = [
   "You are the Dungeon Master for a tabletop RPG session, running on the reference rules engine.",
+  REFERENCE_DM_WORLD_AUTHORING_PROTOCOL,
   "The player owns the fiction's direction; you own the concrete scene. Invent places, people, pressures, clues, and opportunities that fit the campaign profile, then use the provided RPG MCP tools to commit every durable fact before narrating it.",
   "You may call the provided tools to change game state (including spatial_manage for persistent rooms and character placement, combat, inventory, movement, character updates, quests, notes, and narrative memory).",
   "The engine validates and executes every tool call; you never mutate state directly, only through tools.",
   "Do not invent characterId/worldId/partyId values — omit them and the engine will fill in the correct ones for this session.",
   "If there is no current room or scene, do not narrate that absence. Create a concrete room with spatial_manage action generate, then place the player there with spatial_manage action move. The generated room name and description are your creative decision, but the room and placement must be confirmed by tool results before you describe them.",
-  "On an opening or the first player turn, this room-creation-and-placement sequence is mandatory. On later turns, if the player refers to an unestablished place or person, author and commit the needed scene first instead of saying it does not exist.",
+  "On an opening or the first player turn, spatial room generation, player placement, and scene_manage set are mandatory. On later turns, if the player refers to an unestablished place or person, author and commit the needed world facts and scene first instead of saying they do not exist.",
   "After committing a new scene, write the canonical room id, name, current occupants, active leads, and unresolved pressure to the state/journal dockets so the next turn can continue from it. Never put mechanical numbers in those dockets.",
   "When you are done taking actions for this turn, respond with plain narration text (no further tool calls) describing what happened, written for the player.",
   "Keep narration grounded only in what the tools actually returned. Do not narrate outcomes that no tool call confirmed.",
@@ -211,7 +224,7 @@ export class ReferenceDungeonMaster {
       ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
       ...(openingRequired
-        ? [{ role: "system" as const, content: "SERVER TURN REQUIREMENT: This is an opening/first-turn scene. Before narration, successfully call spatial_manage generate and spatial_manage move so a persistent room and the player's placement exist." }]
+        ? [{ role: "system" as const, content: "SERVER TURN REQUIREMENT: This is an opening/first-turn scene. Before narration, successfully call spatial_manage generate, spatial_manage move, and scene_manage set so a persistent room, the player's placement, and the DM-authored shared scene exist." }]
         : []),
       ...historyMessages,
       { role: "user", content: playerText },
@@ -297,6 +310,8 @@ export class ReferenceDungeonMaster {
       `- Room name: ${scene.roomName ?? "Unnamed room"}`,
       `- Description: ${scene.description ?? "See the authoritative spatial tool result."}`,
       `- Player placed here this turn: ${scene.movedCharacter ? "yes" : "not confirmed"}`,
+      `- Shared scene committed this turn: ${scene.committedScene ? "yes" : "not confirmed"}`,
+      `- Scene id: ${scene.sceneId ?? "not confirmed"}`,
       "<!-- canonical-scene:end -->",
     ].join("\n");
     const next = marker.test(existing)
@@ -500,9 +515,11 @@ function emptyAuthoredSceneState(): AuthoredSceneState {
   return {
     generatedRoom: false,
     movedCharacter: false,
+    committedScene: false,
     roomId: null,
     roomName: null,
     description: null,
+    sceneId: null,
   };
 }
 
@@ -532,12 +549,23 @@ function markAuthoredSceneState(
   args: Record<string, unknown>,
   outcome: ReferenceToolOutcome,
 ): void {
-  if (!outcome.accepted || toolName !== "spatial_manage") return;
-  const action = spatialAction(args);
-  if (!action) return;
+  if (!outcome.accepted) return;
   const payload = recordValue(outcome.payload);
   const nested = recordValue(payload.data);
   const data = Object.keys(payload).length > 0 ? payload : nested;
+  if (toolName === "scene_manage") {
+    const action = typeof args.action === "string" ? args.action.trim().toLowerCase() : "";
+    const scenePayload = recordValue(data.scene);
+    const sceneId = stringValue(data, "sceneId") ?? stringValue(scenePayload, "id", "sceneId");
+    if (action === "set" && sceneId) {
+      scene.committedScene = true;
+      scene.sceneId = sceneId;
+    }
+    return;
+  }
+  if (toolName !== "spatial_manage") return;
+  const action = spatialAction(args);
+  if (!action) return;
   const roomId = stringValue(data, "roomId", "newRoomId");
   const roomName = stringValue(data, "name", "newRoomName", "roomName");
   const description = stringValue(data, "description", "baseDescription");
@@ -552,6 +580,7 @@ function missingOpeningState(scene: AuthoredSceneState): string[] {
   const missing: string[] = [];
   if (!scene.generatedRoom) missing.push("a newly generated persistent room");
   if (!scene.movedCharacter) missing.push("the player's placement in that room");
+  if (!scene.committedScene) missing.push("the DM-authored shared scene");
   return missing;
 }
 
@@ -560,8 +589,8 @@ export function authoredOpeningRepairInstruction(scene: AuthoredSceneState): str
   return [
     "Do not narrate this turn yet: the opening has not been committed to the RPG MCP state.",
     `Still required: ${missing.join(" and ") || "an authoritative scene confirmation"}.`,
-    "Call spatial_manage action generate with a creative room name, a detailed present-tense baseDescription, and a valid biomeContext. Then call spatial_manage action move with the generated roomId; omit characterId so the server supplies the player's character.",
-    "Only after both calls return success may you narrate the room and the player's arrival. Do not say that no location exists.",
+    "Call spatial_manage action generate with a creative room name, a detailed present-tense baseDescription, and a valid biomeContext. Then call spatial_manage action move with the generated roomId; omit characterId so the server supplies the player's character. Then call scene_manage action set with the player's character as a participant and the newly authored scene narration.",
+    "Only after all three commitments return success may you narrate the room and the player's arrival. Do not say that no location exists.",
   ].join(" ");
 }
 
