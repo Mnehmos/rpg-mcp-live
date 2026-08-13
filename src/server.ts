@@ -417,7 +417,11 @@ app.get("/api/character-options", async (request, response) => {
   // id simply falls back to the deployment default.
   const campaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
   const routing = campaignId ? referenceEngineStore.getRouting(userId, campaignId) : null;
-  const policy = characterOptionPolicy(routing?.campaignProfileJson, referenceContentCatalog.defaultPolicy);
+  const policy = characterOptionPolicy(
+    routing?.campaignProfileJson,
+    referenceContentCatalog.defaultPolicy,
+    (requested) => validateCampaignContentPolicy(contentRegistry.activePack, deploymentContentPolicy, requested)
+  );
   response.json({ options: open5eCharacterOptions(policy) });
 });
 

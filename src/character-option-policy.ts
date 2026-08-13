@@ -12,15 +12,36 @@ import type { Open5eCharacterOptionPolicy } from "./open5e-rules.js";
  * filtering existed in open5eCharacterOptions the whole time; nothing was
  * passing it a policy.
  *
- * Falls back to the deployment default when a campaign predates stored
- * policies, rather than returning undefined: undefined means "no filtering at
- * all", and a campaign always has some policy in effect.
+ * The stored policy is re-validated rather than trusted. Campaigns created
+ * before creation-time validation existed can hold a schema-valid but
+ * deployment-invalid policy, and the same happens whenever a deployment's
+ * allowlists later narrow. Serving that policy unchanged would let an old
+ * campaign keep offering documents this deployment is no longer permitted to
+ * serve — the ceiling enforced for new campaigns has to apply to old ones too.
+ *
+ * `validate` is injected rather than imported so this stays testable without
+ * loading a content pack.
  */
 export function characterOptionPolicy(
   campaignProfileJson: string | null | undefined,
-  fallback: EngineContentPolicy
+  fallback: EngineContentPolicy,
+  validate: (policy: EngineContentPolicy) => EngineContentPolicy
 ): Open5eCharacterOptionPolicy {
-  return resolverPolicyForCampaign(storedContentPolicy(campaignProfileJson) ?? fallback);
+  const stored = storedContentPolicy(campaignProfileJson);
+  if (!stored) return resolverPolicyForCampaign(fallback);
+
+  try {
+    return resolverPolicyForCampaign(validate(stored));
+  } catch (error) {
+    // Fall back rather than fail: the player should still be able to build a
+    // character, just within what the deployment currently permits.
+    console.warn(
+      "Stored campaign content policy is not valid for the current deployment; " +
+        "falling back to the deployment default.",
+      error instanceof Error ? error.message : error
+    );
+    return resolverPolicyForCampaign(fallback);
+  }
 }
 
 function storedContentPolicy(campaignProfileJson: string | null | undefined): EngineContentPolicy | null {
