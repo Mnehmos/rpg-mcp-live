@@ -5,7 +5,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameStore } from "./store.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
-import { ReferenceDmProviderUnavailableError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
+import {
+  authoredOpeningRepairInstruction,
+  ReferenceDmProviderUnavailableError,
+  ReferenceDungeonMaster,
+  REFERENCE_DM_SYSTEM_PROMPT,
+  requiresAuthoredOpeningState,
+  type AuthoredSceneState,
+} from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
 
@@ -541,5 +548,136 @@ describe("ReferenceDungeonMaster", () => {
     await dm.resolveTurn("account-1", "actor-1", "campaign-1", "What do I suspect about the innkeeper?");
 
     expect(capturedSecret).toBe("The innkeeper is a spy.");
+  });
+});
+
+describe("reference DM scene authoring contract", () => {
+  it("requires a persisted opening room before the first player turn", () => {
+    expect(requiresAuthoredOpeningState("I observe the current moment.", [])).toBe(true);
+    expect(requiresAuthoredOpeningState("I listen carefully.", [
+      { id: "player-1", kind: "player", text: "I enter.", createdAt: "now" },
+    ])).toBe(false);
+    expect(requiresAuthoredOpeningState("Open the first situation and establish the campaign's opening scene.", [
+      { id: "player-1", kind: "player", text: "I enter.", createdAt: "now" },
+    ])).toBe(true);
+  });
+
+  it("tells the provider exactly how to repair narration that skipped state", () => {
+    const scene: AuthoredSceneState = {
+      generatedRoom: true,
+      movedCharacter: false,
+      roomId: "room-1",
+      roomName: "The Salt Archive",
+      description: "A flooded archive beneath the quay.",
+    };
+    const instruction = authoredOpeningRepairInstruction(scene);
+
+    expect(instruction).toContain("spatial_manage action move");
+    expect(instruction).toContain("generated roomId");
+    expect(instruction).toContain("Do not say that no location exists");
+  });
+
+  it("makes creative scene authoring and MCP commitment explicit", () => {
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Invent places, people, pressures, clues");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not narrate that absence");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
+  });
+
+  it("does not release narration-only output for the first suggested action", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-opening-guard-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient(CHARACTER_FIXTURES);
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    vi.stubGlobal("fetch", vi.fn(async () => openRouterMessage("No room or specific location has been established.")));
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I observe the current moment.")).rejects.toThrow(
+      "before committing a newly generated persistent room"
+    );
+  });
+
+  it("commits the generated room and player placement before releasing opening narration", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-opening-commit-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "spatial_manage.generate": () => ({
+        success: true,
+        roomId: "room-1",
+        name: "The Salt Archive",
+        description: "A flooded archive beneath the quay.",
+      }),
+      "spatial_manage.move": (args) => ({
+        success: true,
+        newRoomId: args.roomId,
+        newRoomName: "The Salt Archive",
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        call += 1;
+        if (call === 1) {
+          return openRouterMessage(null, [
+            {
+              id: "generate-room",
+              type: "function",
+              function: {
+                name: "spatial_manage",
+                arguments: JSON.stringify({
+                  action: "generate",
+                  name: "The Salt Archive",
+                  baseDescription: "A flooded archive beneath the quay.",
+                  biomeContext: "coastal",
+                }),
+              },
+            },
+          ]);
+        }
+        if (call === 2) {
+          return openRouterMessage(null, [
+            {
+              id: "move-player",
+              type: "function",
+              function: {
+                name: "spatial_manage",
+                arguments: JSON.stringify({ action: "move", roomId: "room-1" }),
+              },
+            },
+          ]);
+        }
+        return openRouterMessage("Mara arrives at the Salt Archive, where dark water laps at the broken shelves.");
+      })
+    );
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I observe the current moment.");
+
+    expect(result.narration.text).toContain("Salt Archive");
+    expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Room id: room-1");
+    expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Player placed here this turn: yes");
+    const remoteCalls = (client.callTool as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => call[0] === "spatial_manage")
+      .map((call) => (call[1] as Record<string, unknown>).action);
+    expect(remoteCalls).toEqual(["generate", "move"]);
   });
 });

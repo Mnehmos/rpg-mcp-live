@@ -60,6 +60,13 @@ GitHub Actions staging proof.
    `verify-production.yml` verifies both services and publishes release
    evidence.
 
+The staging and production verifier jobs do not declare GitHub Actions
+`environment` blocks. Their active URLs and promotion credential are
+repository-scoped, and omitting those blocks prevents GitHub Actions from
+creating duplicate generic `staging` and `production` deployment records next
+to Railway's canonical `RPG MCP Live / staging` and `RPG MCP Live / production`
+records.
+
 ## Playtest freshness check
 
 Railway supplies `RAILWAY_GIT_COMMIT_SHA`, `RAILWAY_DEPLOYMENT_ID`, and

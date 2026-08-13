@@ -46,13 +46,31 @@ interface ChatMessage {
   tool_call_id?: string;
 }
 
+interface ReferenceToolOutcome {
+  text: string;
+  accepted: boolean;
+  payload: unknown;
+}
+
+export interface AuthoredSceneState {
+  generatedRoom: boolean;
+  movedCharacter: boolean;
+  roomId: string | null;
+  roomName: string | null;
+  description: string | null;
+}
+
 const MAX_TOOL_ROUNDS = 6;
 
-const SYSTEM_PROMPT = [
+export const REFERENCE_DM_SYSTEM_PROMPT = [
   "You are the Dungeon Master for a tabletop RPG session, running on the reference rules engine.",
-  "You may call the provided tools to change game state (combat, inventory, movement, character updates, notes).",
+  "The player owns the fiction's direction; you own the concrete scene. Invent places, people, pressures, clues, and opportunities that fit the campaign profile, then use the provided RPG MCP tools to commit every durable fact before narrating it.",
+  "You may call the provided tools to change game state (including spatial_manage for persistent rooms and character placement, combat, inventory, movement, character updates, quests, notes, and narrative memory).",
   "The engine validates and executes every tool call; you never mutate state directly, only through tools.",
   "Do not invent characterId/worldId/partyId values — omit them and the engine will fill in the correct ones for this session.",
+  "If there is no current room or scene, do not narrate that absence. Create a concrete room with spatial_manage action generate, then place the player there with spatial_manage action move. The generated room name and description are your creative decision, but the room and placement must be confirmed by tool results before you describe them.",
+  "On an opening or the first player turn, this room-creation-and-placement sequence is mandatory. On later turns, if the player refers to an unestablished place or person, author and commit the needed scene first instead of saying it does not exist.",
+  "After committing a new scene, write the canonical room id, name, current occupants, active leads, and unresolved pressure to the state/journal dockets so the next turn can continue from it. Never put mechanical numbers in those dockets.",
   "When you are done taking actions for this turn, respond with plain narration text (no further tool calls) describing what happened, written for the player.",
   "Keep narration grounded only in what the tools actually returned. Do not narrate outcomes that no tool call confirmed.",
   "You also keep six narrative memory documents via read_docket/write_docket: state (current scene summary), player (character personality/backstory/lore prose), npcs (notes on NPCs met), journal (session-by-session recap), campaign (premise/setting/tone), and secrets (DM-only facts the player hasn't learned).",
@@ -178,13 +196,23 @@ export class ReferenceDungeonMaster {
     // narrated before it and would confabulate ("this is the first
     // conversation turn") rather than recall it.
     const priorLog = this.store.getLogMessages(accountId, campaignId);
+    const openingRequired = requiresAuthoredOpeningState(playerText, priorLog);
+    const authoredScene = emptyAuthoredSceneState();
+    let openingRepairAttempted = false;
+    const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
+    const stateMemory = this.store.getDocket(accountId, campaignId, "state");
     const historyMessages: ChatMessage[] = priorLog
       .filter((entry): entry is StoredLogMessage & { kind: "player" | "narration" } => entry.kind === "player" || entry.kind === "narration")
       .map((entry) => ({ role: entry.kind === "player" ? "user" : "assistant", content: entry.text }) as ChatMessage);
 
     const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
+      ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
+      ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
+      ...(openingRequired
+        ? [{ role: "system" as const, content: "SERVER TURN REQUIREMENT: This is an opening/first-turn scene. Before narration, successfully call spatial_manage generate and spatial_manage move so a persistent room and the player's placement exist." }]
+        : []),
       ...historyMessages,
       { role: "user", content: playerText },
     ];
@@ -195,16 +223,29 @@ export class ReferenceDungeonMaster {
         const completion = await this.chatCompletion(messages, tools);
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
-          narrationText = completion.content?.trim() || null;
+          const candidate = completion.content?.trim() || "";
+          const missing = openingRequired ? missingOpeningState(authoredScene) : [];
+          if (missing.length > 0 && !openingRepairAttempted) {
+            openingRepairAttempted = true;
+            messages.push({ role: "assistant", content: candidate || null });
+            messages.push({ role: "user", content: authoredOpeningRepairInstruction(authoredScene) });
+            continue;
+          }
+          if (missing.length > 0) {
+            throw new Error(`The DM tried to narrate before committing ${missing.join(" and ")}.`);
+          }
+          narrationText = candidate || null;
           break;
         }
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
         for (const call of toolCalls) {
-          const resultText =
+          const callArgs = parseArguments(call.function.arguments);
+          const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
-              ? this.handleDocketTool(accountId, campaignId, call.function.name, parseArguments(call.function.arguments))
+              ? { text: this.handleDocketTool(accountId, campaignId, call.function.name, callArgs), accepted: true, payload: null }
               : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant);
-          messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
+          markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
+          messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
         }
       }
     } catch (error) {
@@ -215,6 +256,10 @@ export class ReferenceDungeonMaster {
       throw new ReferenceDmProviderUnavailableError(
         new Error("The reference-engine DM did not produce narration within the tool-call round budget.")
       );
+    }
+
+    if (authoredScene.roomId) {
+      this.persistAuthoredSceneState(accountId, campaignId, authoredScene);
     }
 
     const version = this.store.bumpVersion(accountId, campaignId);
@@ -238,6 +283,28 @@ export class ReferenceDungeonMaster {
     };
   }
 
+  private persistAuthoredSceneState(
+    accountId: string,
+    campaignId: string,
+    scene: AuthoredSceneState,
+  ): void {
+    const existing = this.store.getDocket(accountId, campaignId, "state");
+    const marker = /<!-- canonical-scene:start -->[\s\S]*?<!-- canonical-scene:end -->/;
+    const block = [
+      "<!-- canonical-scene:start -->",
+      "## Current canonical scene",
+      `- Room id: ${scene.roomId}`,
+      `- Room name: ${scene.roomName ?? "Unnamed room"}`,
+      `- Description: ${scene.description ?? "See the authoritative spatial tool result."}`,
+      `- Player placed here this turn: ${scene.movedCharacter ? "yes" : "not confirmed"}`,
+      "<!-- canonical-scene:end -->",
+    ].join("\n");
+    const next = marker.test(existing)
+      ? existing.replace(marker, block)
+      : [existing.trim(), block].filter(Boolean).join("\n\n");
+    this.store.setDocket(accountId, campaignId, "state", next);
+  }
+
   private async callRemoteTool(
     rawArguments: string,
     toolName: string,
@@ -245,19 +312,24 @@ export class ReferenceDungeonMaster {
     fillOnlyArgs: Record<string, unknown>,
     knownCharacterIds: Set<string>,
     tenant: TenantIdentity
-  ): Promise<string> {
+  ): Promise<ReferenceToolOutcome> {
     const args = forceArgs(fillMissingArgs(parseArguments(rawArguments), fillOnlyArgs), forcedArgs);
     const requestedCharacterId = args.characterId;
     if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
-      return JSON.stringify({
+      const text = JSON.stringify({
         error:
           "Unknown characterId. Only use a characterId you learned from an actual tool result earlier in this turn " +
           "(e.g. from create/list/get), or omit it to target your own character.",
       });
+      return { text, accepted: false, payload: { error: "unknown_character_id" } };
     }
     const result = await this.client.callTool(toolName, args, tenant);
     collectCharacterIds(result.payload, knownCharacterIds);
-    return result.text || JSON.stringify(result.payload ?? {});
+    return {
+      text: result.text || JSON.stringify(result.payload ?? {}),
+      accepted: remoteResultAccepted(result.payload, result.isError),
+      payload: result.payload,
+    };
   }
 
   /**
@@ -394,6 +466,109 @@ function parseArguments(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function formatCampaignProfile(raw: string | null): string | null {
+  if (!raw) return null;
+  try {
+    const profile = JSON.parse(raw) as Record<string, unknown>;
+    const fields = ["name", "setting", "premise", "tone"]
+      .map((key) => `${key}: ${typeof profile[key] === "string" ? profile[key] : ""}`)
+      .filter((line) => !line.endsWith(": "));
+    return fields.length > 0 ? `CAMPAIGN PROFILE (player-authored; preserve its direction):\n${fields.join("\n")}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A campaign with no prior player/narrator exchange still needs a concrete
+ * authored starting place. This is deliberately based on the web adapter's
+ * own log, not on prose that may have been returned by the provider.
+ */
+export function requiresAuthoredOpeningState(
+  playerText: string,
+  priorLog: readonly StoredLogMessage[],
+): boolean {
+  const hasPlayerTurn = priorLog.some((entry) => entry.kind === "player");
+  const isOpeningRequest = /open the first situation|begin the opening|begin the story/i.test(playerText);
+  const isFirstSuggestedAction = /^\s*I\s+(?:observe the current moment|listen carefully|make a general check|continue the tutorial)\.?\s*$/i.test(playerText);
+  return isOpeningRequest || (!hasPlayerTurn && isFirstSuggestedAction);
+}
+
+function emptyAuthoredSceneState(): AuthoredSceneState {
+  return {
+    generatedRoom: false,
+    movedCharacter: false,
+    roomId: null,
+    roomName: null,
+    description: null,
+  };
+}
+
+function spatialAction(args: Record<string, unknown>): string | null {
+  const action = typeof args.action === "string" ? args.action.trim().toLowerCase() : "";
+  if (["generate", "create", "room", "new_room"].includes(action)) return "generate";
+  if (["move", "enter", "go", "travel"].includes(action)) return "move";
+  return null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function stringValue(record: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function markAuthoredSceneState(
+  scene: AuthoredSceneState,
+  toolName: string,
+  args: Record<string, unknown>,
+  outcome: ReferenceToolOutcome,
+): void {
+  if (!outcome.accepted || toolName !== "spatial_manage") return;
+  const action = spatialAction(args);
+  if (!action) return;
+  const payload = recordValue(outcome.payload);
+  const nested = recordValue(payload.data);
+  const data = Object.keys(payload).length > 0 ? payload : nested;
+  const roomId = stringValue(data, "roomId", "newRoomId");
+  const roomName = stringValue(data, "name", "newRoomName", "roomName");
+  const description = stringValue(data, "description", "baseDescription");
+  if (roomId) scene.roomId = roomId;
+  if (roomName) scene.roomName = roomName;
+  if (description) scene.description = description;
+  if (action === "generate" && roomId) scene.generatedRoom = true;
+  if (action === "move" && (roomId || stringValue(args, "roomId"))) scene.movedCharacter = true;
+}
+
+function missingOpeningState(scene: AuthoredSceneState): string[] {
+  const missing: string[] = [];
+  if (!scene.generatedRoom) missing.push("a newly generated persistent room");
+  if (!scene.movedCharacter) missing.push("the player's placement in that room");
+  return missing;
+}
+
+export function authoredOpeningRepairInstruction(scene: AuthoredSceneState): string {
+  const missing = missingOpeningState(scene);
+  return [
+    "Do not narrate this turn yet: the opening has not been committed to the RPG MCP state.",
+    `Still required: ${missing.join(" and ") || "an authoritative scene confirmation"}.`,
+    "Call spatial_manage action generate with a creative room name, a detailed present-tense baseDescription, and a valid biomeContext. Then call spatial_manage action move with the generated roomId; omit characterId so the server supplies the player's character.",
+    "Only after both calls return success may you narrate the room and the player's arrival. Do not say that no location exists.",
+  ].join(" ");
+}
+
+function remoteResultAccepted(payload: unknown, isError: boolean): boolean {
+  if (isError) return false;
+  const record = recordValue(payload);
+  return record.success !== false && record.error === undefined;
 }
 
 function fillMissingArgs(args: Record<string, unknown>, fillers: Record<string, unknown>): Record<string, unknown> {
