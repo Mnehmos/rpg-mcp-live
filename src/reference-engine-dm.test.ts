@@ -21,6 +21,7 @@ function fakeClient(handlers: Record<string, (args: Record<string, unknown>) => 
       if (!handler) throw new Error(`no fixture for ${key}`);
       return ok(handler(args));
     }),
+    deleteCampaignData: vi.fn(async () => ({ deleted: true })),
   } as unknown as ReferenceEngineClient;
 }
 
@@ -146,7 +147,8 @@ describe("ReferenceDungeonMaster", () => {
       worldId: "world-1", // forced, not the model's "wrong-world"
       partyId: "party-1",
       characterId: "char-1", // filled in since the model omitted it
-      sessionId: "lantern:account-1:campaign-1",
+      // No sessionId: tenant identity now travels in the signed x-rpg-tenant
+      // header, not in arguments the model can see or influence.
     });
     expect(result.narration.text).toBe("You strike the goblin for 6 damage.");
     expect(result.narrationSource).toBe("llm");

@@ -27,6 +27,7 @@ function fakeClient(handlers: Record<string, (args: Record<string, unknown>) => 
       if (!handler) throw new Error(`no fixture for ${key}`);
       return ok(handler(args));
     }),
+    deleteCampaignData: vi.fn(async () => ({ deleted: true })),
   } as unknown as ReferenceEngineClient;
 }
 
