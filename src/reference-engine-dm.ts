@@ -4,7 +4,13 @@ import type { ReferenceEngineClient } from "./reference-engine-client.js";
 import type { TenantIdentity } from "./reference-engine-tenant.js";
 import { DOCKET_NAMES, type DocketName, type ReferenceEngineStore, type StoredLogMessage } from "./reference-engine-store.js";
 import type { ReferenceEngineToolCatalog, OpenRouterToolDefinition } from "./reference-engine-tools.js";
-import type { EngineAbility, EngineCharacterView, EngineSessionView } from "./engine-contracts.js";
+import type {
+  EngineAbility,
+  EngineCharacterView,
+  EngineSessionView,
+  EngineToolCallDisclosure,
+  EngineToolDisclosure,
+} from "./engine-contracts.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -35,6 +41,7 @@ export interface ReferenceTurnResult {
   campaignVersion: number;
   narration: { text: string; proposedFacts: []; suggestedActions: [] };
   narrationSource: "llm";
+  toolDisclosure: EngineToolDisclosure | null;
   session: EngineSessionView;
   replayed: false;
 }
@@ -50,6 +57,111 @@ interface ReferenceToolOutcome {
   text: string;
   accepted: boolean;
   payload: unknown;
+  effectiveArguments: Record<string, unknown>;
+}
+
+function storedToolCallId(entryId: string, index: number): string {
+  const safeEntryId = entryId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48) || "entry";
+  return `history_${safeEntryId}_${index + 1}`;
+}
+
+const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = 4_000;
+const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
+
+function serializeStoredToolResult(result: unknown): string {
+  const serialized = typeof result === "string" ? result : JSON.stringify(result) ?? "null";
+  if (serialized.length <= MAX_REPLAYED_TOOL_RESULT_CHARACTERS) return serialized;
+  return serialized.slice(0, MAX_REPLAYED_TOOL_RESULT_CHARACTERS - REPLAY_TRUNCATION_MARKER.length)
+    + REPLAY_TRUNCATION_MARKER;
+}
+
+/**
+ * Reconstruct the assistant/tool exchanges that produced prior narration.
+ * Only accepted engine results extend the cross-turn character allowlist;
+ * model-supplied arguments and rejected results never grant authority.
+ */
+function replayStoredHistory(
+  priorLog: readonly StoredLogMessage[],
+  knownCharacterIds: Set<string>
+): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  for (const entry of priorLog) {
+    if (entry.kind === "player") {
+      messages.push({ role: "user", content: entry.text });
+      continue;
+    }
+    if (entry.kind === "narration") {
+      messages.push({ role: "assistant", content: entry.text });
+      continue;
+    }
+    if (entry.kind !== "tool" || !entry.toolDisclosure?.calls.length) continue;
+
+    const toolCalls = entry.toolDisclosure.calls.map((call, index) => {
+      if (call.accepted) collectCharacterIds(call.result, knownCharacterIds);
+      return {
+        id: storedToolCallId(entry.id, index),
+        type: "function" as const,
+        function: {
+          name: call.name,
+          arguments: JSON.stringify(call.requestedArguments ?? call.arguments),
+        },
+      };
+    });
+    messages.push({ role: "assistant", content: null, tool_calls: toolCalls });
+    entry.toolDisclosure.calls.forEach((call, index) => {
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCalls[index]!.id,
+        content: serializeStoredToolResult(call.result),
+      });
+    });
+  }
+  return messages;
+}
+
+const TOOL_DISCLOSURE_WARNING =
+  "Spoiler warning: the DM used game tools to author or resolve this moment. Expand the calls to see newly created locations, characters, enemies, items, rolls, and state changes.";
+const SENSITIVE_DISCLOSURE_KEY = /^(?:api[_-]?key|authorization|cookie|credential|password|secret|token)$/i;
+
+function sanitizeToolDisclosureValue(value: unknown, secretDocket: boolean, depth = 0): unknown {
+  if (secretDocket) return "[DM-only content withheld]";
+  if (depth > 8) return "[content truncated]";
+  if (Array.isArray(value)) return value.map((item) => sanitizeToolDisclosureValue(item, false, depth + 1));
+  if (!value || typeof value !== "object") return value;
+
+  const source = value as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+  const dmOnly = source.visibility === "dm_only";
+  for (const [key, child] of Object.entries(source)) {
+    if (SENSITIVE_DISCLOSURE_KEY.test(key) || (dmOnly && key === "content")) {
+      sanitized[key] = "[redacted]";
+      continue;
+    }
+    sanitized[key] = sanitizeToolDisclosureValue(child, false, depth + 1);
+  }
+  return sanitized;
+}
+
+function makeToolCallDisclosure(
+  toolName: string,
+  args: Record<string, unknown>,
+  outcome: ReferenceToolOutcome
+): EngineToolCallDisclosure {
+  const secretDocket = args.name === "secrets" && (toolName === "read_docket" || toolName === "write_docket");
+  const safeArguments = sanitizeToolDisclosureValue(outcome.effectiveArguments, false) as Record<string, unknown>;
+  const safeRequestedArguments = sanitizeToolDisclosureValue(args, false) as Record<string, unknown>;
+  if (toolName === "write_docket" && args.name === "secrets") {
+    safeArguments.content = "[DM-only content withheld]";
+    safeRequestedArguments.content = "[DM-only content withheld]";
+  }
+  const argumentsChanged = JSON.stringify(args) !== JSON.stringify(outcome.effectiveArguments);
+  return {
+    name: toolName,
+    arguments: safeArguments,
+    ...(argumentsChanged ? { requestedArguments: safeRequestedArguments } : {}),
+    result: sanitizeToolDisclosureValue(outcome.payload ?? outcome.text, secretDocket),
+    accepted: outcome.accepted,
+  };
 }
 
 export interface AuthoredSceneState {
@@ -76,6 +188,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Use spatial_manage generate and move for places and player placement; npc_manage create or spawn_manage for NPCs and populated locations; combat_manage spawn_quick_enemy or spawn_manage for enemies and encounters; item_manage and inventory_manage for authored objects and possession; quest_manage for durable quests; and scene_manage set for the DM-authored shared scene frame.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
+  "The execution order is mandatory orchestration, not an allow/reject classifier: player intent -> relevant engine action -> returned engine result -> scene_manage set -> narration. Never narrate a state-changing outcome before the relevant engine call succeeds, and never turn a skipped call into an 'unresolved' continuity fact; repair the tool sequence or describe the failure at the engine boundary.",
   "For every turn that advances the shared fiction, commit the new or changed world facts through the appropriate engine tools, then commit the resulting DM scene with scene_manage action set using the player's character as a participant. Only after those tool results succeed may you narrate them.",
   "Be decisive and economical: use the smallest complete set of tool calls for the current turn, batch independent calls when possible, do not reread every continuity docket or rewrite unchanged dockets, and do not repeat a tool call after a successful result. Once the scene is committed, stop calling tools and narrate.",
   "If a tool rejects an authoring attempt, repair the tool call or narrate the failed action without claiming the rejected fact became real. Never substitute a docket entry or prose for an engine commitment.",
@@ -186,10 +299,11 @@ export class ReferenceDungeonMaster {
     // itself is deliberately fill-only (many tools target an NPC/enemy the
     // model just created in this same session, not always the player's own
     // PC) — so it can't be blanket-forced. Instead, only allow characterId
-    // values the model has actually learned from a real tool result in this
-    // turn (or the player's own bound character); anything else is rejected
-    // before it reaches the network, the same "engine validates, never
-    // trusts the model" discipline the adapter already applies elsewhere.
+    // values the model has actually learned from an accepted result in this
+    // campaign's replayed history or the current turn (plus the player's own
+    // bound character); anything else is rejected before it reaches the
+    // network, the same "engine validates, never trusts the model" discipline
+    // the adapter already applies elsewhere.
     const knownCharacterIds = new Set<string>();
     if (routing.referenceCharacterId) knownCharacterIds.add(routing.referenceCharacterId);
 
@@ -208,21 +322,16 @@ export class ReferenceDungeonMaster {
       ? formatCharacterSheetContext((await this.adapter.getCampaign(accountId, actorId, campaignId)).campaign.character)
       : null;
 
-    // Prior turns are never replayed as actual tool-call/tool-result pairs
-    // here (that history isn't retained — see this file's class doc "known,
-    // disclosed MVP gap" note), only as narration text. That's sufficient
-    // for narrative continuity, which is what was actually missing: without
-    // this, every turn started a brand-new conversation with just the
-    // current playerText, so the model had no memory of anything said or
-    // narrated before it and would confabulate ("this is the first
-    // conversation turn") rather than recall it.
     const priorLog = this.store.getLogMessages(accountId, campaignId);
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
-    const historyMessages: ChatMessage[] = priorLog
-      .filter((entry): entry is StoredLogMessage & { kind: "player" | "narration" } => entry.kind === "player" || entry.kind === "narration")
-      .map((entry) => ({ role: entry.kind === "player" ? "user" : "assistant", content: entry.text }) as ChatMessage);
+    // Replay the actual assistant/tool exchange, not a prose-only rewrite of
+    // prior turns. Besides restoring the model's own successful tool-use
+    // pattern, accepted engine results safely carry discovered NPC/enemy IDs
+    // across turns. Rejected results and model arguments never seed the
+    // allowlist.
+    const historyMessages = replayStoredHistory(priorLog, knownCharacterIds);
 
     const messages: ChatMessage[] = [
       { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
@@ -236,6 +345,7 @@ export class ReferenceDungeonMaster {
     let narrationText: string | null = null;
     let toolRoundCount = 0;
     const toolCallNames: string[] = [];
+    const disclosedToolCalls: EngineToolCallDisclosure[] = [];
     try {
       // Reserve one completion after the final allowed tool-bearing round so
       // the DM can narrate the authored result instead of exhausting the
@@ -258,8 +368,9 @@ export class ReferenceDungeonMaster {
           const callArgs = parseArguments(call.function.arguments);
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
-              ? { text: this.handleDocketTool(accountId, campaignId, call.function.name, callArgs), accepted: true, payload: null }
+              ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
               : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant);
+          disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
         }
@@ -282,8 +393,17 @@ export class ReferenceDungeonMaster {
 
     const version = this.store.bumpVersion(accountId, campaignId);
     const now = new Date().toISOString();
+    const toolDisclosure = disclosedToolCalls.length > 0
+      ? {
+          spoilerWarning: TOOL_DISCLOSURE_WARNING,
+          calls: disclosedToolCalls,
+        }
+      : null;
     const logMessages: StoredLogMessage[] = [
       { id: randomUUID(), kind: "player", text: playerText, createdAt: now },
+      ...(toolDisclosure
+        ? [{ id: randomUUID(), kind: "tool" as const, text: "The DM consulted the game world.", createdAt: now, toolDisclosure }]
+        : []),
       { id: randomUUID(), kind: "narration", text: narrationText, createdAt: new Date().toISOString() },
     ];
     this.store.appendLogMessages(accountId, campaignId, logMessages);
@@ -296,6 +416,7 @@ export class ReferenceDungeonMaster {
       campaignVersion: version,
       narration: { text: narrationText, proposedFacts: [], suggestedActions: [] },
       narrationSource: "llm",
+      toolDisclosure,
       session: campaign,
       replayed: false,
     };
@@ -342,10 +463,10 @@ export class ReferenceDungeonMaster {
     if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
       const text = JSON.stringify({
         error:
-          "Unknown characterId. Only use a characterId you learned from an actual tool result earlier in this turn " +
+          "Unknown characterId. Only use a characterId learned from an accepted tool result in this campaign or current turn " +
           "(e.g. from create/list/get), or omit it to target your own character.",
       });
-      return { text, accepted: false, payload: { error: "unknown_character_id" } };
+      return { text, accepted: false, payload: { error: "unknown_character_id" }, effectiveArguments: args };
     }
     const result = await this.client.callTool(toolName, args, tenant);
     collectCharacterIds(result.payload, knownCharacterIds);
@@ -353,6 +474,21 @@ export class ReferenceDungeonMaster {
       text: result.text || JSON.stringify(result.payload ?? {}),
       accepted: remoteResultAccepted(result.payload, result.isError),
       payload: result.payload,
+      effectiveArguments: args,
+    };
+  }
+
+  private callDocketTool(
+    accountId: string,
+    campaignId: string,
+    toolName: "read_docket" | "write_docket",
+    args: Record<string, unknown>
+  ): ReferenceToolOutcome {
+    return {
+      text: this.handleDocketTool(accountId, campaignId, toolName, args),
+      accepted: isDocketName(args.name),
+      payload: null,
+      effectiveArguments: args,
     };
   }
 

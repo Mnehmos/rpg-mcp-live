@@ -1,12 +1,14 @@
 import type Database from "better-sqlite3";
+import type { EngineToolDisclosure } from "./engine-contracts.js";
 
 export type EngineBackend = "reference";
 
 export interface StoredLogMessage {
   id: string;
-  kind: "narration" | "roll" | "system" | "player";
+  kind: "narration" | "roll" | "system" | "player" | "tool";
   text: string;
   createdAt: string;
+  toolDisclosure?: EngineToolDisclosure;
 }
 
 const MAX_LOG_MESSAGES = 40;

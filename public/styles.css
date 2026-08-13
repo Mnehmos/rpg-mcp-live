@@ -161,6 +161,25 @@ h1 i { color: var(--amber); font-style: italic; }
 .log-entry.player { margin-left: auto; color: var(--ink); border-color: rgba(155, 200, 172, .25); background: rgba(155, 200, 172, .07); }
 .log-entry.player .log-icon { color: var(--mint); }
 .log-entry.system { color: var(--muted); font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; }
+.log-entry.tool { color: var(--muted); border-color: rgba(233, 167, 91, .28); background: rgba(233, 167, 91, .045); font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; }
+.log-entry.tool .log-icon { color: var(--amber-bright); font-size: 8px; letter-spacing: .08em; }
+.tool-disclosure { display: grid; gap: 8px; }
+.tool-disclosure-warning { margin: 0; color: var(--amber-bright); font-size: 10px; line-height: 1.45; }
+.tool-disclosure-summary { margin: 0; color: var(--muted); line-height: 1.45; }
+.tool-disclosure-summary strong { color: var(--ink); font-weight: 500; }
+.tool-call-list { display: grid; gap: 5px; }
+.tool-call-entry { border: 1px solid rgba(242, 236, 223, .1); background: rgba(8, 10, 14, .45); }
+.tool-call-entry summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 9px; color: var(--muted); cursor: pointer; list-style: none; }
+.tool-call-entry summary::-webkit-details-marker { display: none; }
+.tool-call-entry summary::after { content: "+"; color: var(--amber); font-size: 14px; }
+.tool-call-entry[open] summary::after { content: "−"; }
+.tool-call-entry summary code { overflow-wrap: anywhere; }
+.tool-call-status { flex: 0 0 auto; color: var(--faint); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
+.tool-call-status.is-committed { color: var(--mint); }
+.tool-call-status.is-rejected { color: #d89b86; }
+.tool-call-section { padding: 0 9px 9px; }
+.tool-call-section > span { display: block; margin: 5px 0 4px; color: var(--faint); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
+.tool-call-section pre { max-height: 260px; margin: 0; padding: 8px; overflow: auto; border: 1px solid rgba(242, 236, 223, .08); background: #080a0e; color: var(--ink); font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dm-response { border-color: rgba(233, 167, 91, .22); box-shadow: inset 2px 0 var(--amber); }
 .chat-composer { padding-bottom: 17px; }
 .compose-topline { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; }
