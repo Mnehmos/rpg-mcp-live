@@ -179,7 +179,7 @@ describe("native Railway evidence", () => {
     ).toThrow("Railway-authored");
   });
 
-  it("uses the newest Railway status for each expected service", () => {
+  it("uses the newest Railway status for the expected service", () => {
     const statuses = [
       serviceStatus(RAILWAY_SERVICE_CONTEXTS[0], "pending"),
       serviceStatus(RAILWAY_SERVICE_CONTEXTS[0], "success", {
@@ -190,7 +190,6 @@ describe("native Railway evidence", () => {
     ];
     const latest = latestRailwayServiceStatuses(statuses);
     expect(latest[RAILWAY_SERVICE_CONTEXTS[0]].state).toBe("success");
-    expect(latest[RAILWAY_SERVICE_CONTEXTS[1]]).toBeUndefined();
   });
 
   it("accepts healthy service statuses while aggregate deployment stays in progress", () => {
@@ -198,7 +197,7 @@ describe("native Railway evidence", () => {
     expect(result.ready).toBe(true);
     expect(result.deploymentState).toBe("in_progress");
     expect(result.missingContexts).toEqual([]);
-    expect(Object.values(result.serviceStatusBindings)).toEqual([true, true]);
+    expect(Object.values(result.serviceStatusBindings)).toEqual([true]);
   });
 
   it("is idempotent when the same successful status event is delivered twice", () => {
@@ -207,17 +206,17 @@ describe("native Railway evidence", () => {
     expect(duplicate).toEqual(first);
   });
 
-  it("waits until both service statuses succeed", () => {
+  it("waits until the expected service status succeeds", () => {
     const result = evaluateNativeRailwayEvidence(
       evidence({
-        commitStatuses: [serviceStatus(RAILWAY_SERVICE_CONTEXTS[0])],
+        commitStatuses: [serviceStatus(RAILWAY_SERVICE_CONTEXTS[0], "pending")],
       })
     );
     expect(result.ready).toBe(false);
-    expect(result.missingContexts).toEqual([RAILWAY_SERVICE_CONTEXTS[1]]);
+    expect(result.missingContexts).toEqual([RAILWAY_SERVICE_CONTEXTS[0]]);
   });
 
-  it("accepts an aggregate success only with both service statuses", () => {
+  it("accepts aggregate success with a healthy service status", () => {
     const result = evaluateNativeRailwayEvidence(
       evidence({
         deploymentStatuses: [
@@ -282,15 +281,14 @@ describe("native Railway evidence", () => {
     );
     expect(result.ready).toBe(false);
     expect(result.missingContexts).toEqual(RAILWAY_SERVICE_CONTEXTS);
-    expect(Object.values(result.serviceStatusBindings)).toEqual([false, false]);
+    expect(Object.values(result.serviceStatusBindings)).toEqual([false]);
   });
 
   it("accepts nested API pages from slurped GitHub responses", () => {
     expect(
       latestRailwayServiceStatuses([
         [serviceStatus(RAILWAY_SERVICE_CONTEXTS[0])],
-        [serviceStatus(RAILWAY_SERVICE_CONTEXTS[1])],
-      ])[RAILWAY_SERVICE_CONTEXTS[1]].state
+      ])[RAILWAY_SERVICE_CONTEXTS[0]].state
     ).toBe("success");
   });
 });
