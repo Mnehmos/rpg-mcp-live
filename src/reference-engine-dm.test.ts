@@ -661,6 +661,8 @@ describe("reference DM scene authoring contract", () => {
   });
 
   it("lets a long creative tool-first turn reach narration", async () => {
+    // A DM can spend several rounds authoring a scene before it has enough
+    // confirmed material to narrate; this protects the fluid tool-first loop.
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-long-authoring-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
