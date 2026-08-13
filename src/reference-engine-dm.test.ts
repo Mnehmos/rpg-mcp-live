@@ -156,8 +156,14 @@ describe("ReferenceDungeonMaster", () => {
     });
     expect(result.narration.text).toBe("You strike the goblin for 6 damage.");
     expect(result.narrationSource).toBe("llm");
+    expect(result.toolDisclosure).toMatchObject({
+      spoilerWarning: expect.stringContaining("Spoiler warning"),
+      calls: [{ name: "combat_action", accepted: true, arguments: { action: "attack", targetId: "goblin-1" } }],
+    });
+    expect(result.toolDisclosure?.calls[0]?.result).toEqual({ success: true, damage: 6 });
     expect(result.campaignVersion).toBe(1);
     expect(result.session.log.some((m) => m.text === "I attack the goblin." && m.kind === "player")).toBe(true);
+    expect(result.session.log.some((m) => m.kind === "tool" && m.toolDisclosure?.calls[0]?.name === "combat_action")).toBe(true);
     expect(result.session.log.some((m) => m.text === "You strike the goblin for 6 damage." && m.kind === "narration")).toBe(
       true
     );
@@ -542,9 +548,11 @@ describe("ReferenceDungeonMaster", () => {
       })
     );
 
-    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "What do I suspect about the innkeeper?");
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "What do I suspect about the innkeeper?");
 
     expect(capturedSecret).toBe("The innkeeper is a spy.");
+    expect(result.toolDisclosure?.calls[0]?.result).toBe("[DM-only content withheld]");
+    expect(JSON.stringify(result.session.log)).not.toContain("The innkeeper is a spy.");
   });
 });
 
@@ -561,6 +569,8 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("make it playable through the engine");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("returned encounterId and participant ids");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player intent -> relevant engine action -> returned engine result -> scene_manage set -> narration");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("never turn a skipped call into an 'unresolved' continuity fact");
   });
 
   it("fills only the player's combat actor id while leaving other tool ids model-driven", async () => {

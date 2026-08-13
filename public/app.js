@@ -24,6 +24,7 @@ import {
 } from "./turn-composer.js";
 import { isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
+import { renderToolDisclosure } from "./tool-disclosure.js";
 
 (function () {
   "use strict";
@@ -1506,12 +1507,18 @@ import { projectCustodyActors } from "./custody-status.mjs";
     var entries = Array.isArray(session.log) ? session.log : [];
     var logHtml = entries.map(function (entry) {
       var kind = String(entry.kind || "narration").replace(/[^a-z-]/g, "");
+      if (entry.toolDisclosure) {
+        return '<div class="log-entry tool"><span class="log-icon">TOOLS</span><div class="log-content">' + renderToolDisclosure(entry.toolDisclosure) + '</div></div>';
+      }
       var icon = kind === "roll" ? "d20" : kind === "system" ? "--" : kind === "player" ? "YOU" : "DM";
       return '<div class="log-entry ' + kind + '"><span class="log-icon">' + icon + '</span><div class="log-content markdown-body">' + renderMarkdown(entry.text) + '</div></div>';
     }).join("");
     var lastLogEntry = entries.length ? entries[entries.length - 1] : null;
     if (state.pendingPlayerText && (!lastLogEntry || lastLogEntry.text !== state.pendingPlayerText)) {
       logHtml += '<div class="log-entry player"><span class="log-icon">YOU</span><div class="log-content markdown-body">' + renderMarkdown(state.pendingPlayerText) + '</div></div>';
+    }
+    if (payload.toolDisclosure && !entries.some(function (entry) { return Boolean(entry.toolDisclosure); })) {
+      logHtml += '<div class="log-entry tool"><span class="log-icon">TOOLS</span><div class="log-content">' + renderToolDisclosure(payload.toolDisclosure) + '</div></div>';
     }
     if (payload.narration && payload.narrationSource === "llm" && (!lastLogEntry || lastLogEntry.text !== payload.narration.text)) {
       logHtml += '<div class="log-entry narration dm-response"><span class="log-icon">DM</span><div class="log-content markdown-body">' + renderMarkdown(payload.narration.text) + '</div></div>';

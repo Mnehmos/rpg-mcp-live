@@ -3762,9 +3762,27 @@ export interface EngineSituationProjection {
 
 export interface EngineMessage {
   id: string;
-  kind: "narration" | "roll" | "system" | "player";
+  kind: "narration" | "roll" | "system" | "player" | "tool";
   text: string;
   createdAt: string;
+  /**
+   * Player-visible, spoiler-gated evidence of the DM's game-tool activity.
+   * This deliberately carries only the call payload/result, never provider
+   * messages, prompts, credentials, or the DM-only secrets docket.
+   */
+  toolDisclosure?: EngineToolDisclosure;
+}
+
+export interface EngineToolDisclosure {
+  spoilerWarning: string;
+  calls: EngineToolCallDisclosure[];
+}
+
+export interface EngineToolCallDisclosure {
+  name: string;
+  arguments: Record<string, unknown>;
+  result: unknown;
+  accepted: boolean;
 }
 
 export interface LanternCampaignState {
