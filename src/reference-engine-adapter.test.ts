@@ -175,6 +175,44 @@ describe("ReferenceEngineAdapter", () => {
     expect(result.campaignVersion).toBe(1);
   });
 
+  it("derives equip slots for carried reference-engine weapons, armor, and shields", async () => {
+    const store = createStore();
+    store.setBackend("account-1", "campaign-1", "reference");
+    store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 14, dex: 12, con: 13, int: 10, wis: 11, cha: 10 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 1,
+        xp: 0,
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+      "inventory_manage.get_detailed": () => ({
+        inventory: [
+          { item: { id: "chain-mail", name: "Chain Mail", type: "armor", weight: 55, properties: { ac: 16 } }, quantity: 1, equipped: false },
+          { item: { id: "shield", name: "Shield", type: "armor", weight: 6, properties: { acBonus: 2 } }, quantity: 1, equipped: false },
+          { item: { id: "crossbow", name: "Light Crossbow", type: "weapon", weight: 5, properties: { damage: "1d8" } }, quantity: 1, equipped: false },
+        ],
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+
+    const { campaign } = await adapter.getCampaign("account-1", "actor-1", "campaign-1");
+
+    expect(campaign.character.inventory.map((item) => [item.id, item.slot])).toEqual([
+      ["chain-mail", "armor"],
+      ["shield", "offhand"],
+      ["crossbow", "mainhand"],
+    ]);
+  });
+
   it("rejects inventory actions before a character exists, without calling the reference engine", async () => {
     const store = createStore();
     store.setBackend("account-1", "campaign-1", "reference");

@@ -107,6 +107,27 @@ interface ReferenceInventoryEntry {
   slot?: string;
 }
 
+const REFERENCE_EQUIPMENT_SLOTS = new Set<NonNullable<EngineInventoryItem["slot"]>>([
+  "mainhand", "offhand", "armor", "head", "feet", "accessory",
+]);
+
+/**
+ * The reference engine stores `slot` as current equip state, so carried items
+ * normally have no slot. Lantern's inventory UI also uses the field as the
+ * slot to request when the player clicks Equip. Derive that affordance from
+ * authoritative item metadata while preserving a valid engine-provided slot.
+ */
+function referenceInventorySlot(entry: ReferenceInventoryEntry): EngineInventoryItem["slot"] {
+  if (entry.slot && REFERENCE_EQUIPMENT_SLOTS.has(entry.slot as NonNullable<EngineInventoryItem["slot"]>)) {
+    return entry.slot as NonNullable<EngineInventoryItem["slot"]>;
+  }
+  if (entry.item.type === "weapon") return "mainhand";
+  if (entry.item.type === "armor") {
+    return typeof entry.item.properties?.acBonus === "number" ? "offhand" : "armor";
+  }
+  return undefined;
+}
+
 const REFERENCE_ITEM_KINDS = new Set<EngineItemKind>([
   "weapon", "armor", "consumable", "quest", "misc", "tool", "ammunition", "treasure",
 ]);
@@ -121,7 +142,7 @@ function mapReferenceInventory(entries: ReferenceInventoryEntry[]): EngineInvent
       id: entry.item.id,
       quantity: entry.quantity,
       equipped: entry.equipped,
-      slot: entry.slot as EngineInventoryItem["slot"],
+      slot: referenceInventorySlot(entry),
       authoredDefinition: {
         name: entry.item.name,
         kind,
