@@ -1,6 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { createInitialCampaign, hydrateCharacter, toSessionView } from "./engine-domain.js";
-import { abilityModifier, buildSavingThrows, buildSkillSheet, open5eCharacterContentKey, open5eClassSourceKey, OPEN5E_RULES_PACK_HASH, OPEN5E_RULES_VERSION } from "./open5e-rules.js";
+import {
+  abilityModifier,
+  buildSavingThrows,
+  buildSkillSheet,
+  getOpen5eSpell,
+  getOpen5eSpellList,
+  getOpen5eSpellProgression,
+  open5eSpellOptions,
+  open5eCharacterContentKey,
+  open5eClassSourceKey,
+  OPEN5E_RULES_PACK_HASH,
+  OPEN5E_RULES_VERSION,
+} from "./open5e-rules.js";
 import {
   engineCampaignProfileSchema,
   engineCharacterDetailsSchema,
@@ -83,6 +95,10 @@ interface ReferenceCharacterRecord {
   weaponProficiencies?: string[];
   toolProficiencies?: string[];
   languages?: string[];
+  knownSpells?: string[];
+  preparedSpells?: string[];
+  cantripsKnown?: string[];
+  spellSlots?: Record<string, { current?: number; max?: number }>;
 }
 
 interface ReferenceNoteRecord {
@@ -183,6 +199,38 @@ function referenceCurrencyToCopper(currency: ReferenceCharacterRecord["currency"
   }
   // Legacy reference records stored total copper under currency.copper.
   return Math.max(0, Math.trunc(currency.copper ?? 0));
+}
+
+function normalizeSpellName(value: string): string {
+  return value.trim().toLocaleLowerCase("en-US").replace(/[^a-z0-9]+/g, "");
+}
+
+/** Convert the reference engine's name-based spell fields into the live UI's
+ * pinned Open5e references. Unknown/homebrew values are retained nowhere in
+ * the projection; the player can see the engine catalog and choose a valid
+ * replacement rather than receiving a silently fake spell. */
+function referenceSpellReferences(values: string[] | undefined, className: string): Array<{ contentKey: string; packHash: string }> {
+  const list = getOpen5eSpellList(className);
+  const references = list?.spells ?? [];
+  const seen = new Set<string>();
+  const result: Array<{ contentKey: string; packHash: string }> = [];
+  for (const value of values ?? []) {
+    const raw = value.trim();
+    if (!raw) continue;
+    const direct = raw.startsWith("open5e:spell:") ? getOpen5eSpell(raw) : null;
+    const match = direct ?? references
+      .map((reference) => getOpen5eSpell(reference.contentKey))
+      .find((spell) => spell && normalizeSpellName(spell.definition.name) === normalizeSpellName(raw));
+    if (!match || seen.has(match.contentKey)) continue;
+    seen.add(match.contentKey);
+    result.push({ contentKey: match.contentKey, packHash: match.packHash });
+  }
+  return result;
+}
+
+function referenceSpellNames(contentKeys: string[]): string[] {
+  return contentKeys.map((contentKey) => getOpen5eSpell(contentKey)?.definition.name ?? "")
+    .filter((name): name is string => Boolean(name));
 }
 
 
@@ -492,6 +540,9 @@ export class ReferenceEngineAdapter {
       weaponProficiencies?: string[];
       toolProficiencies?: string[];
       languages?: string[];
+      cantripsKnown?: string[];
+      knownSpells?: string[];
+      preparedSpells?: string[];
     };
     const result = await this.client.callTool("character_manage", {
       action: "create",
@@ -509,6 +560,9 @@ export class ReferenceEngineAdapter {
       weaponProficiencies: args.weaponProficiencies,
       toolProficiencies: args.toolProficiencies,
       languages: args.languages,
+      cantripsKnown: args.cantripsKnown ? referenceSpellNames(args.cantripsKnown) : undefined,
+      knownSpells: args.knownSpells ? referenceSpellNames(args.knownSpells) : undefined,
+      preparedSpells: args.preparedSpells ? referenceSpellNames(args.preparedSpells) : undefined,
     }, this.tenantFor(accountId, campaignId, routing));
     const character = result.payload as ReferenceCharacterRecord;
     this.store.setReferenceIds(accountId, campaignId, { characterId: character.id });
@@ -660,6 +714,90 @@ export class ReferenceEngineAdapter {
     return this.getCampaign(accountId, actorId, campaignId);
   }
 
+  /**
+   * Persists player-selected source-backed spells through the reference
+   * engine. The engine stores spell names, while the browser and this host
+   * use pinned Open5e content keys; only names resolved from the installed
+   * class catalog are forwarded.
+   */
+  public async updateCharacterSpells(
+    accountId: string,
+    actorId: string,
+    campaignId: string,
+    update: { cantripsKnown?: string[]; knownSpells?: string[]; preparedSpells?: string[] }
+  ): Promise<{ campaign: EngineSessionView; dockets: Partial<Record<"state" | "npcs" | "journal" | "campaign", string>> }> {
+    const routing = this.requireRouting(accountId, campaignId);
+    if (!routing.referenceCharacterId) throw new ReferenceEngineUnsupportedError("spellbook_update");
+    const characterResult = await this.client.callTool("character_manage", {
+      action: "get",
+      characterId: routing.referenceCharacterId,
+    }, this.tenantFor(accountId, campaignId, routing));
+    const character = characterResult.payload as ReferenceCharacterRecord;
+    const className = character.characterClass;
+    const progression = getOpen5eSpellProgression(className);
+    const spellOptions = open5eSpellOptions(className, character.level);
+    const args: Record<string, unknown> = {
+      action: "update",
+      characterId: routing.referenceCharacterId,
+    };
+    if (update.cantripsKnown !== undefined) args.cantripsKnown = referenceSpellNames(update.cantripsKnown);
+    if (update.knownSpells !== undefined) args.knownSpells = referenceSpellNames(update.knownSpells);
+    if (update.preparedSpells !== undefined) args.preparedSpells = referenceSpellNames(update.preparedSpells);
+    if (update.knownSpells !== undefined && progression?.selectionMode === "prepared") {
+      throw new ReferenceEngineUnsupportedError("known_spells_for_prepared_class");
+    }
+    if (update.preparedSpells !== undefined && progression?.selectionMode === "known") {
+      throw new ReferenceEngineUnsupportedError("prepared_spells_for_known_class");
+    }
+    const ability = progression?.spellcastingAbility;
+    const abilityModifierValue = ability ? abilityModifier(character.stats[ability]) : 0;
+    const preparedCapacity = progression?.preparedFormula
+      ? Math.max(
+          progression.preparedFormula.minimum,
+          Math.floor(
+            character.level * progression.preparedFormula.classLevelMultiplier
+            + abilityModifierValue * progression.preparedFormula.abilityModifierMultiplier,
+          ),
+        )
+      : null;
+    if (update.cantripsKnown !== undefined && spellOptions.cantripLimit !== null
+      && update.cantripsKnown.length > spellOptions.cantripLimit) {
+      throw new ReferenceEngineUnsupportedError(`cantrip_limit_${spellOptions.cantripLimit}`);
+    }
+    if (update.knownSpells !== undefined && spellOptions.knownSpellLimit !== null
+      && update.knownSpells.length > spellOptions.knownSpellLimit) {
+      throw new ReferenceEngineUnsupportedError(`known_spell_limit_${spellOptions.knownSpellLimit}`);
+    }
+    if (update.preparedSpells !== undefined && preparedCapacity !== null
+      && update.preparedSpells.length > preparedCapacity) {
+      throw new ReferenceEngineUnsupportedError(`prepared_spell_limit_${preparedCapacity}`);
+    }
+    // Resolve every submitted key before mutating anything. This keeps an
+    // unavailable, unreachable, or foreign spell from being silently dropped by the host.
+    const submittedSpellBuckets: Array<{ key: string; bucket: "cantrip" | "levelled" }> = [
+      ...(update.cantripsKnown ?? []).map((key) => ({ key, bucket: "cantrip" as const })),
+      ...(update.knownSpells ?? []).map((key) => ({ key, bucket: "levelled" as const })),
+      ...(update.preparedSpells ?? []).map((key) => ({ key, bucket: "levelled" as const })),
+    ];
+    for (const { key, bucket } of submittedSpellBuckets) {
+      const spell = getOpen5eSpell(key);
+      if (!spell
+        || !getOpen5eSpellList(className)?.spells.some((reference) => reference.contentKey === key)
+        || !spellOptions.spells.some((reference) => reference.contentKey === key)) {
+        throw new ReferenceEngineUnsupportedError(`spell ${key}`);
+      }
+      if (bucket === "cantrip" && spell.definition.level !== 0) {
+        throw new ReferenceEngineUnsupportedError(`cantrip_requires_level_0_${key}`);
+      }
+      if (bucket === "levelled" && spell.definition.level === 0) {
+        throw new ReferenceEngineUnsupportedError(`levelled_spell_cannot_be_cantrip_${key}`);
+      }
+    }
+    await this.client.callTool("character_manage", args, this.tenantFor(accountId, campaignId, routing));
+    this.store.bumpVersion(accountId, campaignId);
+    return this.getCampaign(accountId, actorId, campaignId);
+  }
+
   private async buildSessionView(
     accountId: string,
     actorId: string,
@@ -788,6 +926,18 @@ export class ReferenceEngineAdapter {
       const authoritativeHp = state.character.hp;
       const authoritativeMaxHp = state.character.maxHp;
       state.character = hydrateCharacter(state.character);
+      if (state.character.spellcasting) {
+        const known = referenceSpellReferences(
+          [...(character.cantripsKnown ?? []), ...(character.knownSpells ?? [])],
+          character.characterClass,
+        );
+        const prepared = referenceSpellReferences(character.preparedSpells, character.characterClass);
+        state.character.spellcasting = {
+          ...state.character.spellcasting,
+          knownSpells: known,
+          preparedSpells: prepared,
+        };
+      }
       if (character.saveProficiencies?.length) {
         state.character.savingThrows = buildSavingThrows(
           state.character.abilities,

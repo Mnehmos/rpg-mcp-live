@@ -128,10 +128,11 @@ export class ReferenceEngineClient {
   public async callTool(
     name: string,
     args: Record<string, unknown>,
-    tenant?: TenantIdentity
+    tenant?: TenantIdentity,
+    timeoutMs?: number
   ): Promise<ReferenceToolCallResult> {
-    await this.ensureInitialized();
-    const response = await this.send("tools/call", { name, arguments: args }, tenant);
+    await this.ensureInitialized(timeoutMs);
+    const response = await this.send("tools/call", { name, arguments: args }, tenant, timeoutMs);
     const result = response.result as
       | { content?: Array<{ type: string; text?: string }>; isError?: boolean }
       | undefined;
@@ -144,9 +145,9 @@ export class ReferenceEngineClient {
     return { text, isError: Boolean(result?.isError), data, raw: result, payload };
   }
 
-  private async ensureInitialized(): Promise<void> {
+  private async ensureInitialized(timeoutMs?: number): Promise<void> {
     if (!this.initialized) {
-      this.initialized = this.initialize();
+      this.initialized = this.initialize(timeoutMs);
     }
     try {
       await this.initialized;
@@ -156,21 +157,22 @@ export class ReferenceEngineClient {
     }
   }
 
-  private async initialize(): Promise<void> {
+  private async initialize(timeoutMs?: number): Promise<void> {
     await this.send("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: "rpg-mcp-live", version: "1.0.0" },
-    });
-    await this.sendNotification("notifications/initialized", {});
+    }, undefined, timeoutMs);
+    await this.sendNotification("notifications/initialized", {}, timeoutMs);
   }
 
   private async send(
     method: string,
     params: Record<string, unknown>,
-    tenant?: TenantIdentity
+    tenant?: TenantIdentity,
+    timeoutMs?: number
   ): Promise<JsonRpcResponse> {
-    const response = await this.post({ jsonrpc: "2.0", id: randomUUID(), method, params }, tenant);
+    const response = await this.post({ jsonrpc: "2.0", id: randomUUID(), method, params }, tenant, timeoutMs);
     const body = await parseJsonRpcBody(response);
     if (!response.ok) {
       throw new ReferenceEngineError(response.status, body?.error);
@@ -181,15 +183,15 @@ export class ReferenceEngineClient {
     return body ?? { jsonrpc: "2.0", result: undefined };
   }
 
-  private async sendNotification(method: string, params: Record<string, unknown>): Promise<void> {
-    const response = await this.post({ jsonrpc: "2.0", method, params });
+  private async sendNotification(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<void> {
+    const response = await this.post({ jsonrpc: "2.0", method, params }, undefined, timeoutMs);
     if (!response.ok && response.status !== 202) {
       const body = await parseJsonRpcBody(response);
       throw new ReferenceEngineError(response.status, body?.error);
     }
   }
 
-  private post(body: Record<string, unknown>, tenant?: TenantIdentity): Promise<Response> {
+  private post(body: Record<string, unknown>, tenant?: TenantIdentity, timeoutMs?: number): Promise<Response> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -202,7 +204,7 @@ export class ReferenceEngineClient {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal: this.options.timeoutMs > 0 ? AbortSignal.timeout(this.options.timeoutMs) : undefined,
+      signal: (timeoutMs ?? this.options.timeoutMs) > 0 ? AbortSignal.timeout(timeoutMs ?? this.options.timeoutMs) : undefined,
     });
   }
 }

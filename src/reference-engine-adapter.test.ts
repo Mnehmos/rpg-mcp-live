@@ -7,6 +7,7 @@ import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { EngineToolCallRequest } from "./engine-contracts.js";
+import { open5eSpellOptions } from "./open5e-rules.js";
 
 function createStore(): ReferenceEngineStore {
   const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-adapter-"));
@@ -457,6 +458,41 @@ describe("ReferenceEngineAdapter", () => {
     expect(campaign.character.hp).toBe(10);
     expect(campaign.character.maxHp).toBe(10);
     expect(campaign.character.ac).toBe(13);
+  });
+
+  it("rejects cantrips and levelled spells submitted to the wrong spellbook bucket", async () => {
+    const store = createStore();
+    store.setBackend("account-1", "campaign-1", "reference");
+    store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+    const options = open5eSpellOptions("cleric", 1);
+    const cantrip = options.spells.find((spell) => spell.level === 0);
+    const levelled = options.spells.find((spell) => spell.level > 0);
+    expect(cantrip).toBeDefined();
+    expect(levelled).toBeDefined();
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Sela",
+        race: "human",
+        characterClass: "cleric",
+        stats: { str: 10, dex: 14, con: 13, int: 12, wis: 16, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 12,
+        level: 1,
+        xp: 0,
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+
+    await expect(adapter.updateCharacterSpells("account-1", "actor-1", "campaign-1", {
+      cantripsKnown: [levelled!.contentKey],
+    })).rejects.toThrow("cantrip_requires_level_0");
+    await expect(adapter.updateCharacterSpells("account-1", "actor-1", "campaign-1", {
+      preparedSpells: [cantrip!.contentKey],
+    })).rejects.toThrow("levelled_spell_cannot_be_cantrip");
+    expect(client.callTool).toHaveBeenCalledTimes(2);
   });
 
   describe("updateCharacterDetails", () => {

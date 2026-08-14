@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GameStore } from "./store.js";
-import { ReferenceEngineStore } from "./reference-engine-store.js";
+import { REFERENCE_COMMAND_LEASE_MS, ReferenceEngineStore } from "./reference-engine-store.js";
 
 function createTestStore(): ReferenceEngineStore {
   const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-reference-engine-"));
@@ -91,6 +91,92 @@ describe("ReferenceEngineStore", () => {
     expect(store.bumpVersion("user-1", "campaign-1")).toBe(1);
     expect(store.bumpVersion("user-1", "campaign-1")).toBe(2);
     expect(store.getRouting("user-1", "campaign-2")?.version).toBe(0);
+  });
+
+  it("persists a command receipt and replays its resolved result", () => {
+    const store = createTestStore();
+    store.setBackend("user-1", "campaign-1", "reference");
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "started" });
+
+    const result = { campaignVersion: 1, narration: { text: "A lantern burns." } };
+    store.resolveReferenceCommand("user-1", "campaign-1", "command-1", result);
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "resolved", result });
+    expect(store.getReferenceCommand("user-1", "campaign-1", "command-1")).toMatchObject({
+      expectedCampaignVersion: 0,
+      status: "resolved",
+      result,
+      failure: null,
+    });
+  });
+
+  it("keeps failed receipts retry-safe and rejects stale or reused command ids", () => {
+    const store = createTestStore();
+    store.setBackend("user-1", "campaign-1", "reference");
+    store.setBackend("user-1", "campaign-2", "reference");
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"attack"}'))
+      .toEqual({ status: "started" });
+    const failure = {
+      correlationId: "corr-1",
+      commitStatus: "not_committed" as const,
+      phase: "tool_loop",
+      toolRounds: 0,
+      toolCallNames: [],
+      acceptedToolCalls: 0,
+      message: "provider unavailable",
+    };
+    store.failReferenceCommand("user-1", "campaign-1", "command-1", failure);
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"attack"}'))
+      .toEqual({ status: "failed", failure });
+    expect(() => store.beginReferenceCommand("user-1", "campaign-2", "command-1", 0, '{"playerText":"attack"}'))
+      .toThrow("cannot be reused");
+
+    store.bumpVersion("user-1", "campaign-1");
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-2", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "conflict", currentVersion: 1 });
+  });
+
+  it("recovers a stale processing receipt into an uncertain terminal state", () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-reference-engine-stale-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const db = gameStore.getRawDb();
+    const store = new ReferenceEngineStore(db);
+    store.setBackend("user-1", "campaign-1", "reference");
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-stale", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "started" });
+    db.prepare("UPDATE reference_engine_commands SET updated_at = ? WHERE user_id = ? AND client_command_id = ?")
+      .run(new Date(Date.now() - REFERENCE_COMMAND_LEASE_MS - 1).toISOString(), "user-1", "command-stale");
+
+    expect(store.getReferenceCommand("user-1", "campaign-1", "command-stale")).toMatchObject({
+      status: "failed",
+      failure: {
+        commitStatus: "uncertain",
+        phase: "recovery",
+      },
+    });
+    store.resolveReferenceCommand("user-1", "campaign-1", "command-stale", { narration: "late worker result" });
+    expect(store.getReferenceCommand("user-1", "campaign-1", "command-stale")).toMatchObject({
+      status: "failed",
+      failure: { commitStatus: "uncertain" },
+      result: null,
+    });
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-stale", 0, '{"playerText":"look"}'))
+      .toMatchObject({ status: "failed", failure: { commitStatus: "uncertain" } });
+  });
+
+  it("serializes different client commands that reserve the same campaign version", () => {
+    const store = createTestStore();
+    store.setBackend("user-1", "campaign-1", "reference");
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-a", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "started" });
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-b", 0, '{"playerText":"listen"}'))
+      .toEqual({ status: "processing" });
   });
 
   describe("dockets", () => {

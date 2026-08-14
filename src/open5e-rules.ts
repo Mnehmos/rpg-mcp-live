@@ -889,6 +889,64 @@ export function open5eSpellSlots(className: string, characterLevel: number, pack
   return Object.fromEntries(Object.entries(row.slots).filter(([, count]) => count > 0));
 }
 
+export interface Open5eSpellOption {
+  contentKey: string;
+  packHash: string;
+  name: string;
+  level: number;
+  school: string;
+  castingTime: string;
+  range: string;
+  concentration: boolean;
+  mechanicsStatus: "compiled-primary" | "prose-only";
+}
+
+/**
+ * Returns the source-backed spell choices that a character of this class and
+ * level can actually reach. The browser uses this instead of shipping raw
+ * Open5e records or letting a client invent spell names.
+ */
+export function open5eSpellOptions(className: string, characterLevel = 1, packHash?: string): {
+  className: string;
+  selectionMode: "known" | "prepared" | "spellbook" | null;
+  knownSpellLimit: number | null;
+  cantripLimit: number | null;
+  spells: Open5eSpellOption[];
+} {
+  const progression = getOpen5eSpellProgression(className, packHash);
+  const list = getOpen5eSpellList(className, packHash);
+  const levelIndex = Math.max(0, Math.min(19, Math.trunc(characterLevel) - 1));
+  const slotMaximums = open5eSpellSlots(className, characterLevel, packHash);
+  const highestLevel = Object.keys(slotMaximums).reduce((highest, level) => Math.max(highest, Number(level)), 0);
+  const spells = (list?.spells ?? [])
+    .map((reference) => getOpen5eSpell(reference.contentKey, packHash))
+    .filter((record): record is Open5eSpellKernelRecord => Boolean(record))
+    .filter((record) => record.definition.level === 0 || record.definition.level <= highestLevel)
+    .map((record) => ({
+      contentKey: record.contentKey,
+      packHash: record.packHash,
+      name: record.definition.name,
+      level: record.definition.level,
+      school: record.definition.school.sourceKey,
+      castingTime: record.definition.castingTime,
+      range: record.definition.range.text,
+      concentration: record.definition.concentration,
+      mechanicsStatus: record.effect ? "compiled-primary" as const : "prose-only" as const,
+    }))
+    .sort((left, right) => left.level - right.level || left.name.localeCompare(right.name));
+  const knownSpellLimit = progression?.selectionMode === "spellbook" && progression.spellbook
+    ? progression.spellbook.initialSpellCount
+      + progression.spellbook.spellsGainedPerLevel * Math.max(0, characterLevel - 1)
+    : progression?.knownSpellLimits[levelIndex] ?? null;
+  return {
+    className: progression?.className ?? className,
+    selectionMode: progression?.selectionMode ?? null,
+    knownSpellLimit,
+    cantripLimit: progression?.cantripsKnown[levelIndex] ?? null,
+    spells,
+  };
+}
+
 export function open5eClassSourceKey(className: string): string {
   const normalized = className.trim().toLocaleLowerCase("en-US").replaceAll(" ", "-");
   return normalized.startsWith("srd_") ? normalized : `srd_${normalized}`;
