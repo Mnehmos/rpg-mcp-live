@@ -37,6 +37,7 @@ type Character = {
 };
 
 let character: Character | null = null;
+let armorEquipped = false;
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -69,7 +70,21 @@ function handleTool(name: string, args: Record<string, unknown>): unknown {
     return { worldId: "smoke-world", partyId: "smoke-party", created: { world: true, party: true } };
   }
   if (name === "narrative_manage" && action === "search") return { notes: [] };
-  if (name === "inventory_manage" && action === "get_detailed") return { inventory: [] };
+  if (name === "inventory_manage" && action === "get_detailed") {
+    return {
+      inventory: [{
+        item: { id: "smoke-chain-mail", name: "Chain Mail", type: "armor", weight: 55, properties: { ac: 16 } },
+        quantity: 1,
+        equipped: armorEquipped,
+        slot: armorEquipped ? "armor" : null,
+      }],
+    };
+  }
+  if (name === "inventory_manage" && action === "equip") {
+    armorEquipped = true;
+    if (character) character = { ...character, ac: 16 };
+    return { success: true, itemName: "Chain Mail", slot: "armor" };
+  }
   if (name === "party_manage" && action === "add_member") return { success: true };
   if (name === "character_manage" && action === "create") {
     character = {
@@ -222,7 +237,7 @@ try {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "Reference Smoke", premise: "Smoke", setting: "Test", tone: "Test" }),
   });
-  const created = await requestJson<{ data: { character: { name: string; savingThrows: Record<string, number>; proficiencies: { languages: string[] } } } }>(
+  const created = await requestJson<{ campaignVersion: number; data: { character: { name: string; savingThrows: Record<string, number>; proficiencies: { languages: string[] } } } }>(
     `http://127.0.0.1:${webPort}/api/campaigns/${campaign.session.id}/character`,
     {
       method: "POST",
@@ -246,6 +261,31 @@ try {
   assert(created.data.character.name === "Reference Smoke Hero", "Reference character creation failed.");
   assert(created.data.character.savingThrows.str === 5 && created.data.character.savingThrows.con === 4, "Reference save derivation failed.");
   assert(created.data.character.proficiencies.languages.includes("Draconic"), "Reference language persistence failed.");
+  const equipped = await requestJson<{ accepted: boolean; campaignVersion: number }>(
+    `http://127.0.0.1:${webPort}/api/campaigns/${campaign.session.id}/inventory`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        clientCommandId: randomUUID(),
+        expectedCampaignVersion: created.campaignVersion,
+        action: "equip",
+        itemId: "smoke-chain-mail",
+        slot: "armor",
+      }),
+    },
+  );
+  assert(equipped.accepted, "Reference inventory equip failed.");
+  const refreshed = await requestJson<{ campaign: { id: string; version: number; character: { ac: number; inventory: Array<{ id: string; equipped: boolean; slot: string }> } } }>(
+    `http://127.0.0.1:${webPort}/api/campaigns/${campaign.session.id}`,
+  );
+  assert(refreshed.campaign.id === campaign.session.id, "Inventory refresh did not preserve the active campaign session.");
+  assert(refreshed.campaign.version === equipped.campaignVersion, "Inventory refresh did not return the committed campaign version.");
+  assert(refreshed.campaign.character.ac === 16, "Inventory refresh did not include the updated armor class.");
+  assert(
+    refreshed.campaign.character.inventory.some((item) => item.id === "smoke-chain-mail" && item.equipped && item.slot === "armor"),
+    "Inventory refresh did not include the equipped item state.",
+  );
   console.log("Reference HTTP smoke passed.");
 } catch (error) {
   console.error(webOutput);

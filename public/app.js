@@ -2329,8 +2329,11 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
         throw new Error("The campaign changed; your view was refreshed.");
       }
       if (!result.response.ok) throw new Error(result.data.error || "That inventory action could not be resolved.");
-      renderSession(result.data);
       setStatus("Inventory updated", "ready");
+      // The mutation response is a durable tool receipt, not a session
+      // envelope. Refresh separately so a read failure can never turn an
+      // already-committed equip/use/drop into an apparent failed mutation.
+      return refreshSession();
     }).catch(function (error) {
       showToast(error.message);
     }).finally(function () { button.disabled = false; });
