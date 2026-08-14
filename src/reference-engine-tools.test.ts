@@ -41,6 +41,7 @@ describe("ReferenceEngineToolCatalog", () => {
   it("exposes the DM world-authoring tools", () => {
     expect(REFERENCE_ENGINE_TOOL_NAMES).toContain("scene_manage");
     expect(REFERENCE_ENGINE_TOOL_NAMES).toContain("spawn_manage");
+    expect(REFERENCE_ENGINE_TOOL_NAMES).toContain("agent_manage");
   });
 
   it("converts the reference engine's custom schema format to OpenRouter tool-call format", async () => {

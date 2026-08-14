@@ -6,6 +6,7 @@ import { GameStore } from "./store.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
 import {
+  normalizeToolArguments,
   ReferenceDmProviderUnavailableError,
   ReferenceDungeonMaster,
   REFERENCE_DM_SYSTEM_PROMPT,
@@ -30,10 +31,17 @@ function fakeClient(handlers: Record<string, (args: Record<string, unknown>) => 
 }
 
 function fakeCatalog(): ReferenceEngineToolCatalog {
+  const combatAction = {
+    type: "function" as const,
+    function: {
+      name: "combat_action",
+      description: "",
+      parameters: { type: "object" as const, properties: {}, required: [] },
+    },
+  };
   return {
-    getTools: vi.fn(async () => [
-      { type: "function", function: { name: "combat_action", description: "", parameters: { type: "object", properties: {}, required: [] } } },
-    ]),
+    getTools: vi.fn(async () => [combatAction]),
+    getTool: vi.fn(async (name: string) => name === "combat_action" ? combatAction : undefined),
   } as unknown as ReferenceEngineToolCatalog;
 }
 
@@ -81,6 +89,41 @@ const CHARACTER_FIXTURES = {
 describe("ReferenceDungeonMaster", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("omits blank optional tool fields without hiding required nested validation", () => {
+    const tool = {
+      type: "function" as const,
+      function: {
+        name: "npc_manage",
+        description: "",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            action: { type: "string" },
+            networkId: { type: "string" },
+            seedRelationship: {
+              type: "object",
+              properties: {
+                withCharacterId: { type: "string" },
+                notes: { type: "string" },
+              },
+              required: ["withCharacterId"],
+            },
+          },
+          required: ["action"],
+        },
+      },
+    } as import("./reference-engine-tools.js").OpenRouterToolDefinition;
+
+    expect(normalizeToolArguments({
+      action: "create",
+      networkId: "",
+      seedRelationship: { withCharacterId: "", notes: "" },
+    }, tool)).toEqual({
+      action: "create",
+      seedRelationship: { withCharacterId: "" },
+    });
   });
 
   it("throws for a campaign that isn't routed to the reference backend", async () => {
@@ -179,6 +222,105 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.session.log.some((m) => m.text === "You strike the goblin for 6 damage." && m.kind === "narration")).toBe(
       true
     );
+  });
+
+  it("marks a resolved failed check as completed while preserving its domain outcome", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-failed-check-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "combat_action.attack": () => ({ success: false, roll: 11, modifier: 0, total: 11, dc: 15, skill: "investigation" }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? openRouterMessage(null, [{
+            id: "failed-check",
+            type: "function",
+            function: { name: "combat_action", arguments: JSON.stringify({ action: "attack", targetId: "goblin-1" }) },
+          }])
+        : openRouterMessage("The seal holds; your investigation turns up no opening.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Investigate the seal.");
+
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({
+      accepted: true,
+      result: { success: false, roll: 11, total: 11, dc: 15 },
+    });
+  });
+
+  it("marks an explicit NPC-agent invocation with its separate provenance receipt", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-agent-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "agent_manage.invoke": () => ({
+        actionType: "invoke",
+        callId: "agent-call-1",
+        provider: "openrouter",
+        model: "test-npc-model",
+        status: "ok",
+        promptTokens: 42,
+        completionTokens: 8,
+        durationMs: 321,
+        response: "The archivist watches the western door.",
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? openRouterMessage(null, [{
+            id: "agent-tool-call",
+            type: "function",
+            function: {
+              name: "agent_manage",
+              arguments: JSON.stringify({ action: "invoke", agentId: "agent-1", situation: "Watch the door." }),
+            },
+          }])
+        : openRouterMessage("The archivist watches the western door.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Ask the archivist to watch the door.");
+
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({
+      name: "agent_manage",
+      provenance: "npc_agent",
+      accepted: true,
+      result: {
+        callId: "agent-call-1",
+        provider: "openrouter",
+        model: "test-npc-model",
+        status: "ok",
+        promptTokens: 42,
+        completionTokens: 8,
+        durationMs: 321,
+      },
+    });
   });
 
   it("gives the model the hydrated saving-throw proficiencies", async () => {
