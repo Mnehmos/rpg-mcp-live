@@ -3780,6 +3780,8 @@ export interface EngineToolDisclosure {
 
 export interface EngineToolCallDisclosure {
   name: string;
+  /** Distinguishes an explicit NPC-agent invocation from ordinary engine tools. */
+  provenance?: "npc_agent";
   /** Sanitized arguments the host actually sent, or attempted to send, to the engine. */
   arguments: Record<string, unknown>;
   /** Original model arguments when host-side scoping or defaults changed them. */

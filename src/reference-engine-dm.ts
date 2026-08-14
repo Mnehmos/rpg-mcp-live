@@ -157,6 +157,7 @@ function makeToolCallDisclosure(
   const argumentsChanged = JSON.stringify(args) !== JSON.stringify(outcome.effectiveArguments);
   return {
     name: toolName,
+    ...(toolName === "agent_manage" && args.action === "invoke" ? { provenance: "npc_agent" as const } : {}),
     arguments: safeArguments,
     ...(argumentsChanged ? { requestedArguments: safeRequestedArguments } : {}),
     result: sanitizeToolDisclosureValue(outcome.payload ?? outcome.text, secretDocket),
@@ -186,6 +187,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Never ask the player to provide a missing location, NPC, enemy, or situation merely because it has not been established. Invent a fitting one from the campaign profile, player intent, and current pressures, then commit it before narration.",
   "Do not wait for the engine to reject an absent fact and do not answer with a deterministic absence check. Treat every player intent as an invitation to author the next playable situation; inspect current state, make the creative decision, call the relevant tools, and keep the flow in-world.",
   "Use spatial_manage generate and move for places and player placement; npc_manage create or spawn_manage for NPCs and populated locations; combat_manage spawn_quick_enemy or spawn_manage for enemies and encounters; item_manage and inventory_manage for authored objects and possession; quest_manage for durable quests; and scene_manage set for the DM-authored shared scene frame.",
+  "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode, with its provider and model supplied by that request or policy. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; the DM remains responsible for dispatching RPG MCP tools and narrating only their successful results.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
   "The execution order is mandatory orchestration, not an allow/reject classifier: player intent -> relevant engine action -> returned engine result -> scene_manage set -> narration. Never narrate a state-changing outcome before the relevant engine call succeeds, and never turn a skipped call into an 'unresolved' continuity fact; repair the tool sequence or describe the failure at the engine boundary.",
@@ -204,6 +206,7 @@ export const REFERENCE_DM_SYSTEM_PROMPT = [
   "If there is no current room or scene, do not narrate that absence. Create a concrete room with spatial_manage action generate, then place the player there with spatial_manage action move. The generated room name and description are your creative decision, but the room and placement must be confirmed by tool results before you describe them.",
   "On an opening or the first player turn, author a persistent room, player placement, and scene_manage set before narration. On later turns, if the player refers to an unestablished place or person, author and commit the needed world facts and scene first instead of saying they do not exist.",
   "If the player says they travel toward a place, look for someone, investigate a lead, enter danger, or otherwise advances the fiction, decide what is there and author it through tools. Do not make the player supply a room, NPC, enemy, item, or clue before you can continue.",
+  "For npc_manage.interact, always provide a non-empty content string and the speakerId; use targetId when someone is addressed. For npc_manage.create, omit seedRelationship, seedMemory, and agent unless you have all of their required nested fields. Never send blank optional UUIDs or empty optional strings.",
   "After committing a new scene, write the canonical room id, name, current occupants, active leads, and unresolved pressure to the state/journal dockets so the next turn can continue from it. Never put mechanical numbers in those dockets.",
   "When you are done taking actions for this turn, respond with plain narration text (no further tool calls) describing what happened, written for the player.",
   "Keep narration grounded only in what the tools actually returned. Do not narrate outcomes that no tool call confirmed.",
@@ -455,9 +458,11 @@ export class ReferenceDungeonMaster {
     tenant: TenantIdentity
   ): Promise<ReferenceToolOutcome> {
     const parsedArgs = parseArguments(rawArguments);
+    const toolDefinition = await this.catalog.getTool(toolName);
+    const normalizedArgs = normalizeToolArguments(parsedArgs, toolDefinition);
     const combatArgs = toolName === "combat_action"
-      ? fillMissingArgs(parsedArgs, { actorId: fillOnlyArgs.characterId })
-      : parsedArgs;
+      ? fillMissingArgs(normalizedArgs, { actorId: fillOnlyArgs.characterId })
+      : normalizedArgs;
     const args = forceArgs(fillMissingArgs(combatArgs, fillOnlyArgs), forcedArgs);
     const requestedCharacterId = args.characterId;
     if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
@@ -629,6 +634,48 @@ function parseArguments(raw: string): Record<string, unknown> {
   }
 }
 
+/**
+ * OpenRouter can return empty strings for optional fields when a tool schema
+ * is broad (for example the top-level npc_manage envelope). Remove those
+ * values only when the loaded schema says the property is optional, while
+ * preserving empty required values so the engine can return its real
+ * validation error. This also walks nested objects and arrays, which keeps
+ * optional UUIDs out of seedRelationship/seedMemory without hiding missing
+ * required nested IDs from the engine.
+ */
+export function normalizeToolArguments(
+  args: Record<string, unknown>,
+  tool?: OpenRouterToolDefinition
+): Record<string, unknown> {
+  const normalized = normalizeToolValue(args, tool?.function.parameters);
+  return normalized && typeof normalized === "object" && !Array.isArray(normalized)
+    ? normalized as Record<string, unknown>
+    : {};
+}
+
+function normalizeToolValue(value: unknown, schema?: Record<string, unknown>): unknown {
+  if (Array.isArray(value)) {
+    const itemSchema = recordValue(schema?.items);
+    return value.map((item) => normalizeToolValue(item, itemSchema));
+  }
+  if (!value || typeof value !== "object") return value;
+
+  const source = value as Record<string, unknown>;
+  const properties = recordValue(schema?.properties);
+  const required = new Set(
+    Array.isArray(schema?.required)
+      ? schema.required.filter((key): key is string => typeof key === "string")
+      : []
+  );
+  const normalized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(source)) {
+    if (child === "" && !required.has(key)) continue;
+    const normalizedChild = normalizeToolValue(child, recordValue(properties[key]));
+    if (normalizedChild !== undefined) normalized[key] = normalizedChild;
+  }
+  return normalized;
+}
+
 function formatCampaignProfile(raw: string | null): string | null {
   if (!raw) return null;
   try {
@@ -710,7 +757,11 @@ function markAuthoredSceneState(
 function remoteResultAccepted(payload: unknown, isError: boolean): boolean {
   if (isError) return false;
   const record = recordValue(payload);
-  return record.success !== false && record.error === undefined;
+  // `success: false` is a legitimate domain outcome for checks, attacks,
+  // saves, and other adjudications. Only transport/tool-envelope errors make
+  // the invocation itself rejected; the disclosure must preserve the failed
+  // game outcome as a completed call.
+  return record.error === undefined;
 }
 
 function fillMissingArgs(args: Record<string, unknown>, fillers: Record<string, unknown>): Record<string, unknown> {
