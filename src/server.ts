@@ -744,7 +744,14 @@ app.post("/api/campaigns/:campaignId/inventory", async (request, response) => {
       arguments: argumentsForTool,
     } as const;
     const result = await referenceEngineAdapter.executeToolCall(userId, userId, request.params.campaignId, toolCallRequest);
-    response.json({ ...result, subscription: store.getSubscription(userId) });
+    const updated = await getAnyCampaign(userId, request.params.campaignId);
+    response.json({
+      ...result,
+      session: updated.campaign,
+      state: updated.state,
+      engineBackend: updated.engineBackend,
+      subscription: store.getSubscription(userId),
+    });
   } catch (error) {
     sendReferenceEngineError(response, error);
   }
