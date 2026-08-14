@@ -95,6 +95,10 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("provider openrouter");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model openai/gpt-5.6-luna");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("reasoningEffort: medium");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("maxTokens 8192");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("place every newly authored companion");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("dispatch the normal RPG MCP tool or tools");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not stop at the proposal");
   });
 
   it("omits blank optional tool fields without hiding required nested validation", () => {
@@ -327,6 +331,72 @@ describe("ReferenceDungeonMaster", () => {
         durationMs: 321,
       },
     });
+  });
+
+  it("continues an NPC proposal through the normal engine tool loop", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-agent-follow-through-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "agent_manage.invoke": () => ({
+        actionType: "invoke",
+        callId: "agent-call-2",
+        provider: "openrouter",
+        model: "openai/gpt-5.6-luna",
+        status: "ok",
+        response: "Strike the creature protecting the archive.",
+      }),
+      "combat_action.attack": () => ({ success: true, damage: 7, actorId: "companion-1", targetId: "enemy-1" }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "agent-tool-call-2",
+          type: "function",
+          function: {
+            name: "agent_manage",
+            arguments: JSON.stringify({ action: "invoke", agentId: "agent-1", situation: "Protect the archive." }),
+          },
+        }]);
+      }
+      if (call === 2) {
+        return openRouterMessage(null, [{
+          id: "companion-action-1",
+          type: "function",
+          function: {
+            name: "combat_action",
+            arguments: JSON.stringify({ action: "attack", actorId: "companion-1", targetId: "enemy-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The companion strikes the creature protecting the archive.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Have the companion protect the archive.");
+
+    expect(result.toolDisclosure?.calls.map((entry) => entry.name)).toEqual([
+      "agent_manage",
+      "combat_action",
+    ]);
+    expect(result.toolDisclosure?.calls[0]?.provenance).toBe("npc_agent");
+    expect(result.toolDisclosure?.calls[1]).toMatchObject({
+      accepted: true,
+      result: { success: true, damage: 7 },
+    });
+    expect(result.narration.text).toContain("strikes the creature");
   });
 
   it("gives the model the hydrated saving-throw proficiencies", async () => {
