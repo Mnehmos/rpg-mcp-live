@@ -292,6 +292,47 @@ describe("ReferenceDungeonMaster", () => {
     });
   });
 
+  it("does not mark a read-only docket lookup as an uncertain commit", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-read-only-failure-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "read-state",
+          type: "function",
+          function: { name: "read_docket", arguments: JSON.stringify({ name: "state" }) },
+        }]);
+      }
+      throw new Error("OpenRouter unavailable after read-only context lookup");
+    }));
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "Recall the current state.", {
+      clientCommandId: "command-read-only",
+      expectedCampaignVersion: 0,
+    })).rejects.toBeInstanceOf(ReferenceDmProviderUnavailableError);
+
+    expect(store.getReferenceCommand("account-1", "campaign-1", "command-read-only")).toMatchObject({
+      status: "failed",
+      failure: {
+        commitStatus: "not_committed",
+        acceptedToolCalls: 0,
+      },
+    });
+  });
+
   it("records context failures instead of leaving a command stuck processing", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-command-context-failure-"));
     const gameStore = new GameStore(join(directory, "game.db"));

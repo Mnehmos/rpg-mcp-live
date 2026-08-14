@@ -29,7 +29,7 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLoading: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -830,7 +830,8 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
   function renderSpellbookOptions(character, spellcasting) {
     var optionsNode = $("#spellbook-options");
     var help = $("#spellbook-help");
-    if (!optionsNode || !state.spellOptions || state.spellOptionsClass !== character.className) return;
+    var characterLevel = Number(character.level || 1);
+    if (!optionsNode || !state.spellOptions || state.spellOptionsClass !== character.className || state.spellOptionsLevel !== characterLevel) return;
     var mode = spellcasting.selectionMode || "prepared";
     var knownSet = spellReferenceSet(spellcasting.knownSpells);
     var preparedSet = spellReferenceSet(spellcasting.preparedSpells);
@@ -864,23 +865,33 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
   }
 
   function loadSpellbookOptions(character, spellcasting) {
-    if (state.spellOptionsLoading || (state.spellOptions && state.spellOptionsClass === character.className)) {
+    var characterLevel = Number(character.level || 1);
+    var cacheKey = String(character.className || "") + ":" + characterLevel;
+    if (state.spellOptionsLoadingKey === cacheKey || (state.spellOptions && state.spellOptionsClass === character.className && state.spellOptionsLevel === characterLevel)) {
       renderSpellbookOptions(character, spellcasting);
       return;
     }
     state.spellOptionsLoading = true;
-    requestJson("/api/character-spell-options?className=" + encodeURIComponent(character.className) + "&level=" + encodeURIComponent(character.level || 1))
+    state.spellOptionsLoadingKey = cacheKey;
+    requestJson("/api/character-spell-options?className=" + encodeURIComponent(character.className) + "&level=" + encodeURIComponent(characterLevel))
       .then(function (result) {
         if (!result.response.ok) throw new Error(result.data.error || "The spell catalog could not be loaded.");
+        if (!state.session || state.session.character.className !== character.className || Number(state.session.character.level || 1) !== characterLevel) return;
         state.spellOptions = result.data.options;
         state.spellOptionsClass = character.className;
+        state.spellOptionsLevel = characterLevel;
         renderSpellbookOptions(character, spellcasting);
       })
       .catch(function (error) {
         var feedback = $("#spellbook-feedback");
         if (feedback) feedback.textContent = error.message;
       })
-      .finally(function () { state.spellOptionsLoading = false; });
+      .finally(function () {
+        if (state.spellOptionsLoadingKey === cacheKey) {
+          state.spellOptionsLoading = false;
+          state.spellOptionsLoadingKey = null;
+        }
+      });
   }
 
   function renderSpellbookEditor(character, spellcasting) {

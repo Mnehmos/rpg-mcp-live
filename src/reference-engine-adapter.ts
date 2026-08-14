@@ -774,12 +774,23 @@ export class ReferenceEngineAdapter {
     }
     // Resolve every submitted key before mutating anything. This keeps an
     // unavailable, unreachable, or foreign spell from being silently dropped by the host.
-    for (const key of [...(update.cantripsKnown ?? []), ...(update.knownSpells ?? []), ...(update.preparedSpells ?? [])]) {
+    const submittedSpellBuckets: Array<{ key: string; bucket: "cantrip" | "levelled" }> = [
+      ...(update.cantripsKnown ?? []).map((key) => ({ key, bucket: "cantrip" as const })),
+      ...(update.knownSpells ?? []).map((key) => ({ key, bucket: "levelled" as const })),
+      ...(update.preparedSpells ?? []).map((key) => ({ key, bucket: "levelled" as const })),
+    ];
+    for (const { key, bucket } of submittedSpellBuckets) {
       const spell = getOpen5eSpell(key);
       if (!spell
         || !getOpen5eSpellList(className)?.spells.some((reference) => reference.contentKey === key)
         || !spellOptions.spells.some((reference) => reference.contentKey === key)) {
         throw new ReferenceEngineUnsupportedError(`spell ${key}`);
+      }
+      if (bucket === "cantrip" && spell.definition.level !== 0) {
+        throw new ReferenceEngineUnsupportedError(`cantrip_requires_level_0_${key}`);
+      }
+      if (bucket === "levelled" && spell.definition.level === 0) {
+        throw new ReferenceEngineUnsupportedError(`levelled_spell_cannot_be_cantrip_${key}`);
       }
     }
     await this.client.callTool("character_manage", args, this.tenantFor(accountId, campaignId, routing));

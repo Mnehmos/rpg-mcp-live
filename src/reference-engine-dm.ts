@@ -97,8 +97,72 @@ interface ChatMessage {
 interface ReferenceToolOutcome {
   text: string;
   accepted: boolean;
+  stateChanging: boolean;
   payload: unknown;
   effectiveArguments: Record<string, unknown>;
+}
+
+// Read-only actions are still useful context, but a successful read cannot
+// make a timed-out turn's commit outcome uncertain. Keep this allowlist
+// conservative: an unknown action is treated as state-changing until it is
+// explicitly reviewed.
+const READ_ONLY_REFERENCE_TOOL_ACTIONS = new Set([
+  "character_manage.get",
+  "character_manage.list",
+  "party_manage.get",
+  "party_manage.list",
+  "combat_manage.get",
+  "combat_manage.list",
+  "combat_manage.status",
+  "combat_map.get",
+  "combat_map.list",
+  "item_manage.get",
+  "item_manage.list",
+  "item_manage.search",
+  "inventory_manage.get",
+  "inventory_manage.get_detailed",
+  "inventory_manage.list",
+  "world_manage.get",
+  "world_manage.list",
+  "world_map.get",
+  "world_map.list",
+  "spatial_manage.get",
+  "spatial_manage.list",
+  "spatial_manage.describe",
+  "scene_manage.get",
+  "quest_manage.get",
+  "quest_manage.list",
+  "quest_manage.search",
+  "npc_manage.get",
+  "npc_manage.list",
+  "npc_manage.search",
+  "agent_manage.get",
+  "agent_manage.list",
+  "aura_manage.get",
+  "aura_manage.list",
+  "scroll_manage.get",
+  "scroll_manage.list",
+  "concentration_manage.get",
+  "concentration_manage.list",
+  "secret_manage.get",
+  "secret_manage.list",
+  "narrative_manage.get",
+  "narrative_manage.search",
+  "narrative_manage.list",
+  "math_manage.evaluate",
+  "session_manage.get",
+  "session_manage.status",
+  "travel_manage.get",
+  "travel_manage.list",
+  "travel_manage.route",
+  "improvisation_manage.get",
+  "improvisation_manage.list",
+]);
+
+function isStateChangingReferenceTool(toolName: string, args: Record<string, unknown>): boolean {
+  if (toolName === "read_docket") return false;
+  if (toolName === "write_docket") return true;
+  return !READ_ONLY_REFERENCE_TOOL_ACTIONS.has(`${toolName}.${String(args.action ?? "")}`);
 }
 
 function storedToolCallId(entryId: string, index: number): string {
@@ -450,6 +514,7 @@ export class ReferenceDungeonMaster {
       // the DM can narrate the authored result instead of exhausting the
       // budget immediately after a valid tool call.
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+        this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
         const completion = await this.chatCompletion(messages, tools, deadlineAt);
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
@@ -470,7 +535,8 @@ export class ReferenceDungeonMaster {
               ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
               : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant, deadlineAt);
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
-          if (remoteOutcome.accepted) acceptedToolCalls += 1;
+          if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedToolCalls += 1;
+          this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
         }
@@ -579,7 +645,7 @@ export class ReferenceDungeonMaster {
           "Unknown characterId. Only use a characterId learned from an accepted tool result in this campaign or current turn " +
           "(e.g. from create/list/get), or omit it to target your own character.",
       });
-      return { text, accepted: false, payload: { error: "unknown_character_id" }, effectiveArguments: args };
+      return { text, accepted: false, stateChanging: false, payload: { error: "unknown_character_id" }, effectiveArguments: args };
     }
     const remainingMs = deadlineAt === null ? undefined : deadlineAt - Date.now();
     if (deadlineAt !== null && remainingMs !== undefined && remainingMs <= 0) {
@@ -587,11 +653,12 @@ export class ReferenceDungeonMaster {
     }
     const result = await this.client.callTool(toolName, args, tenant, remainingMs);
     collectCharacterIds(result.payload, knownCharacterIds);
-    return {
-      text: result.text || JSON.stringify(result.payload ?? {}),
-      accepted: remoteResultAccepted(result.payload, result.isError),
-      payload: result.payload,
-      effectiveArguments: args,
+      return {
+        text: result.text || JSON.stringify(result.payload ?? {}),
+        accepted: remoteResultAccepted(result.payload, result.isError),
+        stateChanging: isStateChangingReferenceTool(toolName, args),
+        payload: result.payload,
+        effectiveArguments: args,
     };
   }
 
@@ -604,6 +671,7 @@ export class ReferenceDungeonMaster {
     return {
       text: this.handleDocketTool(accountId, campaignId, toolName, args),
       accepted: isDocketName(args.name),
+      stateChanging: toolName === "write_docket" && isDocketName(args.name),
       payload: null,
       effectiveArguments: args,
     };

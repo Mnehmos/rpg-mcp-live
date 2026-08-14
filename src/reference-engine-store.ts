@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EngineToolDisclosure } from "./engine-contracts.js";
 
@@ -12,6 +13,13 @@ export interface StoredLogMessage {
 }
 
 const MAX_LOG_MESSAGES = 40;
+
+/**
+ * A DM turn has a bounded provider budget, but the process can still die after
+ * the receipt is inserted. Treat a receipt with no heartbeat for longer than
+ * this lease as an uncertain terminal outcome rather than returning 202 forever.
+ */
+export const REFERENCE_COMMAND_LEASE_MS = 5 * 60 * 1000;
 
 export type ReferenceCommandStatus = "processing" | "resolved" | "failed";
 export type ReferenceCommandCommitStatus = "not_committed" | "uncertain";
@@ -87,6 +95,23 @@ interface ReferenceCommandRow {
   failure_json: string | null;
   created_at: string;
   updated_at: string;
+}
+
+function referenceCommandLeaseExpired(updatedAt: string, nowMs = Date.now()): boolean {
+  const updatedAtMs = Date.parse(updatedAt);
+  return !Number.isFinite(updatedAtMs) || nowMs - updatedAtMs > REFERENCE_COMMAND_LEASE_MS;
+}
+
+function staleReferenceCommandFailure(clientCommandId: string): ReferenceCommandFailure {
+  return {
+    correlationId: `recovery-${clientCommandId}-${randomUUID()}`,
+    commitStatus: "uncertain",
+    phase: "recovery",
+    toolRounds: 0,
+    toolCallNames: [],
+    acceptedToolCalls: 0,
+    message: "The previous turn lease expired before its durable outcome was recorded; refresh the campaign before retrying.",
+  };
 }
 
 /**
@@ -177,12 +202,58 @@ export class ReferenceEngineStore {
             failure: existing.failure_json ? JSON.parse(existing.failure_json) as ReferenceCommandFailure : null,
           };
         }
+        if (referenceCommandLeaseExpired(existing.updated_at)) {
+          const failure = staleReferenceCommandFailure(clientCommandId);
+          const now = new Date().toISOString();
+          this.db
+            .prepare(
+              `UPDATE reference_engine_commands
+               SET status = 'failed', failure_json = ?, updated_at = ?
+               WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
+            )
+            .run(JSON.stringify(failure), now, userId, campaignId, clientCommandId);
+          return { status: "failed", failure };
+        }
         return { status: "processing" };
       }
 
       const current = this.getRouting(userId, campaignId);
       if (expectedCampaignVersion !== undefined && current && current.version !== expectedCampaignVersion) {
         return { status: "conflict", currentVersion: current.version };
+      }
+
+      // The optimistic version is the campaign turn boundary. Reserve it under
+      // the same immediate SQLite transaction as the receipt insert so two
+      // different client IDs cannot both start from one version.
+      const activeRows = expectedCampaignVersion === undefined
+        ? this.db
+          .prepare(
+            `SELECT client_command_id, updated_at
+             FROM reference_engine_commands
+             WHERE user_id = ? AND campaign_id = ? AND status = 'processing'`
+          )
+          .all(userId, campaignId) as Array<Pick<ReferenceCommandRow, "client_command_id" | "updated_at">>
+        : this.db
+          .prepare(
+            `SELECT client_command_id, updated_at
+             FROM reference_engine_commands
+             WHERE user_id = ? AND campaign_id = ? AND expected_version = ? AND status = 'processing'`
+          )
+          .all(userId, campaignId, expectedCampaignVersion) as Array<Pick<ReferenceCommandRow, "client_command_id" | "updated_at">>;
+      for (const active of activeRows) {
+        if (referenceCommandLeaseExpired(active.updated_at)) {
+          const failure = staleReferenceCommandFailure(active.client_command_id);
+          const now = new Date().toISOString();
+          this.db
+            .prepare(
+              `UPDATE reference_engine_commands
+               SET status = 'failed', failure_json = ?, updated_at = ?
+               WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
+            )
+            .run(JSON.stringify(failure), now, userId, campaignId, active.client_command_id);
+          continue;
+        }
+        return { status: "processing" };
       }
 
       const now = new Date().toISOString();
@@ -196,7 +267,18 @@ export class ReferenceEngineStore {
         .run(userId, campaignId, clientCommandId, expectedCampaignVersion ?? null, requestJson, now, now);
       return { status: "started" };
     });
-    return transaction();
+    return transaction.immediate();
+  }
+
+  /** Refreshes the lease while the provider/tool loop is still active. */
+  public touchReferenceCommand(userId: string, campaignId: string, clientCommandId: string): void {
+    this.db
+      .prepare(
+        `UPDATE reference_engine_commands
+         SET updated_at = ?
+         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
+      )
+      .run(new Date().toISOString(), userId, campaignId, clientCommandId);
   }
 
   public resolveReferenceCommand(
@@ -209,7 +291,7 @@ export class ReferenceEngineStore {
       .prepare(
         `UPDATE reference_engine_commands
          SET status = 'resolved', result_json = ?, failure_json = NULL, updated_at = ?
-         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
+         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
       )
       .run(JSON.stringify(result), new Date().toISOString(), userId, campaignId, clientCommandId);
   }
@@ -224,20 +306,40 @@ export class ReferenceEngineStore {
       .prepare(
         `UPDATE reference_engine_commands
          SET status = 'failed', failure_json = ?, updated_at = ?
-         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
+         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
       )
       .run(JSON.stringify(failure), new Date().toISOString(), userId, campaignId, clientCommandId);
   }
 
   public getReferenceCommand(userId: string, campaignId: string, clientCommandId: string): ReferenceCommandRecord | null {
-    const row = this.db
-      .prepare(
-        `SELECT user_id, campaign_id, client_command_id, expected_version,
-                request_json, status, result_json, failure_json, created_at, updated_at
-         FROM reference_engine_commands
-         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
-      )
-      .get(userId, campaignId, clientCommandId) as ReferenceCommandRow | undefined;
+    const read = this.db.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT user_id, campaign_id, client_command_id, expected_version,
+                  request_json, status, result_json, failure_json, created_at, updated_at
+           FROM reference_engine_commands
+           WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
+        )
+        .get(userId, campaignId, clientCommandId) as ReferenceCommandRow | undefined;
+      if (!row || row.status !== "processing" || !referenceCommandLeaseExpired(row.updated_at)) return row;
+
+      const failure = staleReferenceCommandFailure(clientCommandId);
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `UPDATE reference_engine_commands
+           SET status = 'failed', failure_json = ?, updated_at = ?
+           WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
+        )
+        .run(JSON.stringify(failure), now, userId, campaignId, clientCommandId);
+      return {
+        ...row,
+        status: "failed" as const,
+        failure_json: JSON.stringify(failure),
+        updated_at: now,
+      };
+    }).immediate();
+    const row = read as ReferenceCommandRow | undefined;
     if (!row) return null;
     return {
       userId: row.user_id,
