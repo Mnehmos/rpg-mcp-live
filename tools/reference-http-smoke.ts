@@ -261,7 +261,7 @@ try {
   assert(created.data.character.name === "Reference Smoke Hero", "Reference character creation failed.");
   assert(created.data.character.savingThrows.str === 5 && created.data.character.savingThrows.con === 4, "Reference save derivation failed.");
   assert(created.data.character.proficiencies.languages.includes("Draconic"), "Reference language persistence failed.");
-  const equipped = await requestJson<{ accepted: boolean; session: { id: string; version: number; character: { ac: number; inventory: Array<{ id: string; equipped: boolean; slot: string }> } } }>(
+  const equipped = await requestJson<{ accepted: boolean; campaignVersion: number }>(
     `http://127.0.0.1:${webPort}/api/campaigns/${campaign.session.id}/inventory`,
     {
       method: "POST",
@@ -276,11 +276,15 @@ try {
     },
   );
   assert(equipped.accepted, "Reference inventory equip failed.");
-  assert(equipped.session.id === campaign.session.id, "Inventory response did not preserve the active campaign session.");
-  assert(equipped.session.character.ac === 16, "Inventory response did not include the updated armor class.");
+  const refreshed = await requestJson<{ campaign: { id: string; version: number; character: { ac: number; inventory: Array<{ id: string; equipped: boolean; slot: string }> } } }>(
+    `http://127.0.0.1:${webPort}/api/campaigns/${campaign.session.id}`,
+  );
+  assert(refreshed.campaign.id === campaign.session.id, "Inventory refresh did not preserve the active campaign session.");
+  assert(refreshed.campaign.version === equipped.campaignVersion, "Inventory refresh did not return the committed campaign version.");
+  assert(refreshed.campaign.character.ac === 16, "Inventory refresh did not include the updated armor class.");
   assert(
-    equipped.session.character.inventory.some((item) => item.id === "smoke-chain-mail" && item.equipped && item.slot === "armor"),
-    "Inventory response did not include the equipped item state.",
+    refreshed.campaign.character.inventory.some((item) => item.id === "smoke-chain-mail" && item.equipped && item.slot === "armor"),
+    "Inventory refresh did not include the equipped item state.",
   );
   console.log("Reference HTTP smoke passed.");
 } catch (error) {
