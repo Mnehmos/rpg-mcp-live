@@ -91,6 +91,12 @@ describe("ReferenceDungeonMaster", () => {
     vi.unstubAllGlobals();
   });
 
+  it("instructs agent-backed NPC setup to use OpenRouter GPT-5.6 Luna at medium reasoning", () => {
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("provider openrouter");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model openai/gpt-5.6-luna");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("reasoningEffort: medium");
+  });
+
   it("omits blank optional tool fields without hiding required nested validation", () => {
     const tool = {
       type: "function" as const,
