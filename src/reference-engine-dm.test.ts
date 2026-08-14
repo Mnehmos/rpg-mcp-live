@@ -97,6 +97,7 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("reasoningEffort: medium");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("maxTokens 8192");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("place every newly authored companion");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Before npc_manage.interact or agent_manage.invoke");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("dispatch the normal RPG MCP tool or tools");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not stop at the proposal");
   });
