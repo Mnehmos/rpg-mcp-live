@@ -100,6 +100,8 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Before npc_manage.interact or agent_manage.invoke");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("dispatch the normal RPG MCP tool or tools");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not stop at the proposal");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("legitimate domain failure such as a miss or failed check");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("retry only rejected, malformed, or otherwise unexecuted calls");
   });
 
   it("omits blank optional tool fields without hiding required nested validation", () => {
