@@ -10,7 +10,7 @@ import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacter
 import { rollAbilityScoreDraft } from "./engine-domain.js";
 import { gameActionSchema } from "./game.js";
 import { GameStore } from "./store.js";
-import { open5eCharacterOptions } from "./open5e-rules.js";
+import { open5eCharacterOptions, open5eSpellOptions } from "./open5e-rules.js";
 import {
   buildOpen5eContentCatalog,
   CampaignContentPolicyError,
@@ -24,7 +24,14 @@ import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
-import { ReferenceDmProviderUnavailableError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
+import {
+  ReferenceDmCommandAlreadyFailedError,
+  ReferenceDmCommandIdReuseError,
+  ReferenceDmCommandInProgressError,
+  ReferenceDmProviderUnavailableError,
+  ReferenceDmVersionConflictError,
+  ReferenceDungeonMaster,
+} from "./reference-engine-dm.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -60,6 +67,7 @@ const referenceDungeonMaster = config.openRouterConfigured
         baseUrl: config.openRouterBaseUrl,
         model: config.openRouterModel,
         timeoutMs: 60_000,
+        turnTimeoutMs: config.referenceDmTimeoutMs,
       }
     )
   : null;
@@ -147,6 +155,18 @@ const characterUpdateRequestSchema = z
   .strict()
   .refine((value) => Boolean(value.name || value.background || value.alignment || value.description || (value.details && Object.keys(value.details).length)), {
     message: "Provide at least one character field to change.",
+  });
+const characterSpellbookUpdateRequestSchema = z
+  .object({
+    clientCommandId: z.string().uuid(),
+    expectedCampaignVersion: z.number().int().nonnegative(),
+    cantripsKnown: z.array(z.string().trim().startsWith("open5e:spell:").max(300)).max(20).optional(),
+    knownSpells: z.array(z.string().trim().startsWith("open5e:spell:").max(300)).max(100).optional(),
+    preparedSpells: z.array(z.string().trim().startsWith("open5e:spell:").max(300)).max(100).optional(),
+  })
+  .strict()
+  .refine((value) => value.cantripsKnown !== undefined || value.knownSpells !== undefined || value.preparedSpells !== undefined, {
+    message: "Provide cantripsKnown, knownSpells, or preparedSpells.",
   });
 const inventoryActionRequestSchema = z
   .object({
@@ -241,18 +261,61 @@ async function sendCampaignCommand(
   const playerText = parsed.data.playerText
     ?? `The player chose the ${parsed.data.action} action.`;
   try {
-    const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText);
+    const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
+      clientCommandId: parsed.data.clientCommandId,
+      expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+    });
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
     if (error instanceof ReferenceEngineNotRoutedError) {
       sendReferenceEngineError(response, error);
       return;
     }
+    if (error instanceof ReferenceDmVersionConflictError) {
+      const current = await referenceEngineAdapter.getCampaign(userId, userId, campaignId);
+      response.status(409).json({
+        code: "stale_version",
+        error: "The campaign changed before this turn started.",
+        session: current.campaign,
+      });
+      return;
+    }
+    if (error instanceof ReferenceDmCommandInProgressError) {
+      response.status(409).json({ code: "command_conflict", error: error.message });
+      return;
+    }
+    if (error instanceof ReferenceDmCommandIdReuseError) {
+      response.status(409).json({ code: "command_id_reuse", error: error.message });
+      return;
+    }
+    if (error instanceof ReferenceDmCommandAlreadyFailedError) {
+      response.status(502).json({
+        code: "reference_dm_unavailable",
+        error: "That turn already has a recorded failure. Reconcile it before retrying.",
+        ...(error.details ? {
+          correlationId: error.details.correlationId,
+          commitStatus: error.details.commitStatus,
+          retryable: error.details.commitStatus === "not_committed",
+        } : {}),
+      });
+      return;
+    }
     if (error instanceof ReferenceDmProviderUnavailableError) {
-      console.error(error.message);
+      console.error(JSON.stringify({
+        event: "reference_dm_turn_failed",
+        correlationId: error.details.correlationId,
+        commitStatus: error.details.commitStatus,
+        phase: error.details.phase,
+        toolRounds: error.details.toolRounds,
+        toolCallNames: error.details.toolCallNames,
+        acceptedToolCalls: error.details.acceptedToolCalls,
+      }));
       response.status(502).json({
         code: "reference_dm_unavailable",
         error: "The reference-engine DM could not resolve this turn. Try again shortly.",
+        correlationId: error.details.correlationId,
+        commitStatus: error.details.commitStatus,
+        retryable: error.details.commitStatus === "not_committed",
       });
       return;
     }
@@ -425,6 +488,18 @@ app.get("/api/character-options", async (request, response) => {
   response.json({ options: open5eCharacterOptions(policy) });
 });
 
+app.get("/api/character-spell-options", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const className = typeof request.query.className === "string" ? request.query.className.trim() : "";
+  const requestedLevel = Number(request.query.level ?? 1);
+  if (!className || !Number.isInteger(requestedLevel) || requestedLevel < 1 || requestedLevel > 20) {
+    response.status(400).json({ code: "invalid_spell_options", error: "A class name and level from 1 through 20 are required." });
+    return;
+  }
+  response.json({ options: open5eSpellOptions(className, requestedLevel) });
+});
+
 app.get("/api/content-catalog", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
@@ -517,9 +592,44 @@ app.post("/api/campaigns/:campaignId/engine-backend", async (request, response) 
 app.get("/api/campaigns/:campaignId/commands/:clientCommandId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  response.status(410).json({
-    code: "async_command_status_removed",
-    error: "Reference-engine turns resolve synchronously; there is no Lantern command queue to poll.",
+  const command = referenceEngineStore.getReferenceCommand(userId, request.params.campaignId, request.params.clientCommandId);
+  if (!command) {
+    response.status(404).json({ code: "command_not_found", error: "No recorded turn exists for that command ID." });
+    return;
+  }
+  if (command.status === "processing") {
+    response.status(202).json({
+      status: "processing",
+      campaignId: command.campaignId,
+      clientCommandId: command.clientCommandId,
+      createdAt: command.createdAt,
+      updatedAt: command.updatedAt,
+    });
+    return;
+  }
+  if (command.status === "failed") {
+    response.json({
+      status: "failed",
+      campaignId: command.campaignId,
+      clientCommandId: command.clientCommandId,
+      ...(command.failure ? {
+        correlationId: command.failure.correlationId,
+        commitStatus: command.failure.commitStatus,
+        retryable: command.failure.commitStatus === "not_committed",
+      } : {}),
+      createdAt: command.createdAt,
+      updatedAt: command.updatedAt,
+    });
+    return;
+  }
+  response.json({
+    status: "resolved",
+    result: command.result,
+    campaignId: command.campaignId,
+    clientCommandId: command.clientCommandId,
+    campaignVersion: (command.result as { campaignVersion?: number } | null)?.campaignVersion ?? null,
+    createdAt: command.createdAt,
+    updatedAt: command.updatedAt,
   });
 });
 
@@ -652,7 +762,11 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
       userId,
       userId,
       request.params.campaignId,
-      "Open the first situation and establish the campaign's opening scene."
+      "Open the first situation and establish the campaign's opening scene.",
+      {
+        clientCommandId: parsed.data.clientCommandId,
+        expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+      }
     );
     response.json({ ...result, subscription: store.getSubscription(userId) });
   } catch (error) {
@@ -705,6 +819,40 @@ app.patch("/api/campaigns/:campaignId/character", async (request, response) => {
       alignment: parsed.data.alignment,
       description: parsed.data.description,
       details: parsed.data.details,
+    });
+    response.json({ campaign: result.campaign, dockets: result.dockets, engineBackend: "reference", subscription: store.getSubscription(userId) });
+  } catch (error) {
+    sendReferenceEngineError(response, error);
+  }
+});
+
+app.patch("/api/campaigns/:campaignId/character/spells", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const parsed = characterSpellbookUpdateRequestSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ code: "invalid_spellbook_update", error: "Choose valid spells from the installed class catalog." });
+    return;
+  }
+  try {
+    const routing = referenceEngineStore.getRouting(userId, request.params.campaignId);
+    if (!routing) {
+      response.status(404).json({ code: "campaign_not_found", error: "That campaign is not available." });
+      return;
+    }
+    if (routing.version !== parsed.data.expectedCampaignVersion) {
+      const current = await referenceEngineAdapter.getCampaign(userId, userId, request.params.campaignId);
+      response.status(409).json({
+        code: "stale_version",
+        error: "The campaign changed before the spellbook update started.",
+        session: current.campaign,
+      });
+      return;
+    }
+    const result = await referenceEngineAdapter.updateCharacterSpells(userId, userId, request.params.campaignId, {
+      cantripsKnown: parsed.data.cantripsKnown,
+      knownSpells: parsed.data.knownSpells,
+      preparedSpells: parsed.data.preparedSpells,
     });
     response.json({ campaign: result.campaign, dockets: result.dockets, engineBackend: "reference", subscription: store.getSubscription(userId) });
   } catch (error) {

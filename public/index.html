@@ -274,6 +274,14 @@
               </div>
               <div id="character-spellbook-section" class="sheet-subsection" hidden>
                 <div class="spell-heading"><span class="tiny-label">SPELLCASTING</span><span id="spell-selection-mode">SPELLBOOK</span></div>
+                <div class="spellbook-editor">
+                  <button id="spellbook-toggle" class="item-action" type="button" hidden>Manage spellbook</button>
+                  <form id="spellbook-form" class="spellbook-form" hidden>
+                    <p id="spellbook-help" class="form-help">Choose from the installed class spell list. The engine validates every saved selection.</p>
+                    <div id="spellbook-options" class="spellbook-options"></div>
+                    <div class="form-actions"><p id="spellbook-feedback" class="form-feedback" role="status"></p><button class="button button-secondary" type="submit">Save spellbook</button></div>
+                  </form>
+                </div>
                 <div id="character-spell-slots" class="spell-slot-grid"></div>
                 <div id="character-concentration" class="concentration-row" hidden></div>
                 <div class="spell-columns">

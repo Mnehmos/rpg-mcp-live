@@ -29,7 +29,7 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLoading: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -823,6 +823,116 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
     return '<div class="spell-entry"><strong>' + escapeHtml(spell && (spell.name || spell.contentKey) || "Unknown spell") + '</strong><small>' + escapeHtml(details.join(" / ") + status) + '</small></div>';
   }
 
+  function spellReferenceSet(spells) {
+    return new Set((Array.isArray(spells) ? spells : []).map(function (spell) { return spell && spell.contentKey; }).filter(Boolean));
+  }
+
+  function renderSpellbookOptions(character, spellcasting) {
+    var optionsNode = $("#spellbook-options");
+    var help = $("#spellbook-help");
+    if (!optionsNode || !state.spellOptions || state.spellOptionsClass !== character.className) return;
+    var mode = spellcasting.selectionMode || "prepared";
+    var knownSet = spellReferenceSet(spellcasting.knownSpells);
+    var preparedSet = spellReferenceSet(spellcasting.preparedSpells);
+    var editableRole = mode === "prepared" ? "prepared" : "known";
+    var cantripLimit = state.spellOptions.cantripLimit === null || state.spellOptions.cantripLimit === undefined
+      ? null
+      : Number(state.spellOptions.cantripLimit);
+    var levelledLimit = editableRole === "prepared"
+      ? (spellcasting.preparedCapacity === null || spellcasting.preparedCapacity === undefined ? null : Number(spellcasting.preparedCapacity))
+      : (state.spellOptions.knownSpellLimit === null || state.spellOptions.knownSpellLimit === undefined ? null : Number(state.spellOptions.knownSpellLimit));
+    if (help) {
+      var levelledAction = editableRole === "prepared" ? "prepare" : mode === "spellbook" ? "keep in your spellbook" : "know";
+      help.textContent = "Choose up to " + (cantripLimit === null ? "the engine limit" : cantripLimit) + " cantrips and "
+        + (levelledLimit === null ? "the engine limit" : levelledLimit) + " levelled spells to " + levelledAction
+        + " from the installed class list. The engine validates the final choices before saving.";
+    }
+    var cantrips = state.spellOptions.spells.filter(function (spell) { return Number(spell.level) === 0; });
+    var levelled = state.spellOptions.spells.filter(function (spell) { return Number(spell.level) > 0; });
+    var choiceHtml = function (spell, role, checked) {
+      return '<label class="spell-choice"><input type="checkbox" data-spell-role="' + role + '" data-spell-level="' + escapeHtml(spell.level) + '" value="' + escapeHtml(spell.contentKey) + '"' + (checked ? " checked" : "") + '><span>' + escapeHtml(spell.name) + '<small>' + escapeHtml("level " + spell.level + " / " + spell.school) + '</small></span><small>' + escapeHtml(spell.castingTime) + ' / ' + escapeHtml(spell.range) + '</small></label>';
+    };
+    var cantripHtml = cantrips.map(function (spell) { return choiceHtml(spell, "cantrips", knownSet.has(spell.contentKey)); }).join("");
+    var levelledHtml = levelled.map(function (spell) {
+      return choiceHtml(spell, editableRole, editableRole === "prepared" ? preparedSet.has(spell.contentKey) : knownSet.has(spell.contentKey));
+    }).join("");
+    optionsNode.innerHTML = '<section class="spell-choice-group"><h4>Cantrips <small>up to ' + escapeHtml(cantripLimit === null ? "the engine limit" : cantripLimit) + '</small></h4>'
+      + (cantripHtml || '<p class="inventory-empty">No cantrips are available for this class and level.</p>')
+      + '</section><section class="spell-choice-group"><h4>' + escapeHtml(editableRole === "prepared" ? "Prepared spells" : mode === "spellbook" ? "Spellbook" : "Known spells") + ' <small>up to ' + escapeHtml(levelledLimit === null ? "the engine limit" : levelledLimit) + '</small></h4>'
+      + (levelledHtml || '<p class="inventory-empty">No levelled spells are available for this class and level.</p>')
+      + '</section>';
+  }
+
+  function loadSpellbookOptions(character, spellcasting) {
+    if (state.spellOptionsLoading || (state.spellOptions && state.spellOptionsClass === character.className)) {
+      renderSpellbookOptions(character, spellcasting);
+      return;
+    }
+    state.spellOptionsLoading = true;
+    requestJson("/api/character-spell-options?className=" + encodeURIComponent(character.className) + "&level=" + encodeURIComponent(character.level || 1))
+      .then(function (result) {
+        if (!result.response.ok) throw new Error(result.data.error || "The spell catalog could not be loaded.");
+        state.spellOptions = result.data.options;
+        state.spellOptionsClass = character.className;
+        renderSpellbookOptions(character, spellcasting);
+      })
+      .catch(function (error) {
+        var feedback = $("#spellbook-feedback");
+        if (feedback) feedback.textContent = error.message;
+      })
+      .finally(function () { state.spellOptionsLoading = false; });
+  }
+
+  function renderSpellbookEditor(character, spellcasting) {
+    var toggle = $("#spellbook-toggle");
+    var form = $("#spellbook-form");
+    if (!toggle || !form) return;
+    if (!spellcasting) {
+      toggle.hidden = true;
+      form.hidden = true;
+      return;
+    }
+    toggle.hidden = false;
+    toggle.textContent = form.hidden ? "Manage spellbook" : "Close spellbook";
+    toggle.onclick = function () {
+      form.hidden = !form.hidden;
+      toggle.textContent = form.hidden ? "Manage spellbook" : "Close spellbook";
+      if (!form.hidden) loadSpellbookOptions(character, spellcasting);
+    };
+    if (!form.dataset.bound) {
+      form.dataset.bound = "true";
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        if (!state.session || !state.spellOptions) return;
+        var selectedCantrips = Array.from(form.querySelectorAll('input[data-spell-role="cantrips"]:checked'));
+        var selectedLevelled = Array.from(form.querySelectorAll('input[data-spell-role="prepared"]:checked, input[data-spell-role="known"]:checked'));
+        var payload = { clientCommandId: newCommandId(), expectedCampaignVersion: state.session.version };
+        payload.cantripsKnown = selectedCantrips.map(function (input) { return input.value; });
+        payload[state.spellOptions.selectionMode === "prepared" ? "preparedSpells" : "knownSpells"] = selectedLevelled.map(function (input) { return input.value; });
+        var button = form.querySelector("button[type=submit]");
+        var feedback = $("#spellbook-feedback");
+        if (button) button.disabled = true;
+        if (feedback) feedback.textContent = "Saving the spellbook…";
+        requestJson("/api/campaigns/" + encodeURIComponent(state.session.id) + "/character/spells", { method: "PATCH", body: JSON.stringify(payload) })
+          .then(function (result) {
+            if (result.response.status === 409 && result.data.session) {
+              renderSession({ session: result.data.session, subscription: state.subscription });
+              throw new Error(result.data.error || "The campaign changed; your sheet was refreshed.");
+            }
+            if (!result.response.ok) throw new Error(result.data.error || "The spellbook could not be saved.");
+            renderSession({ session: result.data.campaign, engineBackend: "reference", dockets: result.data.dockets, subscription: result.data.subscription || state.subscription });
+            showToast("Spellbook saved to the engine.");
+          })
+          .catch(function (error) {
+            if (feedback) feedback.textContent = error.message;
+            showToast(error.message);
+          })
+          .finally(function () { if (button) button.disabled = false; });
+      });
+    }
+    if (!form.hidden) loadSpellbookOptions(character, spellcasting);
+  }
+
   function featureDetailHtml(feature) {
     return markdownFeatureDetailHtml(feature);
   }
@@ -1074,6 +1184,7 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
           : "";
       }
     }
+    renderSpellbookEditor(character, spellcasting);
     var inventoryNode = $("#character-inventory");
     if (inventoryNode) {
       var richInventory = Array.isArray(character.inventory) ? character.inventory : [];
@@ -1792,7 +1903,9 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
       }
       if (!result.response.ok) throw new Error(result.data.error || "The table is unavailable.");
       renderSession(result.data);
-      if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
+      var pendingForLoadedCampaign = pendingCommand && result.data.session && pendingCommand.campaignId === result.data.session.id;
+      if (pendingForLoadedCampaign) setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      else if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
       if (!result.data.session && Array.isArray(result.data.campaigns) && result.data.campaigns.length > 0) {
@@ -1866,27 +1979,10 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
   }
 
   function reconcilePendingCommand(campaignId, clientCommandId) {
-    if (campaignEngineBackend(campaignId) === "reference") {
-      // Reference-backend commands resolve synchronously inside the
-      // original POST /commands call -- there is no async job for
-      // GET /commands/:id to ever find (that endpoint only knows about
-      // Lantern's command queue). If we're reconciling at all, the original
-      // request's outcome was already lost (network drop, page reload) or it
-      // failed; either way there's nothing left to poll for, so report it as
-      // not committed immediately instead of hammering an endpoint that can
-      // only ever 404. Every call site above funnels through here, so this
-      // one check covers all of them. Mirrors the confirmedMissing branch
-      // below exactly, just without ever polling for it.
-      clearPendingCommand(clientCommandId);
-      state.pendingPlayerText = null;
-      renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("That turn was not committed; you can try again.", "ready");
-      showToast("The server confirmed that turn was not committed.");
-      return Promise.resolve(false);
-    }
+    var referenceBackend = campaignEngineBackend(campaignId) === "reference";
     var attempts = 0;
-    var maxAttempts = 80;
-    var pollDelayMs = 1500;
+    var maxAttempts = referenceBackend ? 20 : 80;
+    var pollDelayMs = referenceBackend ? 1000 : 1500;
 
     function waitForNextPoll() {
       return new Promise(function (resolve) {
@@ -1901,6 +1997,10 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
       ).then(function (result) {
         if (isConfirmedMissingCommand(result.response.status, result.data.code)) {
           return { resolved: false, confirmedMissing: true };
+        }
+        if (result.response.ok && result.data.status === "failed") {
+          if (result.data.commitStatus === "not_committed") return { resolved: false, confirmedMissing: true };
+          return { resolved: false, uncertain: true };
         }
         if (result.response.ok && result.data.status === "resolved" && result.data.result) {
           if (isStaleCommandStatus(result.data)) {
@@ -1943,6 +2043,13 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
         setStatus("That turn was not committed; you can try again.", "ready");
         showToast("The server confirmed that turn was not committed.");
         return false;
+      }
+      if (outcome.uncertain) {
+        return refreshSession().then(function () {
+          setStatus("This turn may have changed the world; refresh before retrying.", "error");
+          showToast("The server could not prove whether this turn committed. Your text remains in the composer.");
+          return false;
+        });
       }
       return refreshSession().then(function () {
         setStatus(

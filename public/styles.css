@@ -432,6 +432,12 @@ h1 i { color: var(--amber); font-style: italic; }
 .spell-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .spell-heading .tiny-label { margin-bottom: 0; }
 .spell-heading > span:last-child { color: var(--faint); font-size: 8px; letter-spacing: .12em; }
+.spellbook-editor { margin-top: 9px; }
+.spellbook-form { display: grid; gap: 8px; margin-top: 8px; padding: 8px; border: 1px solid rgba(233, 167, 91, .16); background: rgba(233, 167, 91, .035); }
+.spellbook-options { display: grid; gap: 5px; max-height: 260px; overflow: auto; }
+.spell-choice { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px; padding: 5px 6px; border: 1px solid rgba(242, 236, 223, .07); color: var(--muted); font-size: 9px; }
+.spell-choice small { color: var(--faint); font-size: 7px; }
+.spell-choice input { accent-color: var(--amber-bright); }
 .spell-slot-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
 .spell-slot { display: grid; gap: 3px; padding: 7px; border: 1px solid rgba(233, 167, 91, .16); background: rgba(233, 167, 91, .04); }
 .spell-slot span { color: var(--faint); font-size: 8px; letter-spacing: .1em; }

@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
 import type { TenantIdentity } from "./reference-engine-tenant.js";
-import { DOCKET_NAMES, type DocketName, type ReferenceEngineStore, type StoredLogMessage } from "./reference-engine-store.js";
+import {
+  DOCKET_NAMES,
+  type DocketName,
+  type ReferenceCommandFailure,
+  type ReferenceEngineStore,
+  type StoredLogMessage,
+} from "./reference-engine-store.js";
 import type { ReferenceEngineToolCatalog, OpenRouterToolDefinition } from "./reference-engine-tools.js";
 import type {
   EngineAbility,
@@ -28,10 +34,45 @@ import type {
  */
 
 export class ReferenceDmProviderUnavailableError extends Error {
-  public constructor(cause: unknown) {
+  public readonly details: ReferenceCommandFailure;
+
+  public constructor(cause: unknown, details: Omit<ReferenceCommandFailure, "correlationId" | "message"> & { correlationId?: string }) {
     super(cause instanceof Error ? cause.message : "The reference-engine DM could not resolve this turn.");
     this.name = "ReferenceDmProviderUnavailableError";
     this.cause = cause;
+    this.details = {
+      ...details,
+      correlationId: details.correlationId ?? randomUUID(),
+      message: cause instanceof Error ? cause.message : "The reference-engine DM could not resolve this turn.",
+    };
+  }
+}
+
+export class ReferenceDmCommandInProgressError extends Error {
+  public constructor() {
+    super("That reference-engine turn is already being resolved.");
+    this.name = "ReferenceDmCommandInProgressError";
+  }
+}
+
+export class ReferenceDmCommandIdReuseError extends Error {
+  public constructor() {
+    super("A client command ID cannot be reused for a different reference-engine turn.");
+    this.name = "ReferenceDmCommandIdReuseError";
+  }
+}
+
+export class ReferenceDmCommandAlreadyFailedError extends Error {
+  public constructor(public readonly details: ReferenceCommandFailure | null) {
+    super("That reference-engine turn already failed; reconcile its recorded outcome before retrying.");
+    this.name = "ReferenceDmCommandAlreadyFailedError";
+  }
+}
+
+export class ReferenceDmVersionConflictError extends Error {
+  public constructor(public readonly currentVersion: number) {
+    super("The campaign changed before this reference-engine turn started.");
+    this.name = "ReferenceDmVersionConflictError";
   }
 }
 
@@ -43,7 +84,7 @@ export interface ReferenceTurnResult {
   narrationSource: "llm";
   toolDisclosure: EngineToolDisclosure | null;
   session: EngineSessionView;
-  replayed: false;
+  replayed: boolean;
 }
 
 interface ChatMessage {
@@ -175,6 +216,11 @@ export interface AuthoredSceneState {
   sceneId: string | null;
 }
 
+export interface ReferenceResolveTurnOptions {
+  clientCommandId?: string;
+  expectedCampaignVersion?: number;
+}
+
 // Creative scene authoring can legitimately need room generation, placement,
 // NPC/object creation, scene commitment, continuity writes, and then a final
 // narration response. This is only a runaway-loop bound; it is not a
@@ -257,20 +303,74 @@ export class ReferenceDungeonMaster {
     private readonly store: ReferenceEngineStore,
     private readonly catalog: ReferenceEngineToolCatalog,
     private readonly adapter: ReferenceEngineAdapter,
-    private readonly openRouter: { apiKey: string; baseUrl: string; model: string; timeoutMs: number }
+    private readonly openRouter: {
+      apiKey: string;
+      baseUrl: string;
+      model: string;
+      timeoutMs: number;
+      turnTimeoutMs?: number;
+    }
   ) {}
 
   public async resolveTurn(
     accountId: string,
     actorId: string,
     campaignId: string,
-    playerText: string
+    playerText: string,
+    options: ReferenceResolveTurnOptions = {}
   ): Promise<ReferenceTurnResult> {
     const routing = this.store.getRouting(accountId, campaignId);
     if (!routing || routing.backend !== "reference") throw new ReferenceEngineNotRoutedError(campaignId);
 
-    const clientCommandId = randomUUID();
+    const clientCommandId = options.clientCommandId ?? randomUUID();
+    let commandStart: ReturnType<ReferenceEngineStore["beginReferenceCommand"]>;
+    try {
+      commandStart = this.store.beginReferenceCommand(
+        accountId,
+        campaignId,
+        clientCommandId,
+        options.expectedCampaignVersion,
+        JSON.stringify({ playerText }),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("cannot be reused")) {
+        throw new ReferenceDmCommandIdReuseError();
+      }
+      throw error;
+    }
+    if (commandStart.status === "resolved") {
+      return { ...(commandStart.result as ReferenceTurnResult), replayed: true };
+    }
+    if (commandStart.status === "processing") throw new ReferenceDmCommandInProgressError();
+    if (commandStart.status === "failed") throw new ReferenceDmCommandAlreadyFailedError(commandStart.failure);
+    if (commandStart.status === "conflict") throw new ReferenceDmVersionConflictError(commandStart.currentVersion);
+
+    let toolRoundCount = 0;
+    const toolCallNames: string[] = [];
+    const disclosedToolCalls: EngineToolCallDisclosure[] = [];
+    let acceptedToolCalls = 0;
+    const correlationId = randomUUID();
+    const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
+      ? Date.now() + this.openRouter.turnTimeoutMs
+      : null;
+    let failureRecorded = false;
+    const failTurn = (cause: unknown, phase: string): ReferenceDmProviderUnavailableError => {
+      failureRecorded = true;
+      const failure = new ReferenceDmProviderUnavailableError(cause, {
+        correlationId,
+        commitStatus: acceptedToolCalls > 0 ? "uncertain" : "not_committed",
+        phase,
+        toolRounds: toolRoundCount,
+        toolCallNames: [...toolCallNames],
+        acceptedToolCalls,
+      });
+      this.store.failReferenceCommand(accountId, campaignId, clientCommandId, failure.details);
+      return failure;
+    };
+
+    try {
     const tools = [...(await this.catalog.getTools()), ...DOCKET_TOOLS];
+    let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
     // supplied — never trust the model's own tenant-scoping fields (same
@@ -345,16 +445,12 @@ export class ReferenceDungeonMaster {
       { role: "user", content: playerText },
     ];
 
-    let narrationText: string | null = null;
-    let toolRoundCount = 0;
-    const toolCallNames: string[] = [];
-    const disclosedToolCalls: EngineToolCallDisclosure[] = [];
     try {
       // Reserve one completion after the final allowed tool-bearing round so
       // the DM can narrate the authored result instead of exhausting the
       // budget immediately after a valid tool call.
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-        const completion = await this.chatCompletion(messages, tools);
+        const completion = await this.chatCompletion(messages, tools, deadlineAt);
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
@@ -372,57 +468,68 @@ export class ReferenceDungeonMaster {
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
-              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant);
+              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant, deadlineAt);
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
+          if (remoteOutcome.accepted) acceptedToolCalls += 1;
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
         }
       }
     } catch (error) {
-      throw new ReferenceDmProviderUnavailableError(error);
+      throw failTurn(error, "tool_loop");
     }
 
     if (!narrationText) {
-      throw new ReferenceDmProviderUnavailableError(
+      throw failTurn(
         new Error(
           `The reference-engine DM did not produce narration within the tool-call round budget (toolRounds=${toolRoundCount}, toolCalls=${toolCallNames.join(",") || "none"}).`
-        )
+        ),
+        "narration",
       );
     }
 
-    if (authoredScene.roomId) {
-      this.persistAuthoredSceneState(accountId, campaignId, authoredScene);
+    try {
+      if (authoredScene.roomId) {
+        this.persistAuthoredSceneState(accountId, campaignId, authoredScene);
+      }
+
+      const version = this.store.bumpVersion(accountId, campaignId);
+      const now = new Date().toISOString();
+      const toolDisclosure = disclosedToolCalls.length > 0
+        ? {
+            spoilerWarning: TOOL_DISCLOSURE_WARNING,
+            calls: disclosedToolCalls,
+          }
+        : null;
+      const logMessages: StoredLogMessage[] = [
+        { id: randomUUID(), kind: "player", text: playerText, createdAt: now },
+        ...(toolDisclosure
+          ? [{ id: randomUUID(), kind: "tool" as const, text: "The DM consulted the game world.", createdAt: now, toolDisclosure }]
+          : []),
+        { id: randomUUID(), kind: "narration", text: narrationText, createdAt: new Date().toISOString() },
+      ];
+      this.store.appendLogMessages(accountId, campaignId, logMessages);
+
+      const { campaign } = await this.adapter.getCampaign(accountId, actorId, campaignId);
+      const result: ReferenceTurnResult = {
+        campaignId,
+        clientCommandId,
+        campaignVersion: version,
+        narration: { text: narrationText, proposedFacts: [], suggestedActions: [] },
+        narrationSource: "llm",
+        toolDisclosure,
+        session: campaign,
+        replayed: false,
+      };
+      this.store.resolveReferenceCommand(accountId, campaignId, clientCommandId, result);
+      return result;
+    } catch (error) {
+      throw failTurn(error, "commit");
     }
-
-    const version = this.store.bumpVersion(accountId, campaignId);
-    const now = new Date().toISOString();
-    const toolDisclosure = disclosedToolCalls.length > 0
-      ? {
-          spoilerWarning: TOOL_DISCLOSURE_WARNING,
-          calls: disclosedToolCalls,
-        }
-      : null;
-    const logMessages: StoredLogMessage[] = [
-      { id: randomUUID(), kind: "player", text: playerText, createdAt: now },
-      ...(toolDisclosure
-        ? [{ id: randomUUID(), kind: "tool" as const, text: "The DM consulted the game world.", createdAt: now, toolDisclosure }]
-        : []),
-      { id: randomUUID(), kind: "narration", text: narrationText, createdAt: new Date().toISOString() },
-    ];
-    this.store.appendLogMessages(accountId, campaignId, logMessages);
-
-    const { campaign } = await this.adapter.getCampaign(accountId, actorId, campaignId);
-
-    return {
-      campaignId,
-      clientCommandId,
-      campaignVersion: version,
-      narration: { text: narrationText, proposedFacts: [], suggestedActions: [] },
-      narrationSource: "llm",
-      toolDisclosure,
-      session: campaign,
-      replayed: false,
-    };
+    } catch (error) {
+      if (failureRecorded) throw error;
+      throw failTurn(error, "context");
+    }
   }
 
   private persistAuthoredSceneState(
@@ -455,7 +562,8 @@ export class ReferenceDungeonMaster {
     forcedArgs: Record<string, unknown>,
     fillOnlyArgs: Record<string, unknown>,
     knownCharacterIds: Set<string>,
-    tenant: TenantIdentity
+    tenant: TenantIdentity,
+    deadlineAt: number | null = null
   ): Promise<ReferenceToolOutcome> {
     const parsedArgs = parseArguments(rawArguments);
     const toolDefinition = await this.catalog.getTool(toolName);
@@ -473,7 +581,11 @@ export class ReferenceDungeonMaster {
       });
       return { text, accepted: false, payload: { error: "unknown_character_id" }, effectiveArguments: args };
     }
-    const result = await this.client.callTool(toolName, args, tenant);
+    const remainingMs = deadlineAt === null ? undefined : deadlineAt - Date.now();
+    if (deadlineAt !== null && remainingMs !== undefined && remainingMs <= 0) {
+      throw new Error("The reference-engine DM turn deadline expired before the next tool call.");
+    }
+    const result = await this.client.callTool(toolName, args, tenant, remainingMs);
     collectCharacterIds(result.payload, knownCharacterIds);
     return {
       text: result.text || JSON.stringify(result.payload ?? {}),
@@ -531,21 +643,27 @@ export class ReferenceDungeonMaster {
    */
   private async chatCompletion(
     messages: ChatMessage[],
-    tools: OpenRouterToolDefinition[]
+    tools: OpenRouterToolDefinition[],
+    deadlineAt: number | null = null
   ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
     try {
-      return await this.chatCompletionOnce(messages, tools);
+      return await this.chatCompletionOnce(messages, tools, deadlineAt);
     } catch (error) {
       if (!(error instanceof EmptyCompletionError)) throw error;
       console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
-      return await this.chatCompletionOnce(messages, tools);
+      return await this.chatCompletionOnce(messages, tools, deadlineAt);
     }
   }
 
   private async chatCompletionOnce(
     messages: ChatMessage[],
-    tools: OpenRouterToolDefinition[]
+    tools: OpenRouterToolDefinition[],
+    deadlineAt: number | null = null
   ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
+    const remainingMs = deadlineAt === null
+      ? this.openRouter.timeoutMs
+      : Math.min(this.openRouter.timeoutMs, deadlineAt - Date.now());
+    if (remainingMs <= 0) throw new Error("The reference-engine DM turn deadline expired.");
     const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -558,7 +676,7 @@ export class ReferenceDungeonMaster {
         tools,
         tool_choice: "auto",
       }),
-      signal: this.openRouter.timeoutMs > 0 ? AbortSignal.timeout(this.openRouter.timeoutMs) : undefined,
+      signal: remainingMs > 0 ? AbortSignal.timeout(remainingMs) : undefined,
     });
     if (!response.ok) {
       const body = await response.text().catch(() => "");

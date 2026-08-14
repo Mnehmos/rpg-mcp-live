@@ -224,6 +224,100 @@ describe("ReferenceDungeonMaster", () => {
     );
   });
 
+  it("replays a resolved client command without calling OpenRouter again", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-command-replay-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    const fetchMock = vi.fn(async () => openRouterMessage("The gate opens."));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Open the gate.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    });
+    const replay = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Open the gate.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(replay).toMatchObject({
+      campaignId: "campaign-1",
+      campaignVersion: first.campaignVersion,
+      replayed: true,
+      narration: first.narration,
+    });
+  });
+
+  it("records provider failures with a durable non-commit status", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-command-failure-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("OpenRouter unavailable");
+    }));
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "Look around.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    })).rejects.toBeInstanceOf(ReferenceDmProviderUnavailableError);
+
+    expect(store.getReferenceCommand("account-1", "campaign-1", "command-1")).toMatchObject({
+      status: "failed",
+      failure: {
+        commitStatus: "not_committed",
+        phase: "tool_loop",
+        acceptedToolCalls: 0,
+      },
+    });
+  });
+
+  it("records context failures instead of leaving a command stuck processing", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-command-context-failure-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    vi.spyOn(adapter, "getCampaign").mockRejectedValue(new Error("sheet unavailable"));
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "Look around.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    })).rejects.toBeInstanceOf(ReferenceDmProviderUnavailableError);
+
+    expect(store.getReferenceCommand("account-1", "campaign-1", "command-1")).toMatchObject({
+      status: "failed",
+      failure: { commitStatus: "not_committed", phase: "context" },
+    });
+  });
+
   it("marks a resolved failed check as completed while preserving its domain outcome", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-failed-check-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -1003,14 +1097,18 @@ describe("reference DM scene authoring contract", () => {
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
     setUpRoutedCampaign(store);
+    let capturedCombatArgs: Record<string, unknown> | null = null;
     const client = fakeClient({
       ...CHARACTER_FIXTURES,
-      "combat_action.attack": (args) => ({
+      "combat_action.attack": (args) => {
+        capturedCombatArgs = args;
+        return {
         success: true,
         hit: false,
         actorId: args.actorId,
         targetId: args.targetId,
-      }),
+        };
+      },
     });
     const adapter = new ReferenceEngineAdapter(client, store);
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
@@ -1038,11 +1136,11 @@ describe("reference DM scene authoring contract", () => {
 
     await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I fire at the drowned figure.");
 
-    expect(client.callTool).toHaveBeenCalledWith(
-      "combat_action",
-      expect.objectContaining({ actorId: "char-1", targetId: "enemy-1", encounterId: "encounter-1" }),
-      expect.anything(),
-    );
+    expect(capturedCombatArgs).toEqual(expect.objectContaining({
+      actorId: "char-1",
+      targetId: "enemy-1",
+      encounterId: "encounter-1",
+    }));
   });
 
   it("records the DM's tool-authored opening scene in state memory", async () => {

@@ -93,6 +93,53 @@ describe("ReferenceEngineStore", () => {
     expect(store.getRouting("user-1", "campaign-2")?.version).toBe(0);
   });
 
+  it("persists a command receipt and replays its resolved result", () => {
+    const store = createTestStore();
+    store.setBackend("user-1", "campaign-1", "reference");
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "started" });
+
+    const result = { campaignVersion: 1, narration: { text: "A lantern burns." } };
+    store.resolveReferenceCommand("user-1", "campaign-1", "command-1", result);
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "resolved", result });
+    expect(store.getReferenceCommand("user-1", "campaign-1", "command-1")).toMatchObject({
+      expectedCampaignVersion: 0,
+      status: "resolved",
+      result,
+      failure: null,
+    });
+  });
+
+  it("keeps failed receipts retry-safe and rejects stale or reused command ids", () => {
+    const store = createTestStore();
+    store.setBackend("user-1", "campaign-1", "reference");
+    store.setBackend("user-1", "campaign-2", "reference");
+
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"attack"}'))
+      .toEqual({ status: "started" });
+    const failure = {
+      correlationId: "corr-1",
+      commitStatus: "not_committed" as const,
+      phase: "tool_loop",
+      toolRounds: 0,
+      toolCallNames: [],
+      acceptedToolCalls: 0,
+      message: "provider unavailable",
+    };
+    store.failReferenceCommand("user-1", "campaign-1", "command-1", failure);
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-1", 0, '{"playerText":"attack"}'))
+      .toEqual({ status: "failed", failure });
+    expect(() => store.beginReferenceCommand("user-1", "campaign-2", "command-1", 0, '{"playerText":"attack"}'))
+      .toThrow("cannot be reused");
+
+    store.bumpVersion("user-1", "campaign-1");
+    expect(store.beginReferenceCommand("user-1", "campaign-1", "command-2", 0, '{"playerText":"look"}'))
+      .toEqual({ status: "conflict", currentVersion: 1 });
+  });
+
   describe("dockets", () => {
     it("returns an empty string for an unwritten docket", () => {
       const store = createTestStore();

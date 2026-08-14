@@ -13,6 +13,39 @@ export interface StoredLogMessage {
 
 const MAX_LOG_MESSAGES = 40;
 
+export type ReferenceCommandStatus = "processing" | "resolved" | "failed";
+export type ReferenceCommandCommitStatus = "not_committed" | "uncertain";
+
+export interface ReferenceCommandFailure {
+  correlationId: string;
+  commitStatus: ReferenceCommandCommitStatus;
+  phase: string;
+  toolRounds: number;
+  toolCallNames: string[];
+  acceptedToolCalls: number;
+  message: string;
+}
+
+export interface ReferenceCommandRecord {
+  userId: string;
+  campaignId: string;
+  clientCommandId: string;
+  expectedCampaignVersion: number | null;
+  requestJson: string;
+  status: ReferenceCommandStatus;
+  result: unknown | null;
+  failure: ReferenceCommandFailure | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReferenceCommandStart =
+  | { status: "started" }
+  | { status: "resolved"; result: unknown }
+  | { status: "processing" }
+  | { status: "failed"; failure: ReferenceCommandFailure | null }
+  | { status: "conflict"; currentVersion: number };
+
 export const DOCKET_NAMES = ["state", "player", "npcs", "journal", "secrets", "campaign"] as const;
 export type DocketName = (typeof DOCKET_NAMES)[number];
 
@@ -41,6 +74,19 @@ interface RoutingRow {
   reference_character_id: string | null;
   campaign_profile_json: string | null;
   version: number;
+}
+
+interface ReferenceCommandRow {
+  user_id: string;
+  campaign_id: string;
+  client_command_id: string;
+  expected_version: number | null;
+  request_json: string;
+  status: ReferenceCommandStatus;
+  result_json: string | null;
+  failure_json: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /**
@@ -79,7 +125,132 @@ export class ReferenceEngineStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (user_id, campaign_id, docket_name)
       );
+
+      CREATE TABLE IF NOT EXISTS reference_engine_commands (
+        user_id TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        client_command_id TEXT NOT NULL,
+        expected_version INTEGER,
+        request_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT,
+        failure_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, client_command_id)
+      );
     `);
+  }
+
+  /**
+   * Starts a reference-DM turn exactly once. Reference-engine tools mutate
+   * immediately, so the host needs this durable receipt before calling the
+   * model: a browser retry must never silently execute the same turn twice.
+   */
+  public beginReferenceCommand(
+    userId: string,
+    campaignId: string,
+    clientCommandId: string,
+    expectedCampaignVersion: number | undefined,
+    requestJson: string
+  ): ReferenceCommandStart {
+    const transaction = this.db.transaction((): ReferenceCommandStart => {
+      const existing = this.db
+        .prepare(
+          `SELECT user_id, campaign_id, client_command_id, expected_version,
+                  request_json, status, result_json, failure_json, created_at, updated_at
+           FROM reference_engine_commands
+           WHERE user_id = ? AND client_command_id = ?`
+        )
+        .get(userId, clientCommandId) as ReferenceCommandRow | undefined;
+
+      if (existing) {
+        if (existing.campaign_id !== campaignId || existing.request_json !== requestJson) {
+          throw new Error("A client command ID cannot be reused for a different reference-engine turn.");
+        }
+        if (existing.status === "resolved" && existing.result_json) {
+          return { status: "resolved", result: JSON.parse(existing.result_json) };
+        }
+        if (existing.status === "failed") {
+          return {
+            status: "failed",
+            failure: existing.failure_json ? JSON.parse(existing.failure_json) as ReferenceCommandFailure : null,
+          };
+        }
+        return { status: "processing" };
+      }
+
+      const current = this.getRouting(userId, campaignId);
+      if (expectedCampaignVersion !== undefined && current && current.version !== expectedCampaignVersion) {
+        return { status: "conflict", currentVersion: current.version };
+      }
+
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO reference_engine_commands (
+             user_id, campaign_id, client_command_id, expected_version,
+             request_json, status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'processing', ?, ?)`
+        )
+        .run(userId, campaignId, clientCommandId, expectedCampaignVersion ?? null, requestJson, now, now);
+      return { status: "started" };
+    });
+    return transaction();
+  }
+
+  public resolveReferenceCommand(
+    userId: string,
+    campaignId: string,
+    clientCommandId: string,
+    result: unknown
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE reference_engine_commands
+         SET status = 'resolved', result_json = ?, failure_json = NULL, updated_at = ?
+         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
+      )
+      .run(JSON.stringify(result), new Date().toISOString(), userId, campaignId, clientCommandId);
+  }
+
+  public failReferenceCommand(
+    userId: string,
+    campaignId: string,
+    clientCommandId: string,
+    failure: ReferenceCommandFailure
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE reference_engine_commands
+         SET status = 'failed', failure_json = ?, updated_at = ?
+         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
+      )
+      .run(JSON.stringify(failure), new Date().toISOString(), userId, campaignId, clientCommandId);
+  }
+
+  public getReferenceCommand(userId: string, campaignId: string, clientCommandId: string): ReferenceCommandRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, campaign_id, client_command_id, expected_version,
+                request_json, status, result_json, failure_json, created_at, updated_at
+         FROM reference_engine_commands
+         WHERE user_id = ? AND campaign_id = ? AND client_command_id = ?`
+      )
+      .get(userId, campaignId, clientCommandId) as ReferenceCommandRow | undefined;
+    if (!row) return null;
+    return {
+      userId: row.user_id,
+      campaignId: row.campaign_id,
+      clientCommandId: row.client_command_id,
+      expectedCampaignVersion: row.expected_version,
+      requestJson: row.request_json,
+      status: row.status,
+      result: row.result_json ? JSON.parse(row.result_json) : null,
+      failure: row.failure_json ? JSON.parse(row.failure_json) as ReferenceCommandFailure : null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   /**
@@ -251,6 +422,9 @@ export class ReferenceEngineStore {
   }
 
   public deleteRouting(userId: string, campaignId: string): void {
+    this.db
+      .prepare("DELETE FROM reference_engine_commands WHERE user_id = ? AND campaign_id = ?")
+      .run(userId, campaignId);
     this.db
       .prepare("DELETE FROM reference_engine_sessions WHERE user_id = ? AND campaign_id = ?")
       .run(userId, campaignId);
