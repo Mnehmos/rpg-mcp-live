@@ -214,6 +214,56 @@ describe("ReferenceEngineAdapter", () => {
     ]);
   });
 
+  it("projects the reference engine quest log instead of the compatibility tutorial quest", async () => {
+    const store = createStore();
+    store.setBackend("account-1", "campaign-1", "reference");
+    store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 7,
+        xp: 0,
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      "quest_manage.get_log": () => ({
+        quests: [
+          {
+            id: "quest-rescue",
+            name: "Rescue Sergeant Pell",
+            description: "Bring Pell home from the salt tunnels.",
+            status: "completed",
+            objectives: [{ id: "obj-rescue", description: "Get Pell out alive", current: 1, required: 1, completed: true }],
+            rewards: { experience: 50, gold: 12 },
+          },
+          {
+            id: "quest-relay",
+            name: "War-machine relay",
+            description: "Find the source of the repeating tremor.",
+            status: "active",
+            objectives: [{ id: "obj-relay", description: "Locate the relay chamber", current: 1, required: 3, completed: false }],
+            rewards: { experience: 100, gold: 25 },
+          },
+        ],
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+
+    const { campaign } = await adapter.getCampaign("account-1", "actor-1", "campaign-1");
+
+    expect(campaign.quests.map((quest) => quest.title)).toEqual(["Rescue Sergeant Pell", "War-machine relay"]);
+    expect(campaign.quests[0]).toMatchObject({ status: "completed", progress: 100, reward: { xp: 50, copper: 1_200 } });
+    expect(campaign.quests[1]).toMatchObject({ status: "active", progress: 33, reward: { xp: 100, copper: 2_500 } });
+  });
+
   it("rejects inventory actions before a character exists, without calling the reference engine", async () => {
     const store = createStore();
     store.setBackend("account-1", "campaign-1", "reference");

@@ -423,10 +423,13 @@ h1 i { color: var(--amber); font-style: italic; }
 .quest-card { padding: 14px 15px; border: 1px solid var(--line); background: rgba(10, 12, 17, .6); }
 .quest-list { display: grid; gap: 7px; margin-top: 12px; max-height: 210px; overflow: auto; scrollbar-color: var(--line-strong) transparent; }
 .quest-entry { padding: 8px 9px; border-left: 2px solid rgba(155, 200, 172, .45); background: rgba(23, 26, 34, .6); }
+.quest-entry-completed { border-left-color: rgba(233, 167, 91, .55); }
+.quest-entry-failed, .quest-entry-abandoned, .quest-entry-expired { border-left-color: rgba(214, 116, 105, .55); }
 .quest-entry-top { display: flex; justify-content: space-between; gap: 8px; color: var(--ink); font-size: 11px; }
 .quest-entry-top span { color: var(--mint); font-size: 9px; }
 .quest-entry p { margin: 5px 0; color: var(--muted); font: 11px/1.4 Georgia, "Times New Roman", serif; }
 .quest-entry small { color: var(--faint); font-size: 8px; }
+.quest-entry .quest-status { display: block; margin-top: 3px; letter-spacing: .12em; text-transform: uppercase; }
 .sheet-subsection { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(242, 236, 223, .08); }
 .sheet-subsection .tiny-label { display: block; margin-bottom: 9px; }
 .spell-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; }

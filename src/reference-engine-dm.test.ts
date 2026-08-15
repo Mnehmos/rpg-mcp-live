@@ -102,6 +102,10 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not stop at the proposal");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("legitimate domain failure such as a miss or failed check");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("retry only rejected, malformed, or otherwise unexecuted calls");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("inventory_manage action transfer");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("give only adds an item and does not remove it from the player");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("exact questId and objective IDs returned by quest_manage.create");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Never derive an objective ID");
   });
 
   it("omits blank optional tool fields without hiding required nested validation", () => {
@@ -1210,6 +1214,8 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("returned encounterId and participant ids");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player intent -> relevant engine action -> returned engine result -> scene_manage set -> narration");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("never turn a skipped call into an 'unresolved' continuity fact");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("plain, diegetic D&D narration");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not paste headings, roll ledgers, HP/AC tables");
   });
 
   it("fills only the player's combat actor id while leaving other tool ids model-driven", async () => {

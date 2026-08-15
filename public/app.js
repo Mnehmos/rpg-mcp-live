@@ -25,6 +25,7 @@ import {
 import { isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderToolDisclosure } from "./tool-disclosure.js";
+import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 
 (function () {
   "use strict";
@@ -1230,18 +1231,19 @@ import { renderToolDisclosure } from "./tool-disclosure.js";
   }
 
   function renderQuests(quests) {
-    var list = Array.isArray(quests) ? quests : [];
+    var list = visibleQuestEntries(quests);
     var active = list.filter(function (quest) { return quest.status === "active"; });
     setText("#quest-count", active.length, "0");
     var node = $("#quest-list");
     if (!node) return;
-    node.innerHTML = active.length ? active.map(function (quest) {
+    node.innerHTML = list.length ? list.map(function (quest) {
       var reward = quest.reward && Number(quest.reward.copper) || 0;
       var rewardGold = Math.floor(reward / 100);
       var rewardSilver = Math.floor((reward % 100) / 10);
       var rewardCopper = reward % 10;
-      return '<article class="quest-entry"><div class="quest-entry-top"><strong>' + escapeHtml(quest.title) + '</strong><span>' + escapeHtml(quest.progress || 0) + '%</span></div><div class="markdown-body">' + renderMarkdown(quest.objective) + '</div><small>Reward · ' + rewardGold + ' gp ' + rewardSilver + ' sp ' + rewardCopper + ' cp · ' + escapeHtml(quest.reward && quest.reward.xp || 0) + ' XP</small></article>';
-    }).join("") : '<p class="notes-empty">No active quests yet.</p>';
+      var status = String(quest.status || "active").replace(/[^a-z-]/g, "");
+      return '<article class="quest-entry quest-entry-' + status + '"><div class="quest-entry-top"><strong>' + escapeHtml(quest.title) + '</strong><span>' + questProgress(quest) + '%</span></div><small class="quest-status">' + escapeHtml(questStatusLabel(quest.status)) + '</small><div class="markdown-body">' + renderMarkdown(quest.objective) + '</div><small>Reward · ' + rewardGold + ' gp ' + rewardSilver + ' sp ' + rewardCopper + ' cp · ' + escapeHtml(quest.reward && quest.reward.xp || 0) + ' XP</small></article>';
+    }).join("") : '<p class="notes-empty">No campaign quests yet.</p>';
   }
 
   function renderNotes(notes) {
