@@ -47,7 +47,9 @@ import { ReferenceEngineStore, type ReferenceEngineRouting } from "./reference-e
  *
  * The reference engine has no concept of Lantern's campaign/session-view
  * contract (characterCreation state machine, runtimeContent, proceduralNotices,
- * quests, scene, orchestration, etc.) — all Lantern-specific. Rather than
+ * scene, orchestration, etc.) — all Lantern-specific. Its assigned quest log
+ * is a genuine equivalent, so that narrow projection is imported below rather
+ * than replaced with the starter tutorial shell. Rather than
  * hand-rolling a parallel projection, this adapter builds a real
  * LanternCampaignState via createInitialCampaign() and overlays only the
  * fields that have a genuine reference-engine equivalent (character stats,
@@ -106,6 +108,29 @@ interface ReferenceNoteRecord {
   content: string;
   visibility: "dm_only" | "player_visible";
   createdAt: string;
+}
+
+interface ReferenceQuestObjectiveRecord {
+  id: string;
+  description: string;
+  type?: string;
+  current?: number;
+  required?: number;
+  completed?: boolean;
+}
+
+interface ReferenceQuestRecord {
+  id: string;
+  name: string;
+  description?: string;
+  status?: string;
+  giver?: string;
+  objectives?: ReferenceQuestObjectiveRecord[];
+  rewards?: {
+    experience?: number;
+    xp?: number;
+    gold?: number;
+  };
 }
 
 interface ReferenceInventoryEntry {
@@ -168,6 +193,43 @@ function mapReferenceInventory(entries: ReferenceInventoryEntry[]): EngineInvent
         armorClass: entry.item.properties?.ac ?? entry.item.properties?.acBonus,
       },
     };
+  });
+}
+
+function mapReferenceQuests(entries: unknown): import("./engine-contracts.js").EngineQuest[] {
+  if (!Array.isArray(entries)) return [];
+  return entries.flatMap((entry): import("./engine-contracts.js").EngineQuest[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const raw = entry as ReferenceQuestRecord;
+    if (!raw.id || !raw.name) return [];
+    const objectives = Array.isArray(raw.objectives) ? raw.objectives : [];
+    const completedUnits = objectives.reduce((total, objective) => {
+      const required = Math.max(1, Math.trunc(objective.required ?? 1));
+      const current = Math.max(0, Math.min(required, Math.trunc(objective.current ?? (objective.completed ? required : 0))));
+      return total + current;
+    }, 0);
+    const requiredUnits = objectives.reduce((total, objective) => total + Math.max(1, Math.trunc(objective.required ?? 1)), 0);
+    const status = raw.status === "completed" || raw.status === "failed" || raw.status === "abandoned" || raw.status === "expired"
+      ? raw.status
+      : "active";
+    const progress = status === "completed"
+      ? 100
+      : requiredUnits > 0
+        ? Math.max(0, Math.min(100, Math.round((completedUnits / requiredUnits) * 100)))
+        : 0;
+    const objective = objectives.map((candidate) => candidate.description).filter(Boolean).join(" ");
+    return [{
+      id: raw.id,
+      title: raw.name,
+      objective: raw.description || objective || "Follow the thread.",
+      status,
+      reward: {
+        xp: Math.max(0, Math.trunc(raw.rewards?.experience ?? raw.rewards?.xp ?? 0)),
+        copper: Math.max(0, Math.trunc(raw.rewards?.gold ?? 0)) * 100,
+      },
+      rewardClaimed: status === "completed",
+      progress,
+    }];
   });
 }
 
@@ -958,6 +1020,29 @@ export class ReferenceEngineAdapter {
       state.character.maxHp = authoritativeMaxHp;
 
       state.phase = "sandbox";
+
+      // The reference engine owns the durable quest log. Import the assigned
+      // quests into the session projection so the UI does not fall back to the
+      // Lantern tutorial quest that exists only in the compatibility shell.
+      // A read failure must not make an otherwise readable campaign disappear.
+      try {
+        const questResult = await this.client.callTool("quest_manage", {
+          action: "get_log",
+          characterId: routing.referenceCharacterId,
+        }, this.tenantFor(accountId, campaignId, routing));
+        const questPayload = questResult.payload as { quests?: unknown };
+        const quests = mapReferenceQuests(questPayload?.quests);
+        // The reference log is authoritative, including an empty result. Do
+        // not leave the compatibility shell's starter quest visible when the
+        // character has no assigned quests.
+        state.quests = quests;
+        if (quests.length > 0) {
+          state.quest = quests.find((quest) => quest.status === "active") ?? quests[0]!;
+        }
+      } catch {
+        // Keep the shell's starter quest only when the authoritative quest log
+        // cannot be read; never synthesize authored quests from narration.
+      }
     }
 
     // Narrative-only overlay from LLM-authored dockets (never touches hp/ac/

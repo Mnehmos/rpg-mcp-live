@@ -11,6 +11,9 @@ import {
   isCurrentRequest,
   nextRequestSequence,
   pendingCommandStorageKey,
+  normalizePendingCommandRecord,
+  pendingCommandRecordsFromValue,
+  pendingCommandStorageValue,
   retryDelayMs,
   shouldRetryCampaignLoad,
 } from "./campaign-resume.js";
@@ -33,6 +36,27 @@ describe("authenticated campaign resume", () => {
     expect(isPendingCommandForCampaign(pending, "campaign-b")).toBe(false);
     expect(isPendingCommandForCampaign({ campaignId: "campaign-a" }, "campaign-a")).toBe(false);
     expect(isPendingCommandForCampaign(null, "campaign-a")).toBe(false);
+  });
+
+  it("migrates the old single pending record and preserves independent campaigns", () => {
+    const legacy = { campaignId: "campaign-a", clientCommandId: "command-a", playerText: "Wait." };
+    expect(pendingCommandRecordsFromValue(legacy)).toEqual([{
+      campaignId: "campaign-a",
+      clientCommandId: "command-a",
+      playerText: "Wait.",
+      status: "processing",
+    }]);
+
+    const records = pendingCommandRecordsFromValue({
+      version: 2,
+      commands: [legacy, { campaignId: "campaign-b", clientCommandId: "command-b", status: "uncertain" }],
+    });
+    expect(records).toEqual([
+      { campaignId: "campaign-a", clientCommandId: "command-a", playerText: "Wait.", status: "processing" },
+      { campaignId: "campaign-b", clientCommandId: "command-b", playerText: "", status: "uncertain" },
+    ]);
+    expect(pendingCommandStorageValue(records)).toEqual({ version: 2, commands: records });
+    expect(normalizePendingCommandRecord({ campaignId: "", clientCommandId: "x" })).toBeNull();
   });
 
   it("keeps an older pending response from being treated as the newer command", () => {

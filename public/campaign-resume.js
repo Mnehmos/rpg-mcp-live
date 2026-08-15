@@ -8,6 +8,46 @@ export function pendingCommandStorageKey(userId) {
   return `lantern.pendingCommand.${normalizedUserId || "anonymous"}`;
 }
 
+export function normalizePendingCommandRecord(record) {
+  const campaignId = String(record?.campaignId || "").trim();
+  const clientCommandId = String(record?.clientCommandId || "").trim();
+  if (!campaignId || !clientCommandId) return null;
+  return {
+    campaignId,
+    clientCommandId,
+    playerText: String(record.playerText || ""),
+    status: record.status === "uncertain" ? "uncertain" : "processing",
+  };
+}
+
+/**
+ * Read both the pre-#265 single-record format and the durable per-campaign
+ * format. The browser may switch campaigns while another campaign's command
+ * is reconciling, so storage cannot be a single global lease.
+ */
+export function pendingCommandRecordsFromValue(value) {
+  if (!value) return [];
+  var candidates = [];
+  if (Array.isArray(value)) candidates = value;
+  else if (Array.isArray(value.commands)) candidates = value.commands;
+  else if (value.commands && typeof value.commands === "object") candidates = Object.values(value.commands);
+  else candidates = [value];
+
+  var byCampaign = new Map();
+  candidates.forEach(function (candidate) {
+    var normalized = normalizePendingCommandRecord(candidate);
+    if (normalized) byCampaign.set(normalized.campaignId, normalized);
+  });
+  return Array.from(byCampaign.values());
+}
+
+export function pendingCommandStorageValue(records) {
+  return {
+    version: 2,
+    commands: pendingCommandRecordsFromValue(records),
+  };
+}
+
 export function isPendingCommandForCampaign(record, campaignId) {
   const normalizedCampaignId = String(campaignId || "").trim();
   const normalizedRecordCampaignId = String(record?.campaignId || "").trim();
