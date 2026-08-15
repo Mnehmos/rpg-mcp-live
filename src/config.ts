@@ -17,6 +17,30 @@ function readCsv(name: string, fallback: string[]): string[] {
   return entries.length ? [...new Set(entries)].sort() : fallback;
 }
 
+/**
+ * Production must never boot with Clerk's development key pair.  Keep the
+ * check pure so configuration tests can exercise the policy without loading
+ * the server or exposing the actual secret values.
+ *
+ * Missing keys remain a valid (but unauthenticated) deployment state for
+ * local/test and for deployments that intentionally fail closed at the
+ * request boundary. Any supplied Clerk key, however, must be a live key in
+ * production; otherwise the app can appear healthy while authenticating
+ * against the wrong Clerk instance.
+ */
+export function productionClerkKeyError(
+  nodeEnv: string,
+  publishableKey: string,
+  secretKey: string,
+): string | null {
+  if (nodeEnv !== "production") return null;
+  if ((publishableKey && !publishableKey.startsWith("pk_live_"))
+    || (secretKey && !secretKey.startsWith("sk_live_"))) {
+    return "Production Clerk configuration requires pk_live_ and sk_live_ keys.";
+  }
+  return null;
+}
+
 const nodeEnv = readString("NODE_ENV", "development");
 const clerkPublishableKey = readString("CLERK_PUBLISHABLE_KEY");
 const clerkSecretKey = readString("CLERK_SECRET_KEY");
@@ -38,6 +62,11 @@ const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TI
 // different value per environment — a shared staging/production secret would
 // let a staging compromise mint production tenant contexts.
 const referenceEngineTenantSecret = readString("REFERENCE_ENGINE_TENANT_SECRET");
+
+const clerkKeyError = productionClerkKeyError(nodeEnv, clerkPublishableKey, clerkSecretKey);
+if (clerkKeyError) {
+  throw new Error(clerkKeyError);
+}
 
 // Which Open5e content the deployment is willing to serve. These mirror the
 // engine-config defaults exactly, so the web host and the retired engine agree

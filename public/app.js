@@ -11,7 +11,10 @@ import {
   isPendingCommandConflict,
   isPendingCommandForCampaign,
   isPendingCommandResponseCurrent,
+  normalizePendingCommandRecord,
   nextRequestSequence,
+  pendingCommandRecordsFromValue,
+  pendingCommandStorageValue,
   pendingCommandStorageKey,
   retryDelayMs,
   shouldRetryCampaignLoad,
@@ -30,7 +33,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -85,43 +88,50 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
     }
   }
 
-  function readPendingCommand() {
+  function readPendingCommands() {
     try {
       var raw = window.localStorage.getItem(pendingCommandStorageKey(currentUserId()));
-      if (!raw) return null;
-      var record = JSON.parse(raw);
-      if (!record || !record.campaignId || !record.clientCommandId) {
-        window.localStorage.removeItem(pendingCommandStorageKey(currentUserId()));
-        return null;
-      }
-      return {
-        campaignId: String(record.campaignId),
-        clientCommandId: String(record.clientCommandId),
-        playerText: String(record.playerText || "")
-      };
+      if (!raw) return [];
+      return pendingCommandRecordsFromValue(JSON.parse(raw));
     } catch (_error) {
-      return null;
+      return [];
     }
   }
 
+  function readPendingCommand(campaignId) {
+    var records = readPendingCommands();
+    var normalizedCampaignId = String(campaignId || "").trim();
+    return normalizedCampaignId
+      ? records.find(function (record) { return record.campaignId === normalizedCampaignId; }) || null
+      : records[0] || null;
+  }
+
   function writePendingCommand(record) {
-    if (!record || !record.campaignId || !record.clientCommandId) return;
+    var normalized = normalizePendingCommandRecord(record);
+    if (!normalized) return;
     try {
-      window.localStorage.setItem(pendingCommandStorageKey(currentUserId()), JSON.stringify({
-        campaignId: String(record.campaignId),
-        clientCommandId: String(record.clientCommandId),
-        playerText: String(record.playerText || "")
-      }));
+      var records = readPendingCommands().filter(function (candidate) {
+        return candidate.campaignId !== normalized.campaignId;
+      });
+      records.push(normalized);
+      window.localStorage.setItem(pendingCommandStorageKey(currentUserId()), JSON.stringify(pendingCommandStorageValue(records)));
     } catch (_error) {
       // Storage can be disabled; the in-memory reconciliation path still works.
     }
   }
 
-  function clearPendingCommand(clientCommandId) {
+  function clearPendingCommand(clientCommandId, campaignId) {
     try {
-      var record = readPendingCommand();
-      if (!record || !clientCommandId || record.clientCommandId === clientCommandId) {
+      var normalizedCampaignId = String(campaignId || "").trim();
+      var records = readPendingCommands().filter(function (record) {
+        var matchesCommand = !clientCommandId || record.clientCommandId === clientCommandId;
+        var matchesCampaign = !normalizedCampaignId || record.campaignId === normalizedCampaignId;
+        return !(matchesCommand && matchesCampaign);
+      });
+      if (records.length === 0) {
         window.localStorage.removeItem(pendingCommandStorageKey(currentUserId()));
+      } else {
+        window.localStorage.setItem(pendingCommandStorageKey(currentUserId()), JSON.stringify(pendingCommandStorageValue(records)));
       }
     } catch (_error) {
       // Storage can be disabled; the in-memory reconciliation path still works.
@@ -129,15 +139,15 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
   }
 
   function clearPendingCommandForCampaign(campaignId) {
-    var pendingCommand = readPendingCommand();
+    var pendingCommand = readPendingCommand(campaignId);
     if (!isPendingCommandForCampaign(pendingCommand, campaignId)) return;
-    clearPendingCommand(pendingCommand.clientCommandId);
+    clearPendingCommand(pendingCommand.clientCommandId, campaignId);
     state.pendingPlayerText = null;
   }
 
   function isCurrentPendingCommand(campaignId, clientCommandId) {
     return Boolean(state.session && state.session.id === campaignId
-      && isPendingCommandResponseCurrent(readPendingCommand(), campaignId, clientCommandId));
+      && isPendingCommandResponseCurrent(readPendingCommand(campaignId), campaignId, clientCommandId));
   }
 
   function waitForCampaignRetry(attempt) {
@@ -1641,6 +1651,9 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
     if (state.pendingPlayerText && (!lastLogEntry || lastLogEntry.text !== state.pendingPlayerText)) {
       logHtml += '<div class="log-entry player"><span class="log-icon">YOU</span><div class="log-content markdown-body">' + renderMarkdown(state.pendingPlayerText) + '</div></div>';
     }
+    if (state.uncertainPlayerText) {
+      logHtml += '<div class="log-entry system"><span class="log-icon">?</span><div class="log-content markdown-body"><strong>Unconfirmed action</strong><br>' + renderMarkdown(state.uncertainPlayerText) + '</div></div>';
+    }
     if (payload.toolDisclosure && !entries.some(function (entry) { return Boolean(entry.toolDisclosure); })) {
       logHtml += '<div class="log-entry tool"><span class="log-icon">TOOLS</span><div class="log-content">' + renderToolDisclosure(payload.toolDisclosure) + '</div></div>';
     }
@@ -1888,14 +1901,22 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
   function refreshSession() {
     var sequence = nextRequestSequence(state.sessionRefreshSequence);
     state.sessionRefreshSequence = sequence;
-    var pendingCommand = readPendingCommand();
-    var preferredCampaignId = pendingCommand ? pendingCommand.campaignId : readActiveCampaignId();
+    var pendingCommands = readPendingCommands();
+    var preferredCampaignId = readActiveCampaignId() || (pendingCommands[0] && pendingCommands[0].campaignId) || "";
     function resumePendingCommand() {
-      var pending = readPendingCommand();
-      if (!pending || state.pendingPlayerText || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
+      var pending = readPendingCommand(state.session && state.session.id);
+      if (!pending || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
+      if (pending.status === "uncertain") {
+        state.pendingPlayerText = null;
+        state.uncertainPlayerText = pending.playerText || "Your submitted action";
+        renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        setStatus("The previous turn may have committed; the table is current.", "error");
+        return Promise.resolve(false);
+      }
+      if (state.pendingPlayerText) return Promise.resolve(false);
       state.pendingPlayerText = pending.playerText || "Your submitted action";
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      return reconcilePendingCommand(pending.campaignId, pending.clientCommandId);
+      return startPendingReconciliation(pending.campaignId, pending.clientCommandId);
     }
     function applySessionResult(result) {
       if (!result) return null;
@@ -1916,14 +1937,14 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       }
       if (!result.response.ok) throw new Error(result.data.error || "The table is unavailable.");
       renderSession(result.data);
-      var pendingForLoadedCampaign = pendingCommand && result.data.session && pendingCommand.campaignId === result.data.session.id;
+      var pendingForLoadedCampaign = result.data.session && readPendingCommand(result.data.session.id);
       if (pendingForLoadedCampaign) setStatus("This turn is still reconciling; keep this tab open.", "thinking");
       else if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
       if (!result.data.session && Array.isArray(result.data.campaigns) && result.data.campaigns.length > 0) {
-        var campaignToLoad = pendingCommand && result.data.campaigns.some(function (campaign) { return campaign.id === pendingCommand.campaignId; })
-          ? pendingCommand.campaignId
+        var campaignToLoad = result.data.campaigns.some(function (campaign) { return campaign.id === preferredCampaignId; })
+          ? preferredCampaignId
           : result.data.campaigns[0].id;
         return loadCampaign(campaignToLoad).then(function () {
           return resumePendingCommand().then(function () { return result.data; });
@@ -1958,7 +1979,8 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       if (!result) return null;
       if (result.response.status === 404 && preferredCampaignId) {
         if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
-        if (pendingCommand && pendingCommand.campaignId === preferredCampaignId) clearPendingCommand(pendingCommand.clientCommandId);
+        var pendingForMissingCampaign = readPendingCommand(preferredCampaignId);
+        if (pendingForMissingCampaign) clearPendingCommand(pendingForMissingCampaign.clientCommandId, preferredCampaignId);
         clearActiveCampaignId();
         return requestSession("/api/session").then(applySessionResult);
       }
@@ -2043,24 +2065,32 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         return refreshSession().then(function () { return false; });
       }
       if (outcome.resolved) {
-        clearPendingCommand(clientCommandId);
+        clearPendingCommand(clientCommandId, campaignId);
         state.pendingPlayerText = null;
+        state.uncertainPlayerText = null;
         renderSession(outcome.result);
         setStatus("The world answers", "ready");
         return true;
       }
       if (outcome.confirmedMissing) {
-        clearPendingCommand(clientCommandId);
+        clearPendingCommand(clientCommandId, campaignId);
         state.pendingPlayerText = null;
+        state.uncertainPlayerText = null;
         renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
         setStatus("That turn was not committed; you can try again.", "ready");
         showToast("The server confirmed that turn was not committed.");
         return false;
       }
       if (outcome.uncertain) {
+        var uncertainCommand = readPendingCommand(campaignId);
+        if (uncertainCommand && uncertainCommand.clientCommandId === clientCommandId) {
+          writePendingCommand(Object.assign({}, uncertainCommand, { status: "uncertain" }));
+          state.uncertainPlayerText = uncertainCommand.playerText || "Your submitted action";
+        }
+        state.pendingPlayerText = null;
         return refreshSession().then(function () {
-          setStatus("This turn may have changed the world; refresh before retrying.", "error");
-          showToast("The server could not prove whether this turn committed. Your text remains in the composer.");
+          setStatus("The previous turn may have committed; the table is current. Continue with a new action when ready.", "error");
+          showToast("The server could not prove whether this turn committed. Your text is preserved for reference; a new action is safe.");
           return false;
         });
       }
@@ -2081,6 +2111,16 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
     });
   }
 
+  function startPendingReconciliation(campaignId, clientCommandId) {
+    var key = String(campaignId) + ":" + String(clientCommandId);
+    if (state.pendingReconciliations[key]) return state.pendingReconciliations[key];
+    var reconciliation = reconcilePendingCommand(campaignId, clientCommandId).finally(function () {
+      delete state.pendingReconciliations[key];
+    });
+    state.pendingReconciliations[key] = reconciliation;
+    return reconciliation;
+  }
+
   function submitCommand(command, clientCommandId) {
     if (!state.session) {
       if (isSignedIn()) {
@@ -2097,17 +2137,28 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
     var campaignId = state.session.id;
     var campaignPath = encodeURIComponent(campaignId);
     var commandId = clientCommandId || newCommandId();
-    var pendingCommand = readPendingCommand();
+    var pendingCommand = readPendingCommand(campaignId);
+    if (pendingCommand && pendingCommand.status === "uncertain") {
+      // An uncertain receipt is durable evidence for the table, not a global
+      // browser lock. Starting a fresh player action clears only that
+      // campaign's old marker; retrying the same composer gets a new id so it
+      // cannot replay an operation whose commit state was already ambiguous.
+      if (commandId === pendingCommand.clientCommandId) commandId = newCommandId();
+      clearPendingCommand(pendingCommand.clientCommandId, campaignId);
+      pendingCommand = null;
+      state.uncertainPlayerText = null;
+    }
     if (isPendingCommandConflict(pendingCommand, campaignId, commandId)) {
       state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
       setStatus("This turn is still reconciling; keep this tab open.", "thinking");
       showToast("Your earlier turn is still reconciling. Wait for it to settle before submitting another action.");
-      reconcilePendingCommand(pendingCommand.campaignId, pendingCommand.clientCommandId);
+      startPendingReconciliation(pendingCommand.campaignId, pendingCommand.clientCommandId);
       return Promise.resolve(false);
     }
     var expectedCampaignVersion = state.session.version;
     state.pendingPlayerText = command.playerText || actionLabel(command.action);
+    state.uncertainPlayerText = null;
     writePendingCommand({ campaignId: campaignId, clientCommandId: commandId, playerText: state.pendingPlayerText });
     renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
     setStatus("The DM is thinking", "thinking");
@@ -2119,23 +2170,25 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       }, command))
     }).then(function (result) {
       if (result.response.status === 401) {
-        clearPendingCommand(commandId);
+        clearPendingCommand(commandId, campaignId);
         state.pendingPlayerText = null;
+        state.uncertainPlayerText = null;
         openAuth();
         return false;
       }
       if (result.response.status === 409 && result.data.code === "stale_version" && result.data.session) {
-        clearPendingCommand(commandId);
+        clearPendingCommand(commandId, campaignId);
         state.pendingPlayerText = null;
+        state.uncertainPlayerText = null;
         renderSession({ session: result.data.session, subscription: state.subscription });
         setStatus("The table moved; your view is current", "ready");
         return false;
       }
       if (result.response.status === 409 && result.data.code === "command_conflict") {
-        return reconcilePendingCommand(campaignId, commandId);
+        return startPendingReconciliation(campaignId, commandId);
       }
       if (result.response.status >= 500 || result.response.status === 408 || result.response.status === 429) {
-        return reconcilePendingCommand(campaignId, commandId);
+        return startPendingReconciliation(campaignId, commandId);
       }
       if (!result.response.ok) {
         var commandError = new Error(result.data.error || "That action could not be resolved.");
@@ -2145,23 +2198,24 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       if (!isCurrentPendingCommand(campaignId, commandId)) {
         return refreshSession().then(function () { return false; });
       }
-      clearPendingCommand(commandId);
+      clearPendingCommand(commandId, campaignId);
       state.pendingPlayerText = null;
       renderSession(result.data);
       setStatus("The world answers", "ready");
       return true;
     }).catch(function (error) {
       if (error && error.reconcile === false) {
-        clearPendingCommand(commandId);
+        clearPendingCommand(commandId, campaignId);
         state.pendingPlayerText = null;
+        state.uncertainPlayerText = null;
         renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
         setStatus("The table needs a moment", "error");
         showToast(error.message);
         return false;
       }
-      return reconcilePendingCommand(campaignId, commandId);
+      return startPendingReconciliation(campaignId, commandId);
     }).catch(function (error) {
-      var pending = readPendingCommand();
+      var pending = readPendingCommand(campaignId);
       if (!isPendingCommandResponseCurrent(pending, campaignId, commandId)) {
         return refreshSession().then(function () { return false; });
       }
@@ -2497,16 +2551,10 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
   }
 
   function loadCampaign(campaignId) {
-    var pendingCommand = readPendingCommand();
-    if (pendingCommand && pendingCommand.campaignId !== campaignId) {
-      showToast("Your submitted turn is still reconciling. Keep this campaign open.");
-      if (!state.pendingPlayerText) {
-        state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
-        renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-        reconcilePendingCommand(pendingCommand.campaignId, pendingCommand.clientCommandId);
-      }
-      return Promise.resolve(false);
-    }
+    // Pending receipts belong to their campaign. They must not block opening
+    // another campaign; each campaign is reconciled independently.
+    state.pendingPlayerText = null;
+    state.uncertainPlayerText = null;
     // A new explicit selection supersedes any refresh/retry chain for the prior campaign.
     state.sessionRefreshSequence = nextRequestSequence(state.sessionRefreshSequence);
     var loadSequence = state.campaignLoadSequence + 1;
@@ -2534,7 +2582,17 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         state.managerOpen = false;
         state.createMode = false;
         renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription });
-        setStatus("Campaign loaded", "ready");
+        var pendingForCampaign = readPendingCommand(campaignId);
+        if (pendingForCampaign && pendingForCampaign.status === "processing") {
+          state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+          setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+          startPendingReconciliation(campaignId, pendingForCampaign.clientCommandId);
+        } else if (pendingForCampaign && pendingForCampaign.status === "uncertain") {
+          setStatus("The previous turn may have committed; the table is current.", "error");
+        } else {
+          setStatus("Campaign loaded", "ready");
+        }
         return true;
       }, function (error) {
         if (!isCurrentLoad()) return false;
