@@ -2083,11 +2083,12 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       }
       if (outcome.uncertain) {
         var uncertainCommand = readPendingCommand(campaignId);
-        if (uncertainCommand && uncertainCommand.clientCommandId === clientCommandId) {
+        var isVisiblePendingCommand = isCurrentPendingCommand(campaignId, clientCommandId);
+        if (isVisiblePendingCommand && uncertainCommand && uncertainCommand.clientCommandId === clientCommandId) {
           writePendingCommand(Object.assign({}, uncertainCommand, { status: "uncertain" }));
           state.uncertainPlayerText = uncertainCommand.playerText || "Your submitted action";
+          state.pendingPlayerText = null;
         }
-        state.pendingPlayerText = null;
         return refreshSession().then(function () {
           setStatus("The previous turn may have committed; the table is current. Continue with a new action when ready.", "error");
           showToast("The server could not prove whether this turn committed. Your text is preserved for reference; a new action is safe.");

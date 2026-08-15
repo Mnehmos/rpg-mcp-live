@@ -1032,8 +1032,11 @@ export class ReferenceEngineAdapter {
         }, this.tenantFor(accountId, campaignId, routing));
         const questPayload = questResult.payload as { quests?: unknown };
         const quests = mapReferenceQuests(questPayload?.quests);
+        // The reference log is authoritative, including an empty result. Do
+        // not leave the compatibility shell's starter quest visible when the
+        // character has no assigned quests.
+        state.quests = quests;
         if (quests.length > 0) {
-          state.quests = quests;
           state.quest = quests.find((quest) => quest.status === "active") ?? quests[0]!;
         }
       } catch {

@@ -264,6 +264,35 @@ describe("ReferenceEngineAdapter", () => {
     expect(campaign.quests[1]).toMatchObject({ status: "active", progress: 33, reward: { xp: 100, copper: 2_500 } });
   });
 
+  it("clears the compatibility tutorial quest when the reference log is empty", async () => {
+    const store = createStore();
+    store.setBackend("account-1", "campaign-1", "reference");
+    store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 7,
+        xp: 0,
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      "quest_manage.get_log": () => ({ quests: [] }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+
+    const { campaign } = await adapter.getCampaign("account-1", "actor-1", "campaign-1");
+
+    expect(campaign.quests).toEqual([]);
+  });
+
   it("rejects inventory actions before a character exists, without calling the reference engine", async () => {
     const store = createStore();
     store.setBackend("account-1", "campaign-1", "reference");
