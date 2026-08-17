@@ -25,7 +25,7 @@
     "open5e:audit-migration": "tsx tools/production-migration-audit.ts"
   },
   "dependencies": {
-    "@clerk/express": "^2.1.52",
+    "@clerk/express": "^2.1.56",
     "better-sqlite3": "^12.9.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
