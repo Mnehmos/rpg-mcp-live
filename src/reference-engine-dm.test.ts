@@ -13,6 +13,8 @@ import {
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
+import { LlmUsageStore } from "./llm-usage.js";
+import { config } from "./config.js";
 
 function ok(payload: unknown, text = ""): ReferenceToolCallResult {
   return { text, isError: false, data: payload, raw: payload, payload };
@@ -239,6 +241,79 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.session.log.some((m) => m.text === "You strike the goblin for 6 damage." && m.kind === "narration")).toBe(
       true
     );
+  });
+
+  it("records provider usage and sends the configured reasoning completion cap", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-usage-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      freeDailyCostMicros: 100_000,
+      freeMonthlyCostMicros: 200_000,
+      freeDailyPromptTokens: 100_000,
+      freeDailyCompletionTokens: 100_000,
+      freeMonthlyPromptTokens: 200_000,
+      freeMonthlyCompletionTokens: 200_000,
+      playerDailyCostMicros: 100_000,
+      playerMonthlyCostMicros: 200_000,
+      playerDailyPromptTokens: 100_000,
+      playerDailyCompletionTokens: 100_000,
+      playerMonthlyPromptTokens: 200_000,
+      playerMonthlyCompletionTokens: 200_000,
+      globalDailyCostMicros: 1_000_000,
+      globalMonthlyCostMicros: 2_000_000,
+      maxTurnCostMicros: 100_000,
+      npcReserveCostMicros: 50_000,
+      reservationTtlMs: 60_000,
+      inputCostUsdPerMillion: 0.2,
+      outputCostUsdPerMillion: 1.2,
+    });
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "openai/gpt-5.6-luna",
+      reasoningEffort: "medium",
+      maxTokens: 123,
+      timeoutMs: 5000,
+      usage,
+    });
+    let requestBody: Record<string, unknown> | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestBody = JSON.parse(init.body) as Record<string, unknown>;
+      return Response.json({
+        id: "provider-request-1",
+        choices: [{ message: { content: "The first bell tolls." } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          completion_tokens_details: { reasoning_tokens: 5 },
+          cost: 0.000123,
+        },
+      });
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Look toward the bell tower.");
+
+    expect(requestBody).toMatchObject({
+      model: "openai/gpt-5.6-luna",
+      max_completion_tokens: 123,
+      reasoning_effort: "medium",
+    });
+    expect(result.turnUsage).toMatchObject({
+      calls: 1,
+      promptTokens: 100,
+      completionTokens: 20,
+      reasoningTokens: 5,
+      totalTokens: 120,
+      costMicros: 123,
+      costUsd: 0.000123,
+    });
+    expect(usage.getSummary("account-1").daily.costMicros).toBe(123);
+    gameStore.close();
   });
 
   it("replays a resolved client command without calling OpenRouter again", async () => {
@@ -473,6 +548,61 @@ describe("ReferenceDungeonMaster", () => {
         durationMs: 321,
       },
     });
+  });
+
+  it("settles nested NPC provider provenance under the owning player account", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-npc-usage-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), config.llmUsage);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "agent_manage.invoke": () => ({
+        actionType: "invoke",
+        callId: "agent-call-usage-1",
+        provider: "openrouter",
+        model: "openai/gpt-5.6-luna",
+        status: "ok",
+        promptTokens: 42,
+        completionTokens: 8,
+        totalTokens: 50,
+        costUsd: 0.0009,
+        costSource: "provider",
+        response: "The archivist points toward the bell tower.",
+      }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "openai/gpt-5.6-luna",
+      maxTokens: 1000,
+      timeoutMs: 5000,
+      usage,
+    });
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? openRouterMessage(null, [{
+          id: "npc-usage-tool",
+          type: "function",
+          function: {
+            name: "agent_manage",
+            arguments: JSON.stringify({ action: "invoke", agentId: "agent-1", situation: "Watch the bell tower." }),
+          },
+        }])
+        : openRouterMessage("The archivist points toward the bell tower.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Ask the archivist what she sees.");
+
+    expect(result.toolDisclosure?.calls[0]?.result).toMatchObject({ costUsd: 0.0009, totalTokens: 50 });
+    expect(result.turnUsage?.calls).toBeGreaterThanOrEqual(2);
+    expect(result.turnUsage?.costMicros).toBeGreaterThanOrEqual(900);
+    expect(usage.getSummary("account-1").monthly.costMicros).toBe(result.turnUsage?.costMicros);
+    gameStore.close();
   });
 
   it("continues an NPC proposal through the normal engine tool loop", async () => {
