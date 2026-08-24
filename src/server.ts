@@ -22,6 +22,7 @@ import { contentSecurityPolicy } from "./security-headers.js";
 import { characterOptionPolicy } from "./character-option-policy.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
+import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
 import {
@@ -40,6 +41,7 @@ const deployment = deploymentIdentity("web");
 const store = new GameStore(config.databasePath);
 const stripe = createStripeClient();
 const referenceEngineStore = new ReferenceEngineStore(store.getRawDb());
+const llmUsageStore = new LlmUsageStore(store.getRawDb(), config.llmUsage);
 if (!config.referenceEngineConfigured) {
   throw new Error("REFERENCE_ENGINE_URL and REFERENCE_ENGINE_TOKEN are required; the Lantern engine is not wired.");
 }
@@ -66,8 +68,11 @@ const referenceDungeonMaster = config.openRouterConfigured
         apiKey: config.openRouterApiKey,
         baseUrl: config.openRouterBaseUrl,
         model: config.openRouterModel,
+        reasoningEffort: config.openRouterReasoningEffort,
+        maxTokens: config.openRouterMaxTokens,
         timeoutMs: 60_000,
         turnTimeoutMs: config.referenceDmTimeoutMs,
+        usage: llmUsageStore,
       }
     )
   : null;
@@ -265,7 +270,7 @@ async function sendCampaignCommand(
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
     });
-    response.json({ ...result, subscription: store.getSubscription(userId) });
+    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
   } catch (error) {
     if (error instanceof ReferenceEngineNotRoutedError) {
       sendReferenceEngineError(response, error);
@@ -297,6 +302,22 @@ async function sendCampaignCommand(
           commitStatus: error.details.commitStatus,
           retryable: error.details.commitStatus === "not_committed",
         } : {}),
+      });
+      return;
+    }
+    const usageError = error instanceof LlmUsageLimitError
+      ? error
+      : error instanceof ReferenceDmProviderUnavailableError && error.cause instanceof LlmUsageLimitError
+        ? error.cause
+        : null;
+    if (usageError) {
+      response.status(429).json({
+        code: usageError.code,
+        error: usageError.message,
+        period: usageError.period,
+        limitMicros: usageError.limit,
+        requestedMicros: usageError.requested,
+        usage: llmUsageStore.getSummary(userId),
       });
       return;
     }
@@ -440,6 +461,7 @@ app.get("/api/session", async (request, response) => {
         error: "That campaign is no longer available in your account.",
         campaigns,
         subscription: store.getSubscription(userId),
+        usage: llmUsageStore.getSummary(userId),
       });
       return;
     }
@@ -453,6 +475,7 @@ app.get("/api/session", async (request, response) => {
       activeCampaignId: selectedCampaign?.id ?? null,
       setupRequired: !result,
       subscription: store.getSubscription(userId),
+      usage: llmUsageStore.getSummary(userId),
     });
   } catch (error) {
     sendReferenceEngineError(response, error);
@@ -464,7 +487,7 @@ app.get("/api/campaigns", async (request, response) => {
   if (!userId) return;
   try {
     const campaigns = await listAllCampaigns(userId);
-    response.json({ campaigns, subscription: store.getSubscription(userId) });
+    response.json({ campaigns, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
   } catch (error) {
     sendReferenceEngineError(response, error);
   }
@@ -544,6 +567,7 @@ app.post("/api/campaigns", async (request, response) => {
       campaign: result.campaign,
       campaigns: await listAllCampaigns(userId),
       subscription: store.getSubscription(userId),
+      usage: llmUsageStore.getSummary(userId),
     });
   } catch (error) {
     sendReferenceEngineError(response, error);
@@ -561,6 +585,7 @@ app.get("/api/campaigns/:campaignId", async (request, response) => {
       engineBackend: result.engineBackend,
       dockets: result.dockets ?? null,
       subscription: store.getSubscription(userId),
+      usage: llmUsageStore.getSummary(userId),
     });
   } catch (error) {
     if (error instanceof ReferenceEngineNotRoutedError) {
@@ -710,7 +735,7 @@ app.post("/api/campaigns/:campaignId/character", async (request, response) => {
         toolProficiencies: parsed.data.toolProficiencies,
       },
     });
-    response.json({ ...result, subscription: store.getSubscription(userId) });
+    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
   } catch (error) {
     sendReferenceEngineError(response, error);
   }
@@ -768,7 +793,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
         expectedCampaignVersion: parsed.data.expectedCampaignVersion,
       }
     );
-    response.json({ ...result, subscription: store.getSubscription(userId) });
+    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
   } catch (error) {
     sendReferenceEngineError(response, error);
   }
@@ -938,7 +963,13 @@ app.post("/api/session/action", async (request, response) => {
 app.get("/api/billing/status", (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  response.json({ subscription: store.getSubscription(userId) });
+  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+});
+
+app.get("/api/usage", (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  response.json({ usage: llmUsageStore.getSummary(userId) });
 });
 
 app.post("/api/billing/checkout", async (request, response) => {

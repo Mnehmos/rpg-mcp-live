@@ -97,7 +97,7 @@ Every rejection carries a stable code. Automated evidence must show unchanged ca
 | Authenticated Clerk campaign/character/tutorial path | blocked | Must be rerun against the promoted pair with an attached signed-in browser. |
 | Real OpenRouter tool turn and refresh/resume | blocked | Must be observed against the promoted engine and then checked against persisted event/state. |
 | Stripe test subscription entitlement | observed | A test purchase was reported earlier; webhook-backed status and cancellation still need a fresh deployed proof. |
-| Usage limits and cost controls | blocked | Required before charging real customers. |
+| Usage limits and cost controls | local | Account-bound token/USD ledger, pre-call reservations, per-user/global ceilings, and `GET /api/usage` are implemented locally; hosted proof and production price/credential configuration remain required before charging real customers. |
 | Production dependency audit | verified | `npm audit --omit=dev --json` reports zero production vulnerabilities; Railway's four audit findings are confined to build/dev dependencies. |
 
 ## Evidence labels

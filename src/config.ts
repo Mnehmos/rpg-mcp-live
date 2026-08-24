@@ -10,6 +10,15 @@ function readString(name: string, fallback = ""): string {
   return process.env[name]?.trim() || fallback;
 }
 
+function readNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function readInteger(name: string, fallback: number): number {
+  return Math.floor(readNumber(name, fallback));
+}
+
 function readCsv(name: string, fallback: string[]): string[] {
   const value = readString(name);
   if (!value) return fallback;
@@ -103,6 +112,31 @@ export const config = Object.freeze({
   openRouterMaxTokens,
   openRouterSiteUrl,
   openRouterAppName,
+  llmUsage: {
+    // These defaults are intentionally conservative for a $5 Player Pass:
+    // $2/user/month is the hard application ceiling before Stripe, while the
+    // deployment-wide brake prevents an unexpected sign-up spike from
+    // consuming the provider balance.
+    freeDailyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_DAILY_COST_USD", 0.05) * 1_000_000),
+    freeMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_MONTHLY_COST_USD", 0.25) * 1_000_000),
+    freeDailyPromptTokens: readInteger("LLM_USAGE_FREE_DAILY_PROMPT_TOKENS", 125_000),
+    freeDailyCompletionTokens: readInteger("LLM_USAGE_FREE_DAILY_COMPLETION_TOKENS", 25_000),
+    freeMonthlyPromptTokens: readInteger("LLM_USAGE_FREE_MONTHLY_PROMPT_TOKENS", 500_000),
+    freeMonthlyCompletionTokens: readInteger("LLM_USAGE_FREE_MONTHLY_COMPLETION_TOKENS", 100_000),
+    playerDailyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_DAILY_COST_USD", 0.25) * 1_000_000),
+    playerMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_COST_USD", 2) * 1_000_000),
+    playerDailyPromptTokens: readInteger("LLM_USAGE_PLAYER_DAILY_PROMPT_TOKENS", 500_000),
+    playerDailyCompletionTokens: readInteger("LLM_USAGE_PLAYER_DAILY_COMPLETION_TOKENS", 125_000),
+    playerMonthlyPromptTokens: readInteger("LLM_USAGE_PLAYER_MONTHLY_PROMPT_TOKENS", 4_000_000),
+    playerMonthlyCompletionTokens: readInteger("LLM_USAGE_PLAYER_MONTHLY_COMPLETION_TOKENS", 1_000_000),
+    globalDailyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_DAILY_COST_USD", 5) * 1_000_000),
+    globalMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_MONTHLY_COST_USD", 25) * 1_000_000),
+    maxTurnCostMicros: Math.round(readNumber("LLM_USAGE_MAX_TURN_COST_USD", 0.1) * 1_000_000),
+    npcReserveCostMicros: Math.round(readNumber("LLM_USAGE_NPC_RESERVE_COST_USD", 0.02) * 1_000_000),
+    reservationTtlMs: readInteger("LLM_USAGE_RESERVATION_TTL_MS", 10 * 60 * 1000),
+    inputCostUsdPerMillion: readNumber("LLM_USAGE_INPUT_COST_USD_PER_MILLION", 0.2),
+    outputCostUsdPerMillion: readNumber("LLM_USAGE_OUTPUT_COST_USD_PER_MILLION", 1.2),
+  },
   referenceDmTimeoutMs,
   openRouterConfigured: Boolean(openRouterApiKey),
   referenceEngineUrl: referenceEngineUrl.replace(/\/$/, ""),

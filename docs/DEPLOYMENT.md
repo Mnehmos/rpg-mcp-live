@@ -90,10 +90,11 @@ Railway SSH access for the release audit uses the dedicated account key named `r
 
 ## Secret placement
 
-Reference engine only:
+Provider/engine services:
 
 - `RPG_MCP_TRANSPORT_TOKEN`;
-- `OPENROUTER_API_KEY`;
+- `OPENROUTER_API_KEY` on the web host for DM orchestration and on the
+  reference engine when agent-backed NPCs are enabled;
 - any provider-side usage/telemetry secret.
 
 Web only:
@@ -121,6 +122,12 @@ OPENROUTER_SITE_URL=https://rpg-mcp-live-production.up.railway.app
 OPENROUTER_FALLBACK_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_FALLBACK_MODEL=<reviewed fallback model, if enabled>
 OPENROUTER_FIRST_TOKEN_TIMEOUT_MS=8000
+LLM_USAGE_INPUT_COST_USD_PER_MILLION=0.20
+LLM_USAGE_OUTPUT_COST_USD_PER_MILLION=1.20
+LLM_USAGE_PLAYER_DAILY_COST_USD=0.25
+LLM_USAGE_PLAYER_MONTHLY_COST_USD=2.00
+LLM_USAGE_GLOBAL_DAILY_COST_USD=5.00
+LLM_USAGE_GLOBAL_MONTHLY_COST_USD=25.00
 CONTENT_ALLOWED_GAMESYSTEMS=5e-2014
 CONTENT_DEFAULT_BASE_DOCUMENT=srd-2014
 CONTENT_BASE_DOCUMENTS=srd-2014
@@ -138,6 +145,15 @@ REFERENCE_ENGINE_TIMEOUT_MS=30000
 ~~~
 
 `REFERENCE_ENGINE_TOKEN` is a secret (see Secret placement above) and is not shown in this baseline block.
+
+The web host records every OpenRouter DM completion and nested NPC-agent
+completion in its account-bound SQLite ledger. `GET /api/usage` returns the
+authenticated player's UTC daily/monthly prompt, completion, reasoning, total
+token, and USD totals plus remaining plan allowance. Reservations are created
+before provider calls so concurrent turns cannot bypass the per-user or
+deployment-wide ceilings. The defaults above assume the current Luna pricing;
+when the model or provider price changes, update the two input/output rate
+variables and review the subscription ceilings before launch.
 
 Do not broaden the document/license ceiling during the S8 migration. OGL rollout is a separate product/legal decision with its own attribution check.
 

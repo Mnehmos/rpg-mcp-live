@@ -33,7 +33,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, usage: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -1599,6 +1599,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
     var previousSessionId = state.session && state.session.id;
     if (payload && payload.state) state.engineState = payload.state;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "subscription")) state.subscription = payload.subscription;
+    if (payload && Object.prototype.hasOwnProperty.call(payload, "usage")) state.usage = payload.usage;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "engineBackend")) state.engineBackend = payload.engineBackend;
     state.session = session || null;
     if (session && session.id) writeActiveCampaignId(session.id);
@@ -1671,7 +1672,10 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       if (wasNearBottom) gameLog.scrollTop = gameLog.scrollHeight;
       gameLog.dataset.initialized = "true";
     }
-    $("#integration-state").textContent = state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY";
+    var usageLabel = state.usage && state.usage.monthly && state.usage.limits && state.usage.limits.monthly
+      ? " · $" + Number(state.usage.monthly.costUsd || 0).toFixed(4) + " / $" + Number(state.usage.limits.monthly.costUsd || 0).toFixed(2) + " · " + Number(state.usage.monthly.totalTokens || 0).toLocaleString() + " tokens this month"
+      : "";
+    $("#integration-state").textContent = (state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY") + usageLabel;
   }
 
   function escapeHtml(value) {
@@ -1930,6 +1934,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         state.characterOptionsLoading = null;
         state.setupRequired = false;
         state.subscription = null;
+        state.usage = null;
         clearActiveCampaignId();
         renderSession({ session: null, campaigns: [], setupRequired: false });
         setStatus("Sign in to begin your campaign", "auth");
@@ -2582,7 +2587,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         writeActiveCampaignId(campaignId);
         state.managerOpen = false;
         state.createMode = false;
-        renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription });
+        renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription, usage: result.data.usage });
         var pendingForCampaign = readPendingCommand(campaignId);
         if (pendingForCampaign && pendingForCampaign.status === "processing") {
           state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";

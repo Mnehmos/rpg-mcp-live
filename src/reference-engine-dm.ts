@@ -17,6 +17,14 @@ import type {
   EngineToolCallDisclosure,
   EngineToolDisclosure,
 } from "./engine-contracts.js";
+import {
+  estimateLlmTokens,
+  type LlmUsageActual,
+  type LlmUsageBucket,
+  type LlmUsageReservation,
+  type LlmUsageStore,
+  usdToMicros,
+} from "./llm-usage.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -85,6 +93,7 @@ export interface ReferenceTurnResult {
   toolDisclosure: EngineToolDisclosure | null;
   session: EngineSessionView;
   replayed: boolean;
+  turnUsage?: LlmUsageBucket;
 }
 
 interface ChatMessage {
@@ -100,6 +109,28 @@ interface ReferenceToolOutcome {
   stateChanging: boolean;
   payload: unknown;
   effectiveArguments: Record<string, unknown>;
+  usage?: LlmUsageActual;
+}
+
+interface ChatCompletionUsageEnvelope {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  completion_tokens_details?: { reasoning_tokens?: number };
+  cost?: number;
+  cost_details?: { upstream_inference_cost?: number };
+}
+
+interface ChatCompletionResult {
+  content: string | null;
+  tool_calls?: ChatMessage["tool_calls"];
+  usage?: LlmUsageActual;
+}
+
+interface DmUsageContext {
+  userId: string;
+  campaignId: string;
+  clientCommandId: string;
 }
 
 // Read-only actions are still useful context, but a successful read cannot
@@ -374,7 +405,10 @@ export class ReferenceDungeonMaster {
       baseUrl: string;
       model: string;
       timeoutMs: number;
+      reasoningEffort?: string;
+      maxTokens?: number;
       turnTimeoutMs?: number;
+      usage?: LlmUsageStore;
     }
   ) {}
 
@@ -517,7 +551,11 @@ export class ReferenceDungeonMaster {
       // budget immediately after a valid tool call.
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
-        const completion = await this.chatCompletion(messages, tools, deadlineAt);
+        const completion = await this.chatCompletion(messages, tools, deadlineAt, {
+          userId: accountId,
+          campaignId,
+          clientCommandId,
+        });
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
@@ -535,7 +573,18 @@ export class ReferenceDungeonMaster {
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
-              : await this.callRemoteTool(call.function.arguments, call.function.name, forcedArgs, fillOnlyArgs, knownCharacterIds, tenant, deadlineAt);
+              : await this.callRemoteTool(
+                accountId,
+                campaignId,
+                clientCommandId,
+                call.function.arguments,
+                call.function.name,
+                forcedArgs,
+                fillOnlyArgs,
+                knownCharacterIds,
+                tenant,
+                deadlineAt,
+              );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedToolCalls += 1;
           this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
@@ -588,6 +637,9 @@ export class ReferenceDungeonMaster {
         toolDisclosure,
         session: campaign,
         replayed: false,
+        ...(this.openRouter.usage
+          ? { turnUsage: this.openRouter.usage.getCommandUsage(accountId, campaignId, clientCommandId) }
+          : {}),
       };
       this.store.resolveReferenceCommand(accountId, campaignId, clientCommandId, result);
       return result;
@@ -625,6 +677,9 @@ export class ReferenceDungeonMaster {
   }
 
   private async callRemoteTool(
+    accountId: string,
+    campaignId: string,
+    clientCommandId: string,
     rawArguments: string,
     toolName: string,
     forcedArgs: Record<string, unknown>,
@@ -653,15 +708,45 @@ export class ReferenceDungeonMaster {
     if (deadlineAt !== null && remainingMs !== undefined && remainingMs <= 0) {
       throw new Error("The reference-engine DM turn deadline expired before the next tool call.");
     }
-    const result = await this.client.callTool(toolName, args, tenant, remainingMs);
-    collectCharacterIds(result.payload, knownCharacterIds);
+    const nestedAgentCall = toolName === "agent_manage" && args.action === "invoke";
+    let nestedReservation: LlmUsageReservation | null = null;
+    if (nestedAgentCall && this.openRouter.usage) {
+      const policy = this.openRouter.usage.getPolicy();
+      const estimatedPromptTokens = Math.ceil(estimateLlmTokens(args) * 1.25);
+      nestedReservation = this.openRouter.usage.reserve({
+        userId: accountId,
+        campaignId,
+        clientCommandId,
+        source: "npc_agent",
+        provider: "openrouter",
+        model: this.openRouter.model,
+        estimatedPromptTokens,
+        estimatedCompletionTokens: Math.max(1, Math.ceil(policy.npcReserveCostMicros / Math.max(0.01, policy.outputCostUsdPerMillion))),
+        estimatedCostMicros: policy.npcReserveCostMicros,
+      });
+    }
+    try {
+      const result = await this.client.callTool(toolName, args, tenant, remainingMs);
+      const usage = nestedAgentCall && nestedReservation
+        ? extractNestedAgentUsage(result.payload, this.openRouter.usage!, nestedReservation)
+        : undefined;
+      if (nestedReservation) {
+        if (usage) this.openRouter.usage!.settle(nestedReservation.id, usage);
+        else this.openRouter.usage!.release(nestedReservation.id);
+      }
+      collectCharacterIds(result.payload, knownCharacterIds);
       return {
         text: result.text || JSON.stringify(result.payload ?? {}),
         accepted: remoteResultAccepted(result.payload, result.isError),
         stateChanging: isStateChangingReferenceTool(toolName, args),
         payload: result.payload,
         effectiveArguments: args,
-    };
+        ...(usage ? { usage } : {}),
+      };
+    } catch (error) {
+      if (nestedReservation) this.openRouter.usage!.release(nestedReservation.id);
+      throw error;
+    }
   }
 
   private callDocketTool(
@@ -714,60 +799,173 @@ export class ReferenceDungeonMaster {
   private async chatCompletion(
     messages: ChatMessage[],
     tools: OpenRouterToolDefinition[],
-    deadlineAt: number | null = null
-  ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
+    deadlineAt: number | null = null,
+    usageContext?: DmUsageContext,
+  ): Promise<ChatCompletionResult> {
     try {
-      return await this.chatCompletionOnce(messages, tools, deadlineAt);
+      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext);
     } catch (error) {
       if (!(error instanceof EmptyCompletionError)) throw error;
       console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
-      return await this.chatCompletionOnce(messages, tools, deadlineAt);
+      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext);
     }
   }
 
   private async chatCompletionOnce(
     messages: ChatMessage[],
     tools: OpenRouterToolDefinition[],
-    deadlineAt: number | null = null
-  ): Promise<{ content: string | null; tool_calls?: ChatMessage["tool_calls"] }> {
+    deadlineAt: number | null = null,
+    usageContext?: DmUsageContext,
+  ): Promise<ChatCompletionResult> {
     const remainingMs = deadlineAt === null
       ? this.openRouter.timeoutMs
       : Math.min(this.openRouter.timeoutMs, deadlineAt - Date.now());
     if (remainingMs <= 0) throw new Error("The reference-engine DM turn deadline expired.");
-    const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.openRouter.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.openRouter.model,
-        messages,
-        tools,
-        tool_choice: "auto",
-      }),
-      signal: remainingMs > 0 ? AbortSignal.timeout(remainingMs) : undefined,
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`OpenRouter request failed with status ${response.status}: ${body.slice(0, 500)}`);
-    }
-    const data = (await response.json()) as {
-      id?: string;
-      choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] }; finish_reason?: string }>;
-      error?: { message?: string; code?: unknown };
+    const maxTokens = this.openRouter.maxTokens !== undefined
+      ? Math.max(1, Math.floor(this.openRouter.maxTokens))
+      : undefined;
+    const reasoningModel = /(?:gpt-5|o[1-9]|reasoning|luna)/i.test(this.openRouter.model);
+    const body: Record<string, unknown> = {
+      model: this.openRouter.model,
+      messages,
+      tools,
+      tool_choice: "auto",
+      ...(maxTokens === undefined ? {} : { [reasoningModel ? "max_completion_tokens" : "max_tokens"]: maxTokens }),
+      ...(reasoningModel && this.openRouter.reasoningEffort ? { reasoning_effort: this.openRouter.reasoningEffort } : {}),
     };
-    const message = data.choices?.[0]?.message;
-    if (!message) {
-      throw new EmptyCompletionError(
-        `id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} error=${JSON.stringify(data.error ?? null)}`
-      );
+    const usageStore = this.openRouter.usage;
+    const reservation = usageStore && usageContext
+      ? usageStore.reserve({
+        userId: usageContext.userId,
+        campaignId: usageContext.campaignId,
+        clientCommandId: usageContext.clientCommandId,
+        source: "dm",
+        provider: "openrouter",
+        model: this.openRouter.model,
+        estimatedPromptTokens: Math.ceil(estimateLlmTokens(messages) * 1.25),
+        estimatedCompletionTokens: maxTokens ?? 900,
+        estimatedCostMicros: usageStore.estimateCostMicros(Math.ceil(estimateLlmTokens(messages) * 1.25), maxTokens ?? 900),
+      })
+      : null;
+    try {
+      const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.openRouter.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: remainingMs > 0 ? AbortSignal.timeout(remainingMs) : undefined,
+      });
+      if (!response.ok) {
+        const responseBody = await response.text().catch(() => "");
+        throw new Error(`OpenRouter request failed with status ${response.status}: ${responseBody.slice(0, 500)}`);
+      }
+      const data = (await response.json()) as {
+        id?: string;
+        choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] }; finish_reason?: string }>;
+        usage?: ChatCompletionUsageEnvelope;
+        error?: { message?: string; code?: unknown };
+      };
+      const message = data.choices?.[0]?.message;
+      const actualUsage = reservation
+        ? buildCompletionUsage(data, message, usageStore!, reservation, this.openRouter.model)
+        : undefined;
+      if (reservation && actualUsage) usageStore!.settle(reservation.id, actualUsage);
+      if (!message) {
+        throw new EmptyCompletionError(
+          `id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} error=${JSON.stringify(data.error ?? null)}`
+        );
+      }
+      return { content: message.content ?? null, tool_calls: message.tool_calls, ...(actualUsage ? { usage: actualUsage } : {}) };
+    } catch (error) {
+      if (reservation) usageStore!.release(reservation.id);
+      throw error;
     }
-    return { content: message.content ?? null, tool_calls: message.tool_calls };
   }
 }
 
 class EmptyCompletionError extends Error {}
+
+function buildCompletionUsage(
+  data: {
+    id?: string;
+    choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] } }>;
+    usage?: ChatCompletionUsageEnvelope;
+  },
+  message: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] } | undefined,
+  usageStore: LlmUsageStore,
+  reservation: LlmUsageReservation,
+  model: string,
+): LlmUsageActual {
+  const envelope = data.usage ?? {};
+  const promptTokens = nonnegativeTokenCount(envelope.prompt_tokens) || reservation.estimatedPromptTokens;
+  const completionTokens = nonnegativeTokenCount(envelope.completion_tokens)
+    || estimateLlmTokens({ content: message?.content ?? null, tool_calls: message?.tool_calls ?? [] });
+  const reasoningTokens = nonnegativeTokenCount(envelope.completion_tokens_details?.reasoning_tokens);
+  const totalTokens = nonnegativeTokenCount(envelope.total_tokens) || promptTokens + completionTokens;
+  let costMicros: number;
+  let costSource: LlmUsageActual["costSource"];
+  if (typeof envelope.cost === "number" && Number.isFinite(envelope.cost)) {
+    costMicros = usdToMicros(envelope.cost);
+    costSource = "provider";
+  } else if (typeof envelope.cost_details?.upstream_inference_cost === "number"
+    && Number.isFinite(envelope.cost_details.upstream_inference_cost)) {
+    costMicros = usdToMicros(envelope.cost_details.upstream_inference_cost);
+    costSource = "provider_upstream";
+  } else {
+    costMicros = usageStore.estimateCostMicros(promptTokens, completionTokens);
+    costSource = "estimated";
+  }
+  return {
+    provider: "openrouter",
+    model,
+    providerRequestId: data.id ?? null,
+    promptTokens,
+    completionTokens,
+    reasoningTokens,
+    totalTokens,
+    costMicros,
+    costSource,
+  };
+}
+
+function extractNestedAgentUsage(
+  payload: unknown,
+  usageStore: LlmUsageStore,
+  reservation: LlmUsageReservation,
+): LlmUsageActual | null {
+  const record = recordValue(payload);
+  const nested = recordValue(record.data);
+  const source = Object.keys(nested).length > 0 ? nested : record;
+  const promptTokens = nonnegativeTokenCount(source.promptTokens);
+  const completionTokens = nonnegativeTokenCount(source.completionTokens);
+  const totalTokens = nonnegativeTokenCount(source.totalTokens) || promptTokens + completionTokens;
+  const hasUsage = promptTokens > 0 || completionTokens > 0 || typeof source.costUsd === "number";
+  if (!hasUsage) return null;
+  const costUsd = typeof source.costUsd === "number" && Number.isFinite(source.costUsd) ? source.costUsd : null;
+  const accountedPromptTokens = promptTokens || reservation.estimatedPromptTokens;
+  const accountedCompletionTokens = completionTokens || reservation.estimatedCompletionTokens;
+  return {
+    provider: typeof source.provider === "string" ? source.provider : "openrouter",
+    model: typeof source.model === "string" ? source.model : "unknown-agent-model",
+    providerRequestId: typeof source.callId === "string" ? source.callId : null,
+    promptTokens: accountedPromptTokens,
+    completionTokens: accountedCompletionTokens,
+    reasoningTokens: nonnegativeTokenCount(source.reasoningTokens),
+    totalTokens: totalTokens || accountedPromptTokens + accountedCompletionTokens,
+    costMicros: costUsd === null
+      ? usageStore.estimateCostMicros(accountedPromptTokens, accountedCompletionTokens)
+      : usdToMicros(costUsd),
+    costSource: source.costSource === "provider" || source.costSource === "provider_upstream"
+      ? source.costSource
+      : "estimated",
+  };
+}
+
+function nonnegativeTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0;
+}
 
 const ABILITY_ORDER: EngineAbility[] = ["str", "dex", "con", "int", "wis", "cha"];
 
