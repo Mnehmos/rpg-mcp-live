@@ -32,6 +32,13 @@ describe("content security policy", () => {
     expect(directive(policy, "connect-src")).toContain(CLERK);
   });
 
+  it("allows the player table's hosted brand fonts", () => {
+    const policy = contentSecurityPolicy(CLERK);
+
+    expect(directive(policy, "style-src")).toContain("https://fonts.googleapis.com");
+    expect(directive(policy, "font-src")).toContain("https://fonts.gstatic.com");
+  });
+
   it("still allows Stripe to render its checkout frame", () => {
     expect(directive(contentSecurityPolicy(CLERK), "frame-src")).toContain("https://*.stripe.com");
   });

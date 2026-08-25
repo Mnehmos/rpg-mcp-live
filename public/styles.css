@@ -911,4 +911,5 @@ h1 i { color: var(--amber); font-style: italic; }
   .play-app .hero { padding-top: 34px; padding-bottom: 26px; }
   .play-app .membership { grid-template-columns: 1fr; gap: 24px; }
   .play-app .play-section { padding-top: 34px; }
+  .play-app .game-shell { grid-template-columns: 1fr; }
 }
