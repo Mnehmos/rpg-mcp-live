@@ -765,42 +765,69 @@ h1 i { color: var(--amber); font-style: italic; }
 /* Quest Keeper AI launch surface: use the marketing site's neon language while
    keeping the player table quieter, denser, and easier to scan. */
 .play-app {
-  --ink: #e9f7ff;
-  --muted: #9bb5c8;
-  --faint: #637d94;
-  --line: rgba(0, 229, 255, .18);
-  --line-strong: rgba(0, 229, 255, .42);
-  --night: #070b18;
-  --panel: #0b1021;
-  --panel-light: #11162b;
-  --amber: #00e5ff;
-  --amber-bright: #b6a0ff;
-  --mint: #61f2c6;
-  --danger: #ff7891;
+  --ink: #e0e0e0;
+  --muted: #6b7280;
+  --faint: #4b5563;
+  --line: rgba(0, 255, 255, .3);
+  --line-strong: rgba(0, 255, 255, .7);
+  --night: #050508;
+  --panel: #111118;
+  --panel-light: #1a1a25;
+  --amber: #00ffff;
+  --amber-bright: #00ff00;
+  --mint: #00ff88;
+  --danger: #ff006e;
+  --warm-accent: #ff9500;
   font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   background:
-    radial-gradient(circle at 15% 0%, rgba(0, 229, 255, .08), transparent 32rem),
-    radial-gradient(circle at 90% 10%, rgba(124, 92, 255, .11), transparent 34rem),
-    var(--night);
+    radial-gradient(circle at 50% 50%, #1f1f2e 0%, #0f0520 50%, var(--night) 100%);
+  background-size: 200% 200%;
+  animation: play-gradient-move 20s ease infinite;
 }
+@keyframes play-gradient-move {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+.play-app::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, .15), rgba(0, 0, 0, .15) 1px, transparent 1px, transparent 2px);
+  z-index: 9999;
+  animation: play-scanline 8s linear infinite;
+}
+.play-app::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(0, 255, 255, .03) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 255, 255, .03) 1px, transparent 1px);
+  background-size: 50px 50px;
+  z-index: 1;
+}
+@keyframes play-scanline {
+  from { transform: translateY(0); }
+  to { transform: translateY(10px); }
+}
+.play-app > * { position: relative; z-index: 2; }
 .play-app h1,
 .play-app h2,
 .play-app h3,
-.play-app .log-entry,
-.play-app .hero-lede,
-.play-app .section-lede,
-.play-app .scene-panel h3,
-.play-app .table-header h3,
-.play-app .character-heading strong,
-.play-app .tutorial-card .markdown-body,
 .play-app .markdown-body h1,
 .play-app .markdown-body h2,
 .play-app .markdown-body h3,
 .play-app .markdown-body h4,
 .play-app .markdown-body h5,
 .play-app .markdown-body h6 {
-  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--amber);
+  font-family: "Share Tech Mono", "IBM Plex Mono", monospace;
+  text-shadow: 0 0 10px var(--amber);
 }
+.play-app .log-entry,
+.play-app .hero-lede,
+.play-app .section-lede,
+.play-app .tutorial-card .markdown-body { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .play-app .grain { opacity: .055; }
 .play-app .site-header { border-bottom-color: rgba(0, 229, 255, .25); }
 .play-app .brand,
@@ -828,14 +855,21 @@ h1 i { color: var(--amber); font-style: italic; }
 .play-app .action-button span {
   color: var(--amber);
 }
-.play-app .button-primary {
-  background: linear-gradient(110deg, #00d9e9, #8b78ff);
-  color: #050811;
-  box-shadow: 0 0 24px rgba(0, 229, 255, .15);
+.play-app .button {
+  border-width: 2px;
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  font-family: "Share Tech Mono", "IBM Plex Mono", monospace;
 }
-.play-app .button-primary:hover { background: linear-gradient(110deg, #72f7ff, #b6a0ff); }
-.play-app .button-quiet { border-color: var(--line-strong); }
-.play-app .button-quiet:hover { border-color: var(--amber); color: var(--ink); }
+.play-app .button-primary {
+  background: transparent;
+  border-color: var(--amber);
+  color: var(--amber);
+  box-shadow: none;
+}
+.play-app .button-primary:hover { background: var(--amber); color: var(--night); box-shadow: 0 0 20px var(--amber); }
+.play-app .button-quiet { border-color: var(--mint); color: var(--mint); }
+.play-app .button-quiet:hover { background: var(--mint); border-color: var(--mint); color: var(--night); box-shadow: 0 0 20px var(--mint); }
 .play-app .hero {
   grid-template-columns: 1fr;
   min-height: 0;
@@ -881,7 +915,7 @@ h1 i { color: var(--amber); font-style: italic; }
   background: radial-gradient(circle at 50% 54%, rgba(0, 229, 255, .2), transparent 28%), linear-gradient(145deg, #111a36, #070b18);
 }
 .play-app .scene-illustration::before { border-color: rgba(0, 229, 255, .38); }
-.play-app .scene-illustration::after { background: linear-gradient(90deg, transparent, rgba(182, 160, 255, .5), transparent); }
+.play-app .scene-illustration::after { background: linear-gradient(90deg, transparent, rgba(0, 255, 136, .5), transparent); }
 .play-app .world-pulse { color: var(--amber-bright); text-shadow: 0 0 28px rgba(0, 229, 255, .7); }
 .play-app .player-sheet,
 .play-app .onboarding-panel,
@@ -897,14 +931,15 @@ h1 i { color: var(--amber); font-style: italic; }
 .play-app .log-entry { border-color: rgba(0, 229, 255, .15); background: rgba(14, 19, 41, .72); }
 .play-app .log-entry.player { border-color: rgba(97, 242, 198, .3); background: rgba(97, 242, 198, .07); }
 .play-app .log-entry.roll,
-.play-app .log-entry.tool { border-color: rgba(182, 160, 255, .3); background: rgba(124, 92, 255, .08); }
+.play-app .log-entry.tool { border-color: rgba(255, 0, 255, .3); background: rgba(255, 0, 255, .08); }
+.play-app .log-entry.roll { color: var(--warm-accent); border-color: rgba(255, 149, 0, .3); background: rgba(255, 149, 0, .08); }
 .play-app .dm-response { border-color: rgba(0, 229, 255, .3); box-shadow: inset 2px 0 var(--amber); }
 .play-app .chat-input-row textarea { background: #070b18; border-color: var(--line-strong); font-family: "IBM Plex Mono", monospace; }
 .play-app .chat-input-row textarea:focus { outline-color: var(--amber); }
 .play-app .action-button:hover { border-color: var(--amber); background: rgba(0, 229, 255, .06); }
 .play-app .action-button-roll { color: var(--amber-bright); }
 .play-app .auth-dialog { background: #0d1327; border-color: var(--line-strong); }
-.play-app .toast { background: linear-gradient(110deg, #00d9e9, #8b78ff); color: #050811; }
+.play-app .toast { background: var(--amber); color: var(--night); }
 .play-app .site-footer { border-top-color: var(--line); }
 
 @media (max-width: 860px) {
