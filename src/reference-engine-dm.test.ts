@@ -1489,6 +1489,56 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("repeats rejection recovery when the repair call is rejected too", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-double-rejection-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "combat_action.attack": () => ({ error: "Encounter is not active; no damage was applied." }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["combat_action"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      call += 1;
+      requestBodies.push(JSON.parse(init.body));
+      if (call === 1 || call === 2) {
+        return openRouterMessage(null, [{
+          id: `rejected-attack-${call}`,
+          type: "function",
+          function: {
+            name: "combat_action",
+            arguments: JSON.stringify({ action: "attack", targetId: "enemy-1" }),
+          },
+        }]);
+      }
+      if (call === 3) return openRouterMessage("Your sword strikes home, tearing away 8 hit points.");
+      return openRouterMessage("The second strike skitters off the ward; the enemy remains untouched.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I strike the enemy.");
+
+    expect(call).toBe(4);
+    expect(result.narration.text).toBe("The second strike skitters off the ward; the enemy remains untouched.");
+    expect(result.narration.text).not.toContain("8 hit points");
+    expect(result.toolDisclosure?.calls).toHaveLength(2);
+    expect(result.toolDisclosure?.calls.every((tool) => tool.accepted === false)).toBe(true);
+    expect(requestBodies[3]?.messages.at(-1)).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("state-changing RPG MCP call was rejected"),
+    });
+    gameStore.close();
+  });
+
   it("read_docket can read back the secrets docket for the model's own context", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));

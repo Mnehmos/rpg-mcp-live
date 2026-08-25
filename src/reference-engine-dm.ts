@@ -558,7 +558,7 @@ export class ReferenceDungeonMaster {
     const disclosedToolCalls: EngineToolCallDisclosure[] = [];
     let acceptedToolCalls = 0;
     const rejectedStateChangingCallNames = new Set<string>();
-    let rejectionRecoveryAttempts = 0;
+    let rejectionRecoveryPending = false;
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
       ? Date.now() + this.openRouter.turnTimeoutMs
@@ -693,8 +693,8 @@ export class ReferenceDungeonMaster {
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
-          if (rejectedStateChangingCallNames.size > 0 && rejectionRecoveryAttempts < 1) {
-            rejectionRecoveryAttempts += 1;
+          if (rejectionRecoveryPending) {
+            rejectionRecoveryPending = false;
             messages.push({
               role: "system",
               content: [
@@ -743,6 +743,7 @@ export class ReferenceDungeonMaster {
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedToolCalls += 1;
           if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
             rejectedStateChangingCallNames.add(call.function.name);
+            rejectionRecoveryPending = true;
           }
           this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
