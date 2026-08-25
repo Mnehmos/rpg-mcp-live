@@ -10,6 +10,7 @@ import {
   ReferenceDmProviderUnavailableError,
   ReferenceDungeonMaster,
   REFERENCE_DM_SYSTEM_PROMPT,
+  buildAuthoritativeActionRoutingHint,
   hasAuthoritativeActionIntent,
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
@@ -1736,6 +1737,16 @@ describe("reference DM scene authoring contract", () => {
     expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
     expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
     expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
+  });
+
+  it("prioritizes material commitment before an optional social clause", () => {
+    const hint = buildAuthoritativeActionRoutingHint(
+      "I pick up the bronze disc, turn it over in the torchlight, and tuck it safely into my pouch before asking Iven what he recognizes."
+    );
+    expect(hint).toContain("Commit the material action before any optional social response");
+    expect(hint).toContain("item_manage");
+    expect(hint).toContain("inventory_manage");
+    expect(hint).toContain("interact with that NPC only after the possession result succeeds");
   });
 
   it("makes creative scene authoring and MCP commitment explicit", () => {
