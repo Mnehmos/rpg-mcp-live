@@ -948,3 +948,87 @@ h1 i { color: var(--amber); font-style: italic; }
   .play-app .play-section { padding-top: 34px; }
   .play-app .game-shell { grid-template-columns: 1fr; }
 }
+
+/* Keep the table itself bounded. Long dossiers and authored histories scroll in
+   their own surfaces so the composer and current turn stay reachable. */
+@media (min-width: 861px) {
+  .play-app .game-shell {
+    height: clamp(620px, calc(100vh - 144px), 760px);
+    min-height: 0;
+    max-height: 760px;
+  }
+
+  .play-app .player-panel {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .play-app .table-panel {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .play-app .game-log {
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+}
+
+@media (max-width: 860px) {
+  .play-app .game-shell {
+    min-height: 0;
+  }
+
+  .play-app .player-panel {
+    max-height: min(58vh, 520px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .play-app .table-panel {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .play-app .game-log {
+    min-height: 240px;
+    max-height: min(50vh, 420px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+}
+
+@media (max-width: 480px) {
+  .play-app .player-panel {
+    max-height: min(52vh, 440px);
+  }
+
+  .play-app .game-log {
+    min-height: 220px;
+    max-height: min(46vh, 360px);
+  }
+
+  .play-app .chat-input-row {
+    flex-direction: column;
+  }
+
+  .play-app .chat-submit {
+    width: 100%;
+    min-height: 48px;
+  }
+
+  .play-app .action-row {
+    grid-template-columns: 1fr;
+  }
+
+  .play-app .action-button {
+    min-height: 58px;
+  }
+}
