@@ -935,6 +935,10 @@ describe("ReferenceDungeonMaster", () => {
     );
     expect(sheetMessage?.content).toContain("STR +5 (proficient)");
     expect(sheetMessage?.content).toContain("CON +4 (proficient)");
+    const stateMessage = firstMessages.find(
+      (message) => message.role === "system" && message.content?.startsWith("CURRENT AUTHORITATIVE ENGINE PROJECTION")
+    );
+    expect(stateMessage?.content).toContain("An item not listed is not possessed");
   });
 
   it("includes prior player and narration messages in the next model request", async () => {
