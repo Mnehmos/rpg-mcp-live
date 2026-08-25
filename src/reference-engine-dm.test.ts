@@ -165,11 +165,15 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(requestBodies[0]?.tools.map((tool) => tool.function.name)).toEqual([
       "activate_tools",
+      "combat_action",
+      "spatial_manage",
+      "npc_manage",
       "read_docket",
       "write_docket",
     ]);
     expect(requestBodies[1]?.tools.map((tool) => tool.function.name)).toEqual([
       "activate_tools",
+      "combat_action",
       "spatial_manage",
       "npc_manage",
       "read_docket",
@@ -184,6 +188,63 @@ describe("ReferenceDungeonMaster", () => {
     )).toBe(true);
     expect(result.toolDisclosure).toBeNull();
     expect(result.turnUsage).toMatchObject({ calls: 2, totalTokens: 220, costMicros: 2 });
+    gameStore.close();
+  });
+
+  it("makes the stable authoring palette available without an activation-only round", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-core-palette-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "inventory_manage.use": () => ({ success: true, actionType: "use", lightSource: { active: true } }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["inventory_manage", "spatial_manage", "scene_manage", "quest_manage"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+      },
+    );
+    let requestCount = 0;
+    let firstTools: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestCount += 1;
+      const body = JSON.parse(init.body) as { tools: Array<{ function: { name: string } }> };
+      firstTools = body.tools.map((tool) => tool.function.name);
+      if (requestCount === 1) {
+        return openRouterMessage(null, [{
+          id: "use-torch",
+          type: "function",
+          function: {
+            name: "inventory_manage",
+            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The torch flares and pushes back the dark.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
+
+    expect(firstTools).toEqual([
+      "activate_tools",
+      "inventory_manage",
+      "spatial_manage",
+      "scene_manage",
+      "quest_manage",
+      "read_docket",
+      "write_docket",
+    ]);
+    expect(requestCount).toBe(2);
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
     gameStore.close();
   });
 
@@ -1377,6 +1438,55 @@ describe("ReferenceDungeonMaster", () => {
       arguments: { name: "rumors", content: "A false lead." },
       result: expect.stringContaining("Unknown docket name"),
     });
+  });
+
+  it("does not publish a damaging narration immediately after a rejected combat call", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-rejected-combat-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "combat_action.attack": () => ({ error: "Encounter is not active; no damage was applied." }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["combat_action"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      call += 1;
+      requestBodies.push(JSON.parse(init.body));
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "rejected-attack",
+          type: "function",
+          function: {
+            name: "combat_action",
+            arguments: JSON.stringify({ action: "attack", targetId: "enemy-1" }),
+          },
+        }]);
+      }
+      if (call === 2) return openRouterMessage("Your sword strikes home, tearing away 8 hit points.");
+      return openRouterMessage("The blade skitters off the ward; the enemy remains untouched.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I strike the enemy.");
+
+    expect(call).toBe(3);
+    expect(result.narration.text).toBe("The blade skitters off the ward; the enemy remains untouched.");
+    expect(result.narration.text).not.toContain("8 hit points");
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "combat_action", accepted: false });
+    expect(requestBodies[2]?.messages.at(-1)).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("state-changing RPG MCP call was rejected"),
+    });
+    gameStore.close();
   });
 
   it("read_docket can read back the secrets docket for the model's own context", async () => {
