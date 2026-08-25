@@ -92,6 +92,10 @@ h1 i { color: var(--amber); font-style: italic; }
   .site-header { min-height: 70px; }.button { min-height: 43px; }.hero { padding-top: 55px; }.hero-actions { align-items: start; flex-direction: column; gap: 18px; }.hero-art { height: 330px; }.art-caption { flex-direction: column; gap: 7px; }.play-heading h2 { font-size: 42px; }.table-header, .game-log, .chat-composer, .action-row, .table-footer { padding-left: 18px; padding-right: 18px; }.table-header { gap: 10px; }.player-pill { font-size: 8px; }.chat-input-row { flex-direction: column; }.chat-submit { min-height: 46px; }.action-button { min-height: 66px; }.auth-dialog { padding: 26px 22px; }
 }
 
+@media (max-width: 480px) {
+  .site-header .top-nav .button { display: none; }
+}
+
 /* The play surface is a cockpit: context on the left, conversation in the middle, action at the bottom. */
 :root { --danger: #d8897e; }
 .play-section { padding-top: 82px; padding-bottom: 116px; }

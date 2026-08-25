@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const page = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 const favicon = readFileSync(new URL("./favicon.svg", import.meta.url), "utf8");
+const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
 describe("player-facing branding", () => {
   it("uses Quest Keeper AI in the page chrome", () => {
@@ -16,5 +17,10 @@ describe("player-facing branding", () => {
   it("uses Quest Keeper AI in the favicon accessibility label", () => {
     expect(favicon).toContain('aria-label="Quest Keeper AI"');
     expect(favicon).not.toContain("Lantern Table");
+  });
+
+  it("keeps the compact mobile header from colliding with the brand", () => {
+    expect(styles).toContain("@media (max-width: 480px)");
+    expect(styles).toContain(".site-header .top-nav .button { display: none; }");
   });
 });
