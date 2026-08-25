@@ -25,6 +25,7 @@ import {
   type EngineInventoryItem,
   type EngineItemKind,
   type EngineNote,
+  type EnginePartyState,
   type EngineSessionView,
   type EngineToolCallRequest,
   type EngineToolResult,
@@ -148,6 +149,21 @@ interface ReferenceInventoryEntry {
   slot?: string;
 }
 
+interface ReferencePartyMemberRecord {
+  characterId?: unknown;
+  role?: unknown;
+  joinedAt?: unknown;
+}
+
+interface ReferencePartyRecord {
+  id?: unknown;
+  currentLocation?: unknown;
+  currentPOI?: unknown;
+  members?: unknown;
+  leader?: unknown;
+  activeCharacter?: unknown;
+}
+
 const REFERENCE_EQUIPMENT_SLOTS = new Set<NonNullable<EngineInventoryItem["slot"]>>([
   "mainhand", "offhand", "armor", "head", "feet", "accessory",
 ]);
@@ -231,6 +247,89 @@ function mapReferenceQuests(entries: unknown): import("./engine-contracts.js").E
       progress,
     }];
   });
+}
+
+/**
+ * The reference engine owns party membership, while the web app still emits
+ * Lantern's session-view contract. Project the authoritative party roster at
+ * read time so NPC companions survive refreshes and new browser sessions.
+ */
+function mapReferenceParty(
+  payload: unknown,
+  state: LanternCampaignState,
+  routing: ReferenceEngineRouting,
+): EnginePartyState | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const rawPayload = payload as Record<string, unknown>;
+  const partyValue = rawPayload.party && typeof rawPayload.party === "object" && !Array.isArray(rawPayload.party)
+    ? rawPayload.party
+    : rawPayload;
+  const party = partyValue as ReferencePartyRecord;
+  const id = typeof party.id === "string" ? party.id : routing.referencePartyId;
+  if (!id || !Array.isArray(party.members)) return null;
+
+  const rawMembers = party.members
+    .filter((member): member is ReferencePartyMemberRecord => Boolean(member && typeof member === "object" && !Array.isArray(member)))
+    .map((member) => ({
+      characterId: typeof member.characterId === "string" ? member.characterId : null,
+      role: member.role === "leader" ? "leader" as const : "companion" as const,
+      joinedAt: typeof member.joinedAt === "string" ? member.joinedAt : null,
+    }))
+    .filter((member): member is { characterId: string; role: "leader" | "companion"; joinedAt: string | null } => Boolean(member.characterId));
+  if (rawMembers.length === 0) return null;
+
+  const leaderValue = party.leader && typeof party.leader === "object" && !Array.isArray(party.leader)
+    ? party.leader as ReferencePartyMemberRecord
+    : null;
+  const activeValue = party.activeCharacter && typeof party.activeCharacter === "object" && !Array.isArray(party.activeCharacter)
+    ? party.activeCharacter as ReferencePartyMemberRecord
+    : null;
+  const leaderActorId = typeof leaderValue?.characterId === "string"
+    ? leaderValue.characterId
+    : rawMembers.find((member) => member.role === "leader")?.characterId
+      ?? routing.referenceCharacterId
+      ?? rawMembers[0]!.characterId;
+  const activeViewpointActorId = typeof activeValue?.characterId === "string"
+    ? activeValue.characterId
+    : leaderActorId;
+  const locationRef = typeof party.currentPOI === "string" && party.currentPOI
+    ? party.currentPOI
+    : typeof party.currentLocation === "string" && party.currentLocation
+      ? party.currentLocation
+      : `party:${id}`;
+  const controllerActorId = routing.referenceCharacterId ?? leaderActorId;
+
+  return {
+    id,
+    leaderActorId,
+    activeViewpointActorId,
+    mode: "together",
+    members: rawMembers.map((member) => ({
+      actorId: member.characterId,
+      role: member.role,
+      controllerActorId,
+      sceneId: locationRef,
+      locationRef,
+      joinedAtVersion: routing.version,
+    })),
+    shared: {
+      questIds: state.quests.map((quest) => quest.id),
+      // The reference party schema has no shared-wallet field. Do not expose
+      // the leader's personal currency as if it were a party balance.
+      currency: { copper: 0 },
+      container: {
+        id: `${id}:shared`,
+        name: "Shared party container",
+        inventory: [],
+      },
+    },
+    rewardAllocation: "leader-only",
+    consent: {
+      mode: "single-controller-future-member-seam",
+      permanentChoiceRequires: "leader-confirmation",
+    },
+    revision: routing.version,
+  };
 }
 
 /**
@@ -1042,6 +1141,27 @@ export class ReferenceEngineAdapter {
       } catch {
         // Keep the shell's starter quest only when the authoritative quest log
         // cannot be read; never synthesize authored quests from narration.
+      }
+
+      // Party membership is authoritative in the reference engine too. It is
+      // intentionally read independently of the quest log: a stale or
+      // unavailable quest projection must not erase a companion roster from
+      // the session view. This also makes party state durable across refresh
+      // and fresh-browser hydration instead of relying on the last DM reply.
+      if (routing.referencePartyId) {
+        try {
+          const partyResult = await this.client.callTool("party_manage", {
+            action: "get",
+            partyId: routing.referencePartyId,
+          }, this.tenantFor(accountId, campaignId, routing));
+          if (!partyResult.isError) {
+            const party = mapReferenceParty(partyResult.payload, state, routing);
+            if (party) state.party = party;
+          }
+        } catch {
+          // Keep the rest of the campaign readable if the optional party
+          // projection is temporarily unavailable.
+        }
       }
     }
 

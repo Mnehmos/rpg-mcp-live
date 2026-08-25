@@ -167,15 +167,12 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(requestBodies[0]?.tools.map((tool) => tool.function.name)).toEqual([
       "activate_tools",
-      "combat_action",
       "spatial_manage",
-      "npc_manage",
       "read_docket",
       "write_docket",
     ]);
     expect(requestBodies[1]?.tools.map((tool) => tool.function.name)).toEqual([
       "activate_tools",
-      "combat_action",
       "spatial_manage",
       "npc_manage",
       "read_docket",
@@ -243,7 +240,6 @@ describe("ReferenceDungeonMaster", () => {
       "inventory_manage",
       "spatial_manage",
       "scene_manage",
-      "quest_manage",
       "read_docket",
       "write_docket",
     ]);
@@ -1393,10 +1389,15 @@ describe("ReferenceDungeonMaster", () => {
     const fetchMock = vi.fn(async () => Response.json({ id: "gen-x", choices: [] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.")).rejects.toThrow(
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.", {
+      clientCommandId: "00000000-0000-4000-8000-000000000001",
+      expectedCampaignVersion: 0,
+    })).rejects.toThrow(
       ReferenceDmProviderUnavailableError
     );
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(store.getReferenceCommand("account-1", "campaign-1", "00000000-0000-4000-8000-000000000001"))
+      .toMatchObject({ failure: { providerCalls: 2, phase: "tool_loop" } });
   });
 
   it("throws ReferenceDmProviderUnavailableError if no narration is produced within the round budget", async () => {

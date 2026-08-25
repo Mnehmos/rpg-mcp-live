@@ -306,7 +306,14 @@ async function sendCampaignCommand(
           correlationId: error.details.correlationId,
           commitStatus: error.details.commitStatus,
           retryable: error.details.commitStatus === "not_committed",
+          providerCalls: error.details.providerCalls ?? 0,
+          toolRounds: error.details.toolRounds,
+          activatedTools: error.details.activatedTools ?? [],
+          toolCallNames: error.details.toolCallNames,
+          acceptedToolCalls: error.details.acceptedToolCalls,
+          rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
         } : {}),
+        usage: llmUsageStore.getCommandUsage(userId, campaignId, parsed.data.clientCommandId),
       });
       return;
     }
@@ -332,9 +339,12 @@ async function sendCampaignCommand(
         correlationId: error.details.correlationId,
         commitStatus: error.details.commitStatus,
         phase: error.details.phase,
+        providerCalls: error.details.providerCalls ?? 0,
         toolRounds: error.details.toolRounds,
+        activatedTools: error.details.activatedTools ?? [],
         toolCallNames: error.details.toolCallNames,
         acceptedToolCalls: error.details.acceptedToolCalls,
+        rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
       }));
       response.status(502).json({
         code: "reference_dm_unavailable",
@@ -344,6 +354,13 @@ async function sendCampaignCommand(
         correlationId: error.details.correlationId,
         commitStatus: error.details.commitStatus,
         retryable: error.details.commitStatus === "not_committed",
+        providerCalls: error.details.providerCalls ?? 0,
+        toolRounds: error.details.toolRounds,
+        activatedTools: error.details.activatedTools ?? [],
+        toolCallNames: error.details.toolCallNames,
+        acceptedToolCalls: error.details.acceptedToolCalls,
+        rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
+        usage: llmUsageStore.getCommandUsage(userId, campaignId, parsed.data.clientCommandId),
       });
       return;
     }
@@ -651,7 +668,14 @@ app.get("/api/campaigns/:campaignId/commands/:clientCommandId", async (request, 
         error: command.failure.commitStatus === "not_committed"
           ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
           : "The server could not prove whether this turn committed; refresh the table before continuing.",
+        providerCalls: command.failure.providerCalls ?? 0,
+        toolRounds: command.failure.toolRounds,
+        activatedTools: command.failure.activatedTools ?? [],
+        toolCallNames: command.failure.toolCallNames,
+        acceptedToolCalls: command.failure.acceptedToolCalls,
+        rejectedToolCalls: command.failure.rejectedToolCalls ?? 0,
       } : {}),
+      usage: llmUsageStore.getCommandUsage(userId, command.campaignId, command.clientCommandId),
       createdAt: command.createdAt,
       updatedAt: command.updatedAt,
     });

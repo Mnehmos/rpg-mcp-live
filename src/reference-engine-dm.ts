@@ -414,18 +414,11 @@ const DOCKET_TOOLS: OpenRouterToolDefinition[] = [
 ];
 
 const ACTIVATE_TOOLS_NAME = "activate_tools";
-const CORE_TOOL_PALETTE = [
+const BASE_TOOL_PALETTE = [
   "spatial_manage",
   "scene_manage",
-  "item_manage",
-  "inventory_manage",
-  "quest_manage",
-  "npc_manage",
-  "party_manage",
-  "combat_manage",
-  "combat_action",
 ] as const;
-const RECENT_TOOL_PALETTE_LIMIT = 12;
+const RECENT_TOOL_PALETTE_LIMIT = 8;
 const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 
 // This is an internal routing hint, not a player-facing approval/rejection
@@ -582,12 +575,39 @@ function buildActivateToolsDefinition(tools: readonly OpenRouterToolDefinition[]
 function seedRecentToolPalette(
   priorLog: readonly StoredLogMessage[],
   availableNames: ReadonlySet<string>,
+  playerText: string,
 ): Set<string> {
-  // Keep the first request cache-stable and immediately useful for ordinary
-  // DM authoring. Rare capabilities remain opt-in through activate_tools;
-  // recent successful tools can add a few more without replaying the whole
-  // catalog on every turn.
-  const selected = new Set<string>(CORE_TOOL_PALETTE.filter((name) => availableNames.has(name)));
+  // Keep the first request cache-stable with only the two capabilities needed
+  // for ordinary scene authoring. A turn-specific intent adds the smallest
+  // useful family; everything else remains DM-controlled through
+  // activate_tools. Recent successful tools preserve continuity but are
+  // bounded so one elaborate scene cannot permanently inflate every prompt.
+  const selected = new Set<string>(BASE_TOOL_PALETTE.filter((name) => availableNames.has(name)));
+  const normalized = playerText.replace(/\s+/g, " ").trim();
+  const addAvailable = (names: readonly string[]) => {
+    for (const name of names) {
+      if (availableNames.has(name)) selected.add(name);
+    }
+  };
+
+  if (COMPANION_ACTION_INTENT.test(normalized)) {
+    addAvailable(["npc_manage", "party_manage", "spatial_manage"]);
+  } else if (LIGHT_ACTION_INTENT.test(normalized) || /\b(?:pick(?:s|ed|ing)?\s+up|collect|loot|retrieve|grab)\b/i.test(normalized)) {
+    addAvailable(["item_manage", "inventory_manage"]);
+  } else if (/\b(?:equip|equips|equipped|unequip|unequips|unequipped|wear|wears|wore)\b/i.test(normalized)) {
+    addAvailable(["inventory_manage"]);
+  } else if (TRANSFER_ACTION_INTENT.test(normalized)) {
+    addAvailable(["inventory_manage", "npc_manage", "party_manage"]);
+  } else if (/\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|roll|rolls|rolled|check|checks|checked)\b/i.test(normalized)) {
+    addAvailable(["combat_manage", "combat_action"]);
+  } else if (/\b(?:quest|objective|mission|bounty|goal)\b/i.test(normalized)) {
+    addAvailable(["quest_manage"]);
+  } else if (/\b(?:talk|talks|talked|ask|asks|asked|speak|speaks|spoke|question|questions|interrogate|interrogates|listen|listens|heard)\b/i.test(normalized)) {
+    addAvailable(["npc_manage", "agent_manage"]);
+  } else if (hasAuthoritativeActionIntent(normalized)) {
+    addAvailable(["spatial_manage", "inventory_manage", "combat_action"]);
+  }
+
   for (let index = priorLog.length - 1; index >= 0 && selected.size < RECENT_TOOL_PALETTE_LIMIT; index -= 1) {
     const entry = priorLog[index];
     if (entry?.kind !== "tool") continue;
@@ -695,6 +715,7 @@ export class ReferenceDungeonMaster {
     let narrationOnlyNext = false;
     let authoritativeToolCallObserved = false;
     let authoritativeRoutingRecoveryPending = false;
+    let activatedToolNames = new Set<string>();
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
       ? Date.now() + this.openRouter.turnTimeoutMs
@@ -702,13 +723,20 @@ export class ReferenceDungeonMaster {
     let failureRecorded = false;
     const failTurn = (cause: unknown, phase: string): ReferenceDmProviderUnavailableError => {
       failureRecorded = true;
+      const failedProviderCalls = cause && typeof cause === "object"
+        && typeof (cause as { providerCalls?: unknown }).providerCalls === "number"
+        ? Math.max(0, Math.trunc((cause as { providerCalls: number }).providerCalls))
+        : 0;
       const failure = new ReferenceDmProviderUnavailableError(cause, {
         correlationId,
         commitStatus: acceptedStateChangingToolCalls > 0 ? "uncertain" : "not_committed",
         phase,
+        providerCalls: providerCallCount + failedProviderCalls,
         toolRounds: toolRoundCount,
+        activatedTools: [...activatedToolNames],
         toolCallNames: [...toolCallNames],
         acceptedToolCalls: acceptedStateChangingToolCalls,
+        rejectedToolCalls,
       });
       this.store.failReferenceCommand(accountId, campaignId, clientCommandId, failure.details);
       return failure;
@@ -792,8 +820,8 @@ export class ReferenceDungeonMaster {
     const authoritativeStateContext = campaignView ? formatAuthoritativeStateContext(campaignView) : null;
 
     const priorLog = this.store.getLogMessages(accountId, campaignId);
-    const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames);
-    const activatedToolNames = new Set(activeRemoteToolNames);
+    const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames, playerText);
+    activatedToolNames = new Set(activeRemoteToolNames);
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
@@ -1163,7 +1191,18 @@ export class ReferenceDungeonMaster {
     let providerCalls = 0;
     const attempt = async (): Promise<ChatCompletionResult> => {
       providerCalls += 1;
-      return this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+      try {
+        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+      } catch (error) {
+        // The resolve loop increments its diagnostic counter only after a
+        // completion returns. Preserve the attempted-call count on failures,
+        // including the empty-completion retry path, so the durable receipt
+        // matches provider usage when a turn cannot finish.
+        if (error && typeof error === "object") {
+          (error as { providerCalls?: number }).providerCalls = providerCalls;
+        }
+        throw error;
+      }
     };
     try {
       const result = await attempt();
@@ -1389,12 +1428,16 @@ function formatAuthoritativeStateContext(campaign: EngineSessionView): string {
   const quests = campaign.quests
     .map((quest) => `${quest.id} ${quest.title} [${quest.status}, ${quest.progress}%]`)
     .join(" | ");
+  const party = campaign.party
+    ? `Committed party ${campaign.party.id}: leader ${campaign.party.leaderActorId}; active viewpoint ${campaign.party.activeViewpointActorId}; members ${campaign.party.members.map((member) => `${member.actorId} (${member.role})`).join(", ") || "none"}; location ${campaign.party.members[0]?.locationRef ?? "unknown"}.`
+    : "No committed party roster is present in the current compatibility projection; read party_manage before relying on party membership.";
 
   return [
     "CURRENT AUTHORITATIVE ENGINE PROJECTION (read before repairing history; this outranks prior narration and narrative memory):",
     `Player inventory (authoritative possession): ${inventory || "empty"}. An item not listed is not possessed; equipped markers are authoritative.`,
     `Campaign quest summary (authoritative title/status/progress only): ${quests || "none"}. Objective IDs are not included here; read quest_manage.get_log before updating or completing an objective.`,
-    "Party membership and committed scene are not included in this compatibility projection; read party_manage or scene_manage before relying on those facts, and do not infer that none exists.",
+    party,
+    "Committed scene details are not included in this compatibility projection; read scene_manage before relying on scene membership or scene text.",
     "Use this projection to distinguish durable facts that exist from prose that only proposed them. If the player asks for a missing durable fact, author it with the relevant RPG MCP tool before narration.",
   ].join("\n");
 }
