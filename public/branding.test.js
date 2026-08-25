@@ -33,6 +33,16 @@ describe("player-facing branding", () => {
     expect(styles).toContain(".play-app::after");
   });
 
+  it("keeps long play sessions inside bounded, touch-scrollable surfaces", () => {
+    expect(styles).toContain("height: clamp(620px, calc(100vh - 144px), 760px);");
+    expect(styles).toContain(".play-app .player-panel");
+    expect(styles).toContain("overscroll-behavior: contain;");
+    expect(styles).toContain("scrollbar-gutter: stable;");
+    expect(styles).toContain("max-height: min(46vh, 360px);");
+    expect(styles).toContain(".play-app .chat-input-row");
+    expect(styles).toContain("grid-template-columns: 1fr;");
+  });
+
   it("completes Clerk OAuth callbacks before returning to the play surface", () => {
     expect(app).toContain('window.location.hash === "#/sso-callback"');
     expect(app).toContain("handleRedirectCallback");
