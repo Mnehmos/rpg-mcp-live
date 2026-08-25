@@ -106,6 +106,7 @@ export interface ReferenceTurnDiagnostics {
   activatedTools: string[];
   toolCallNames: string[];
   acceptedToolCalls: number;
+  acceptedStateChangingToolCalls: number;
   rejectedToolCalls: number;
 }
 
@@ -139,6 +140,7 @@ interface ChatCompletionResult {
   content: string | null;
   tool_calls?: ChatMessage["tool_calls"];
   usage?: LlmUsageActual;
+  providerCalls?: number;
 }
 
 interface DmUsageContext {
@@ -572,6 +574,7 @@ export class ReferenceDungeonMaster {
     const toolCallNames: string[] = [];
     const disclosedToolCalls: EngineToolCallDisclosure[] = [];
     let acceptedToolCalls = 0;
+    let acceptedStateChangingToolCalls = 0;
     let rejectedToolCalls = 0;
     const rejectedStateChangingCallNames = new Set<string>();
     let rejectionRecoveryPending = false;
@@ -585,11 +588,11 @@ export class ReferenceDungeonMaster {
       failureRecorded = true;
       const failure = new ReferenceDmProviderUnavailableError(cause, {
         correlationId,
-        commitStatus: acceptedToolCalls > 0 ? "uncertain" : "not_committed",
+        commitStatus: acceptedStateChangingToolCalls > 0 ? "uncertain" : "not_committed",
         phase,
         toolRounds: toolRoundCount,
         toolCallNames: [...toolCallNames],
-        acceptedToolCalls,
+        acceptedToolCalls: acceptedStateChangingToolCalls,
       });
       this.store.failReferenceCommand(accountId, campaignId, clientCommandId, failure.details);
       return failure;
@@ -702,13 +705,13 @@ export class ReferenceDungeonMaster {
           ...DOCKET_TOOLS,
         ];
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
-        providerCallCount += 1;
         const completion = await this.chatCompletion(messages, tools, deadlineAt, {
           userId: accountId,
           campaignId,
           clientCommandId,
           admittedTurn: true,
         }, narrationOnlyNext ? "none" : "auto");
+        providerCallCount += completion.providerCalls ?? 1;
         narrationOnlyNext = false;
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
@@ -764,7 +767,8 @@ export class ReferenceDungeonMaster {
                 deadlineAt,
               );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
-          if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedToolCalls += 1;
+          if (remoteOutcome.accepted) acceptedToolCalls += 1;
+          if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedStateChangingToolCalls += 1;
           if (!remoteOutcome.accepted) rejectedToolCalls += 1;
           if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
             rejectedStateChangingCallNames.add(call.function.name);
@@ -840,6 +844,7 @@ export class ReferenceDungeonMaster {
           activatedTools: [...activatedToolNames],
           toolCallNames: [...toolCallNames],
           acceptedToolCalls,
+          acceptedStateChangingToolCalls,
           rejectedToolCalls,
         },
       };
@@ -1008,12 +1013,19 @@ export class ReferenceDungeonMaster {
     usageContext?: DmUsageContext,
     toolChoice: "auto" | "none" = "auto",
   ): Promise<ChatCompletionResult> {
+    let providerCalls = 0;
+    const attempt = async (): Promise<ChatCompletionResult> => {
+      providerCalls += 1;
+      return this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+    };
     try {
-      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+      const result = await attempt();
+      return { ...result, providerCalls };
     } catch (error) {
       if (!(error instanceof EmptyCompletionError)) throw error;
       console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
-      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+      const result = await attempt();
+      return { ...result, providerCalls };
     }
   }
 

@@ -1310,6 +1310,7 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.narration.text).toBe("The room is quiet.");
+    expect(result.diagnostics?.providerCalls).toBe(2);
   });
 
   it("throws ReferenceDmProviderUnavailableError when the retry also returns an empty choices array", async () => {
@@ -1618,6 +1619,11 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(capturedSecret).toBe("The innkeeper is a spy.");
     expect(result.toolDisclosure?.calls[0]?.result).toBe("[DM-only content withheld]");
+    expect(result.diagnostics).toMatchObject({
+      acceptedToolCalls: 1,
+      acceptedStateChangingToolCalls: 0,
+      rejectedToolCalls: 0,
+    });
     expect(JSON.stringify(result.session.log)).not.toContain("The innkeeper is a spy.");
   });
 
