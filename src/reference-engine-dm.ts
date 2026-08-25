@@ -428,6 +428,17 @@ const CORE_TOOL_PALETTE = [
 const RECENT_TOOL_PALETTE_LIMIT = 12;
 const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 
+// This is an internal routing hint, not a player-facing approval/rejection
+// classifier.  For an unambiguous state-changing verb, the first provider
+// completion must enter the tool loop so the DM can choose and commit the
+// appropriate RPG MCP action before it narrates.  Keep the vocabulary narrow:
+// ordinary conversational or observational turns should remain tool_choice=auto.
+const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|don|dons|donned|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
+
+function hasAuthoritativeActionIntent(playerText: string): boolean {
+  return AUTHORITATIVE_ACTION_INTENT.test(playerText);
+}
+
 function compactToolDescription(tool: OpenRouterToolDefinition): string {
   const description = tool.function.description.replace(/\s+/g, " ").trim();
   const actionSchema = tool.function.parameters.properties.action as { enum?: unknown[] } | undefined;
@@ -583,6 +594,8 @@ export class ReferenceDungeonMaster {
     const rejectedStateChangingCallNames = new Set<string>();
     let rejectionRecoveryPending = false;
     let narrationOnlyNext = false;
+    let authoritativeToolCallObserved = false;
+    let authoritativeRoutingRecoveryPending = false;
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
       ? Date.now() + this.openRouter.turnTimeoutMs
@@ -620,6 +633,7 @@ export class ReferenceDungeonMaster {
     const availableRemoteToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
     const activationTool = buildActivateToolsDefinition(allRemoteTools);
     const toolDirectory = buildToolDirectory(allRemoteTools);
+    const requiresAuthoritativeToolChoice = hasAuthoritativeActionIntent(playerText);
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
@@ -717,7 +731,11 @@ export class ReferenceDungeonMaster {
           campaignId,
           clientCommandId,
           admittedTurn: true,
-        }, narrationOnlyNext ? "none" : "auto");
+        }, narrationOnlyNext
+          ? "none"
+          : requiresAuthoritativeToolChoice && !authoritativeToolCallObserved
+            ? "required"
+            : "auto");
         providerCallCount += completion.providerCalls ?? 1;
         narrationOnlyNext = false;
         const toolCalls = completion.tool_calls ?? [];
@@ -735,8 +753,23 @@ export class ReferenceDungeonMaster {
             });
             continue;
           }
+          if (requiresAuthoritativeToolChoice && !authoritativeToolCallObserved) {
+            if (!authoritativeRoutingRecoveryPending) {
+              authoritativeRoutingRecoveryPending = true;
+              messages.push({ role: "assistant", content: candidate || null });
+              messages.push({
+                role: "system",
+                content: "Internal DM routing correction: this turn contains an explicit state-changing action. The draft above is not final. Use the relevant RPG MCP tool or tools now, wait for their results, and only then narrate the changed situation. Do not substitute prose or improvisation for the authoritative engine call.",
+              });
+              continue;
+            }
+            throw new Error("The DM provider returned prose without an authoritative RPG MCP call for an explicit state-changing action.");
+          }
           narrationText = candidate || null;
           break;
+        }
+        if (toolCalls.some((call) => call.function.name !== ACTIVATE_TOOLS_NAME)) {
+          authoritativeToolCallObserved = true;
         }
         toolRoundCount = round + 1;
         toolCallNames.push(...toolCalls.map((call) => call.function.name));
@@ -1018,7 +1051,7 @@ export class ReferenceDungeonMaster {
     tools: OpenRouterToolDefinition[],
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
-    toolChoice: "auto" | "none" = "auto",
+    toolChoice: "auto" | "none" | "required" = "auto",
   ): Promise<ChatCompletionResult> {
     let providerCalls = 0;
     const attempt = async (): Promise<ChatCompletionResult> => {
@@ -1041,7 +1074,7 @@ export class ReferenceDungeonMaster {
     tools: OpenRouterToolDefinition[],
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
-    toolChoice: "auto" | "none" = "auto",
+    toolChoice: "auto" | "none" | "required" = "auto",
   ): Promise<ChatCompletionResult> {
     const remainingMs = deadlineAt === null
       ? this.openRouter.timeoutMs
