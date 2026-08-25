@@ -668,9 +668,11 @@ export class ReferenceDungeonMaster {
     // hydrated view once up front and handing it over as context means the
     // model never needs to guess, and never needs an extra tool round just
     // to ask.
-    const sheetContext = routing.referenceCharacterId
-      ? formatCharacterSheetContext((await this.adapter.getCampaign(accountId, actorId, campaignId)).campaign.character)
+    const campaignView = routing.referenceCharacterId
+      ? (await this.adapter.getCampaign(accountId, actorId, campaignId)).campaign
       : null;
+    const sheetContext = campaignView ? formatCharacterSheetContext(campaignView.character) : null;
+    const authoritativeStateContext = campaignView ? formatAuthoritativeStateContext(campaignView) : null;
 
     const priorLog = this.store.getLogMessages(accountId, campaignId);
     const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames);
@@ -692,6 +694,7 @@ export class ReferenceDungeonMaster {
       ...historyMessages,
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
+      ...(authoritativeStateContext ? [{ role: "system" as const, content: authoritativeStateContext }] : []),
       { role: "user", content: playerText },
     ];
 
@@ -1232,6 +1235,24 @@ function formatCharacterSheetContext(character: EngineCharacterView): string {
     `Inventory: ${inventory || "none"}`,
     `Spellcasting: ${spells}`,
     `Conditions: ${character.conditions.join(", ") || "none"}`,
+  ].join("\n");
+}
+
+/** Renders the compact authoritative projection used to arbitrate durable facts in replayed prose. */
+function formatAuthoritativeStateContext(campaign: EngineSessionView): string {
+  const inventory = campaign.character.inventory
+    .map((item) => `${item.authoredDefinition?.name ?? item.id} x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
+    .join(", ");
+  const quests = campaign.quests
+    .map((quest) => `${quest.id} ${quest.title} [${quest.status}, ${quest.progress}%]`)
+    .join(" | ");
+
+  return [
+    "CURRENT AUTHORITATIVE ENGINE PROJECTION (read before repairing history; this outranks prior narration and narrative memory):",
+    `Player inventory (authoritative possession): ${inventory || "empty"}. An item not listed is not possessed; equipped markers are authoritative.`,
+    `Campaign quest summary (authoritative title/status/progress only): ${quests || "none"}. Objective IDs are not included here; read quest_manage.get_log before updating or completing an objective.`,
+    "Party membership and committed scene are not included in this compatibility projection; read party_manage or scene_manage before relying on those facts, and do not infer that none exists.",
+    "Use this projection to distinguish durable facts that exist from prose that only proposed them. If the player asks for a missing durable fact, author it with the relevant RPG MCP tool before narration.",
   ].join("\n");
 }
 
