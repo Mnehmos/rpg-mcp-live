@@ -248,6 +248,42 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("keeps improvisation opt-in even when an older turn used it", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-improvisation-palette-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    store.appendLogMessages("account-1", "campaign-1", [{
+      id: "prior-improvisation",
+      kind: "tool",
+      text: "The DM consulted the game world.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      toolDisclosure: {
+        spoilerWarning: "Spoilers",
+        calls: [{ name: "improvisation_manage", arguments: { action: "apply_effect" }, result: { success: true }, accepted: true }],
+      },
+    }]);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["combat_action", "improvisation_manage"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+    let requestTools: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestTools = (JSON.parse(init.body) as { tools: Array<{ function: { name: string } }> }).tools.map((tool) => tool.function.name);
+      return openRouterMessage("The road bends into darkness.");
+    }));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road.");
+
+    expect(requestTools).not.toContain("improvisation_manage");
+    expect(requestTools).toContain("activate_tools");
+    gameStore.close();
+  });
+
   it("omits blank optional tool fields without hiding required nested validation", () => {
     const tool = {
       type: "function" as const,
@@ -420,6 +456,7 @@ describe("ReferenceDungeonMaster", () => {
         choices: [{ message: { content: "The first bell tolls." } }],
         usage: {
           prompt_tokens: 100,
+          prompt_tokens_details: { cached_tokens: 80 },
           completion_tokens: 20,
           total_tokens: 120,
           completion_tokens_details: { reasoning_tokens: 5 },
@@ -438,6 +475,7 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.turnUsage).toMatchObject({
       calls: 1,
       promptTokens: 100,
+      cachedPromptTokens: 80,
       completionTokens: 20,
       reasoningTokens: 5,
       totalTokens: 120,
@@ -1727,10 +1765,12 @@ describe("reference DM scene authoring contract", () => {
     });
 
     let call = 0;
+    const requestBodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
+      vi.fn(async (_url: string, init: { body: string }) => {
         call += 1;
+        requestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
         if (call === 1) {
           return openRouterMessage(null, [
             {
@@ -1788,6 +1828,14 @@ describe("reference DM scene authoring contract", () => {
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Room id: room-1");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Player placed here this turn: yes");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Shared scene committed this turn: yes");
+    expect(requestBodies.at(-1)?.tool_choice).toBe("none");
+    expect(result.diagnostics).toMatchObject({
+      providerCalls: 4,
+      toolRounds: 3,
+      toolCallNames: ["spatial_manage", "spatial_manage", "scene_manage"],
+      acceptedToolCalls: 3,
+      rejectedToolCalls: 0,
+    });
     const remoteCalls = (client.callTool as ReturnType<typeof vi.fn>).mock.calls
       .filter((call) => ["spatial_manage", "scene_manage"].includes(call[0] as string))
       .map((call) => `${call[0]}.${(call[1] as Record<string, unknown>).action}`);

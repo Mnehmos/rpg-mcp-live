@@ -97,6 +97,16 @@ export interface ReferenceTurnResult {
   session: EngineSessionView;
   replayed: boolean;
   turnUsage?: LlmUsageBucket;
+  diagnostics?: ReferenceTurnDiagnostics;
+}
+
+export interface ReferenceTurnDiagnostics {
+  providerCalls: number;
+  toolRounds: number;
+  activatedTools: string[];
+  toolCallNames: string[];
+  acceptedToolCalls: number;
+  rejectedToolCalls: number;
 }
 
 interface ChatMessage {
@@ -117,6 +127,7 @@ interface ReferenceToolOutcome {
 
 interface ChatCompletionUsageEnvelope {
   prompt_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
   completion_tokens?: number;
   total_tokens?: number;
   completion_tokens_details?: { reasoning_tokens?: number };
@@ -409,6 +420,7 @@ const CORE_TOOL_PALETTE = [
   "combat_action",
 ] as const;
 const RECENT_TOOL_PALETTE_LIMIT = 12;
+const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 
 function compactToolDescription(tool: OpenRouterToolDefinition): string {
   const description = tool.function.description.replace(/\s+/g, " ").trim();
@@ -465,7 +477,9 @@ function seedRecentToolPalette(
     const entry = priorLog[index];
     if (entry?.kind !== "tool") continue;
     for (const call of entry.toolDisclosure?.calls ?? []) {
-      if (call.accepted && availableNames.has(call.name)) selected.add(call.name);
+      if (call.accepted && availableNames.has(call.name) && !RECENT_TOOL_PALETTE_EXCLUSIONS.has(call.name)) {
+        selected.add(call.name);
+      }
       if (selected.size >= RECENT_TOOL_PALETTE_LIMIT) break;
     }
   }
@@ -554,11 +568,14 @@ export class ReferenceDungeonMaster {
     if (commandStart.status === "conflict") throw new ReferenceDmVersionConflictError(commandStart.currentVersion);
 
     let toolRoundCount = 0;
+    let providerCallCount = 0;
     const toolCallNames: string[] = [];
     const disclosedToolCalls: EngineToolCallDisclosure[] = [];
     let acceptedToolCalls = 0;
+    let rejectedToolCalls = 0;
     const rejectedStateChangingCallNames = new Set<string>();
     let rejectionRecoveryPending = false;
+    let narrationOnlyNext = false;
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
       ? Date.now() + this.openRouter.turnTimeoutMs
@@ -653,6 +670,7 @@ export class ReferenceDungeonMaster {
 
     const priorLog = this.store.getLogMessages(accountId, campaignId);
     const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames);
+    const activatedToolNames = new Set(activeRemoteToolNames);
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
@@ -684,12 +702,14 @@ export class ReferenceDungeonMaster {
           ...DOCKET_TOOLS,
         ];
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
+        providerCallCount += 1;
         const completion = await this.chatCompletion(messages, tools, deadlineAt, {
           userId: accountId,
           campaignId,
           clientCommandId,
           admittedTurn: true,
-        });
+        }, narrationOnlyNext ? "none" : "auto");
+        narrationOnlyNext = false;
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
@@ -717,6 +737,10 @@ export class ReferenceDungeonMaster {
         for (const call of toolCalls) {
           const callArgs = parseArguments(call.function.arguments);
           if (call.function.name === ACTIVATE_TOOLS_NAME) {
+            const requestedNames = Array.isArray(callArgs.names)
+              ? callArgs.names.filter((name): name is string => typeof name === "string" && availableRemoteToolNames.has(name))
+              : [];
+            for (const name of requestedNames) activatedToolNames.add(name);
             messages.push({
               role: "tool",
               tool_call_id: call.id,
@@ -741,6 +765,7 @@ export class ReferenceDungeonMaster {
               );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedToolCalls += 1;
+          if (!remoteOutcome.accepted) rejectedToolCalls += 1;
           if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
             rejectedStateChangingCallNames.add(call.function.name);
             rejectionRecoveryPending = true;
@@ -748,6 +773,17 @@ export class ReferenceDungeonMaster {
           this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
+        }
+        if (
+          disclosedToolCalls.at(-1)?.name === "scene_manage"
+          && disclosedToolCalls.at(-1)?.accepted
+          && authoredScene.committedScene
+          && !rejectionRecoveryPending
+        ) {
+          // The scene commit is the authoritative boundary between tool work
+          // and prose. Keep the next provider call for narration, but do not
+          // let a model that ignores the prompt start another paid tool round.
+          narrationOnlyNext = true;
         }
       }
     } catch (error) {
@@ -798,6 +834,14 @@ export class ReferenceDungeonMaster {
         ...(this.openRouter.usage
           ? { turnUsage: this.openRouter.usage.getCommandUsage(accountId, campaignId, clientCommandId) }
           : {}),
+        diagnostics: {
+          providerCalls: providerCallCount,
+          toolRounds: toolRoundCount,
+          activatedTools: [...activatedToolNames],
+          toolCallNames: [...toolCallNames],
+          acceptedToolCalls,
+          rejectedToolCalls,
+        },
       };
       this.store.resolveReferenceCommand(accountId, campaignId, clientCommandId, result);
       return result;
@@ -962,13 +1006,14 @@ export class ReferenceDungeonMaster {
     tools: OpenRouterToolDefinition[],
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
+    toolChoice: "auto" | "none" = "auto",
   ): Promise<ChatCompletionResult> {
     try {
-      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext);
+      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
     } catch (error) {
       if (!(error instanceof EmptyCompletionError)) throw error;
       console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
-      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext);
+      return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
     }
   }
 
@@ -977,6 +1022,7 @@ export class ReferenceDungeonMaster {
     tools: OpenRouterToolDefinition[],
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
+    toolChoice: "auto" | "none" = "auto",
   ): Promise<ChatCompletionResult> {
     const remainingMs = deadlineAt === null
       ? this.openRouter.timeoutMs
@@ -990,7 +1036,7 @@ export class ReferenceDungeonMaster {
       model: this.openRouter.model,
       messages,
       tools,
-      tool_choice: "auto",
+      tool_choice: toolChoice,
       ...(maxTokens === undefined ? {} : { [reasoningModel ? "max_completion_tokens" : "max_tokens"]: maxTokens }),
       ...(reasoningModel && this.openRouter.reasoningEffort ? { reasoning_effort: this.openRouter.reasoningEffort } : {}),
     };
@@ -1063,6 +1109,7 @@ function buildCompletionUsage(
 ): LlmUsageActual {
   const envelope = data.usage ?? {};
   const promptTokens = nonnegativeTokenCount(envelope.prompt_tokens) || reservation.estimatedPromptTokens;
+  const cachedPromptTokens = nonnegativeTokenCount(envelope.prompt_tokens_details?.cached_tokens);
   const completionTokens = nonnegativeTokenCount(envelope.completion_tokens)
     || estimateLlmTokens({ content: message?.content ?? null, tool_calls: message?.tool_calls ?? [] });
   const reasoningTokens = nonnegativeTokenCount(envelope.completion_tokens_details?.reasoning_tokens);
@@ -1085,6 +1132,7 @@ function buildCompletionUsage(
     model,
     providerRequestId: data.id ?? null,
     promptTokens,
+    cachedPromptTokens,
     completionTokens,
     reasoningTokens,
     totalTokens,
