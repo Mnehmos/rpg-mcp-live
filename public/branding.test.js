@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 const page = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 const favicon = readFileSync(new URL("./favicon.svg", import.meta.url), "utf8");
 const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
 
 describe("player-facing branding", () => {
   it("uses Quest Keeper AI in the page chrome", () => {
@@ -30,5 +31,12 @@ describe("player-facing branding", () => {
     expect(styles).toContain('font-family: "Share Tech Mono"');
     expect(styles).toContain(".play-app::before");
     expect(styles).toContain(".play-app::after");
+  });
+
+  it("completes Clerk OAuth callbacks before returning to the play surface", () => {
+    expect(app).toContain('window.location.hash === "#/sso-callback"');
+    expect(app).toContain("handleRedirectCallback");
+    expect(app).toContain("signInFallbackRedirectUrl");
+    expect(app).not.toContain("continueSignUpUrl");
   });
 });
