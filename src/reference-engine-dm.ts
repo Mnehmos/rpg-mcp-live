@@ -434,7 +434,8 @@ const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 // appropriate RPG MCP action before it narrates.  Keep the vocabulary narrow:
 // ordinary conversational or observational turns should remain tool_choice=auto.
 const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
-const COMPANION_ACTION_INTENT = /\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b|\bjoin(?:s|ed)?\s+(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:form|forms|formed)\s+(?:a|the)\s+(?:party|group|company|team)\b/i;
+const COMPANION_ACTION_INTENT = /(?:\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b[\s\S]{0,80}\b(?:join|come|travel|fight|adventure)\b[\s\S]{0,40}\b(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b[\s\S]{0,80}\b(?:into|to|as)\s+(?:our|the|a|an)\s+(?:party|group|company|team|companion|ally)\b|\bjoin(?:s|ed)?\s+(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:form|forms|formed)\s+(?:a|the)\s+(?:party|group|company|team)\b)/i;
+const COMPANION_ACTION_VERB = /^(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed)$/i;
 const TRANSFER_ACTION_INTENT = /\b(?:hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave)\b/i;
 const LIGHT_ACTION_INTENT = /\b(?:light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished)\b/i;
 const NON_ACTION_LOOK_IDIOM = /\btake\s+(?:a|an|the|my)\s+(?:(?:closer|close|quick|brief)\s+)?look\b/i;
@@ -445,9 +446,18 @@ export function hasAuthoritativeActionIntent(playerText: string): boolean {
   const normalized = playerText.replace(/\s+/g, " ").trim();
   if (!normalized || HYPOTHETICAL_OR_QUESTION.test(normalized)) return false;
   if (NON_ACTION_LOOK_IDIOM.test(normalized) && !AUTHORITATIVE_ACTION_INTENT.test(normalized.replace(NON_ACTION_LOOK_IDIOM, ""))) return false;
-  const actionMatch = AUTHORITATIVE_ACTION_INTENT.exec(normalized);
-  if (!actionMatch || actionMatch.index === undefined) return false;
-  return !NEGATED_ACTION_PREFIX.test(normalized.slice(0, actionMatch.index));
+  let searchOffset = 0;
+  while (searchOffset < normalized.length) {
+    const actionMatch = AUTHORITATIVE_ACTION_INTENT.exec(normalized.slice(searchOffset));
+    if (!actionMatch || actionMatch.index === undefined) return false;
+    const actionIndex = searchOffset + actionMatch.index;
+    if (COMPANION_ACTION_VERB.test(actionMatch[0]) && !COMPANION_ACTION_INTENT.test(normalized)) {
+      searchOffset = actionIndex + actionMatch[0].length;
+      continue;
+    }
+    return !NEGATED_ACTION_PREFIX.test(normalized.slice(0, actionIndex));
+  }
+  return false;
 }
 
 /**
@@ -457,7 +467,7 @@ export function hasAuthoritativeActionIntent(playerText: string): boolean {
  */
 export function buildAuthoritativeActionRoutingHint(playerText: string): string | null {
   const normalized = playerText.replace(/\s+/g, " ").trim();
-  if (!normalized || HYPOTHETICAL_OR_QUESTION.test(normalized)) return null;
+  if (!normalized || !hasAuthoritativeActionIntent(normalized)) return null;
 
   const hints: string[] = [];
   if (COMPANION_ACTION_INTENT.test(normalized)) {
@@ -481,8 +491,16 @@ export function buildAuthoritativeActionRoutingHint(playerText: string): string 
 }
 
 function rejectedStateChangingActionKey(toolName: string, args: Record<string, unknown>): string {
-  const action = typeof args.action === "string" && args.action.trim() ? args.action.trim() : "unknown";
-  return `${toolName}.${action}`;
+  const identity = Object.entries(args)
+    .filter(([key, value]) => (
+      value !== undefined
+      && value !== null
+      && (key === "action" || key === "name" || key === "direction" || /id$/i.test(key))
+    ))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join("|");
+  return `${toolName}:${identity || "unscoped"}`;
 }
 
 function buildGeneralAuthoritativeActionRoutingHint(playerText: string): string | null {
@@ -889,15 +907,18 @@ export class ReferenceDungeonMaster {
               );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           if (remoteOutcome.accepted) acceptedToolCalls += 1;
+          const rejectedActionKey = remoteOutcome.stateChanging
+            ? rejectedStateChangingActionKey(call.function.name, remoteOutcome.effectiveArguments)
+            : null;
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) {
             acceptedStateChangingToolCalls += 1;
             authoritativeToolCallObserved = true;
-            rejectedStateChangingActionKeys.delete(rejectedStateChangingActionKey(call.function.name, callArgs));
+            if (rejectedActionKey) rejectedStateChangingActionKeys.delete(rejectedActionKey);
             rejectionRecoveryPending = rejectedStateChangingActionKeys.size > 0;
           }
           if (!remoteOutcome.accepted) rejectedToolCalls += 1;
           if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
-            rejectedStateChangingActionKeys.add(rejectedStateChangingActionKey(call.function.name, callArgs));
+            if (rejectedActionKey) rejectedStateChangingActionKeys.add(rejectedActionKey);
             rejectionRecoveryPending = true;
           }
           this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);

@@ -1641,6 +1641,60 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("keeps rejection recovery pending when a different target succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-targeted-recovery-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "inventory_manage.use": (args) => args.itemId === "torch-a"
+        ? { error: "Torch A is not carried." }
+        : { success: true, actionType: "use", itemId: args.itemId, lightSource: { active: true } },
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["inventory_manage"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      call += 1;
+      requestBodies.push(JSON.parse(init.body));
+      if (call === 1) {
+        return openRouterMessage(null, [
+          {
+            id: "use-torch-a",
+            type: "function",
+            function: { name: "inventory_manage", arguments: JSON.stringify({ action: "use", itemId: "torch-a" }) },
+          },
+          {
+            id: "use-torch-b",
+            type: "function",
+            function: { name: "inventory_manage", arguments: JSON.stringify({ action: "use", itemId: "torch-b" }) },
+          },
+        ]);
+      }
+      if (call === 2) return openRouterMessage("Both torches flare to life.");
+      return openRouterMessage("Torch A remains dark; Torch B burns steadily in the dark.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light both torches.");
+
+    expect(call).toBe(3);
+    expect(requestBodies[2]?.messages.at(-1)).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("state-changing RPG MCP call was rejected"),
+    });
+    expect(result.narration.text).toContain("Torch A remains dark");
+    expect(result.diagnostics).toMatchObject({ acceptedStateChangingToolCalls: 1, rejectedToolCalls: 1 });
+    gameStore.close();
+  });
+
   it("repeats rejection recovery when the repair call is rejected too", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-double-rejection-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -1791,6 +1845,10 @@ describe("reference DM scene authoring contract", () => {
     expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
     expect(hasAuthoritativeActionIntent("Do I attack him?")).toBe(false);
     expect(hasAuthoritativeActionIntent("Is it safe if I open the door?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I invite the innkeeper to sit by the fire.")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I welcome the news.")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I don't invite the stranger to join us.")).toBe(false);
+    expect(buildAuthoritativeActionRoutingHint("I don't invite the stranger to join us.")).toBeNull();
     expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
   });
 
