@@ -978,6 +978,8 @@ describe("ReferenceDungeonMaster", () => {
         { role: "user", content: "I search the archive." },
       ])
     );
+    expect(firstMessages.find((message) => message.role === "assistant" && message.content?.startsWith("[PRIOR DM NARRATION"))?.content)
+      .toContain("accepted RPG MCP results above are the source of truth");
   });
 
   it("replays prior accepted and rejected tool calls in API-valid message order", async () => {
