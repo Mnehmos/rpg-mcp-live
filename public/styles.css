@@ -972,7 +972,7 @@ h1 i { color: var(--amber); font-style: italic; }
 
   .play-app .game-log {
     min-height: 620px;
-    max-height: none;
+    max-height: min(78vh, 820px);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;

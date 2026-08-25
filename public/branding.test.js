@@ -36,6 +36,7 @@ describe("player-facing branding", () => {
   it("keeps the desktop dossier natural while preserving mobile scrolling", () => {
     expect(styles).toContain("height: auto;");
     expect(styles).toContain("min-height: 620px;");
+    expect(styles).toContain("max-height: min(78vh, 820px);");
     expect(styles).toContain(".play-app .player-panel");
     expect(styles).toContain("overflow: visible;");
     expect(styles).toContain("overscroll-behavior: contain;");
