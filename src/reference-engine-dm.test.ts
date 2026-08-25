@@ -10,6 +10,7 @@ import {
   ReferenceDmProviderUnavailableError,
   ReferenceDungeonMaster,
   REFERENCE_DM_SYSTEM_PROMPT,
+  buildAuthoritativeActionRoutingHint,
   hasAuthoritativeActionIntent,
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
@@ -1589,6 +1590,57 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("does not spend an extra recovery completion after the rejected action is repaired", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-repaired-action-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    let useAttempts = 0;
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "inventory_manage.use": () => {
+        useAttempts += 1;
+        return useAttempts === 1
+          ? { error: "The carried item id is stale." }
+          : { success: true, actionType: "use", lightSource: { active: true } };
+      },
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["inventory_manage"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1 || call === 2) {
+        return openRouterMessage(null, [{
+          id: `use-torch-${call}`,
+          type: "function",
+          function: {
+            name: "inventory_manage",
+            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The repaired flame catches and steadies in the dark.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
+
+    expect(call).toBe(3);
+    expect(result.narration.text).toContain("repaired flame");
+    expect(result.diagnostics).toMatchObject({
+      providerCalls: 3,
+      acceptedStateChangingToolCalls: 1,
+      rejectedToolCalls: 1,
+    });
+    gameStore.close();
+  });
+
   it("repeats rejection recovery when the repair call is rejected too", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-double-rejection-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -1733,9 +1785,18 @@ describe("ReferenceDungeonMaster", () => {
 describe("reference DM scene authoring contract", () => {
   it("does not route questions, negations, or look idioms as mutations", () => {
     expect(hasAuthoritativeActionIntent("I pick up the bronze disc.")).toBe(true);
+    expect(hasAuthoritativeActionIntent("I invite the stranger to join our party.")).toBe(true);
     expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
     expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
     expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
+  });
+
+  it("routes companion invitations through authoritative creation, placement, and party membership", () => {
+    const hint = buildAuthoritativeActionRoutingHint("I invite the stranger to join our party.");
+    expect(hint).toContain("npc_manage.create");
+    expect(hint).toContain("spatial_manage.move");
+    expect(hint).toContain("party_manage.add_member");
+    expect(hint).toContain("Do not use scene_manage, write_docket, or npc_manage.interact as substitutes");
   });
 
   it("makes creative scene authoring and MCP commitment explicit", () => {
