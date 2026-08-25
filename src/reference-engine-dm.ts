@@ -433,10 +433,17 @@ const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 // completion must enter the tool loop so the DM can choose and commit the
 // appropriate RPG MCP action before it narrates.  Keep the vocabulary narrow:
 // ordinary conversational or observational turns should remain tool_choice=auto.
-const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|don|dons|donned|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
+const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
+const NON_ACTION_LOOK_IDIOM = /\btake\s+(?:a|an|the|my)\s+(?:(?:closer|close|quick|brief)\s+)?look\b/i;
+const HYPOTHETICAL_OR_QUESTION = /\?|^\s*(?:what if|what happens if|should I|can I|could I|would it|may I|might I)\b/i;
+const NEGATED_ACTION_PREFIX = /\b(?:don't|do not|never|not|can't|cannot|won't|wouldn't|shouldn't|didn't|did not|refuse to|avoid)\b[\s\S]{0,40}$/i;
 
-function hasAuthoritativeActionIntent(playerText: string): boolean {
-  return AUTHORITATIVE_ACTION_INTENT.test(playerText);
+export function hasAuthoritativeActionIntent(playerText: string): boolean {
+  const normalized = playerText.replace(/\s+/g, " ").trim();
+  if (!normalized || HYPOTHETICAL_OR_QUESTION.test(normalized) || NON_ACTION_LOOK_IDIOM.test(normalized)) return false;
+  const actionMatch = AUTHORITATIVE_ACTION_INTENT.exec(normalized);
+  if (!actionMatch || actionMatch.index === undefined) return false;
+  return !NEGATED_ACTION_PREFIX.test(normalized.slice(0, actionMatch.index));
 }
 
 function compactToolDescription(tool: OpenRouterToolDefinition): string {
@@ -593,6 +600,7 @@ export class ReferenceDungeonMaster {
     let rejectedToolCalls = 0;
     const rejectedStateChangingCallNames = new Set<string>();
     let rejectionRecoveryPending = false;
+    let rejectionRecoveryNarrationReady = false;
     let narrationOnlyNext = false;
     let authoritativeToolCallObserved = false;
     let authoritativeRoutingRecoveryPending = false;
@@ -743,6 +751,7 @@ export class ReferenceDungeonMaster {
           const candidate = completion.content?.trim() || "";
           if (rejectionRecoveryPending) {
             rejectionRecoveryPending = false;
+            rejectionRecoveryNarrationReady = true;
             messages.push({
               role: "system",
               content: [
@@ -753,7 +762,7 @@ export class ReferenceDungeonMaster {
             });
             continue;
           }
-          if (requiresAuthoritativeToolChoice && !authoritativeToolCallObserved) {
+          if (requiresAuthoritativeToolChoice && !authoritativeToolCallObserved && !rejectionRecoveryNarrationReady) {
             if (!authoritativeRoutingRecoveryPending) {
               authoritativeRoutingRecoveryPending = true;
               messages.push({ role: "assistant", content: candidate || null });
@@ -767,9 +776,6 @@ export class ReferenceDungeonMaster {
           }
           narrationText = candidate || null;
           break;
-        }
-        if (toolCalls.some((call) => call.function.name !== ACTIVATE_TOOLS_NAME)) {
-          authoritativeToolCallObserved = true;
         }
         toolRoundCount = round + 1;
         toolCallNames.push(...toolCalls.map((call) => call.function.name));
@@ -808,7 +814,10 @@ export class ReferenceDungeonMaster {
               );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           if (remoteOutcome.accepted) acceptedToolCalls += 1;
-          if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedStateChangingToolCalls += 1;
+          if (remoteOutcome.accepted && remoteOutcome.stateChanging) {
+            acceptedStateChangingToolCalls += 1;
+            authoritativeToolCallObserved = true;
+          }
           if (!remoteOutcome.accepted) rejectedToolCalls += 1;
           if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
             rejectedStateChangingCallNames.add(call.function.name);

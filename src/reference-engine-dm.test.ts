@@ -10,6 +10,7 @@ import {
   ReferenceDmProviderUnavailableError,
   ReferenceDungeonMaster,
   REFERENCE_DM_SYSTEM_PROMPT,
+  hasAuthoritativeActionIntent,
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
@@ -1730,6 +1731,13 @@ describe("ReferenceDungeonMaster", () => {
 });
 
 describe("reference DM scene authoring contract", () => {
+  it("does not route questions, negations, or look idioms as mutations", () => {
+    expect(hasAuthoritativeActionIntent("I pick up the bronze disc.")).toBe(true);
+    expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
+    expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
+  });
+
   it("makes creative scene authoring and MCP commitment explicit", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Invent places, people, pressures, clues");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("There are no rooms, locations, NPCs, enemies, items, quests, clues");
