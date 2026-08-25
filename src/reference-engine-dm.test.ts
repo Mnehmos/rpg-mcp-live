@@ -1734,6 +1734,7 @@ describe("ReferenceDungeonMaster", () => {
 describe("reference DM scene authoring contract", () => {
   it("does not route questions, negations, or look idioms as mutations", () => {
     expect(hasAuthoritativeActionIntent("I pick up the bronze disc.")).toBe(true);
+    expect(hasAuthoritativeActionIntent("I pick up the bronze disc. What does Iven recognize?")).toBe(true);
     expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
     expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
     expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
@@ -1747,6 +1748,8 @@ describe("reference DM scene authoring contract", () => {
     expect(hint).toContain("item_manage");
     expect(hint).toContain("inventory_manage");
     expect(hint).toContain("interact with that NPC only after the possession result succeeds");
+    expect(buildAuthoritativeActionRoutingHint("I take a rest.")).not.toContain("item acquisition");
+    expect(buildAuthoritativeActionRoutingHint("I attack and take cover.")).not.toContain("item acquisition");
   });
 
   it("makes creative scene authoring and MCP commitment explicit", () => {
