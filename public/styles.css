@@ -949,29 +949,29 @@ h1 i { color: var(--amber); font-style: italic; }
   .play-app .game-shell { grid-template-columns: 1fr; }
 }
 
-/* Keep the table itself bounded. Long dossiers and authored histories scroll in
-   their own surfaces so the composer and current turn stay reachable. */
+/* Keep the campaign log bounded without turning the character dossier into a
+   second viewport. Both columns keep the grid's natural height, while older
+   turns remain available inside the log itself. */
 @media (min-width: 861px) {
   .play-app .game-shell {
-    height: clamp(620px, calc(100vh - 144px), 760px);
+    height: auto;
     min-height: 0;
-    max-height: 760px;
+    max-height: none;
   }
 
   .play-app .player-panel {
     min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
+    max-height: none;
+    overflow: visible;
   }
 
   .play-app .table-panel {
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .play-app .game-log {
-    min-height: 0;
+    min-height: 620px;
     max-height: none;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -981,24 +981,24 @@ h1 i { color: var(--amber); font-style: italic; }
 
 @media (max-width: 860px) {
   .play-app .game-shell {
+    height: auto;
     min-height: 0;
+    max-height: none;
   }
 
   .play-app .player-panel {
-    max-height: min(58vh, 520px);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
+    max-height: none;
+    overflow: visible;
   }
 
   .play-app .table-panel {
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .play-app .game-log {
-    min-height: 240px;
-    max-height: min(50vh, 420px);
+    min-height: 420px;
+    max-height: min(68vh, 620px);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -1006,13 +1006,9 @@ h1 i { color: var(--amber); font-style: italic; }
 }
 
 @media (max-width: 480px) {
-  .play-app .player-panel {
-    max-height: min(52vh, 440px);
-  }
-
   .play-app .game-log {
-    min-height: 220px;
-    max-height: min(46vh, 360px);
+    min-height: 360px;
+    max-height: min(64vh, 500px);
   }
 
   .play-app .chat-input-row {
