@@ -981,24 +981,24 @@ h1 i { color: var(--amber); font-style: italic; }
 
 @media (max-width: 860px) {
   .play-app .game-shell {
-    height: auto;
     min-height: 0;
-    max-height: none;
   }
 
   .play-app .player-panel {
-    max-height: none;
-    overflow: visible;
+    max-height: min(58vh, 520px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
   }
 
   .play-app .table-panel {
     min-height: 0;
-    overflow: visible;
+    overflow: hidden;
   }
 
   .play-app .game-log {
-    min-height: 420px;
-    max-height: min(68vh, 620px);
+    min-height: 240px;
+    max-height: min(50vh, 420px);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -1006,9 +1006,13 @@ h1 i { color: var(--amber); font-style: italic; }
 }
 
 @media (max-width: 480px) {
+  .play-app .player-panel {
+    max-height: min(52vh, 440px);
+  }
+
   .play-app .game-log {
-    min-height: 360px;
-    max-height: min(64vh, 500px);
+    min-height: 220px;
+    max-height: min(46vh, 360px);
   }
 
   .play-app .chat-input-row {

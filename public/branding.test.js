@@ -33,14 +33,15 @@ describe("player-facing branding", () => {
     expect(styles).toContain(".play-app::after");
   });
 
-  it("keeps the dossier natural while the campaign log remains readable and scrollable", () => {
+  it("keeps the desktop dossier natural while preserving mobile scrolling", () => {
     expect(styles).toContain("height: auto;");
     expect(styles).toContain("min-height: 620px;");
     expect(styles).toContain(".play-app .player-panel");
     expect(styles).toContain("overflow: visible;");
     expect(styles).toContain("overscroll-behavior: contain;");
     expect(styles).toContain("scrollbar-gutter: stable;");
-    expect(styles).toContain("max-height: min(64vh, 500px);");
+    expect(styles).toContain("max-height: min(58vh, 520px);");
+    expect(styles).toContain("max-height: min(46vh, 360px);");
     expect(styles).toContain(".play-app .chat-input-row");
     expect(styles).toContain("grid-template-columns: 1fr;");
   });
