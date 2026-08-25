@@ -167,15 +167,12 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(requestBodies[0]?.tools.map((tool) => tool.function.name)).toEqual([
       "activate_tools",
-      "combat_action",
       "spatial_manage",
-      "npc_manage",
       "read_docket",
       "write_docket",
     ]);
     expect(requestBodies[1]?.tools.map((tool) => tool.function.name)).toEqual([
       "activate_tools",
-      "combat_action",
       "spatial_manage",
       "npc_manage",
       "read_docket",
@@ -243,7 +240,6 @@ describe("ReferenceDungeonMaster", () => {
       "inventory_manage",
       "spatial_manage",
       "scene_manage",
-      "quest_manage",
       "read_docket",
       "write_docket",
     ]);

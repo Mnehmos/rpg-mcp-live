@@ -28,9 +28,14 @@ export interface ReferenceCommandFailure {
   correlationId: string;
   commitStatus: ReferenceCommandCommitStatus;
   phase: string;
+  /** Provider completions, including retries, charged to this failed turn. */
+  providerCalls?: number;
   toolRounds: number;
+  /** Capabilities exposed to the provider when the failure occurred. */
+  activatedTools?: string[];
   toolCallNames: string[];
   acceptedToolCalls: number;
+  rejectedToolCalls?: number;
   message: string;
 }
 
@@ -107,9 +112,12 @@ function staleReferenceCommandFailure(clientCommandId: string): ReferenceCommand
     correlationId: `recovery-${clientCommandId}-${randomUUID()}`,
     commitStatus: "uncertain",
     phase: "recovery",
+    providerCalls: 0,
     toolRounds: 0,
+    activatedTools: [],
     toolCallNames: [],
     acceptedToolCalls: 0,
+    rejectedToolCalls: 0,
     message: "The previous turn lease expired before its durable outcome was recorded; refresh the campaign before retrying.",
   };
 }

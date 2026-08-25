@@ -150,6 +150,56 @@ describe("ReferenceEngineAdapter", () => {
     expect(store.getRouting("account-1", "campaign-1")?.referenceCharacterId).toBe("char-1");
   });
 
+  it("projects the authoritative party roster and preserves it across refresh", async () => {
+    const store = createStore();
+    store.setBackend("account-1", "campaign-1", "reference");
+    store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Hero",
+        race: "human",
+        characterClass: "fighter",
+        stats: { str: 16, dex: 14, con: 15, int: 10, wis: 12, cha: 8 },
+        hp: 10,
+        maxHp: 10,
+        ac: 10,
+        level: 7,
+        xp: 0,
+      }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      "quest_manage.get_log": () => ({ quests: [] }),
+      "party_manage.get": () => ({
+        id: "party-1",
+        name: "The Bellwardens",
+        currentLocation: "room-bell-sunken-cloister",
+        members: [
+          { characterId: "char-1", role: "leader", joinedAt: "2026-08-25T00:00:00.000Z" },
+          { characterId: "npc-ysra", role: "companion", joinedAt: "2026-08-25T00:05:00.000Z" },
+        ],
+        leader: { characterId: "char-1" },
+        activeCharacter: { characterId: "char-1" },
+      }),
+      "narrative_manage.search": () => ({ notes: [] }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+
+    const first = await adapter.getCampaign("account-1", "actor-1", "campaign-1");
+    const refreshed = await adapter.getCampaign("account-1", "actor-1", "campaign-1");
+
+    expect(first.campaign.party).toMatchObject({
+      id: "party-1",
+      leaderActorId: "char-1",
+      activeViewpointActorId: "char-1",
+      members: [
+        { actorId: "char-1", role: "leader", locationRef: "room-bell-sunken-cloister" },
+        { actorId: "npc-ysra", role: "companion", locationRef: "room-bell-sunken-cloister" },
+      ],
+    });
+    expect(refreshed.campaign.party).toEqual(first.campaign.party);
+  });
+
   it("routes inventory actions to inventory_manage with the stored characterId", async () => {
     const store = createStore();
     store.setBackend("account-1", "campaign-1", "reference");
