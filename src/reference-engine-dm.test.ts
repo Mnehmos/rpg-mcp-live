@@ -1789,6 +1789,8 @@ describe("reference DM scene authoring contract", () => {
     expect(hasAuthoritativeActionIntent("I pick up the bronze disc. What does Iven recognize?")).toBe(true);
     expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
     expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("Do I attack him?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("Is it safe if I open the door?")).toBe(false);
     expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
   });
 
