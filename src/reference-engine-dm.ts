@@ -435,15 +435,50 @@ const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 // ordinary conversational or observational turns should remain tool_choice=auto.
 const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
 const NON_ACTION_LOOK_IDIOM = /\btake\s+(?:a|an|the|my)\s+(?:(?:closer|close|quick|brief)\s+)?look\b/i;
-const HYPOTHETICAL_OR_QUESTION = /\?|^\s*(?:what if|what happens if|should I|can I|could I|would it|may I|might I)\b/i;
+const HYPOTHETICAL_OR_QUESTION = /^\s*(?:what if|what happens if|should I|can I|could I|would it|may I|might I|do I|did I|is it|are we)\b/i;
 const NEGATED_ACTION_PREFIX = /\b(?:don't|do not|never|not|can't|cannot|won't|wouldn't|shouldn't|didn't|did not|refuse to|avoid)\b[\s\S]{0,40}$/i;
 
 export function hasAuthoritativeActionIntent(playerText: string): boolean {
   const normalized = playerText.replace(/\s+/g, " ").trim();
-  if (!normalized || HYPOTHETICAL_OR_QUESTION.test(normalized) || NON_ACTION_LOOK_IDIOM.test(normalized)) return false;
+  if (!normalized || HYPOTHETICAL_OR_QUESTION.test(normalized)) return false;
+  if (NON_ACTION_LOOK_IDIOM.test(normalized) && !AUTHORITATIVE_ACTION_INTENT.test(normalized.replace(NON_ACTION_LOOK_IDIOM, ""))) return false;
   const actionMatch = AUTHORITATIVE_ACTION_INTENT.exec(normalized);
   if (!actionMatch || actionMatch.index === undefined) return false;
   return !NEGATED_ACTION_PREFIX.test(normalized.slice(0, actionMatch.index));
+}
+
+export function buildAuthoritativeActionRoutingHint(playerText: string): string | null {
+  if (!hasAuthoritativeActionIntent(playerText)) return null;
+  const normalized = playerText.replace(/\s+/g, " ").trim();
+  const explicitAcquisition = /\b(?:pick(?:s|ed|ing)?\s+up|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed)\b/i.test(normalized);
+  const takeOrKeep = /\b(?:take|takes|took|keep|keeps|kept)\b/i.test(normalized);
+  const nonAcquisitionTakeOrKeep = /\b(?:take|takes|took)\s+(?:(?:a|an|the|my|your)\s+)?(?:rest|cover|look|closer look|breath|moment|seat|shelter)\b|\bkeep\s+(?:watch|guard|quiet|moving|the door open)\b/i.test(normalized);
+  const pickup = explicitAcquisition || (takeOrKeep && !nonAcquisitionTakeOrKeep);
+  const light = /\b(?:light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished)\b/i.test(normalized);
+  const equipment = /\b(?:equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore)\b/i.test(normalized);
+  const transfer = /\b(?:hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave)\b/i.test(normalized);
+  const combat = /\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|roll|rolls|rolled|check|checks|checked)\b/i.test(normalized);
+  const movement = /\b(?:travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate)\b/i.test(normalized);
+
+  if (pickup) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): this turn contains an explicit item acquisition. Commit the material action before any optional social response: use item_manage create or an existing authoritative item lookup, then inventory_manage give or transfer with the accepted item id and the player's character. If the same turn asks an NPC a question, interact with that NPC only after the possession result succeeds. Do not use npc_manage, improvisation_manage, scene_manage, a docket, or prose as a substitute for the concrete item and inventory calls.";
+  }
+  if (light) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested light-source change through inventory_manage use or extinguish before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative light result.";
+  }
+  if (equipment) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested equipment change through inventory_manage equip or unequip before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative inventory result.";
+  }
+  if (transfer) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested handoff through inventory_manage transfer before optional conversation or narration. Do not use inventory_manage give, improvisation_manage, scene_manage, a docket, or prose as a substitute for the atomic transfer result.";
+  }
+  if (combat) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): resolve the requested combat or check action through the relevant RPG MCP combat/check tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
+  }
+  if (movement) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested movement, rest, or recovery through the relevant RPG MCP spatial/combat/inventory tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
+  }
+  return "INTERNAL DM ROUTING HINT (not player-facing): commit the explicit state-changing action through the relevant RPG MCP tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
 }
 
 function compactToolDescription(tool: OpenRouterToolDefinition): string {
@@ -703,8 +738,9 @@ export class ReferenceDungeonMaster {
     const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames);
     const activatedToolNames = new Set(activeRemoteToolNames);
     const authoredScene = emptyAuthoredSceneState();
-    const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
-    const stateMemory = this.store.getDocket(accountId, campaignId, "state");
+      const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
+      const stateMemory = this.store.getDocket(accountId, campaignId, "state");
+      const authoritativeActionRoutingHint = buildAuthoritativeActionRoutingHint(playerText);
     // Replay the actual assistant/tool exchange, not a prose-only rewrite of
     // prior turns. Besides restoring the model's own successful tool-use
     // pattern, accepted engine results safely carry discovered NPC/enemy IDs
@@ -720,6 +756,7 @@ export class ReferenceDungeonMaster {
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
       ...(authoritativeStateContext ? [{ role: "system" as const, content: authoritativeStateContext }] : []),
+      ...(authoritativeActionRoutingHint ? [{ role: "system" as const, content: authoritativeActionRoutingHint }] : []),
       { role: "user", content: playerText },
     ];
 
