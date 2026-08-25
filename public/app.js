@@ -2751,6 +2751,21 @@ import { usageLabel } from "./usage-display.js";
       })
       .then(function () {
         state.clerk = window.Clerk;
+        if (window.location.hash === "#/sso-callback" && typeof state.clerk.handleRedirectCallback === "function") {
+          var appUrl = window.location.origin + window.location.pathname;
+          var returnUrl = appUrl + "#play";
+          return state.clerk.handleRedirectCallback({
+            signInUrl: appUrl,
+            signUpUrl: appUrl,
+            signInFallbackRedirectUrl: returnUrl,
+            signUpFallbackRedirectUrl: returnUrl,
+            continueSignUpUrl: returnUrl,
+          });
+        }
+        return null;
+      })
+      .then(function () {
+        if (!state.clerk) return;
         if (typeof state.clerk.addListener === "function") {
           state.clerk.addListener(function () {
             renderIdentity();
