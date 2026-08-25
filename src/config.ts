@@ -113,18 +113,19 @@ export const config = Object.freeze({
   openRouterSiteUrl,
   openRouterAppName,
   llmUsage: {
-    // These defaults are intentionally conservative for a $5 Player Pass:
-    // $2/user/month is the hard application ceiling before Stripe, while the
-    // deployment-wide brake prevents an unexpected sign-up spike from
-    // consuming the provider balance.
+    // Player Pass aims for $2/user/month in provider cost but admits complete
+    // turns until the $4 hard ceiling. A power user's already-admitted turn is
+    // allowed to finish; the next command is where the dollar gate applies.
+    // Deployment-wide brakes remain the final provider-balance safeguard.
     freeDailyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_DAILY_COST_USD", 0.05) * 1_000_000),
     freeMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_MONTHLY_COST_USD", 0.25) * 1_000_000),
     freeDailyPromptTokens: readInteger("LLM_USAGE_FREE_DAILY_PROMPT_TOKENS", 125_000),
     freeDailyCompletionTokens: readInteger("LLM_USAGE_FREE_DAILY_COMPLETION_TOKENS", 25_000),
     freeMonthlyPromptTokens: readInteger("LLM_USAGE_FREE_MONTHLY_PROMPT_TOKENS", 500_000),
     freeMonthlyCompletionTokens: readInteger("LLM_USAGE_FREE_MONTHLY_COMPLETION_TOKENS", 100_000),
-    playerDailyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_DAILY_COST_USD", 0.25) * 1_000_000),
-    playerMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_COST_USD", 2) * 1_000_000),
+    playerDailyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_DAILY_COST_USD", 1) * 1_000_000),
+    playerMonthlyTargetCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD", 2) * 1_000_000),
+    playerMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_COST_USD", 4) * 1_000_000),
     playerDailyPromptTokens: readInteger("LLM_USAGE_PLAYER_DAILY_PROMPT_TOKENS", 500_000),
     playerDailyCompletionTokens: readInteger("LLM_USAGE_PLAYER_DAILY_COMPLETION_TOKENS", 125_000),
     playerMonthlyPromptTokens: readInteger("LLM_USAGE_PLAYER_MONTHLY_PROMPT_TOKENS", 4_000_000),

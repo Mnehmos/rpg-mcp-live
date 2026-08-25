@@ -14,6 +14,7 @@ function policy(overrides: Partial<LlmUsagePolicy> = {}): LlmUsagePolicy {
     freeMonthlyPromptTokens: 2_000,
     freeMonthlyCompletionTokens: 2_000,
     playerDailyCostMicros: 100,
+    playerMonthlyTargetCostMicros: 150,
     playerMonthlyCostMicros: 200,
     playerDailyPromptTokens: 10_000,
     playerDailyCompletionTokens: 10_000,
@@ -125,7 +126,89 @@ describe("LLM usage ledger", () => {
       estimatedCompletionTokens: 100,
       estimatedCostMicros: 50,
     });
-    expect(usage.getSummary("player-1").plan).toBe("player_pass");
+    expect(usage.getSummary("player-1")).toMatchObject({
+      plan: "player_pass",
+      targets: { monthly: { costMicros: 150, costUsd: 0.00015 } },
+      limits: { monthly: { costMicros: 200, costUsd: 0.0002 } },
+    });
+    game.close();
+  });
+
+  it("admits once before mutation and lets every provider call in that command finish", () => {
+    const { game, usage } = createStores({
+      freeDailyCostMicros: 10,
+      freeMonthlyCostMicros: 20,
+    });
+    usage.admitTurn("player-1");
+
+    const first = usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 100,
+      estimatedCompletionTokens: 100,
+      estimatedCostMicros: 8,
+      admittedTurn: true,
+    });
+    usage.settle(first.id, {
+      provider: "openrouter",
+      model: "test-model",
+      promptTokens: 100,
+      completionTokens: 100,
+      costMicros: 12,
+      costSource: "provider",
+    });
+
+    expect(() => usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 100,
+      estimatedCompletionTokens: 100,
+      estimatedCostMicros: 8,
+      admittedTurn: true,
+    })).not.toThrow();
+    expect(() => usage.admitTurn("player-1")).toThrowError(LlmUsageLimitError);
+    game.close();
+  });
+
+  it("keeps raw token ceilings diagnostic for an admitted command", () => {
+    const { game, usage } = createStores({
+      freeDailyPromptTokens: 1,
+      freeDailyCompletionTokens: 1,
+      freeMonthlyPromptTokens: 1,
+      freeMonthlyCompletionTokens: 1,
+    });
+    usage.admitTurn("player-1");
+    const reservation = usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 10_000,
+      estimatedCompletionTokens: 5_000,
+      estimatedCostMicros: 1,
+      admittedTurn: true,
+    });
+    usage.settle(reservation.id, {
+      provider: "openrouter",
+      model: "test-model",
+      promptTokens: 10_000,
+      completionTokens: 5_000,
+      costMicros: 1,
+      costSource: "provider",
+    });
+
+    expect(usage.getSummary("player-1").monthly.totalTokens).toBe(15_000);
+    expect(() => usage.admitTurn("player-1")).not.toThrow();
     game.close();
   });
 });

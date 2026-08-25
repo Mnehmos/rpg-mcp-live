@@ -9,7 +9,10 @@ import {
   type ReferenceEngineStore,
   type StoredLogMessage,
 } from "./reference-engine-store.js";
-import type { ReferenceEngineToolCatalog, OpenRouterToolDefinition } from "./reference-engine-tools.js";
+import {
+  type ReferenceEngineToolCatalog,
+  type OpenRouterToolDefinition,
+} from "./reference-engine-tools.js";
 import type {
   EngineAbility,
   EngineCharacterView,
@@ -131,6 +134,7 @@ interface DmUsageContext {
   userId: string;
   campaignId: string;
   clientCommandId: string;
+  admittedTurn: true;
 }
 
 // Read-only actions are still useful context, but a successful read cannot
@@ -343,6 +347,7 @@ export const REFERENCE_DM_SYSTEM_PROMPT = [
   "You are the Dungeon Master for a tabletop RPG session, running on the reference rules engine.",
   REFERENCE_DM_WORLD_AUTHORING_PROTOCOL,
   "The player owns the fiction's direction; you own the concrete scene. Invent places, people, pressures, clues, and opportunities that fit the campaign profile, then use the provided RPG MCP tools to commit every durable fact before narrating it.",
+  "You control tool selection. Consult the compact RPG MCP capability directory and call activate_tools with the smallest set of capabilities needed for this turn; you may activate more later whenever the fiction demands it. Activation only reveals schemas and never changes game state.",
   "You may call the provided tools to change game state (including spatial_manage for persistent rooms and character placement, combat, inventory, movement, character updates, quests, notes, and narrative memory).",
   "The engine validates and executes every tool call; you never mutate state directly, only through tools.",
   "Do not invent characterId/worldId/partyId values — omit them and the engine will fill in the correct ones for this session.",
@@ -389,6 +394,93 @@ const DOCKET_TOOLS: OpenRouterToolDefinition[] = [
     },
   },
 ];
+
+const ACTIVATE_TOOLS_NAME = "activate_tools";
+const RECENT_TOOL_PALETTE_LIMIT = 8;
+
+function compactToolDescription(tool: OpenRouterToolDefinition): string {
+  const description = tool.function.description.replace(/\s+/g, " ").trim();
+  const actionSchema = tool.function.parameters.properties.action as { enum?: unknown[] } | undefined;
+  const actions = Array.isArray(actionSchema?.enum)
+    ? actionSchema.enum.filter((value): value is string => typeof value === "string").slice(0, 16)
+    : [];
+  const summary = description.length > 180 ? `${description.slice(0, 177)}...` : description;
+  return [summary || "Engine capability.", actions.length ? `Actions: ${actions.join(", ")}.` : ""]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildToolDirectory(tools: readonly OpenRouterToolDefinition[]): string {
+  return [
+    "RPG MCP CAPABILITY DIRECTORY (selection only; successful tool results remain authoritative):",
+    "Use activate_tools to expose the full schema for the smallest useful set. You can activate additional capabilities in a later round.",
+    ...tools.map((tool) => `- ${tool.function.name}: ${compactToolDescription(tool)}`),
+  ].join("\n");
+}
+
+function buildActivateToolsDefinition(tools: readonly OpenRouterToolDefinition[]): OpenRouterToolDefinition {
+  return {
+    type: "function",
+    function: {
+      name: ACTIVATE_TOOLS_NAME,
+      description:
+        "Expose full schemas for one or more RPG MCP capabilities on the next tool round. This is DM-controlled tool selection only and does not inspect or mutate game state.",
+      parameters: {
+        type: "object",
+        properties: {
+          names: {
+            type: "array",
+            items: { type: "string", enum: tools.map((tool) => tool.function.name) },
+            description: "Capability names selected from the system directory.",
+          },
+        },
+        required: ["names"],
+      },
+    },
+  };
+}
+
+function seedRecentToolPalette(
+  priorLog: readonly StoredLogMessage[],
+  availableNames: ReadonlySet<string>,
+): Set<string> {
+  const selected = new Set<string>();
+  for (let index = priorLog.length - 1; index >= 0 && selected.size < RECENT_TOOL_PALETTE_LIMIT; index -= 1) {
+    const entry = priorLog[index];
+    if (entry?.kind !== "tool") continue;
+    for (const call of entry.toolDisclosure?.calls ?? []) {
+      if (call.accepted && availableNames.has(call.name)) selected.add(call.name);
+      if (selected.size >= RECENT_TOOL_PALETTE_LIMIT) break;
+    }
+  }
+  return selected;
+}
+
+function activateTools(
+  args: Record<string, unknown>,
+  activeNames: Set<string>,
+  availableNames: ReadonlySet<string>,
+): string {
+  const requested = Array.isArray(args.names)
+    ? args.names.filter((name): name is string => typeof name === "string")
+    : [];
+  const activated: string[] = [];
+  const unknown: string[] = [];
+  for (const name of requested) {
+    if (!availableNames.has(name)) {
+      unknown.push(name);
+      continue;
+    }
+    if (!activeNames.has(name)) activated.push(name);
+    activeNames.add(name);
+  }
+  return JSON.stringify({
+    success: requested.length > 0 && unknown.length === 0,
+    activated,
+    active: [...activeNames],
+    ...(unknown.length ? { unknown } : {}),
+  });
+}
 
 function isDocketName(value: unknown): value is DocketName {
   return typeof value === "string" && (DOCKET_NAMES as readonly string[]).includes(value);
@@ -469,7 +561,16 @@ export class ReferenceDungeonMaster {
     };
 
     try {
-    const tools = [...(await this.catalog.getTools()), ...DOCKET_TOOLS];
+      this.openRouter.usage?.admitTurn(accountId);
+    } catch (error) {
+      throw failTurn(error, "admission");
+    }
+
+    try {
+    const allRemoteTools = await this.catalog.getTools();
+    const availableRemoteToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
+    const activationTool = buildActivateToolsDefinition(allRemoteTools);
+    const toolDirectory = buildToolDirectory(allRemoteTools);
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
@@ -526,6 +627,7 @@ export class ReferenceDungeonMaster {
       : null;
 
     const priorLog = this.store.getLogMessages(accountId, campaignId);
+    const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames);
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
@@ -538,10 +640,11 @@ export class ReferenceDungeonMaster {
 
     const messages: ChatMessage[] = [
       { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
-      ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
+      { role: "system", content: toolDirectory },
       ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
-      ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
       ...historyMessages,
+      ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
+      ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
       { role: "user", content: playerText },
     ];
 
@@ -550,11 +653,17 @@ export class ReferenceDungeonMaster {
       // the DM can narrate the authored result instead of exhausting the
       // budget immediately after a valid tool call.
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+        const tools = [
+          activationTool,
+          ...allRemoteTools.filter((tool) => activeRemoteToolNames.has(tool.function.name)),
+          ...DOCKET_TOOLS,
+        ];
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
         const completion = await this.chatCompletion(messages, tools, deadlineAt, {
           userId: accountId,
           campaignId,
           clientCommandId,
+          admittedTurn: true,
         });
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
@@ -570,6 +679,14 @@ export class ReferenceDungeonMaster {
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
         for (const call of toolCalls) {
           const callArgs = parseArguments(call.function.arguments);
+          if (call.function.name === ACTIVATE_TOOLS_NAME) {
+            messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content: activateTools(callArgs, activeRemoteToolNames, availableRemoteToolNames),
+            });
+            continue;
+          }
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
@@ -723,6 +840,7 @@ export class ReferenceDungeonMaster {
         estimatedPromptTokens,
         estimatedCompletionTokens: Math.max(1, Math.ceil(policy.npcReserveCostMicros / Math.max(0.01, policy.outputCostUsdPerMillion))),
         estimatedCostMicros: policy.npcReserveCostMicros,
+        admittedTurn: true,
       });
     }
     try {
@@ -834,6 +952,7 @@ export class ReferenceDungeonMaster {
       ...(reasoningModel && this.openRouter.reasoningEffort ? { reasoning_effort: this.openRouter.reasoningEffort } : {}),
     };
     const usageStore = this.openRouter.usage;
+    const estimatedPromptTokens = Math.ceil(estimateLlmTokens({ messages, tools }) * 1.25);
     const reservation = usageStore && usageContext
       ? usageStore.reserve({
         userId: usageContext.userId,
@@ -842,9 +961,10 @@ export class ReferenceDungeonMaster {
         source: "dm",
         provider: "openrouter",
         model: this.openRouter.model,
-        estimatedPromptTokens: Math.ceil(estimateLlmTokens(messages) * 1.25),
+        estimatedPromptTokens,
         estimatedCompletionTokens: maxTokens ?? 900,
-        estimatedCostMicros: usageStore.estimateCostMicros(Math.ceil(estimateLlmTokens(messages) * 1.25), maxTokens ?? 900),
+        estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, maxTokens ?? 900),
+        admittedTurn: usageContext.admittedTurn,
       })
       : null;
     try {
