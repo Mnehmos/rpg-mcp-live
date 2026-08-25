@@ -30,6 +30,7 @@ import { commandFailureMessage, isStaleCommandStatus } from "./command-status.js
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
+import { usageLabel } from "./usage-display.js";
 
 (function () {
   "use strict";
@@ -1673,19 +1674,8 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
       if (wasNearBottom) gameLog.scrollTop = gameLog.scrollHeight;
       gameLog.dataset.initialized = "true";
     }
-    var usageLabel = "";
-    if (state.usage && state.usage.monthly && state.usage.limits && state.usage.limits.monthly) {
-      var spentUsd = Number(state.usage.monthly.costUsd || 0);
-      var hardUsd = Number(state.usage.limits.monthly.costUsd || 0);
-      var targetUsd = state.usage.targets && state.usage.targets.monthly
-        ? Number(state.usage.targets.monthly.costUsd || 0)
-        : hardUsd;
-      var budgetLabel = targetUsd > 0 && targetUsd < hardUsd
-        ? "$" + spentUsd.toFixed(4) + " / $" + targetUsd.toFixed(2) + " target · $" + hardUsd.toFixed(2) + " max"
-        : "$" + spentUsd.toFixed(4) + " / $" + hardUsd.toFixed(2) + " max";
-      usageLabel = " · " + budgetLabel + " · " + Number(state.usage.monthly.totalTokens || 0).toLocaleString() + " raw tokens";
-    }
-    $("#integration-state").textContent = (state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY") + usageLabel;
+    var usageStatus = state.usage ? usageLabel(state.usage) : "";
+    $("#integration-state").textContent = (state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY") + (usageStatus ? " · " + usageStatus : "");
   }
 
   function escapeHtml(value) {

@@ -22,10 +22,11 @@ export function contentSecurityPolicy(clerkFrontend: string | null): string {
     "base-uri 'self'",
     "object-src 'none'",
     "script-src 'self'" + clerk + captcha,
-    "style-src 'self' 'unsafe-inline'" + clerk,
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com" + clerk,
     "img-src 'self' data:" + clerk + clerkImages,
     "connect-src 'self'" + clerk,
     "frame-src 'self'" + clerk + captcha + " https://*.stripe.com",
+    "font-src 'self' https://fonts.gstatic.com",
     "worker-src 'self' blob:",
   ].join("; ");
 }
