@@ -2759,7 +2759,6 @@ import { usageLabel } from "./usage-display.js";
             signUpUrl: appUrl,
             signInFallbackRedirectUrl: returnUrl,
             signUpFallbackRedirectUrl: returnUrl,
-            continueSignUpUrl: returnUrl,
           });
         }
         return null;

@@ -37,6 +37,6 @@ describe("player-facing branding", () => {
     expect(app).toContain('window.location.hash === "#/sso-callback"');
     expect(app).toContain("handleRedirectCallback");
     expect(app).toContain("signInFallbackRedirectUrl");
-    expect(app).toContain("continueSignUpUrl");
+    expect(app).not.toContain("continueSignUpUrl");
   });
 });
