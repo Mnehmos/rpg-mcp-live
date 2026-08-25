@@ -346,6 +346,7 @@ describe("ReferenceDungeonMaster", () => {
       playerMonthlyCompletionTokens: 200_000,
       globalDailyCostMicros: 1_000_000,
       globalMonthlyCostMicros: 2_000_000,
+      turnAdmissionReserveCostMicros: 10_000,
       maxTurnCostMicros: 100_000,
       npcReserveCostMicros: 50_000,
       reservationTtlMs: 60_000,

@@ -22,6 +22,7 @@ function policy(overrides: Partial<LlmUsagePolicy> = {}): LlmUsagePolicy {
     playerMonthlyCompletionTokens: 20_000,
     globalDailyCostMicros: 1_000,
     globalMonthlyCostMicros: 2_000,
+    turnAdmissionReserveCostMicros: 5,
     maxTurnCostMicros: 500,
     npcReserveCostMicros: 100,
     reservationTtlMs: 60_000,
@@ -139,7 +140,13 @@ describe("LLM usage ledger", () => {
       freeDailyCostMicros: 10,
       freeMonthlyCostMicros: 20,
     });
-    usage.admitTurn("player-1");
+    usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      provider: "openrouter",
+      model: "test-model",
+    });
 
     const first = usage.reserve({
       userId: "player-1",
@@ -174,7 +181,13 @@ describe("LLM usage ledger", () => {
       estimatedCostMicros: 8,
       admittedTurn: true,
     })).not.toThrow();
-    expect(() => usage.admitTurn("player-1")).toThrowError(LlmUsageLimitError);
+    expect(() => usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-2",
+      clientCommandId: "command-2",
+      provider: "openrouter",
+      model: "test-model",
+    })).toThrowError(LlmUsageLimitError);
     game.close();
   });
 
@@ -185,7 +198,13 @@ describe("LLM usage ledger", () => {
       freeMonthlyPromptTokens: 1,
       freeMonthlyCompletionTokens: 1,
     });
-    usage.admitTurn("player-1");
+    const admission = usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      provider: "openrouter",
+      model: "test-model",
+    });
     const reservation = usage.reserve({
       userId: "player-1",
       campaignId: "campaign-1",
@@ -208,7 +227,48 @@ describe("LLM usage ledger", () => {
     });
 
     expect(usage.getSummary("player-1").monthly.totalTokens).toBe(15_000);
-    expect(() => usage.admitTurn("player-1")).not.toThrow();
+    usage.release(admission.id);
+    expect(() => usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-2",
+      clientCommandId: "command-2",
+      provider: "openrouter",
+      model: "test-model",
+    })).not.toThrow();
+    game.close();
+  });
+
+  it("atomically counts in-flight turn admissions against the global brake", () => {
+    const { game, usage } = createStores({
+      freeDailyCostMicros: 100,
+      freeMonthlyCostMicros: 100,
+      globalDailyCostMicros: 15,
+      globalMonthlyCostMicros: 15,
+      turnAdmissionReserveCostMicros: 10,
+    });
+    const first = usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      provider: "openrouter",
+      model: "test-model",
+    });
+
+    expect(() => usage.admitTurn({
+      userId: "player-2",
+      campaignId: "campaign-2",
+      clientCommandId: "command-2",
+      provider: "openrouter",
+      model: "test-model",
+    })).toThrowError(LlmUsageLimitError);
+    usage.release(first.id);
+    expect(() => usage.admitTurn({
+      userId: "player-2",
+      campaignId: "campaign-2",
+      clientCommandId: "command-2",
+      provider: "openrouter",
+      model: "test-model",
+    })).not.toThrow();
     game.close();
   });
 });

@@ -560,8 +560,15 @@ export class ReferenceDungeonMaster {
       return failure;
     };
 
+    let turnAdmission: LlmUsageReservation | null = null;
     try {
-      this.openRouter.usage?.admitTurn(accountId);
+      turnAdmission = this.openRouter.usage?.admitTurn({
+        userId: accountId,
+        campaignId,
+        clientCommandId,
+        provider: "openrouter",
+        model: this.openRouter.model,
+      }) ?? null;
     } catch (error) {
       throw failTurn(error, "admission");
     }
@@ -766,6 +773,8 @@ export class ReferenceDungeonMaster {
     } catch (error) {
       if (failureRecorded) throw error;
       throw failTurn(error, "context");
+    } finally {
+      if (turnAdmission) this.openRouter.usage?.release(turnAdmission.id);
     }
   }
 

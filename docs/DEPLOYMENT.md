@@ -127,6 +127,7 @@ LLM_USAGE_OUTPUT_COST_USD_PER_MILLION=1.20
 LLM_USAGE_PLAYER_DAILY_COST_USD=1.00
 LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD=2.00
 LLM_USAGE_PLAYER_MONTHLY_COST_USD=4.00
+LLM_USAGE_TURN_ADMISSION_RESERVE_COST_USD=0.01
 LLM_USAGE_GLOBAL_DAILY_COST_USD=5.00
 LLM_USAGE_GLOBAL_MONTHLY_COST_USD=25.00
 CONTENT_ALLOWED_GAMESYSTEMS=5e-2014
@@ -151,13 +152,15 @@ The web host records every OpenRouter DM completion and nested NPC-agent
 completion in its account-bound SQLite ledger. `GET /api/usage` returns the
 authenticated player's UTC daily/monthly prompt, completion, reasoning, total
 token, and actual USD totals. Raw token counts are diagnostics. A command is
-admitted once, before any game-state mutation, using settled dollar cost; all
-provider calls needed to finish that admitted turn may then complete. The
+admitted once, before any game-state mutation, using settled dollar cost plus a
+short-lived per-turn reservation; all provider calls needed to finish that
+admitted turn may then complete. The admission reservation makes concurrent
+commands count atomically against user and deployment-wide dollar brakes. The
 Player Pass target is distinct from its hard next-turn admission ceiling.
 Reservations still protect standalone provider calls and the per-request
 safety brake. The defaults above assume the current Luna pricing; when the
 model or provider price changes, update the two input/output rate variables and
-review the target and hard ceilings before launch.
+review the target, admission reserve, and hard ceilings before launch.
 
 Do not broaden the document/license ceiling during the S8 migration. OGL rollout is a separate product/legal decision with its own attribution check.
 

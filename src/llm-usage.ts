@@ -21,6 +21,7 @@ export interface LlmUsagePolicy {
   playerMonthlyCompletionTokens: number;
   globalDailyCostMicros: number;
   globalMonthlyCostMicros: number;
+  turnAdmissionReserveCostMicros: number;
   maxTurnCostMicros: number;
   npcReserveCostMicros: number;
   reservationTtlMs: number;
@@ -52,6 +53,14 @@ export interface LlmUsageReservationInput {
   estimatedCostMicros: number;
   /** The command already passed the cost-only gate before any world mutation. */
   admittedTurn?: boolean;
+}
+
+export interface LlmTurnAdmissionInput {
+  userId: string;
+  campaignId: string;
+  clientCommandId: string;
+  provider: string;
+  model: string;
 }
 
 export interface LlmUsageReservation {
@@ -195,24 +204,62 @@ export class LlmUsageStore {
 
   /**
    * Admit a complete player command before the DM can mutate world state.
-   * Only settled dollar cost is a product gate. Once admitted, provider calls
-   * for this command may finish even if their raw token totals cross a
-   * diagnostic token threshold or the command itself overshoots a cost cap.
-   * The next command is then rejected at this boundary.
+   * Settled dollar cost plus short-lived in-flight turn reservations form the
+   * product gate. Once admitted, provider calls for this command may finish
+   * even if their raw token totals cross a diagnostic token threshold or the
+   * command itself overshoots a cost cap. The next command is then rejected at
+   * this boundary.
    */
-  public admitTurn(userId: string, now = new Date()): void {
-    const plan = this.planForUser(userId);
-    const limits = this.limitsForPlan(plan);
-    const periods = periodBoundaries(now);
-    const userDaily = this.aggregateUser(userId, periods.dailyStart);
-    const userMonthly = this.aggregateUser(userId, periods.monthlyStart);
-    const globalDaily = this.aggregateAll(periods.dailyStart);
-    const globalMonthly = this.aggregateAll(periods.monthlyStart);
+  public admitTurn(input: LlmTurnAdmissionInput, now = new Date()): LlmUsageReservation {
+    const estimatedCostMicros = nonnegativeInteger(this.policy.turnAdmissionReserveCostMicros);
+    const admission: LlmUsageReservation = {
+      id: randomUUID(),
+      estimatedPromptTokens: 0,
+      estimatedCompletionTokens: 0,
+      estimatedCostMicros,
+    };
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + this.policy.reservationTtlMs).toISOString();
 
-    assertAdmissionAvailable("daily", userDaily.cost_micros ?? 0, limits.dailyCostMicros);
-    assertAdmissionAvailable("monthly", userMonthly.cost_micros ?? 0, limits.monthlyCostMicros);
-    assertAdmissionAvailable("global_daily", globalDaily.cost_micros ?? 0, this.policy.globalDailyCostMicros);
-    assertAdmissionAvailable("global_monthly", globalMonthly.cost_micros ?? 0, this.policy.globalMonthlyCostMicros);
+    const transaction = this.db.transaction(() => {
+      this.expireReservations(nowIso);
+      const plan = this.planForUser(input.userId);
+      const limits = this.limitsForPlan(plan);
+      const periods = periodBoundaries(now);
+      const userDaily = this.aggregateUser(input.userId, periods.dailyStart);
+      const userMonthly = this.aggregateUser(input.userId, periods.monthlyStart);
+      const userReserved = this.aggregateReservations(input.userId);
+      const globalDaily = this.aggregateAll(periods.dailyStart);
+      const globalMonthly = this.aggregateAll(periods.monthlyStart);
+      const globalReserved = this.aggregateAllReservations();
+
+      assertWithin("daily", (userDaily.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.dailyCostMicros);
+      assertWithin("monthly", (userMonthly.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.monthlyCostMicros);
+      assertWithin("global_daily", (globalDaily.cost_micros ?? 0) + globalReserved.dailyCostMicros, estimatedCostMicros, this.policy.globalDailyCostMicros);
+      assertWithin("global_monthly", (globalMonthly.cost_micros ?? 0) + globalReserved.monthlyCostMicros, estimatedCostMicros, this.policy.globalMonthlyCostMicros);
+
+      this.db
+        .prepare(
+          `INSERT INTO llm_usage_reservations (
+             id, user_id, campaign_id, client_command_id, source, provider, model,
+             estimated_prompt_tokens, estimated_completion_tokens, estimated_cost_micros,
+             status, expires_at, created_at
+           ) VALUES (?, ?, ?, ?, 'dm', ?, ?, 0, 0, ?, 'reserved', ?, ?)`,
+        )
+        .run(
+          admission.id,
+          input.userId,
+          input.campaignId,
+          input.clientCommandId,
+          input.provider,
+          input.model,
+          estimatedCostMicros,
+          expiresAt,
+          nowIso,
+        );
+    });
+    transaction.immediate();
+    return admission;
   }
 
   public reserve(input: LlmUsageReservationInput): LlmUsageReservation {
@@ -603,21 +650,6 @@ function assertWithin(
     requested,
     limit,
     `LLM ${period.replace("_", " ")} usage limit reached.`,
-  );
-}
-
-function assertAdmissionAvailable(
-  period: "daily" | "monthly" | "global_daily" | "global_monthly",
-  used: number,
-  limit: number,
-): void {
-  if (used < limit) return;
-  throw new LlmUsageLimitError(
-    period,
-    used,
-    0,
-    limit,
-    `LLM ${period.replace("_", " ")} cost limit reached before this turn started.`,
   );
 }
 
