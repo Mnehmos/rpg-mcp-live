@@ -32,18 +32,22 @@ function fakeClient(handlers: Record<string, (args: Record<string, unknown>) => 
   } as unknown as ReferenceEngineClient;
 }
 
-function fakeCatalog(): ReferenceEngineToolCatalog {
-  const combatAction = {
+function fakeCatalog(names: string[] = ["combat_action"]): ReferenceEngineToolCatalog {
+  const tools = names.map((name) => ({
     type: "function" as const,
     function: {
-      name: "combat_action",
-      description: "",
-      parameters: { type: "object" as const, properties: {}, required: [] },
+      name,
+      description: `${name} fixture capability.`,
+      parameters: {
+        type: "object" as const,
+        properties: { action: { type: "string", enum: ["get", "set"] } },
+        required: [],
+      },
     },
-  };
+  }));
   return {
-    getTools: vi.fn(async () => [combatAction]),
-    getTool: vi.fn(async (name: string) => name === "combat_action" ? combatAction : undefined),
+    getTools: vi.fn(async () => tools),
+    getTool: vi.fn(async (name: string) => tools.find((tool) => tool.function.name === name)),
   } as unknown as ReferenceEngineToolCatalog;
 }
 
@@ -108,6 +112,84 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("give only adds an item and does not remove it from the player");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("exact questId and objective IDs returned by quest_manage.create");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Never derive an objective ID");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("call activate_tools with the smallest set");
+  });
+
+  it("starts with a compact palette and lets the DM activate only the capabilities it chooses", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-palette-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 1_000_000,
+      freeMonthlyCostMicros: 1_000_000,
+      freeDailyPromptTokens: 1,
+      freeDailyCompletionTokens: 1,
+      freeMonthlyPromptTokens: 1,
+      freeMonthlyCompletionTokens: 1,
+    });
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["combat_action", "spatial_manage", "npc_manage"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+        usage,
+      },
+    );
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string | null }>; tools: Array<{ function: { name: string } }> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestBodies.push(JSON.parse(init.body));
+      if (requestBodies.length === 1) {
+        return Response.json({
+          choices: [{ message: { content: null, tool_calls: [{
+            id: "activate-1",
+            type: "function",
+            function: {
+              name: "activate_tools",
+              arguments: JSON.stringify({ names: ["spatial_manage", "npc_manage"] }),
+            },
+          }] } }],
+          usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cost: 0.000001 },
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: "Mist gathers around the road ahead." } }],
+        usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cost: 0.000001 },
+      });
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road into the mist.");
+
+    expect(requestBodies[0]?.tools.map((tool) => tool.function.name)).toEqual([
+      "activate_tools",
+      "read_docket",
+      "write_docket",
+    ]);
+    expect(requestBodies[1]?.tools.map((tool) => tool.function.name)).toEqual([
+      "activate_tools",
+      "spatial_manage",
+      "npc_manage",
+      "read_docket",
+      "write_docket",
+    ]);
+    expect(requestBodies[0]?.messages.some((message) =>
+      message.role === "system"
+      && message.content?.includes("RPG MCP CAPABILITY DIRECTORY")
+      && message.content.includes("combat_action")
+      && message.content.includes("spatial_manage")
+      && message.content.includes("npc_manage")
+    )).toBe(true);
+    expect(result.toolDisclosure).toBeNull();
+    expect(result.turnUsage).toMatchObject({ calls: 2, totalTokens: 220, costMicros: 2 });
+    gameStore.close();
   });
 
   it("omits blank optional tool fields without hiding required nested validation", () => {
@@ -256,6 +338,7 @@ describe("ReferenceDungeonMaster", () => {
       freeMonthlyPromptTokens: 200_000,
       freeMonthlyCompletionTokens: 200_000,
       playerDailyCostMicros: 100_000,
+      playerMonthlyTargetCostMicros: 150_000,
       playerMonthlyCostMicros: 200_000,
       playerDailyPromptTokens: 100_000,
       playerDailyCompletionTokens: 100_000,
@@ -263,6 +346,7 @@ describe("ReferenceDungeonMaster", () => {
       playerMonthlyCompletionTokens: 200_000,
       globalDailyCostMicros: 1_000_000,
       globalMonthlyCostMicros: 2_000_000,
+      turnAdmissionReserveCostMicros: 10_000,
       maxTurnCostMicros: 100_000,
       npcReserveCostMicros: 50_000,
       reservationTtlMs: 60_000,
@@ -382,6 +466,66 @@ describe("ReferenceDungeonMaster", () => {
         acceptedToolCalls: 0,
       },
     });
+  });
+
+  it("rejects the next command at dollar admission before loading tools or campaign state", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-admission-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 10,
+      freeMonthlyCostMicros: 10,
+      globalDailyCostMicros: 1_000,
+      globalMonthlyCostMicros: 1_000,
+    });
+    const prior = usage.reserve({
+      userId: "account-1",
+      campaignId: "campaign-0",
+      clientCommandId: "prior-command",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 1,
+      estimatedCompletionTokens: 1,
+      estimatedCostMicros: 10,
+    });
+    usage.settle(prior.id, {
+      provider: "openrouter",
+      model: "test-model",
+      promptTokens: 1,
+      completionTokens: 1,
+      costMicros: 10,
+      costSource: "provider",
+    });
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const campaignSpy = vi.spyOn(adapter, "getCampaign");
+    const catalog = fakeCatalog();
+    const dm = new ReferenceDungeonMaster(client, store, catalog, adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      usage,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I open the sealed door.", {
+      clientCommandId: "blocked-command",
+      expectedCampaignVersion: 0,
+    })).rejects.toBeInstanceOf(ReferenceDmProviderUnavailableError);
+
+    expect(catalog.getTools).not.toHaveBeenCalled();
+    expect(campaignSpy).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.getReferenceCommand("account-1", "campaign-1", "blocked-command")).toMatchObject({
+      status: "failed",
+      failure: { commitStatus: "not_committed", phase: "admission", acceptedToolCalls: 0 },
+    });
+    gameStore.close();
   });
 
   it("does not mark a read-only docket lookup as an uncertain commit", async () => {
@@ -828,7 +972,12 @@ describe("ReferenceDungeonMaster", () => {
       role: "assistant",
       content: "Black water laps over the chapel floor.",
     });
-    expect(firstMessages[priorPlayerIndex + 5]).toEqual({
+    const currentPlayerIndex = firstMessages.findIndex((message) => message.content === "I listen at the altar.");
+    expect(currentPlayerIndex).toBeGreaterThan(priorPlayerIndex + 4);
+    expect(firstMessages.slice(priorPlayerIndex + 5, currentPlayerIndex)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "system", content: expect.stringContaining("CURRENT CHARACTER SHEET") })]),
+    );
+    expect(firstMessages[currentPlayerIndex]).toEqual({
       role: "user",
       content: "I listen at the altar.",
     });
