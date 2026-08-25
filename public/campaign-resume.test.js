@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeCampaignStorageKey,
   campaignSessionUrl,
+  commandReconciliationPolicy,
   isPendingCommandForCampaign,
   isPendingCommandConflict,
   isPendingCommandForRequest,
@@ -92,6 +93,11 @@ describe("authenticated campaign resume", () => {
     expect(isCurrentCampaignSelection("", "")).toBe(false);
     expect(isConfirmedMissingCommand(404, "command_not_found")).toBe(true);
     expect(isConfirmedMissingCommand(404, "temporary_error")).toBe(false);
+  });
+
+  it("keeps reference reconciliation alive beyond the DM deadline", () => {
+    expect(commandReconciliationPolicy("reference")).toEqual({ maxAttempts: 180, pollDelayMs: 1000 });
+    expect(commandReconciliationPolicy("lantern")).toEqual({ maxAttempts: 80, pollDelayMs: 1500 });
   });
 });
 

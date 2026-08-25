@@ -5,6 +5,7 @@ import {
 import {
   activeCampaignStorageKey,
   campaignSessionUrl,
+  commandReconciliationPolicy,
   isCurrentCampaignSelection,
   isConfirmedMissingCommand,
   isCurrentRequest,
@@ -33,7 +34,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, usage: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, usage: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -2028,10 +2029,10 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
   }
 
   function reconcilePendingCommand(campaignId, clientCommandId) {
-    var referenceBackend = campaignEngineBackend(campaignId) === "reference";
+    var reconciliationPolicy = commandReconciliationPolicy(campaignEngineBackend(campaignId));
     var attempts = 0;
-    var maxAttempts = referenceBackend ? 20 : 80;
-    var pollDelayMs = referenceBackend ? 1000 : 1500;
+    var maxAttempts = reconciliationPolicy.maxAttempts;
+    var pollDelayMs = reconciliationPolicy.pollDelayMs;
 
     function waitForNextPoll() {
       return new Promise(function (resolve) {
@@ -2110,6 +2111,7 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         });
       }
       return refreshSession().then(function () {
+        if (outcome.pending) schedulePendingReconciliation(campaignId, clientCommandId);
         setStatus(
           outcome.pending
             ? "This turn is still reconciling; keep this tab open."
@@ -2120,10 +2122,22 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         return false;
       });
     }).catch(function () {
+      schedulePendingReconciliation(campaignId, clientCommandId);
       setStatus("This turn is still reconciling; keep this tab open.", "thinking");
       showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
       return false;
     });
+  }
+
+  function schedulePendingReconciliation(campaignId, clientCommandId) {
+    var key = String(campaignId) + ":" + String(clientCommandId);
+    if (state.pendingReconciliationTimers[key]) return;
+    state.pendingReconciliationTimers[key] = window.setTimeout(function () {
+      delete state.pendingReconciliationTimers[key];
+      if (isCurrentPendingCommand(campaignId, clientCommandId)) {
+        startPendingReconciliation(campaignId, clientCommandId);
+      }
+    }, 5000);
   }
 
   function startPendingReconciliation(campaignId, clientCommandId) {

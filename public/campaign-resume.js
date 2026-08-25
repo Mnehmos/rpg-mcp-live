@@ -105,3 +105,15 @@ export function isConfirmedMissingCommand(status, code) {
   return status === 404 && code === "command_not_found";
 }
 
+/**
+ * Reference turns can spend the server's full DM deadline (and a proxy can
+ * return a 5xx while the durable command is still processing). Keep the
+ * browser poll window longer than that deadline; the app schedules a
+ * background retry if the command still has not reached a terminal state.
+ */
+export function commandReconciliationPolicy(engineBackend) {
+  return engineBackend === "reference"
+    ? { maxAttempts: 180, pollDelayMs: 1000 }
+    : { maxAttempts: 80, pollDelayMs: 1500 };
+}
+

@@ -333,6 +333,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Do not wait for the engine to reject an absent fact and do not answer with a deterministic absence check. Treat every player intent as an invitation to author the next playable situation; inspect current state, make the creative decision, call the relevant tools, and keep the flow in-world.",
   "Use spatial_manage generate and move for places and player placement; npc_manage create or spawn_manage for NPCs and populated locations; combat_manage spawn_quick_enemy or spawn_manage for enemies and encounters; item_manage and inventory_manage for authored objects and possession; quest_manage for durable quests; and scene_manage set for the DM-authored shared scene frame.",
   "When the player gives, offers, or hands a carried item to an NPC, use inventory_manage action transfer with fromCharacterId set to the player's exact character id and toCharacterId set to the recipient character id. Do not use inventory_manage give as a handoff: give only adds an item and does not remove it from the player. Narrate acceptance only after the atomic transfer result succeeds.",
+  "Prose, improvisation_manage, a docket entry, or an NPC/agent proposal never creates a concrete possession, quest, party membership, or light state. When the player acquires or discovers an item, author it with item_manage, then commit possession with inventory_manage give or transfer before narrating ownership. When a durable goal becomes real, create it with quest_manage and use the exact returned IDs. When a companion joins the party, commit party_manage membership and spatial placement before treating the companion as present. For light, use inventory_manage action use to light a carried source and action extinguish to put it out; narrate only the authoritative result.",
   "When creating or advancing a quest, use the exact questId and objective IDs returned by quest_manage.create, quest_manage.get, or quest_manage.get_log. Never derive an objective ID from a quest ID, objective name, or array position; if the ID is unavailable, read the quest log before updating or completing it.",
   "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4-flash, and competencyOverride {model: deepseek/deepseek-v4-flash} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, use maxTokens 8192 or higher and omit budgetTokens (or use a clearly session-sized budget, never a tiny 300/1000 budget). Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
@@ -396,7 +397,18 @@ const DOCKET_TOOLS: OpenRouterToolDefinition[] = [
 ];
 
 const ACTIVATE_TOOLS_NAME = "activate_tools";
-const RECENT_TOOL_PALETTE_LIMIT = 8;
+const CORE_TOOL_PALETTE = [
+  "spatial_manage",
+  "scene_manage",
+  "item_manage",
+  "inventory_manage",
+  "quest_manage",
+  "npc_manage",
+  "party_manage",
+  "combat_manage",
+  "combat_action",
+] as const;
+const RECENT_TOOL_PALETTE_LIMIT = 12;
 
 function compactToolDescription(tool: OpenRouterToolDefinition): string {
   const description = tool.function.description.replace(/\s+/g, " ").trim();
@@ -444,7 +456,11 @@ function seedRecentToolPalette(
   priorLog: readonly StoredLogMessage[],
   availableNames: ReadonlySet<string>,
 ): Set<string> {
-  const selected = new Set<string>();
+  // Keep the first request cache-stable and immediately useful for ordinary
+  // DM authoring. Rare capabilities remain opt-in through activate_tools;
+  // recent successful tools can add a few more without replaying the whole
+  // catalog on every turn.
+  const selected = new Set<string>(CORE_TOOL_PALETTE.filter((name) => availableNames.has(name)));
   for (let index = priorLog.length - 1; index >= 0 && selected.size < RECENT_TOOL_PALETTE_LIMIT; index -= 1) {
     const entry = priorLog[index];
     if (entry?.kind !== "tool") continue;
@@ -541,6 +557,8 @@ export class ReferenceDungeonMaster {
     const toolCallNames: string[] = [];
     const disclosedToolCalls: EngineToolCallDisclosure[] = [];
     let acceptedToolCalls = 0;
+    const rejectedStateChangingCallNames = new Set<string>();
+    let rejectionRecoveryPending = false;
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
       ? Date.now() + this.openRouter.turnTimeoutMs
@@ -675,6 +693,18 @@ export class ReferenceDungeonMaster {
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
+          if (rejectionRecoveryPending) {
+            rejectionRecoveryPending = false;
+            messages.push({
+              role: "system",
+              content: [
+                "The previous draft was not published because an authoritative state-changing RPG MCP call was rejected.",
+                `Rejected capability: ${[...rejectedStateChangingCallNames].join(", ")}.`,
+                "Take one more DM completion now. Use the returned tool error as the boundary: repair the call if the player's intent still needs a commitment, or narrate the attempt failing/being blocked in diegetic D&D prose. Do not claim the rejected state change happened, and do not replace it with prose, a docket entry, or an agent proposal.",
+              ].join(" "),
+            });
+            continue;
+          }
           narrationText = candidate || null;
           break;
         }
@@ -711,6 +741,10 @@ export class ReferenceDungeonMaster {
               );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) acceptedToolCalls += 1;
+          if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
+            rejectedStateChangingCallNames.add(call.function.name);
+            rejectionRecoveryPending = true;
+          }
           this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
