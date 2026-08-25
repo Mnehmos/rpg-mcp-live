@@ -1678,6 +1678,7 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("scene_manage action set");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player drives what happens next");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("History is not proof");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("current authoritative projection");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not narrate that absence");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
