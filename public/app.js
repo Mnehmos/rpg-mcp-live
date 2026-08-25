@@ -26,7 +26,7 @@ import {
   shouldSubmitOnEnter,
   updateComposerCounter,
 } from "./turn-composer.js";
-import { isStaleCommandStatus } from "./command-status.js";
+import { commandFailureMessage, isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
@@ -2049,7 +2049,9 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
           return { resolved: false, confirmedMissing: true };
         }
         if (result.response.ok && result.data.status === "failed") {
-          if (result.data.commitStatus === "not_committed") return { resolved: false, confirmedMissing: true };
+          if (result.data.commitStatus === "not_committed") {
+            return { resolved: false, confirmedMissing: true, message: commandFailureMessage(result.data) };
+          }
           return { resolved: false, uncertain: true };
         }
         if (result.response.ok && result.data.status === "resolved" && result.data.result) {
@@ -2092,8 +2094,9 @@ import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-pr
         state.pendingPlayerText = null;
         state.uncertainPlayerText = null;
         renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-        setStatus("That turn was not committed; you can try again.", "ready");
-        showToast("The server confirmed that turn was not committed.");
+        var notCommittedMessage = outcome.message || "That turn was not committed; you can try again.";
+        setStatus(notCommittedMessage, "ready");
+        showToast(notCommittedMessage);
         return false;
       }
       if (outcome.uncertain) {

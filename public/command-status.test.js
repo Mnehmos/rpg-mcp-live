@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isStaleCommandStatus } from "./command-status.js";
+import { commandFailureMessage, isStaleCommandStatus } from "./command-status.js";
 
 describe("command status", () => {
   it("rejects a stored result older than the current campaign", () => {
@@ -17,5 +17,15 @@ describe("command status", () => {
       result: { session: { version: 3 } },
     })).toBe(false);
     expect(isStaleCommandStatus({ status: "processing", campaignVersion: 3 })).toBe(false);
+  });
+
+  it("explains safe retry when the DM failed before any state commit", () => {
+    expect(commandFailureMessage({ commitStatus: "not_committed" })).toBe(
+      "The DM provider did not return a result; no game state was committed. Your action is safe to retry."
+    );
+    expect(commandFailureMessage({
+      commitStatus: "not_committed",
+      error: "A more specific provider message.",
+    })).toBe("A more specific provider message.");
   });
 });
