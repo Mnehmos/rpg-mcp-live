@@ -433,7 +433,11 @@ const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 // completion must enter the tool loop so the DM can choose and commit the
 // appropriate RPG MCP action before it narrates.  Keep the vocabulary narrow:
 // ordinary conversational or observational turns should remain tool_choice=auto.
-const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
+const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
+const COMPANION_ACTION_INTENT = /(?:\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b[\s\S]{0,80}\b(?:join|come|travel|fight|adventure)\b[\s\S]{0,40}\b(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b[\s\S]{0,80}\b(?:into|to|as)\s+(?:our|the|a|an)\s+(?:party|group|company|team|companion|ally)\b|\bjoin(?:s|ed)?\s+(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:form|forms|formed)\s+(?:a|the)\s+(?:party|group|company|team)\b)/i;
+const COMPANION_ACTION_VERB = /^(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed)$/i;
+const TRANSFER_ACTION_INTENT = /\b(?:hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave)\b/i;
+const LIGHT_ACTION_INTENT = /\b(?:light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished)\b/i;
 const NON_ACTION_LOOK_IDIOM = /\btake\s+(?:a|an|the|my)\s+(?:(?:closer|close|quick|brief)\s+)?look\b/i;
 const HYPOTHETICAL_OR_QUESTION = /^\s*(?:what if|what happens if|should I|can I|could I|would it|may I|might I|do I|did I|is it|are we)\b/i;
 const NEGATED_ACTION_PREFIX = /\b(?:don't|do not|never|not|can't|cannot|won't|wouldn't|shouldn't|didn't|did not|refuse to|avoid)\b[\s\S]{0,40}$/i;
@@ -442,12 +446,64 @@ export function hasAuthoritativeActionIntent(playerText: string): boolean {
   const normalized = playerText.replace(/\s+/g, " ").trim();
   if (!normalized || HYPOTHETICAL_OR_QUESTION.test(normalized)) return false;
   if (NON_ACTION_LOOK_IDIOM.test(normalized) && !AUTHORITATIVE_ACTION_INTENT.test(normalized.replace(NON_ACTION_LOOK_IDIOM, ""))) return false;
-  const actionMatch = AUTHORITATIVE_ACTION_INTENT.exec(normalized);
-  if (!actionMatch || actionMatch.index === undefined) return false;
-  return !NEGATED_ACTION_PREFIX.test(normalized.slice(0, actionMatch.index));
+  let searchOffset = 0;
+  while (searchOffset < normalized.length) {
+    const actionMatch = AUTHORITATIVE_ACTION_INTENT.exec(normalized.slice(searchOffset));
+    if (!actionMatch || actionMatch.index === undefined) return false;
+    const actionIndex = searchOffset + actionMatch.index;
+    if (COMPANION_ACTION_VERB.test(actionMatch[0]) && !COMPANION_ACTION_INTENT.test(normalized)) {
+      searchOffset = actionIndex + actionMatch[0].length;
+      continue;
+    }
+    return !NEGATED_ACTION_PREFIX.test(normalized.slice(0, actionIndex));
+  }
+  return false;
 }
 
+/**
+ * Adds a small, turn-specific routing reminder for actions where a plausible
+ * prose answer is especially easy to mistake for an engine commitment. This
+ * is orchestration guidance for the DM, not a player-facing approval gate.
+ */
 export function buildAuthoritativeActionRoutingHint(playerText: string): string | null {
+  const normalized = playerText.replace(/\s+/g, " ").trim();
+  if (!normalized || !hasAuthoritativeActionIntent(normalized)) return null;
+
+  const hints: string[] = [];
+  if (COMPANION_ACTION_INTENT.test(normalized)) {
+    hints.push(
+      "For an explicit companion invitation, recruitment, or joining action: if the NPC is new, call npc_manage.create and use the exact returned character id; ensure a current room exists, then call spatial_manage.move with that exact NPC id and the accepted current room id; only after placement succeeds call party_manage.add_member with the exact NPC id and party id. If the NPC already exists, read and reuse its authoritative id instead of creating a duplicate. Do not use scene_manage, write_docket, or npc_manage.interact as substitutes for creation, placement, or party membership. Only after those commitments may you interact, invoke an explicitly agent-backed NPC, commit the scene, and narrate the companion as present.",
+    );
+  }
+  if (TRANSFER_ACTION_INTENT.test(normalized) && !COMPANION_ACTION_INTENT.test(normalized)) {
+    hints.push(
+      "For a carried-item handoff, read inventory_manage.get_detailed when the exact item id is not already known, then call inventory_manage.transfer once with the authoritative item id, player source id, and recipient character id. Do not replace transfer with give or repeat a rejected guessed id.",
+    );
+  }
+  if (LIGHT_ACTION_INTENT.test(normalized)) {
+    hints.push(
+      "For light, use the exact carried item id shown in the authoritative sheet; if no light-source item is present, catalog/materialize and give it first, then call inventory_manage.use or extinguish once. Do not narrate a flame or light transition from scene prose alone.",
+    );
+  }
+  return hints.length
+    ? `TURN-SPECIFIC AUTHORITATIVE ROUTING (internal DM guidance): ${hints.join(" ")}`
+    : buildGeneralAuthoritativeActionRoutingHint(normalized);
+}
+
+function rejectedStateChangingActionKey(toolName: string, args: Record<string, unknown>): string {
+  const identity = Object.entries(args)
+    .filter(([key, value]) => (
+      value !== undefined
+      && value !== null
+      && (key === "action" || key === "name" || key === "direction" || /id$/i.test(key))
+    ))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join("|");
+  return `${toolName}:${identity || "unscoped"}`;
+}
+
+function buildGeneralAuthoritativeActionRoutingHint(playerText: string): string | null {
   if (!hasAuthoritativeActionIntent(playerText)) return null;
   const normalized = playerText.replace(/\s+/g, " ").trim();
   const explicitAcquisition = /\b(?:pick(?:s|ed|ing)?\s+up|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed)\b/i.test(normalized);
@@ -633,7 +689,7 @@ export class ReferenceDungeonMaster {
     let acceptedToolCalls = 0;
     let acceptedStateChangingToolCalls = 0;
     let rejectedToolCalls = 0;
-    const rejectedStateChangingCallNames = new Set<string>();
+    const rejectedStateChangingActionKeys = new Set<string>();
     let rejectionRecoveryPending = false;
     let rejectionRecoveryNarrationReady = false;
     let narrationOnlyNext = false;
@@ -677,6 +733,7 @@ export class ReferenceDungeonMaster {
     const activationTool = buildActivateToolsDefinition(allRemoteTools);
     const toolDirectory = buildToolDirectory(allRemoteTools);
     const requiresAuthoritativeToolChoice = hasAuthoritativeActionIntent(playerText);
+    const authoritativeActionRoutingHint = buildAuthoritativeActionRoutingHint(playerText);
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
@@ -738,9 +795,8 @@ export class ReferenceDungeonMaster {
     const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames);
     const activatedToolNames = new Set(activeRemoteToolNames);
     const authoredScene = emptyAuthoredSceneState();
-      const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
-      const stateMemory = this.store.getDocket(accountId, campaignId, "state");
-      const authoritativeActionRoutingHint = buildAuthoritativeActionRoutingHint(playerText);
+    const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
+    const stateMemory = this.store.getDocket(accountId, campaignId, "state");
     // Replay the actual assistant/tool exchange, not a prose-only rewrite of
     // prior turns. Besides restoring the model's own successful tool-use
     // pattern, accepted engine results safely carry discovered NPC/enemy IDs
@@ -793,7 +849,7 @@ export class ReferenceDungeonMaster {
               role: "system",
               content: [
                 "The previous draft was not published because an authoritative state-changing RPG MCP call was rejected.",
-                `Rejected capability: ${[...rejectedStateChangingCallNames].join(", ")}.`,
+                `Rejected capability: ${[...rejectedStateChangingActionKeys].join(", ")}.`,
                 "Take one more DM completion now. Use the returned tool error as the boundary: repair the call if the player's intent still needs a commitment, or narrate the attempt failing/being blocked in diegetic D&D prose. Do not claim the rejected state change happened, and do not replace it with prose, a docket entry, or an agent proposal.",
               ].join(" "),
             });
@@ -851,13 +907,18 @@ export class ReferenceDungeonMaster {
               );
           disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
           if (remoteOutcome.accepted) acceptedToolCalls += 1;
+          const rejectedActionKey = remoteOutcome.stateChanging
+            ? rejectedStateChangingActionKey(call.function.name, remoteOutcome.effectiveArguments)
+            : null;
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) {
             acceptedStateChangingToolCalls += 1;
             authoritativeToolCallObserved = true;
+            if (rejectedActionKey) rejectedStateChangingActionKeys.delete(rejectedActionKey);
+            rejectionRecoveryPending = rejectedStateChangingActionKeys.size > 0;
           }
           if (!remoteOutcome.accepted) rejectedToolCalls += 1;
           if (!remoteOutcome.accepted && remoteOutcome.stateChanging) {
-            rejectedStateChangingCallNames.add(call.function.name);
+            if (rejectedActionKey) rejectedStateChangingActionKeys.add(rejectedActionKey);
             rejectionRecoveryPending = true;
           }
           this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
@@ -1296,7 +1357,7 @@ function formatCharacterSheetContext(character: EngineCharacterView): string {
     (ability) => `${ability.toUpperCase()} ${character.abilities[ability]} (${formatModifier(character.abilityModifiers[ability])})`
   ).join(", ");
   const inventory = character.inventory
-    .map((item) => `${item.authoredDefinition?.name ?? item.id} x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
+    .map((item) => `${item.authoredDefinition?.name ?? item.id} [id=${item.id}] x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
     .join(", ");
   const currency = character.derived.currencyBreakdown;
   const spells = character.spellcasting
@@ -1323,7 +1384,7 @@ function formatCharacterSheetContext(character: EngineCharacterView): string {
 /** Renders the compact authoritative projection used to arbitrate durable facts in replayed prose. */
 function formatAuthoritativeStateContext(campaign: EngineSessionView): string {
   const inventory = campaign.character.inventory
-    .map((item) => `${item.authoredDefinition?.name ?? item.id} x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
+    .map((item) => `${item.authoredDefinition?.name ?? item.id} [id=${item.id}] x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
     .join(", ");
   const quests = campaign.quests
     .map((quest) => `${quest.id} ${quest.title} [${quest.status}, ${quest.progress}%]`)

@@ -1590,6 +1590,111 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("does not spend an extra recovery completion after the rejected action is repaired", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-repaired-action-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    let useAttempts = 0;
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "inventory_manage.use": () => {
+        useAttempts += 1;
+        return useAttempts === 1
+          ? { error: "The carried item id is stale." }
+          : { success: true, actionType: "use", lightSource: { active: true } };
+      },
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["inventory_manage"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1 || call === 2) {
+        return openRouterMessage(null, [{
+          id: `use-torch-${call}`,
+          type: "function",
+          function: {
+            name: "inventory_manage",
+            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The repaired flame catches and steadies in the dark.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
+
+    expect(call).toBe(3);
+    expect(result.narration.text).toContain("repaired flame");
+    expect(result.diagnostics).toMatchObject({
+      providerCalls: 3,
+      acceptedStateChangingToolCalls: 1,
+      rejectedToolCalls: 1,
+    });
+    gameStore.close();
+  });
+
+  it("keeps rejection recovery pending when a different target succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-targeted-recovery-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "inventory_manage.use": (args) => args.itemId === "torch-a"
+        ? { error: "Torch A is not carried." }
+        : { success: true, actionType: "use", itemId: args.itemId, lightSource: { active: true } },
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["inventory_manage"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string | null }> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      call += 1;
+      requestBodies.push(JSON.parse(init.body));
+      if (call === 1) {
+        return openRouterMessage(null, [
+          {
+            id: "use-torch-a",
+            type: "function",
+            function: { name: "inventory_manage", arguments: JSON.stringify({ action: "use", itemId: "torch-a" }) },
+          },
+          {
+            id: "use-torch-b",
+            type: "function",
+            function: { name: "inventory_manage", arguments: JSON.stringify({ action: "use", itemId: "torch-b" }) },
+          },
+        ]);
+      }
+      if (call === 2) return openRouterMessage("Both torches flare to life.");
+      return openRouterMessage("Torch A remains dark; Torch B burns steadily in the dark.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light both torches.");
+
+    expect(call).toBe(3);
+    expect(requestBodies[2]?.messages.at(-1)).toMatchObject({
+      role: "system",
+      content: expect.stringContaining("state-changing RPG MCP call was rejected"),
+    });
+    expect(result.narration.text).toContain("Torch A remains dark");
+    expect(result.diagnostics).toMatchObject({ acceptedStateChangingToolCalls: 1, rejectedToolCalls: 1 });
+    gameStore.close();
+  });
+
   it("repeats rejection recovery when the repair call is rejected too", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-double-rejection-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -1734,10 +1839,25 @@ describe("ReferenceDungeonMaster", () => {
 describe("reference DM scene authoring contract", () => {
   it("does not route questions, negations, or look idioms as mutations", () => {
     expect(hasAuthoritativeActionIntent("I pick up the bronze disc.")).toBe(true);
+    expect(hasAuthoritativeActionIntent("I invite the stranger to join our party.")).toBe(true);
     expect(hasAuthoritativeActionIntent("I pick up the bronze disc. What does Iven recognize?")).toBe(true);
     expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
     expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("Do I attack him?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("Is it safe if I open the door?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I invite the innkeeper to sit by the fire.")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I welcome the news.")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I don't invite the stranger to join us.")).toBe(false);
+    expect(buildAuthoritativeActionRoutingHint("I don't invite the stranger to join us.")).toBeNull();
     expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
+  });
+
+  it("routes companion invitations through authoritative creation, placement, and party membership", () => {
+    const hint = buildAuthoritativeActionRoutingHint("I invite the stranger to join our party.");
+    expect(hint).toContain("npc_manage.create");
+    expect(hint).toContain("spatial_manage.move");
+    expect(hint).toContain("party_manage.add_member");
+    expect(hint).toContain("Do not use scene_manage, write_docket, or npc_manage.interact as substitutes");
   });
 
   it("prioritizes material commitment before an optional social clause", () => {

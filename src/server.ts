@@ -5,6 +5,9 @@ import { clerkMiddleware, createClerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
 import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent } from "./billing.js";
 import { config } from "./config.js";
+
+const REFERENCE_DM_NOT_COMMITTED_MESSAGE =
+  "The DM provider did not return a result; no game state was committed. Your action is safe to retry.";
 import { deploymentIdentity } from "./deployment-identity.js";
 import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema } from "./engine-contracts.js";
 import { rollAbilityScoreDraft } from "./engine-domain.js";
@@ -296,7 +299,9 @@ async function sendCampaignCommand(
     if (error instanceof ReferenceDmCommandAlreadyFailedError) {
       response.status(502).json({
         code: "reference_dm_unavailable",
-        error: "That turn already has a recorded failure. Reconcile it before retrying.",
+        error: error.details?.commitStatus === "not_committed"
+          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
+          : "That turn already has a recorded failure. The table may have changed; refresh before continuing.",
         ...(error.details ? {
           correlationId: error.details.correlationId,
           commitStatus: error.details.commitStatus,
@@ -333,7 +338,9 @@ async function sendCampaignCommand(
       }));
       response.status(502).json({
         code: "reference_dm_unavailable",
-        error: "The reference-engine DM could not resolve this turn. Try again shortly.",
+        error: error.details.commitStatus === "not_committed"
+          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
+          : "The reference-engine DM stopped after a state change; refresh the table before continuing.",
         correlationId: error.details.correlationId,
         commitStatus: error.details.commitStatus,
         retryable: error.details.commitStatus === "not_committed",
@@ -641,6 +648,9 @@ app.get("/api/campaigns/:campaignId/commands/:clientCommandId", async (request, 
         correlationId: command.failure.correlationId,
         commitStatus: command.failure.commitStatus,
         retryable: command.failure.commitStatus === "not_committed",
+        error: command.failure.commitStatus === "not_committed"
+          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
+          : "The server could not prove whether this turn committed; refresh the table before continuing.",
       } : {}),
       createdAt: command.createdAt,
       updatedAt: command.updatedAt,
