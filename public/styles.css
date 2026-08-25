@@ -949,30 +949,30 @@ h1 i { color: var(--amber); font-style: italic; }
   .play-app .game-shell { grid-template-columns: 1fr; }
 }
 
-/* Keep the table itself bounded. Long dossiers and authored histories scroll in
-   their own surfaces so the composer and current turn stay reachable. */
+/* Keep the campaign log bounded without turning the character dossier into a
+   second viewport. Both columns keep the grid's natural height, while older
+   turns remain available inside the log itself. */
 @media (min-width: 861px) {
   .play-app .game-shell {
-    height: clamp(620px, calc(100vh - 144px), 760px);
+    height: auto;
     min-height: 0;
-    max-height: 760px;
+    max-height: none;
   }
 
   .play-app .player-panel {
     min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
+    max-height: none;
+    overflow: visible;
   }
 
   .play-app .table-panel {
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .play-app .game-log {
-    min-height: 0;
-    max-height: none;
+    min-height: 620px;
+    max-height: min(78vh, 820px);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;

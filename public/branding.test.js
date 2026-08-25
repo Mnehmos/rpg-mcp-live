@@ -33,11 +33,15 @@ describe("player-facing branding", () => {
     expect(styles).toContain(".play-app::after");
   });
 
-  it("keeps long play sessions inside bounded, touch-scrollable surfaces", () => {
-    expect(styles).toContain("height: clamp(620px, calc(100vh - 144px), 760px);");
+  it("keeps the desktop dossier natural while preserving mobile scrolling", () => {
+    expect(styles).toContain("height: auto;");
+    expect(styles).toContain("min-height: 620px;");
+    expect(styles).toContain("max-height: min(78vh, 820px);");
     expect(styles).toContain(".play-app .player-panel");
+    expect(styles).toContain("overflow: visible;");
     expect(styles).toContain("overscroll-behavior: contain;");
     expect(styles).toContain("scrollbar-gutter: stable;");
+    expect(styles).toContain("max-height: min(58vh, 520px);");
     expect(styles).toContain("max-height: min(46vh, 360px);");
     expect(styles).toContain(".play-app .chat-input-row");
     expect(styles).toContain("grid-template-columns: 1fr;");
