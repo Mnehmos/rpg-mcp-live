@@ -23,7 +23,7 @@ export const engineConfig = Object.freeze({
   internalToken: readString("ENGINE_INTERNAL_TOKEN"),
   openRouterApiKey,
   openRouterBaseUrl: readString("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").replace(/\/$/, ""),
-  openRouterModel: readString("OPENROUTER_MODEL", "openai/gpt-5.6-luna"),
+  openRouterModel: readString("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
   openRouterFallbackBaseUrl: readString("OPENROUTER_FALLBACK_BASE_URL", readString("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")).replace(/\/$/, ""),
   openRouterFallbackModel: readString("OPENROUTER_FALLBACK_MODEL"),
   openRouterFirstTokenTimeoutMs: Number.parseInt(readString("OPENROUTER_FIRST_TOKEN_TIMEOUT_MS", "8000"), 10),

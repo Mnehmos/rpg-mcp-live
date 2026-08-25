@@ -8,17 +8,9 @@ export type LlmUsageCostSource = "provider" | "provider_upstream" | "estimated";
 export interface LlmUsagePolicy {
   freeDailyCostMicros: number;
   freeMonthlyCostMicros: number;
-  freeDailyPromptTokens: number;
-  freeDailyCompletionTokens: number;
-  freeMonthlyPromptTokens: number;
-  freeMonthlyCompletionTokens: number;
   playerDailyCostMicros: number;
   playerMonthlyTargetCostMicros: number;
   playerMonthlyCostMicros: number;
-  playerDailyPromptTokens: number;
-  playerDailyCompletionTokens: number;
-  playerMonthlyPromptTokens: number;
-  playerMonthlyCompletionTokens: number;
   globalDailyCostMicros: number;
   globalMonthlyCostMicros: number;
   turnAdmissionReserveCostMicros: number;
@@ -83,8 +75,6 @@ export interface LlmUsageBucket {
 export interface LlmUsageLimitBucket {
   costMicros: number;
   costUsd: number;
-  promptTokens: number;
-  completionTokens: number;
 }
 
 export interface LlmUsageSummary {
@@ -206,9 +196,9 @@ export class LlmUsageStore {
    * Admit a complete player command before the DM can mutate world state.
    * Settled dollar cost plus short-lived in-flight turn reservations form the
    * product gate. Once admitted, provider calls for this command may finish
-   * even if their raw token totals cross a diagnostic token threshold or the
-   * command itself overshoots a cost cap. The next command is then rejected at
-   * this boundary.
+   * regardless of raw token totals; only settled and reserved USD cost controls
+   * admission. If the command overshoots a cost cap, the next command is then
+   * rejected at this boundary.
    */
   public admitTurn(input: LlmTurnAdmissionInput, now = new Date()): LlmUsageReservation {
     const estimatedCostMicros = nonnegativeInteger(this.policy.turnAdmissionReserveCostMicros);
@@ -302,10 +292,6 @@ export class LlmUsageStore {
 
         assertWithin("daily", (userDaily.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.dailyCostMicros);
         assertWithin("monthly", (userMonthly.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.monthlyCostMicros);
-        assertWithin("daily", (userDaily.prompt_tokens ?? 0) + userReserved.promptTokens, estimatedPromptTokens, limits.dailyPromptTokens);
-        assertWithin("daily", (userDaily.completion_tokens ?? 0) + userReserved.completionTokens, estimatedCompletionTokens, limits.dailyCompletionTokens);
-        assertWithin("monthly", (userMonthly.prompt_tokens ?? 0) + userReserved.promptTokens, estimatedPromptTokens, limits.monthlyPromptTokens);
-        assertWithin("monthly", (userMonthly.completion_tokens ?? 0) + userReserved.completionTokens, estimatedCompletionTokens, limits.monthlyCompletionTokens);
         assertWithin("global_daily", (globalDaily.cost_micros ?? 0) + globalReserved.dailyCostMicros, estimatedCostMicros, this.policy.globalDailyCostMicros);
         assertWithin("global_monthly", (globalMonthly.cost_micros ?? 0) + globalReserved.monthlyCostMicros, estimatedCostMicros, this.policy.globalMonthlyCostMicros);
       }
@@ -425,8 +411,8 @@ export class LlmUsageStore {
     const periods = periodBoundaries(now);
     const daily = mapBucket(this.aggregateUser(userId, periods.dailyStart));
     const monthly = mapBucket(this.aggregateUser(userId, periods.monthlyStart));
-    const dailyLimit = mapLimit(limits.dailyCostMicros, limits.dailyPromptTokens, limits.dailyCompletionTokens);
-    const monthlyLimit = mapLimit(limits.monthlyCostMicros, limits.monthlyPromptTokens, limits.monthlyCompletionTokens);
+    const dailyLimit = mapLimit(limits.dailyCostMicros);
+    const monthlyLimit = mapLimit(limits.monthlyCostMicros);
     const monthlyTargetCostMicros = plan === "player_pass"
       ? Math.min(this.policy.playerMonthlyTargetCostMicros, limits.monthlyCostMicros)
       : limits.monthlyCostMicros;
@@ -495,27 +481,15 @@ export class LlmUsageStore {
   private limitsForPlan(plan: LlmUsagePlan): {
     dailyCostMicros: number;
     monthlyCostMicros: number;
-    dailyPromptTokens: number;
-    dailyCompletionTokens: number;
-    monthlyPromptTokens: number;
-    monthlyCompletionTokens: number;
   } {
     return plan === "player_pass"
       ? {
           dailyCostMicros: this.policy.playerDailyCostMicros,
           monthlyCostMicros: this.policy.playerMonthlyCostMicros,
-          dailyPromptTokens: this.policy.playerDailyPromptTokens,
-          dailyCompletionTokens: this.policy.playerDailyCompletionTokens,
-          monthlyPromptTokens: this.policy.playerMonthlyPromptTokens,
-          monthlyCompletionTokens: this.policy.playerMonthlyCompletionTokens,
         }
       : {
           dailyCostMicros: this.policy.freeDailyCostMicros,
           monthlyCostMicros: this.policy.freeMonthlyCostMicros,
-          dailyPromptTokens: this.policy.freeDailyPromptTokens,
-          dailyCompletionTokens: this.policy.freeDailyCompletionTokens,
-          monthlyPromptTokens: this.policy.freeMonthlyPromptTokens,
-          monthlyCompletionTokens: this.policy.freeMonthlyCompletionTokens,
         };
   }
 
@@ -557,21 +531,15 @@ export class LlmUsageStore {
       .get(startIso) as AggregateRow;
   }
 
-  private aggregateReservations(userId: string): {
-    promptTokens: number;
-    completionTokens: number;
-    costMicros: number;
-  } {
+  private aggregateReservations(userId: string): { costMicros: number } {
     const row = this.db
       .prepare(
-        `SELECT COALESCE(SUM(estimated_prompt_tokens), 0) AS prompt_tokens,
-                COALESCE(SUM(estimated_completion_tokens), 0) AS completion_tokens,
-                COALESCE(SUM(estimated_cost_micros), 0) AS cost_micros
+        `SELECT COALESCE(SUM(estimated_cost_micros), 0) AS cost_micros
          FROM llm_usage_reservations
          WHERE user_id = ? AND status = 'reserved'`,
       )
-      .get(userId) as { prompt_tokens: number; completion_tokens: number; cost_micros: number };
-    return { promptTokens: row.prompt_tokens, completionTokens: row.completion_tokens, costMicros: row.cost_micros };
+      .get(userId) as { cost_micros: number };
+    return { costMicros: row.cost_micros };
   }
 
   private aggregateAllReservations(): {
@@ -619,12 +587,10 @@ function mapBucket(row: AggregateRow): LlmUsageBucket {
   };
 }
 
-function mapLimit(costMicros: number, promptTokens: number, completionTokens: number): LlmUsageLimitBucket {
+function mapLimit(costMicros: number): LlmUsageLimitBucket {
   return {
     costMicros,
     costUsd: microsToUsd(costMicros),
-    promptTokens,
-    completionTokens,
   };
 }
 
@@ -632,8 +598,6 @@ function remainingLimit(limit: LlmUsageLimitBucket, used: LlmUsageBucket): LlmUs
   return {
     costMicros: Math.max(0, limit.costMicros - used.costMicros),
     costUsd: microsToUsd(Math.max(0, limit.costMicros - used.costMicros)),
-    promptTokens: Math.max(0, limit.promptTokens - used.promptTokens),
-    completionTokens: Math.max(0, limit.completionTokens - used.completionTokens),
   };
 }
 

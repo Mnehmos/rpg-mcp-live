@@ -4,7 +4,7 @@ import { fallbackIntentForPlayerText, OpenRouterInterpreter } from "./openrouter
 const options = {
   apiKey: "test-key",
   baseUrl: "https://openrouter.example/v1",
-  model: "openai/gpt-5.6-luna",
+  model: "deepseek/deepseek-v4-flash",
   reasoningEffort: "medium",
   maxTokens: 900,
   siteUrl: "https://lantern.example",

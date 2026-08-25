@@ -14,7 +14,7 @@ import type { EngineWorldObjectInstance, LanternCampaignState, RequestContext } 
 import { openAiSdkFetch } from "./test-openai-stream.js";
 import { compileRuntimeContent } from "./content/runtime-compiler.js";
 
-const options = { apiKey: "test-key", baseUrl: "https://openrouter.example/v1", model: "openai/gpt-5.6-luna", reasoningEffort: "medium", maxTokens: 2_500, siteUrl: "https://lantern.example", appName: "Lantern Table Engine" };
+const options = { apiKey: "test-key", baseUrl: "https://openrouter.example/v1", model: "deepseek/deepseek-v4-flash", reasoningEffort: "medium", maxTokens: 2_500, siteUrl: "https://lantern.example", appName: "Lantern Table Engine" };
 
 function response(message: Record<string, unknown>): Response {
   return { ok: true, status: 200, json: async () => ({ choices: [{ message }] }) } as Response;
