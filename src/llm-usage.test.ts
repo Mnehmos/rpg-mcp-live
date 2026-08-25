@@ -9,17 +9,9 @@ function policy(overrides: Partial<LlmUsagePolicy> = {}): LlmUsagePolicy {
   return {
     freeDailyCostMicros: 10,
     freeMonthlyCostMicros: 20,
-    freeDailyPromptTokens: 1_000,
-    freeDailyCompletionTokens: 1_000,
-    freeMonthlyPromptTokens: 2_000,
-    freeMonthlyCompletionTokens: 2_000,
     playerDailyCostMicros: 100,
     playerMonthlyTargetCostMicros: 150,
     playerMonthlyCostMicros: 200,
-    playerDailyPromptTokens: 10_000,
-    playerDailyCompletionTokens: 10_000,
-    playerMonthlyPromptTokens: 20_000,
-    playerMonthlyCompletionTokens: 20_000,
     globalDailyCostMicros: 1_000,
     globalMonthlyCostMicros: 2_000,
     turnAdmissionReserveCostMicros: 5,
@@ -191,13 +183,8 @@ describe("LLM usage ledger", () => {
     game.close();
   });
 
-  it("keeps raw token ceilings diagnostic for an admitted command", () => {
-    const { game, usage } = createStores({
-      freeDailyPromptTokens: 1,
-      freeDailyCompletionTokens: 1,
-      freeMonthlyPromptTokens: 1,
-      freeMonthlyCompletionTokens: 1,
-    });
+  it("keeps raw tokens as telemetry without using them as an admission ceiling", () => {
+    const { game, usage } = createStores();
     const admission = usage.admitTurn({
       userId: "player-1",
       campaignId: "campaign-1",
@@ -235,6 +222,46 @@ describe("LLM usage ledger", () => {
       provider: "openrouter",
       model: "test-model",
     })).not.toThrow();
+    game.close();
+  });
+
+  it("admits standalone calls by dollars even after very large token telemetry", () => {
+    const { game, usage } = createStores();
+    const first = usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      source: "npc_agent",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 10_000_000,
+      estimatedCompletionTokens: 1_000_000,
+      estimatedCostMicros: 1,
+    });
+    usage.settle(first.id, {
+      provider: "openrouter",
+      model: "test-model",
+      promptTokens: 10_000_000,
+      completionTokens: 1_000_000,
+      costMicros: 1,
+      costSource: "provider",
+    });
+
+    expect(() => usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-2",
+      source: "npc_agent",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 10_000_000,
+      estimatedCompletionTokens: 1_000_000,
+      estimatedCostMicros: 1,
+    })).not.toThrow();
+    expect(usage.getSummary("player-1").limits.daily).toEqual({
+      costMicros: 10,
+      costUsd: 0.00001,
+    });
     game.close();
   });
 

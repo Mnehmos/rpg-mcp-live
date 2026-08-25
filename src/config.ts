@@ -58,7 +58,7 @@ const stripeWebhookSecret = readString("STRIPE_WEBHOOK_SECRET");
 const stripePriceId = readString("STRIPE_PRICE_ID");
 const openRouterApiKey = readString("OPENROUTER_API_KEY");
 const openRouterBaseUrl = readString("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").replace(/\/$/, "");
-const openRouterModel = readString("OPENROUTER_MODEL", "openai/gpt-5.6-luna");
+const openRouterModel = readString("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash");
 const openRouterReasoningEffort = readString("OPENROUTER_REASONING_EFFORT", "medium");
 const openRouterMaxTokens = Number.parseInt(readString("OPENROUTER_MAX_TOKENS", "900"), 10);
 const openRouterSiteUrl = readString("OPENROUTER_SITE_URL");
@@ -119,25 +119,17 @@ export const config = Object.freeze({
     // Deployment-wide brakes remain the final provider-balance safeguard.
     freeDailyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_DAILY_COST_USD", 0.05) * 1_000_000),
     freeMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_MONTHLY_COST_USD", 0.25) * 1_000_000),
-    freeDailyPromptTokens: readInteger("LLM_USAGE_FREE_DAILY_PROMPT_TOKENS", 125_000),
-    freeDailyCompletionTokens: readInteger("LLM_USAGE_FREE_DAILY_COMPLETION_TOKENS", 25_000),
-    freeMonthlyPromptTokens: readInteger("LLM_USAGE_FREE_MONTHLY_PROMPT_TOKENS", 500_000),
-    freeMonthlyCompletionTokens: readInteger("LLM_USAGE_FREE_MONTHLY_COMPLETION_TOKENS", 100_000),
     playerDailyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_DAILY_COST_USD", 1) * 1_000_000),
     playerMonthlyTargetCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD", 2) * 1_000_000),
     playerMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_COST_USD", 4) * 1_000_000),
-    playerDailyPromptTokens: readInteger("LLM_USAGE_PLAYER_DAILY_PROMPT_TOKENS", 500_000),
-    playerDailyCompletionTokens: readInteger("LLM_USAGE_PLAYER_DAILY_COMPLETION_TOKENS", 125_000),
-    playerMonthlyPromptTokens: readInteger("LLM_USAGE_PLAYER_MONTHLY_PROMPT_TOKENS", 4_000_000),
-    playerMonthlyCompletionTokens: readInteger("LLM_USAGE_PLAYER_MONTHLY_COMPLETION_TOKENS", 1_000_000),
     globalDailyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_DAILY_COST_USD", 5) * 1_000_000),
     globalMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_MONTHLY_COST_USD", 25) * 1_000_000),
     turnAdmissionReserveCostMicros: Math.round(readNumber("LLM_USAGE_TURN_ADMISSION_RESERVE_COST_USD", 0.01) * 1_000_000),
     maxTurnCostMicros: Math.round(readNumber("LLM_USAGE_MAX_TURN_COST_USD", 0.1) * 1_000_000),
     npcReserveCostMicros: Math.round(readNumber("LLM_USAGE_NPC_RESERVE_COST_USD", 0.02) * 1_000_000),
     reservationTtlMs: readInteger("LLM_USAGE_RESERVATION_TTL_MS", 10 * 60 * 1000),
-    inputCostUsdPerMillion: readNumber("LLM_USAGE_INPUT_COST_USD_PER_MILLION", 0.2),
-    outputCostUsdPerMillion: readNumber("LLM_USAGE_OUTPUT_COST_USD_PER_MILLION", 1.2),
+    inputCostUsdPerMillion: readNumber("LLM_USAGE_INPUT_COST_USD_PER_MILLION", 0.0574),
+    outputCostUsdPerMillion: readNumber("LLM_USAGE_OUTPUT_COST_USD_PER_MILLION", 0.1148),
   },
   referenceDmTimeoutMs,
   openRouterConfigured: Boolean(openRouterApiKey),

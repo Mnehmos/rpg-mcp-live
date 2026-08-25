@@ -97,10 +97,9 @@ describe("ReferenceDungeonMaster", () => {
     vi.unstubAllGlobals();
   });
 
-  it("instructs agent-backed NPC setup to use OpenRouter GPT-5.6 Luna at medium reasoning", () => {
+  it("instructs agent-backed NPC setup to use OpenRouter DeepSeek V4 Flash", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("provider openrouter");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model openai/gpt-5.6-luna");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("reasoningEffort: medium");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model deepseek/deepseek-v4-flash");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("maxTokens 8192");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("place every newly authored companion");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Before npc_manage.interact or agent_manage.invoke");
@@ -126,10 +125,6 @@ describe("ReferenceDungeonMaster", () => {
       ...config.llmUsage,
       freeDailyCostMicros: 1_000_000,
       freeMonthlyCostMicros: 1_000_000,
-      freeDailyPromptTokens: 1,
-      freeDailyCompletionTokens: 1,
-      freeMonthlyPromptTokens: 1,
-      freeMonthlyCompletionTokens: 1,
     });
     const dm = new ReferenceDungeonMaster(
       client,
@@ -333,17 +328,9 @@ describe("ReferenceDungeonMaster", () => {
     const usage = new LlmUsageStore(gameStore.getRawDb(), {
       freeDailyCostMicros: 100_000,
       freeMonthlyCostMicros: 200_000,
-      freeDailyPromptTokens: 100_000,
-      freeDailyCompletionTokens: 100_000,
-      freeMonthlyPromptTokens: 200_000,
-      freeMonthlyCompletionTokens: 200_000,
       playerDailyCostMicros: 100_000,
       playerMonthlyTargetCostMicros: 150_000,
       playerMonthlyCostMicros: 200_000,
-      playerDailyPromptTokens: 100_000,
-      playerDailyCompletionTokens: 100_000,
-      playerMonthlyPromptTokens: 200_000,
-      playerMonthlyCompletionTokens: 200_000,
       globalDailyCostMicros: 1_000_000,
       globalMonthlyCostMicros: 2_000_000,
       turnAdmissionReserveCostMicros: 10_000,
@@ -358,7 +345,7 @@ describe("ReferenceDungeonMaster", () => {
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
       apiKey: "key",
       baseUrl: "https://openrouter.example/api/v1",
-      model: "openai/gpt-5.6-luna",
+      model: "openai/gpt-5.4",
       reasoningEffort: "medium",
       maxTokens: 123,
       timeoutMs: 5000,
@@ -383,7 +370,7 @@ describe("ReferenceDungeonMaster", () => {
     const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Look toward the bell tower.");
 
     expect(requestBody).toMatchObject({
-      model: "openai/gpt-5.6-luna",
+      model: "openai/gpt-5.4",
       max_completion_tokens: 123,
       reasoning_effort: "medium",
     });
@@ -706,7 +693,7 @@ describe("ReferenceDungeonMaster", () => {
         actionType: "invoke",
         callId: "agent-call-usage-1",
         provider: "openrouter",
-        model: "openai/gpt-5.6-luna",
+        model: "deepseek/deepseek-v4-flash",
         status: "ok",
         promptTokens: 42,
         completionTokens: 8,
@@ -720,7 +707,7 @@ describe("ReferenceDungeonMaster", () => {
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
       apiKey: "key",
       baseUrl: "https://openrouter.example/api/v1",
-      model: "openai/gpt-5.6-luna",
+      model: "deepseek/deepseek-v4-flash",
       maxTokens: 1000,
       timeoutMs: 5000,
       usage,
@@ -761,7 +748,7 @@ describe("ReferenceDungeonMaster", () => {
         actionType: "invoke",
         callId: "agent-call-2",
         provider: "openrouter",
-        model: "openai/gpt-5.6-luna",
+        model: "deepseek/deepseek-v4-flash",
         status: "ok",
         response: "Strike the creature protecting the archive.",
       }),

@@ -115,15 +115,15 @@ ENGINE_PORT=8080
 RPG_DATA_DIR=/app/data
 RPG_MCP_TRANSPORT_TOKEN=<secret>
 PORT=3000
-OPENROUTER_MODEL=openai/gpt-5.6-luna
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 OPENROUTER_REASONING_EFFORT=medium
 OPENROUTER_MAX_TOKENS=2500
 OPENROUTER_SITE_URL=https://rpg-mcp-live-production.up.railway.app
 OPENROUTER_FALLBACK_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_FALLBACK_MODEL=<reviewed fallback model, if enabled>
 OPENROUTER_FIRST_TOKEN_TIMEOUT_MS=8000
-LLM_USAGE_INPUT_COST_USD_PER_MILLION=0.20
-LLM_USAGE_OUTPUT_COST_USD_PER_MILLION=1.20
+LLM_USAGE_INPUT_COST_USD_PER_MILLION=0.0574
+LLM_USAGE_OUTPUT_COST_USD_PER_MILLION=0.1148
 LLM_USAGE_PLAYER_DAILY_COST_USD=1.00
 LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD=2.00
 LLM_USAGE_PLAYER_MONTHLY_COST_USD=4.00
@@ -158,9 +158,10 @@ admitted turn may then complete. The admission reservation makes concurrent
 commands count atomically against user and deployment-wide dollar brakes. The
 Player Pass target is distinct from its hard next-turn admission ceiling.
 Reservations still protect standalone provider calls and the per-request
-safety brake. The defaults above assume the current Luna pricing; when the
-model or provider price changes, update the two input/output rate variables and
-review the target, admission reserve, and hard ceilings before launch.
+safety brake. The defaults above are the fallback estimate for the pinned
+DeepSeek V4 Flash route; provider-reported settled cost remains authoritative.
+When model or provider pricing changes, update the two input/output rate
+variables and review the target, admission reserve, and hard ceilings.
 
 Do not broaden the document/license ceiling during the S8 migration. OGL rollout is a separate product/legal decision with its own attribution check.
 
