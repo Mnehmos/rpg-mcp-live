@@ -26,6 +26,7 @@ export interface LlmUsageActual {
   model: string;
   providerRequestId?: string | null;
   promptTokens: number;
+  cachedPromptTokens?: number | null;
   completionTokens: number;
   reasoningTokens?: number | null;
   totalTokens?: number;
@@ -65,6 +66,7 @@ export interface LlmUsageReservation {
 export interface LlmUsageBucket {
   calls: number;
   promptTokens: number;
+  cachedPromptTokens: number;
   completionTokens: number;
   reasoningTokens: number;
   totalTokens: number;
@@ -104,6 +106,7 @@ export interface LlmUsageSummary {
 interface AggregateRow {
   calls: number | null;
   prompt_tokens: number | null;
+  cached_prompt_tokens: number | null;
   completion_tokens: number | null;
   reasoning_tokens: number | null;
   total_tokens: number | null;
@@ -159,6 +162,7 @@ export class LlmUsageStore {
         model TEXT NOT NULL,
         provider_request_id TEXT,
         prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_prompt_tokens INTEGER NOT NULL DEFAULT 0,
         completion_tokens INTEGER NOT NULL DEFAULT 0,
         reasoning_tokens INTEGER NOT NULL DEFAULT 0,
         total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -190,6 +194,10 @@ export class LlmUsageStore {
       CREATE INDEX IF NOT EXISTS idx_llm_usage_reservations_scope
         ON llm_usage_reservations(user_id, status, expires_at);
     `);
+    const usageColumns = this.db.prepare("PRAGMA table_info(llm_usage)").all() as Array<{ name: string }>;
+    if (!usageColumns.some((column) => column.name === "cached_prompt_tokens")) {
+      this.db.exec("ALTER TABLE llm_usage ADD COLUMN cached_prompt_tokens INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   /**
@@ -331,6 +339,7 @@ export class LlmUsageStore {
 
   public settle(reservationId: string, actual: LlmUsageActual): void {
     const promptTokens = nonnegativeInteger(actual.promptTokens);
+    const cachedPromptTokens = nonnegativeInteger(actual.cachedPromptTokens ?? 0);
     const completionTokens = nonnegativeInteger(actual.completionTokens);
     const reasoningTokens = nonnegativeInteger(actual.reasoningTokens ?? 0);
     const totalTokens = nonnegativeInteger(actual.totalTokens ?? promptTokens + completionTokens);
@@ -367,9 +376,9 @@ export class LlmUsageStore {
         .prepare(
           `INSERT INTO llm_usage (
              id, user_id, campaign_id, client_command_id, source, provider, model,
-             provider_request_id, prompt_tokens, completion_tokens, reasoning_tokens,
+             provider_request_id, prompt_tokens, cached_prompt_tokens, completion_tokens, reasoning_tokens,
              total_tokens, cost_micros, cost_source, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           reservationId,
@@ -381,6 +390,7 @@ export class LlmUsageStore {
           actual.model,
           actual.providerRequestId ?? null,
           promptTokens,
+          cachedPromptTokens,
           completionTokens,
           reasoningTokens,
           totalTokens,
@@ -450,6 +460,7 @@ export class LlmUsageStore {
         .prepare(
           `SELECT COUNT(*) AS calls,
                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                  COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens,
                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
                   COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
@@ -508,6 +519,7 @@ export class LlmUsageStore {
       .prepare(
         `SELECT COUNT(*) AS calls,
                 COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens,
                 COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
                 COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens,
@@ -522,6 +534,7 @@ export class LlmUsageStore {
       .prepare(
         `SELECT COUNT(*) AS calls,
                 COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(cached_prompt_tokens), 0) AS cached_prompt_tokens,
                 COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
                 COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens,
@@ -579,6 +592,7 @@ function mapBucket(row: AggregateRow): LlmUsageBucket {
   return {
     calls: nonnegativeInteger(row.calls ?? 0),
     promptTokens: nonnegativeInteger(row.prompt_tokens ?? 0),
+    cachedPromptTokens: nonnegativeInteger(row.cached_prompt_tokens ?? 0),
     completionTokens: nonnegativeInteger(row.completion_tokens ?? 0),
     reasoningTokens: nonnegativeInteger(row.reasoning_tokens ?? 0),
     totalTokens: nonnegativeInteger(row.total_tokens ?? 0),
