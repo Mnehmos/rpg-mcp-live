@@ -761,3 +761,154 @@ h1 i { color: var(--amber); font-style: italic; }
   text-overflow: ellipsis;
 }
 .action-button-generated:hover .action-prompt { color: var(--muted); }
+
+/* Quest Keeper AI launch surface: use the marketing site's neon language while
+   keeping the player table quieter, denser, and easier to scan. */
+.play-app {
+  --ink: #e9f7ff;
+  --muted: #9bb5c8;
+  --faint: #637d94;
+  --line: rgba(0, 229, 255, .18);
+  --line-strong: rgba(0, 229, 255, .42);
+  --night: #070b18;
+  --panel: #0b1021;
+  --panel-light: #11162b;
+  --amber: #00e5ff;
+  --amber-bright: #b6a0ff;
+  --mint: #61f2c6;
+  --danger: #ff7891;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(0, 229, 255, .08), transparent 32rem),
+    radial-gradient(circle at 90% 10%, rgba(124, 92, 255, .11), transparent 34rem),
+    var(--night);
+}
+.play-app h1,
+.play-app h2,
+.play-app h3,
+.play-app .log-entry,
+.play-app .hero-lede,
+.play-app .section-lede,
+.play-app .scene-panel h3,
+.play-app .table-header h3,
+.play-app .character-heading strong,
+.play-app .tutorial-card .markdown-body,
+.play-app .markdown-body h1,
+.play-app .markdown-body h2,
+.play-app .markdown-body h3,
+.play-app .markdown-body h4,
+.play-app .markdown-body h5,
+.play-app .markdown-body h6 {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.play-app .grain { opacity: .055; }
+.play-app .site-header { border-bottom-color: rgba(0, 229, 255, .25); }
+.play-app .brand,
+.play-app .top-nav,
+.play-app .button,
+.play-app .eyebrow,
+.play-app .tiny-label,
+.play-app .feature-number,
+.play-app .scene-kicker,
+.play-app .player-panel-topline,
+.play-app .table-kicker,
+.play-app .table-footer,
+.play-app .footer-note {
+  font-family: "Share Tech Mono", "IBM Plex Mono", monospace;
+}
+.play-app .brand-mark,
+.play-app .brand em,
+.play-app .brand small,
+.play-app .eyebrow,
+.play-app .tiny-label,
+.play-app .feature-number,
+.play-app .scene-kicker,
+.play-app .text-link span,
+.play-app .text-button:hover,
+.play-app .action-button span {
+  color: var(--amber);
+}
+.play-app .button-primary {
+  background: linear-gradient(110deg, #00d9e9, #8b78ff);
+  color: #050811;
+  box-shadow: 0 0 24px rgba(0, 229, 255, .15);
+}
+.play-app .button-primary:hover { background: linear-gradient(110deg, #72f7ff, #b6a0ff); }
+.play-app .button-quiet { border-color: var(--line-strong); }
+.play-app .button-quiet:hover { border-color: var(--amber); color: var(--ink); }
+.play-app .hero {
+  grid-template-columns: 1fr;
+  min-height: 0;
+  gap: 0;
+  padding-top: 42px;
+  padding-bottom: 34px;
+}
+.play-app .hero-copy { max-width: 820px; }
+.play-app .hero-copy h1 {
+  max-width: 760px;
+  font-size: clamp(34px, 5vw, 66px);
+  letter-spacing: -.06em;
+  line-height: 1.02;
+  margin-bottom: 20px;
+}
+.play-app .hero-lede { max-width: 760px; font-size: 14px; line-height: 1.7; margin-bottom: 24px; }
+.play-app .micro-copy { margin-top: 24px; }
+.play-app .hero-art { display: none; }
+.play-app .three-up { display: none; }
+.play-app .membership {
+  grid-template-columns: 1fr minmax(290px, 380px);
+  gap: 44px;
+  padding-top: 30px;
+  padding-bottom: 34px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, rgba(0, 229, 255, .035), rgba(124, 92, 255, .045));
+}
+.play-app .membership h2 { font-size: clamp(28px, 4vw, 48px); }
+.play-app .price-card { background: rgba(11, 16, 33, .85); border-color: var(--line-strong); }
+.play-app .price { font-family: "IBM Plex Mono", monospace; font-size: 25px; }
+.play-app .play-section { padding-top: 42px; }
+.play-app .play-heading h2 { font-size: clamp(28px, 4vw, 50px); letter-spacing: -.06em; }
+.play-app .game-shell {
+  grid-template-columns: minmax(260px, .68fr) minmax(0, 1.7fr);
+  border-color: rgba(0, 229, 255, .34);
+  background: rgba(8, 12, 27, .9);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, .32), 0 0 50px rgba(0, 229, 255, .05);
+}
+.play-app .scene-panel,
+.play-app .table-panel { background: rgba(11, 16, 33, .82); }
+.play-app .scene-illustration {
+  background: radial-gradient(circle at 50% 54%, rgba(0, 229, 255, .2), transparent 28%), linear-gradient(145deg, #111a36, #070b18);
+}
+.play-app .scene-illustration::before { border-color: rgba(0, 229, 255, .38); }
+.play-app .scene-illustration::after { background: linear-gradient(90deg, transparent, rgba(182, 160, 255, .5), transparent); }
+.play-app .world-pulse { color: var(--amber-bright); text-shadow: 0 0 28px rgba(0, 229, 255, .7); }
+.play-app .player-sheet,
+.play-app .onboarding-panel,
+.play-app .campaign-context,
+.play-app .campaign-dossier,
+.play-app .character-choice-panel,
+.play-app .feature-detail,
+.play-app .source-detail,
+.play-app .quest-entry,
+.play-app .lore-entry,
+.play-app .note-entry { background: rgba(6, 10, 23, .7); border-color: rgba(0, 229, 255, .18); }
+.play-app .game-log { background: radial-gradient(circle at 78% 16%, rgba(124, 92, 255, .09), transparent 30%), rgba(5, 8, 18, .55); }
+.play-app .log-entry { border-color: rgba(0, 229, 255, .15); background: rgba(14, 19, 41, .72); }
+.play-app .log-entry.player { border-color: rgba(97, 242, 198, .3); background: rgba(97, 242, 198, .07); }
+.play-app .log-entry.roll,
+.play-app .log-entry.tool { border-color: rgba(182, 160, 255, .3); background: rgba(124, 92, 255, .08); }
+.play-app .dm-response { border-color: rgba(0, 229, 255, .3); box-shadow: inset 2px 0 var(--amber); }
+.play-app .chat-input-row textarea { background: #070b18; border-color: var(--line-strong); font-family: "IBM Plex Mono", monospace; }
+.play-app .chat-input-row textarea:focus { outline-color: var(--amber); }
+.play-app .action-button:hover { border-color: var(--amber); background: rgba(0, 229, 255, .06); }
+.play-app .action-button-roll { color: var(--amber-bright); }
+.play-app .auth-dialog { background: #0d1327; border-color: var(--line-strong); }
+.play-app .toast { background: linear-gradient(110deg, #00d9e9, #8b78ff); color: #050811; }
+.play-app .site-footer { border-top-color: var(--line); }
+
+@media (max-width: 860px) {
+  .play-app .hero { padding-top: 34px; padding-bottom: 26px; }
+  .play-app .membership { grid-template-columns: 1fr; gap: 24px; }
+  .play-app .play-section { padding-top: 34px; }
+}

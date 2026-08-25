@@ -30,7 +30,7 @@ export const engineConfig = Object.freeze({
   openRouterReasoningEffort: readString("OPENROUTER_REASONING_EFFORT", "medium"),
   openRouterMaxTokens: Number.parseInt(readString("OPENROUTER_MAX_TOKENS", "2500"), 10),
   openRouterSiteUrl: readString("OPENROUTER_SITE_URL"),
-  openRouterAppName: readString("OPENROUTER_APP_NAME", "Lantern Table Engine"),
+  openRouterAppName: readString("OPENROUTER_APP_NAME", "Quest Keeper AI"),
   contentGamesystem,
   contentAllowedGamesystems: readCsv("CONTENT_ALLOWED_GAMESYSTEMS", [contentGamesystem]),
   contentDefaultBaseDocument: readString("CONTENT_DEFAULT_BASE_DOCUMENT", "srd-2014"),
