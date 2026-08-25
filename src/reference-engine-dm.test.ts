@@ -10,6 +10,7 @@ import {
   ReferenceDmProviderUnavailableError,
   ReferenceDungeonMaster,
   REFERENCE_DM_SYSTEM_PROMPT,
+  hasAuthoritativeActionIntent,
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
@@ -215,10 +216,12 @@ describe("ReferenceDungeonMaster", () => {
     );
     let requestCount = 0;
     let firstTools: string[] = [];
+    let firstToolChoice: string | undefined;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
       requestCount += 1;
-      const body = JSON.parse(init.body) as { tools: Array<{ function: { name: string } }> };
+      const body = JSON.parse(init.body) as { tools: Array<{ function: { name: string } }>; tool_choice?: string };
       firstTools = body.tools.map((tool) => tool.function.name);
+      if (requestCount === 1) firstToolChoice = body.tool_choice;
       if (requestCount === 1) {
         return openRouterMessage(null, [{
           id: "use-torch",
@@ -243,8 +246,59 @@ describe("ReferenceDungeonMaster", () => {
       "read_docket",
       "write_docket",
     ]);
+    expect(firstToolChoice).toBe("required");
     expect(requestCount).toBe(2);
     expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
+    gameStore.close();
+  });
+
+  it("recovers internally when a provider ignores required tool routing", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-required-routing-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "inventory_manage.use": () => ({ success: true, actionType: "use", lightSource: { active: true } }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["inventory_manage"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+      },
+    );
+    let requestCount = 0;
+    const toolChoices: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestCount += 1;
+      const body = JSON.parse(init.body) as { tool_choice?: string };
+      toolChoices.push(body.tool_choice ?? "missing");
+      if (requestCount === 1) return openRouterMessage("The torch flares before the DM consults the engine.");
+      if (requestCount === 2) {
+        return openRouterMessage(null, [{
+          id: "use-torch-after-recovery",
+          type: "function",
+          function: {
+            name: "inventory_manage",
+            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The torch catches, and the dark gives way around you.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
+
+    expect(toolChoices).toEqual(["required", "required", "auto"]);
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
+    expect(result.narration.text).toContain("torch catches");
     gameStore.close();
   });
 
@@ -503,11 +557,11 @@ describe("ReferenceDungeonMaster", () => {
     const fetchMock = vi.fn(async () => openRouterMessage("The gate opens."));
     vi.stubGlobal("fetch", fetchMock);
 
-    const first = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Open the gate.", {
+    const first = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look at the gate.", {
       clientCommandId: "command-1",
       expectedCampaignVersion: 0,
     });
-    const replay = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "Open the gate.", {
+    const replay = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look at the gate.", {
       clientCommandId: "command-1",
       expectedCampaignVersion: 0,
     });
@@ -1677,6 +1731,13 @@ describe("ReferenceDungeonMaster", () => {
 });
 
 describe("reference DM scene authoring contract", () => {
+  it("does not route questions, negations, or look idioms as mutations", () => {
+    expect(hasAuthoritativeActionIntent("I pick up the bronze disc.")).toBe(true);
+    expect(hasAuthoritativeActionIntent("I don't attack him.")).toBe(false);
+    expect(hasAuthoritativeActionIntent("What happens if I open it?")).toBe(false);
+    expect(hasAuthoritativeActionIntent("I take a closer look.")).toBe(false);
+  });
+
   it("makes creative scene authoring and MCP commitment explicit", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Invent places, people, pressures, clues");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("There are no rooms, locations, NPCs, enemies, items, quests, clues");
