@@ -723,11 +723,15 @@ export class ReferenceDungeonMaster {
     let failureRecorded = false;
     const failTurn = (cause: unknown, phase: string): ReferenceDmProviderUnavailableError => {
       failureRecorded = true;
+      const failedProviderCalls = cause && typeof cause === "object"
+        && typeof (cause as { providerCalls?: unknown }).providerCalls === "number"
+        ? Math.max(0, Math.trunc((cause as { providerCalls: number }).providerCalls))
+        : 0;
       const failure = new ReferenceDmProviderUnavailableError(cause, {
         correlationId,
         commitStatus: acceptedStateChangingToolCalls > 0 ? "uncertain" : "not_committed",
         phase,
-        providerCalls: providerCallCount,
+        providerCalls: providerCallCount + failedProviderCalls,
         toolRounds: toolRoundCount,
         activatedTools: [...activatedToolNames],
         toolCallNames: [...toolCallNames],
@@ -1187,7 +1191,18 @@ export class ReferenceDungeonMaster {
     let providerCalls = 0;
     const attempt = async (): Promise<ChatCompletionResult> => {
       providerCalls += 1;
-      return this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+      try {
+        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+      } catch (error) {
+        // The resolve loop increments its diagnostic counter only after a
+        // completion returns. Preserve the attempted-call count on failures,
+        // including the empty-completion retry path, so the durable receipt
+        // matches provider usage when a turn cannot finish.
+        if (error && typeof error === "object") {
+          (error as { providerCalls?: number }).providerCalls = providerCalls;
+        }
+        throw error;
+      }
     };
     try {
       const result = await attempt();
