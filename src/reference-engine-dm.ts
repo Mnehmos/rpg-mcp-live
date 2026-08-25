@@ -1244,24 +1244,14 @@ function formatAuthoritativeStateContext(campaign: EngineSessionView): string {
     .map((item) => `${item.authoredDefinition?.name ?? item.id} x${item.quantity}${item.equipped ? " (equipped)" : ""}`)
     .join(", ");
   const quests = campaign.quests
-    .map((quest) => {
-      const objectives = quest.graph?.objectives
-        .map((objective) => `${objective.id}: ${objective.title} [${objective.status}]`)
-        .join("; ");
-      return `${quest.id} ${quest.title} [${quest.status}]${objectives ? ` objectives ${objectives}` : ""}`;
-    })
+    .map((quest) => `${quest.id} ${quest.title} [${quest.status}, ${quest.progress}%]`)
     .join(" | ");
-  const partyMembers = campaign.party?.members
-    .map((member) => `${member.actorId} (${member.role})`)
-    .join(", ") || "none";
-  const scene = campaign.scene ? campaign.scene.sceneId : "none";
 
   return [
     "CURRENT AUTHORITATIVE ENGINE PROJECTION (read before repairing history; this outranks prior narration and narrative memory):",
     `Player inventory (authoritative possession): ${inventory || "empty"}. An item not listed is not possessed; equipped markers are authoritative.`,
-    `Campaign quests (authoritative): ${quests || "none"}. A quest or objective not listed is not active.`,
-    `Party membership (authoritative): ${partyMembers}. A companion not listed is not currently in the party.`,
-    `Current committed scene id: ${scene}.`,
+    `Campaign quest summary (authoritative title/status/progress only): ${quests || "none"}. Objective IDs are not included here; read quest_manage.get_log before updating or completing an objective.`,
+    "Party membership and committed scene are not included in this compatibility projection; read party_manage or scene_manage before relying on those facts, and do not infer that none exists.",
     "Use this projection to distinguish durable facts that exist from prose that only proposed them. If the player asks for a missing durable fact, author it with the relevant RPG MCP tool before narration.",
   ].join("\n");
 }
