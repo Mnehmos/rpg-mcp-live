@@ -974,7 +974,7 @@ describe("ReferenceDungeonMaster", () => {
     expect(firstMessages).toEqual(
       expect.arrayContaining([
         { role: "user", content: "I enter the archive." },
-        { role: "assistant", content: "Dust swirls beneath the shelves." },
+        { role: "assistant", content: expect.stringContaining("[PRIOR DM NARRATION — continuity only") },
         { role: "user", content: "I search the archive." },
       ])
     );
@@ -1060,8 +1060,9 @@ describe("ReferenceDungeonMaster", () => {
     });
     expect(firstMessages[priorPlayerIndex + 4]).toEqual({
       role: "assistant",
-      content: "Black water laps over the chapel floor.",
+      content: expect.stringContaining("[PRIOR DM NARRATION — continuity only"),
     });
+    expect(firstMessages[priorPlayerIndex + 4]?.content).toContain("Black water laps over the chapel floor.");
     const currentPlayerIndex = firstMessages.findIndex((message) => message.content === "I listen at the altar.");
     expect(currentPlayerIndex).toBeGreaterThan(priorPlayerIndex + 4);
     expect(firstMessages.slice(priorPlayerIndex + 5, currentPlayerIndex)).toEqual(
@@ -1683,6 +1684,8 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player drives what happens next");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("History is not proof");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("current authoritative projection");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Material-action routing is mandatory");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("A prose-only completion is not final");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not narrate that absence");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("write the canonical room id");
