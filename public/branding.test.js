@@ -23,4 +23,12 @@ describe("player-facing branding", () => {
     expect(styles).toContain("@media (max-width: 480px)");
     expect(styles).toContain(".site-header .top-nav .button { display: none; }");
   });
+
+  it("uses the public style guide tokens on the play surface", () => {
+    expect(styles).toContain("--amber: #00ffff");
+    expect(styles).toContain("--mint: #00ff88");
+    expect(styles).toContain('font-family: "Share Tech Mono"');
+    expect(styles).toContain(".play-app::before");
+    expect(styles).toContain(".play-app::after");
+  });
 });
