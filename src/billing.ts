@@ -2,6 +2,12 @@ import Stripe from "stripe";
 import { config } from "./config.js";
 import type { GameStore } from "./store.js";
 
+export const ENTITLED_SUBSCRIPTION_STATUSES = ["active", "trialing", "past_due"] as const;
+
+export function isEntitledSubscriptionStatus(status: string): boolean {
+  return ENTITLED_SUBSCRIPTION_STATUSES.includes(status as typeof ENTITLED_SUBSCRIPTION_STATUSES[number]);
+}
+
 export function createStripeClient(): Stripe | null {
   if (!config.stripeSecretKey) return null;
 
@@ -100,6 +106,68 @@ async function saveAuthoritativeSubscription(
     currentPeriodEnd: subscriptionPeriodEnd(subscription),
   });
   return true;
+}
+
+/**
+ * Repair a local subscription row whose status was recorded before the
+ * Checkout return/webhook path began persisting Stripe's authoritative status.
+ * The stored subscription ID is the lookup key; a different Stripe customer
+ * can never take over the account's local binding.
+ */
+export async function reconcileStoredSubscription(
+  stripe: Stripe,
+  store: GameStore,
+  userId: string,
+): Promise<boolean> {
+  const existing = store.getSubscription(userId);
+  if (!existing?.stripeSubscriptionId) return false;
+
+  try {
+    const subscription = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
+    const customerId = stripeId(subscription.customer);
+    if (existing.stripeCustomerId && customerId !== existing.stripeCustomerId) return false;
+    if (subscription.metadata?.clerk_user_id && subscription.metadata.clerk_user_id !== userId) return false;
+    return await saveAuthoritativeSubscription(stripe, store, userId, subscription, existing.stripeCustomerId);
+  } catch {
+    // A transient Stripe failure must not turn a status read into a 500 or
+    // cause the checkout route to create a second subscription.
+    return false;
+  }
+}
+
+export type CheckoutGuardResult =
+  | { action: "checkout" }
+  | { action: "portal"; customerId: string; status: string }
+  | { action: "pending"; status: string };
+
+/**
+ * Decide what the checkout endpoint may do after refreshing any existing
+ * Stripe subscription binding. This is deliberately separate from URL
+ * creation so the no-duplicate rule can be tested without calling Stripe
+ * Checkout.
+ */
+export async function resolveCheckoutGuard(
+  stripe: Stripe,
+  store: GameStore,
+  userId: string,
+): Promise<CheckoutGuardResult> {
+  const existing = store.getSubscription(userId);
+  let reconciliationSucceeded: boolean | null = null;
+  if (existing?.stripeSubscriptionId) {
+    reconciliationSucceeded = await reconcileStoredSubscription(stripe, store, userId);
+  }
+
+  const current = store.getSubscription(userId);
+  if (reconciliationSucceeded === false && existing?.stripeSubscriptionId) {
+    return { action: "pending", status: current?.status ?? existing.status };
+  }
+  if (current && isEntitledSubscriptionStatus(current.status) && current.stripeCustomerId) {
+    return { action: "portal", customerId: current.stripeCustomerId, status: current.status };
+  }
+  if (current?.status === "checkout_complete" && current.stripeSubscriptionId) {
+    return { action: "pending", status: current.status };
+  }
+  return { action: "checkout" };
 }
 
 /**
