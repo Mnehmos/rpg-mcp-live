@@ -241,6 +241,25 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     }
   }
 
+  function isPlayerPassActive() {
+    if (state.subscription) {
+      return ["active", "trialing", "past_due", "checkout_complete"].indexOf(state.subscription.status) !== -1;
+    }
+    return Boolean(state.usage && state.usage.plan === "player_pass");
+  }
+
+  function renderMembership() {
+    var status = $("#membership-status");
+    var statusCopy = $("#membership-status-copy");
+    var checkoutButton = $("#membership-checkout");
+    var portalButton = $("#membership-portal");
+    var active = isPlayerPassActive();
+    if (status) status.hidden = !active;
+    if (statusCopy && active) statusCopy.textContent = "Your Player Pass is active. Your table is ready.";
+    if (checkoutButton) checkoutButton.hidden = active;
+    if (portalButton) portalButton.hidden = !active || !state.subscription || !state.subscription.stripeCustomerId;
+  }
+
   function titleCase(value) {
     return String(value || "").replace(/(^|[-_ ])([a-z])/g, function (_match, prefix, character) {
       return prefix + character.toUpperCase();
@@ -1672,6 +1691,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function renderIntegrationState() {
+    renderMembership();
     var integrationState = $("#integration-state");
     if (!integrationState) return;
     if (!state.config && !state.session && !state.subscription && !state.usage) return;
@@ -1688,7 +1708,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var usageParts = state.usage
       ? [usageLabel(state.usage), usageResetLabel(state.usage, new Date())].filter(Boolean)
       : [];
-    var base = state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY";
+    var base = isPlayerPassActive()
+      ? "PLAYER PASS ACTIVE"
+      : state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY";
     integrationState.textContent = base + (usageParts.length ? " · " + usageParts.join(" · ") : "");
   }
 
@@ -1708,8 +1730,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       state.characterOptions = null;
       state.characterOptionsCampaignId = null;
     }
+    renderMembership();
     renderOnboarding(payload || {});
-    if (!session) return;
+    if (!session) {
+      renderIntegrationState();
+      return;
+    }
     if (session.phase === "character_creation") loadCharacterOptions(session.id);
     var snapshot = payload.state || state.engineState || {};
     if (session.phase === "tutorial" && (session.characterCreated || (snapshot.character && snapshot.character.created)) && !session.worldContext && !snapshot.worldContext) {
@@ -2000,11 +2026,31 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     });
   }
 
+  function checkoutReturnQuery() {
+    var params = new URLSearchParams(window.location.search);
+    var sessionId = params.get("session_id");
+    if (params.get("checkout") !== "success" || !sessionId) return "";
+    return "checkout=success&session_id=" + encodeURIComponent(sessionId);
+  }
+
+  function addCheckoutReturnQuery(url, query) {
+    if (!query) return url;
+    return url + (url.indexOf("?") === -1 ? "?" : "&") + query;
+  }
+
+  function clearCheckoutReturn() {
+    var url = new URL(window.location.href);
+    url.searchParams.delete("checkout");
+    url.searchParams.delete("session_id");
+    window.history.replaceState({}, "", url.pathname + (url.search ? url.search : "") + url.hash);
+  }
+
   function refreshSession() {
     var sequence = nextRequestSequence(state.sessionRefreshSequence);
     state.sessionRefreshSequence = sequence;
     var pendingCommands = readPendingCommands();
     var preferredCampaignId = readActiveCampaignId() || (pendingCommands[0] && pendingCommands[0].campaignId) || "";
+    var checkoutQuery = checkoutReturnQuery();
     function resumePendingCommand() {
       var pending = readPendingCommand(state.session && state.session.id);
       if (!pending || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
@@ -2078,14 +2124,15 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         throw error;
       });
     }
-    return requestSession(campaignSessionUrl(preferredCampaignId)).then(function (result) {
+    return requestSession(addCheckoutReturnQuery(campaignSessionUrl(preferredCampaignId), checkoutQuery)).then(function (result) {
       if (!result) return null;
+      if (result.data && result.data.checkoutSync === "synced") clearCheckoutReturn();
       if (result.response.status === 404 && preferredCampaignId) {
         if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
         var pendingForMissingCampaign = readPendingCommand(preferredCampaignId);
         if (pendingForMissingCampaign) clearPendingCommand(pendingForMissingCampaign.clientCommandId, preferredCampaignId);
         clearActiveCampaignId();
-        return requestSession("/api/session").then(applySessionResult);
+        return requestSession(addCheckoutReturnQuery("/api/session", checkoutQuery)).then(applySessionResult);
       }
       return applySessionResult(result);
     }).catch(function (error) {
@@ -2883,7 +2930,28 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     });
   }
 
+  function manageMembership() {
+    if (!isSignedIn()) {
+      openAuth();
+      return;
+    }
+    if (!state.subscription || !state.subscription.stripeCustomerId) {
+      showToast("Your membership is still syncing with Stripe. Try again in a moment.");
+      refreshSession();
+      return;
+    }
+    requestJson("/api/billing/portal", { method: "POST" }).then(function (result) {
+      if (result.response.status === 401) { openAuth(); return; }
+      if (!result.response.ok) throw new Error(result.data.error || "Billing management could not be opened.");
+      window.location.assign(result.data.url);
+    }).catch(function (error) { showToast(error.message); });
+  }
+
   function checkout() {
+    if (isPlayerPassActive()) {
+      manageMembership();
+      return;
+    }
     if (!state.config.subscription.enabled) {
       showToast("Stripe is ready to connect; add STRIPE_PRICE_ID to enable checkout.");
       return;
@@ -3055,6 +3123,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       startQuickstart(button.dataset.quickstartId);
     });
     document.querySelectorAll('[data-action="checkout"]').forEach(function (button) { button.addEventListener("click", checkout); });
+    document.querySelectorAll('[data-action="portal"]').forEach(function (button) { button.addEventListener("click", manageMembership); });
     document.querySelectorAll('[data-action="open-auth"]').forEach(function (button) { button.addEventListener("click", openAuth); });
     document.querySelectorAll('[data-action="close-auth"]').forEach(function (button) { button.addEventListener("click", closeAuth); });
     document.querySelectorAll('[data-action="open-attribution"]').forEach(function (button) { button.addEventListener("click", openAttribution); });
@@ -3073,6 +3142,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       state.config = config;
       $("#subscription-label").textContent = config.subscription.label;
       $("#subscription-price").textContent = config.subscription.priceLabel;
+      renderMembership();
       return setupClerk();
     }).then(function () {
       return Promise.all([loadContentCatalog(), loadQuickstarts(), refreshSession()]).then(function () {
