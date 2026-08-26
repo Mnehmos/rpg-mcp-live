@@ -63,6 +63,49 @@ function subscriptionUsesPrice(subscription: Stripe.Subscription, priceId: strin
   return subscription.items.data.some((item) => item.price.id === priceId);
 }
 
+async function listAllCustomers(stripe: Stripe): Promise<Stripe.Customer[]> {
+  const customers: Stripe.Customer[] = [];
+  let startingAfter: string | undefined;
+
+  while (true) {
+    const page = await stripe.customers.list({
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    customers.push(...page.data);
+    if (!page.has_more || page.data.length === 0) return customers;
+
+    const nextStartingAfter = page.data[page.data.length - 1]?.id;
+    if (!nextStartingAfter || nextStartingAfter === startingAfter) return customers;
+    startingAfter = nextStartingAfter;
+  }
+}
+
+async function listAllCustomerSubscriptions(
+  stripe: Stripe,
+  customerId: string,
+  priceId: string,
+): Promise<Stripe.Subscription[]> {
+  const subscriptions: Stripe.Subscription[] = [];
+  let startingAfter: string | undefined;
+
+  while (true) {
+    const page = await stripe.subscriptions.list({
+      customer: customerId,
+      price: priceId,
+      status: "all",
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    subscriptions.push(...page.data);
+    if (!page.has_more || page.data.length === 0) return subscriptions;
+
+    const nextStartingAfter = page.data[page.data.length - 1]?.id;
+    if (!nextStartingAfter || nextStartingAfter === startingAfter) return subscriptions;
+    startingAfter = nextStartingAfter;
+  }
+}
+
 function saveSubscription(store: GameStore, values: {
   userId: string;
   customerId: string | null;
@@ -158,17 +201,15 @@ export async function reconcileSubscriptionByEmail(
   if (!normalizedEmail || !playerPassPriceId) return "failed";
 
   try {
-    const customers = await stripe.customers.list({ email: email.trim(), limit: 20 });
+    // Stripe's Customers List email filter can be case-sensitive. Read every
+    // customer page, then apply the normalized comparison locally so a paid
+    // account cannot be missed and sent through a second Checkout.
+    const customers = await listAllCustomers(stripe);
     const candidates = new Map<string, Stripe.Subscription>();
-    for (const customer of customers.data) {
+    for (const customer of customers) {
       if (!customer.email || customer.email.trim().toLowerCase() !== normalizedEmail) continue;
-      const subscriptions = await stripe.subscriptions.list({
-        customer: customer.id,
-        price: playerPassPriceId,
-        status: "all",
-        limit: 100,
-      });
-      for (const subscription of subscriptions.data) {
+      const subscriptions = await listAllCustomerSubscriptions(stripe, customer.id, playerPassPriceId);
+      for (const subscription of subscriptions) {
         if (isEntitledSubscriptionStatus(subscription.status)
           && subscriptionUsesPrice(subscription, playerPassPriceId)) {
           candidates.set(subscription.id, subscription);

@@ -82,6 +82,52 @@ describe("Stripe membership synchronization", () => {
     store.close();
   });
 
+  it("paginates customers and matches email casing before linking a legacy account", async () => {
+    const store = createTestStore();
+    const customerRequests: Array<{ limit: number; starting_after?: string }> = [];
+    const customerPages = [
+      {
+        data: [{ id: "cus_other", email: "other@example.com" }],
+        has_more: true,
+      },
+      {
+        data: [{ id: "cus_legacy", email: "MNEHMOS@GMAIL.COM" }],
+        has_more: false,
+      },
+    ];
+    const stripe = {
+      customers: {
+        list: async (params: { limit: number; starting_after?: string }) => {
+          customerRequests.push(params);
+          const page = customerPages.shift();
+          if (!page) throw new Error("unexpected customer page request");
+          return page;
+        },
+      },
+      subscriptions: {
+        list: async ({ customer }: { customer: string }) => ({
+          data: customer === "cus_legacy"
+            ? [testSubscription({ id: "sub_legacy", customer: "cus_legacy" })]
+            : [],
+          has_more: false,
+        }),
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileSubscriptionByEmail(stripe, store, "player-1", "mnehmos@gmail.com", "price_test"))
+      .resolves.toBe("linked");
+    expect(customerRequests).toEqual([
+      { limit: 100 },
+      { limit: 100, starting_after: "cus_other" },
+    ]);
+    expect(store.getSubscription("player-1")).toMatchObject({
+      stripeCustomerId: "cus_legacy",
+      stripeSubscriptionId: "sub_legacy",
+      status: "active",
+    });
+    store.close();
+  });
+
   it("refuses to bind an ambiguous email with multiple active Player Pass subscriptions", async () => {
     const store = createTestStore();
     const stripe = {
