@@ -30,7 +30,7 @@ import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from 
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
-import { usageLabel } from "./usage-display.js";
+import { usageLabel, usageResetLabel } from "./usage-display.js";
 
 (function () {
   "use strict";
@@ -1623,6 +1623,16 @@ import { usageLabel } from "./usage-display.js";
     }).join("");
   }
 
+  function renderIntegrationState() {
+    var integrationState = $("#integration-state");
+    if (!integrationState) return;
+    var usageParts = state.usage
+      ? [usageLabel(state.usage), usageResetLabel(state.usage, new Date())].filter(Boolean)
+      : [];
+    var base = state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY";
+    integrationState.textContent = base + (usageParts.length ? " · " + usageParts.join(" · ") : "");
+  }
+
   function renderSession(payload) {
     var session = payload && payload.session;
     var previousSessionId = state.session && state.session.id;
@@ -1701,8 +1711,7 @@ import { usageLabel } from "./usage-display.js";
       if (wasNearBottom) gameLog.scrollTop = gameLog.scrollHeight;
       gameLog.dataset.initialized = "true";
     }
-    var usageStatus = state.usage ? usageLabel(state.usage) : "";
-    $("#integration-state").textContent = (state.subscription ? "MEMBERSHIP " + state.subscription.status.toUpperCase() : "SERVER READY") + (usageStatus ? " · " + usageStatus : "");
+    renderIntegrationState();
   }
 
   function escapeHtml(value) {
@@ -2990,6 +2999,7 @@ import { usageLabel } from "./usage-display.js";
 
   function boot() {
     bind();
+    window.setInterval(renderIntegrationState, 1000);
     fetch("/api/config").then(function (response) { return response.json(); }).then(function (config) {
       state.config = config;
       $("#subscription-label").textContent = config.subscription.label;
