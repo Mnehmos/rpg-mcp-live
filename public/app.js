@@ -559,6 +559,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var species = findCharacterOption("species", $("#character-species-input").value);
     var characterClass = findCharacterOption("classes", $("#character-class-input").value);
     var background = findCharacterOption("backgrounds", $("#character-background-choice").value);
+    var levelInput = $("#character-level-input");
+    var startingLevel = levelInput ? Number(levelInput.value || 1) : 1;
     if (!species || !characterClass || !background) return;
 
     var priorAbilities = checkedCharacterValues("#character-ability-choice-options");
@@ -647,7 +649,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       var packLabel = String(state.characterOptions.packHash || "").slice(0, 10);
       summary.textContent = species.name + " · " + characterClass.name + " · " + background.name + ". "
         + species.size + ", " + species.speedFeet + " ft; d" + characterClass.hitDie + ". "
-        + "The engine applies reviewed level-one rules and starter equipment from this campaign's selected content pack " + packLabel + ".";
+        + "The engine applies reviewed level " + startingLevel + " rules, class progression, and starter equipment from this campaign's selected content pack " + packLabel + ".";
     }
   }
 
@@ -845,12 +847,50 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     return new Set((Array.isArray(spells) ? spells : []).map(function (spell) { return spell && spell.contentKey; }).filter(Boolean));
   }
 
+  function spellManagementCopy(mode) {
+    if (mode === "known") {
+      return {
+        toggle: "Manage known spells",
+        close: "Close known spells",
+        save: "Save known spells",
+        rules: "This class casts leveled spells from its known list. There is no daily preparation step.",
+        action: "know"
+      };
+    }
+    if (mode === "prepared") {
+      return {
+        toggle: "Manage preparations",
+        close: "Close preparations",
+        save: "Save preparations",
+        rules: "Choose the leveled spells this class has prepared. The allowed count follows class, level, and spellcasting ability.",
+        action: "prepare"
+      };
+    }
+    if (mode === "spellbook") {
+      return {
+        toggle: "Manage spellbook",
+        close: "Close spellbook",
+        save: "Save spellbook",
+        rules: "Add spells to the spellbook, then prepare the leveled spells you want available. Cantrips are always available.",
+        action: "keep in your spellbook"
+      };
+    }
+    return {
+      toggle: "Manage spells",
+      close: "Close spells",
+      save: "Save spell choices",
+      rules: "Choose spells from the installed class list. The engine validates every saved selection.",
+      action: "know"
+    };
+  }
+
   function renderSpellbookOptions(character, spellcasting) {
     var optionsNode = $("#spellbook-options");
     var help = $("#spellbook-help");
     var characterLevel = Number(character.level || 1);
     if (!optionsNode || !state.spellOptions || state.spellOptionsClass !== character.className || state.spellOptionsLevel !== characterLevel) return;
     var mode = spellcasting.selectionMode || "prepared";
+    var copy = spellManagementCopy(mode);
     var knownSet = spellReferenceSet(spellcasting.knownSpells);
     var preparedSet = spellReferenceSet(spellcasting.preparedSpells);
     var editableRole = mode === "prepared" ? "prepared" : "known";
@@ -861,9 +901,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       ? (spellcasting.preparedCapacity === null || spellcasting.preparedCapacity === undefined ? null : Number(spellcasting.preparedCapacity))
       : (state.spellOptions.knownSpellLimit === null || state.spellOptions.knownSpellLimit === undefined ? null : Number(state.spellOptions.knownSpellLimit));
     if (help) {
-      var levelledAction = editableRole === "prepared" ? "prepare" : mode === "spellbook" ? "keep in your spellbook" : "know";
       help.textContent = "Choose up to " + (cantripLimit === null ? "the engine limit" : cantripLimit) + " cantrips and "
-        + (levelledLimit === null ? "the engine limit" : levelledLimit) + " levelled spells to " + levelledAction
+        + (levelledLimit === null ? "the engine limit" : levelledLimit) + " levelled spells to " + copy.action
         + " from the installed class list. The engine validates the final choices before saving.";
     }
     var cantrips = state.spellOptions.spells.filter(function (spell) { return Number(spell.level) === 0; });
@@ -921,11 +960,15 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       form.hidden = true;
       return;
     }
+    var mode = spellcasting.selectionMode || "prepared";
+    var copy = spellManagementCopy(mode);
     toggle.hidden = false;
-    toggle.textContent = form.hidden ? "Manage spellbook" : "Close spellbook";
+    toggle.textContent = form.hidden ? copy.toggle : copy.close;
+    var saveButton = $("#spellbook-save") || form.querySelector("button[type=submit]");
+    if (saveButton) saveButton.textContent = copy.save;
     toggle.onclick = function () {
       form.hidden = !form.hidden;
-      toggle.textContent = form.hidden ? "Manage spellbook" : "Close spellbook";
+      toggle.textContent = form.hidden ? copy.toggle : copy.close;
       if (!form.hidden) loadSpellbookOptions(character, spellcasting);
     };
     if (!form.dataset.bound) {
@@ -941,7 +984,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         var button = form.querySelector("button[type=submit]");
         var feedback = $("#spellbook-feedback");
         if (button) button.disabled = true;
-        if (feedback) feedback.textContent = "Saving the spellbook…";
+        var activeMode = state.spellOptions.selectionMode || (state.session.character.spellcasting && state.session.character.spellcasting.selectionMode) || "known";
+        var activeCopy = spellManagementCopy(activeMode);
+        if (feedback) feedback.textContent = "Saving " + activeCopy.toggle.replace(/^Manage /, "") + "…";
         requestJson("/api/campaigns/" + encodeURIComponent(state.session.id) + "/character/spells", { method: "PATCH", body: JSON.stringify(payload) })
           .then(function (result) {
             if (result.response.status === 409 && result.data.session) {
@@ -950,7 +995,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
             }
             if (!result.response.ok) throw new Error(result.data.error || "The spellbook could not be saved.");
             renderSession({ session: result.data.campaign, engineBackend: "reference", dockets: result.data.dockets, subscription: result.data.subscription || state.subscription });
-            showToast("Spellbook saved to the engine.");
+            showToast(activeCopy.save.replace(/^Save /, "") + " saved to the engine.");
           })
           .catch(function (error) {
             if (feedback) feedback.textContent = error.message;
@@ -1183,12 +1228,14 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (spellbookSection) spellbookSection.hidden = !spellcasting;
     if (spellcasting) {
       var selectionMode = spellcasting.selectionMode || "spellcasting";
+      var managementCopy = spellManagementCopy(selectionMode);
       var selectionDetail = titleCase(selectionMode);
       if (spellcasting.cantripLimit !== null && spellcasting.cantripLimit !== undefined) selectionDetail += " / " + spellcasting.cantripLimit + " cantrips";
       if (spellcasting.knownSpellLimit !== null && spellcasting.knownSpellLimit !== undefined) selectionDetail += " / " + spellcasting.knownSpellLimit + " leveled";
       if (spellcasting.preparedCapacity !== null && spellcasting.preparedCapacity !== undefined) selectionDetail += " / " + spellcasting.preparedCapacity + " prepared";
       setText("#spell-selection-mode", selectionDetail.toUpperCase(), "SPELLCASTING");
-      setText("#known-spell-label", selectionMode === "spellbook" ? "SPELLBOOK & CANTRIPS" : "KNOWN SPELLS", "KNOWN SPELLS");
+      setText("#spellcasting-rules-help", managementCopy.rules, "Choose spells from the installed class list.");
+      setText("#known-spell-label", selectionMode === "spellbook" ? "SPELLBOOK" : "KNOWN SPELLS", "KNOWN SPELLS");
       setText("#prepared-spell-label", selectionMode === "known" ? "PREPARATION NOT USED" : "PREPARED", "PREPARED");
       var slotsNode = $("#character-spell-slots");
       if (slotsNode) {
@@ -1204,7 +1251,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       if (knownSpellsNode) knownSpellsNode.innerHTML = knownSpells.map(spellEntryHtml).join("") || '<p class="inventory-empty">No spells selected.</p>';
       var preparedSpellsNode = $("#character-prepared-spells");
       var preparedSpells = Array.isArray(spellcasting.preparedSpells) ? spellcasting.preparedSpells : [];
-      if (preparedSpellsNode) preparedSpellsNode.innerHTML = preparedSpells.map(spellEntryHtml).join("") || '<p class="inventory-empty">No spells prepared.</p>';
+      if (preparedSpellsNode) preparedSpellsNode.innerHTML = preparedSpells.map(spellEntryHtml).join("")
+        || (selectionMode === "known" ? '<p class="inventory-empty">This class casts from known spells; daily preparation is not used.</p>' : '<p class="inventory-empty">No spells prepared.</p>');
       var concentrationNode = $("#character-concentration");
       if (concentrationNode) {
         concentrationNode.hidden = !spellcasting.concentration;
@@ -2479,8 +2527,14 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var characterClass = findCharacterOption("classes", $("#character-class-input").value);
     var background = findCharacterOption("backgrounds", $("#character-background-choice").value);
     var alignment = findCharacterOption("alignments", $("#character-alignment-choice").value);
+    var levelInput = $("#character-level-input");
+    var level = levelInput ? Number(levelInput.value || 1) : 1;
     if (!species || !characterClass || !background || !alignment) {
       feedback.textContent = "Choose a species, class, background, and alignment.";
+      return;
+    }
+    if (!Number.isInteger(level) || level < 1 || level > 20) {
+      feedback.textContent = "Choose a starting level from 1 through 20.";
       return;
     }
     var abilityScoreMethod = $("#character-ability-method").value || "standard_array";
@@ -2539,6 +2593,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       classKey: characterClass.contentKey,
       backgroundKey: background.contentKey,
       alignmentKey: alignment.contentKey,
+      level: level,
       abilityScoreMethod: abilityScoreMethod,
       abilityScoreDraftId: abilityScoreMethod === "rolled" && draft ? draft.id : undefined,
       abilityScores: abilityScores,
@@ -2950,7 +3005,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     $("#character-form").addEventListener("submit", createCharacter);
     $("#character-roll-stats").addEventListener("click", rollCharacterStats);
     $("#character-ability-method").addEventListener("change", renderAbilityScoreFields);
-    ["#character-species-input", "#character-class-input", "#character-background-choice", "#character-alignment-choice"].forEach(function (selector) {
+    ["#character-species-input", "#character-class-input", "#character-level-input", "#character-background-choice", "#character-alignment-choice"].forEach(function (selector) {
       var input = $(selector);
       if (input) input.addEventListener("change", renderCharacterChoiceFields);
     });

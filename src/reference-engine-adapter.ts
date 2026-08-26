@@ -102,6 +102,7 @@ interface ReferenceCharacterRecord {
   preparedSpells?: string[];
   cantripsKnown?: string[];
   spellSlots?: Record<string, { current?: number; max?: number }>;
+  pactMagicSlots?: { current?: number; max?: number; slotLevel?: number };
 }
 
 interface ReferenceNoteRecord {
@@ -392,6 +393,25 @@ function referenceSpellReferences(values: string[] | undefined, className: strin
 function referenceSpellNames(contentKeys: string[]): string[] {
   return contentKeys.map((contentKey) => getOpen5eSpell(contentKey)?.definition.name ?? "")
     .filter((name): name is string => Boolean(name));
+}
+
+function referenceSpellSlotCurrents(
+  spellSlots: ReferenceCharacterRecord["spellSlots"],
+  pactMagicSlots: ReferenceCharacterRecord["pactMagicSlots"],
+): Record<string, number> {
+  const currents: Record<string, number> = {};
+  for (const [key, slot] of Object.entries(spellSlots ?? {})) {
+    const level = /^level(\d+)$/i.exec(key)?.[1] ?? key;
+    const value = slot?.current ?? slot?.max;
+    if (value !== undefined && Number.isFinite(Number(value))) {
+      currents[level] = Math.max(0, Math.trunc(Number(value)));
+    }
+  }
+  if (pactMagicSlots?.slotLevel !== undefined && pactMagicSlots.current !== undefined
+    && Number.isFinite(Number(pactMagicSlots.current))) {
+    currents[String(pactMagicSlots.slotLevel)] = Math.max(0, Math.trunc(Number(pactMagicSlots.current)));
+  }
+  return currents;
 }
 
 
@@ -701,6 +721,7 @@ export class ReferenceEngineAdapter {
       weaponProficiencies?: string[];
       toolProficiencies?: string[];
       languages?: string[];
+      level?: number;
       cantripsKnown?: string[];
       knownSpells?: string[];
       preparedSpells?: string[];
@@ -712,6 +733,7 @@ export class ReferenceEngineAdapter {
       class: args.className ?? "fighter",
       background: args.background,
       alignment: args.alignment,
+      level: args.level ?? 1,
       characterType: "pc",
       stats: args.abilityScores,
       skillProficiencies: args.skillProficiencies,
@@ -1098,6 +1120,18 @@ export class ReferenceEngineAdapter {
           knownSpells: known,
           preparedSpells: prepared,
         };
+        const referenceSlots = referenceSpellSlotCurrents(character.spellSlots, character.pactMagicSlots);
+        if (Object.keys(referenceSlots).length > 0) {
+          const localSlots = state.character.spellcasting.slots;
+          state.character.spellcasting.slots = Object.fromEntries(
+            Object.entries(state.character.spellcasting.slotMaximums).map(([level, maximum]) => [
+              level,
+              referenceSlots[level] === undefined
+                ? localSlots[level] ?? maximum
+                : Math.max(0, Math.min(maximum, referenceSlots[level])),
+            ])
+          );
+        }
       }
       if (character.saveProficiencies?.length) {
         state.character.savingThrows = buildSavingThrows(

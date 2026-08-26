@@ -250,6 +250,7 @@ h1 i { color: var(--amber); font-style: italic; }
 .setup-auth-gate p { color: var(--muted); font-size: 13px; margin: 0; }
 .setup-form { display: grid; gap: 18px; max-width: 760px; padding-top: 25px; }
 .setup-form label { display: grid; gap: 8px; color: var(--amber); font-size: 9px; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; }
+.setup-form label > small { color: var(--muted); font-size: 10px; font-weight: 400; letter-spacing: normal; line-height: 1.35; text-transform: none; }
 .setup-form input, .setup-form textarea, .setup-form select { width: 100%; border: 1px solid var(--line-strong); border-radius: 1px; background: rgba(8, 10, 14, .72); color: var(--ink); padding: 12px 13px; font: 15px/1.45 Georgia, "Times New Roman", serif; letter-spacing: normal; text-transform: none; }
 .setup-form textarea { min-height: 92px; resize: vertical; }
 .setup-form input::placeholder, .setup-form textarea::placeholder { color: var(--faint); }
@@ -451,6 +452,7 @@ h1 i { color: var(--amber); font-style: italic; }
 .spell-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .spell-heading .tiny-label { margin-bottom: 0; }
 .spell-heading > span:last-child { color: var(--faint); font-size: 8px; letter-spacing: .12em; }
+.spellcasting-rules-help { margin: 6px 0 0; max-width: 620px; }
 .spellbook-editor { margin-top: 9px; }
 .spellbook-form { display: grid; gap: 8px; margin-top: 8px; padding: 8px; border: 1px solid rgba(233, 167, 91, .16); background: rgba(233, 167, 91, .035); }
 .spellbook-options { display: grid; gap: 5px; max-height: 260px; overflow: auto; }
