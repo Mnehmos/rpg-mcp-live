@@ -70,6 +70,15 @@ describe("LLM usage ledger", () => {
     game.close();
   });
 
+  it("exposes UTC daily and monthly reset boundaries", () => {
+    const { game, usage } = createStores();
+    expect(usage.getSummary("player-1", new Date("2026-08-26T22:58:30.000Z")).resetsAt).toEqual({
+      daily: "2026-08-27T00:00:00.000Z",
+      monthly: "2026-09-01T00:00:00.000Z",
+    });
+    game.close();
+  });
+
   it("counts active reservations before allowing another concurrent request", () => {
     const { game, usage } = createStores();
     usage.reserve({

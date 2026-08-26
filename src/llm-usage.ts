@@ -84,6 +84,10 @@ export interface LlmUsageSummary {
   currency: "USD";
   daily: LlmUsageBucket;
   monthly: LlmUsageBucket;
+  resetsAt: {
+    daily: string;
+    monthly: string;
+  };
   targets: {
     monthly: Pick<LlmUsageLimitBucket, "costMicros" | "costUsd">;
   };
@@ -431,6 +435,10 @@ export class LlmUsageStore {
       currency: "USD",
       daily,
       monthly,
+      resetsAt: {
+        daily: periods.dailyResetAt,
+        monthly: periods.monthlyResetAt,
+      },
       targets: {
         monthly: {
           costMicros: monthlyTargetCostMicros,
@@ -631,8 +639,21 @@ function assertWithin(
   );
 }
 
-function periodBoundaries(now: Date): { dailyStart: string; monthlyStart: string } {
+function periodBoundaries(now: Date): {
+  dailyStart: string;
+  monthlyStart: string;
+  dailyResetAt: string;
+  monthlyResetAt: string;
+} {
   const daily = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const monthly = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  return { dailyStart: daily.toISOString(), monthlyStart: monthly.toISOString() };
+  const dailyReset = new Date(daily);
+  dailyReset.setUTCDate(dailyReset.getUTCDate() + 1);
+  const monthlyReset = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return {
+    dailyStart: daily.toISOString(),
+    monthlyStart: monthly.toISOString(),
+    dailyResetAt: dailyReset.toISOString(),
+    monthlyResetAt: monthlyReset.toISOString(),
+  };
 }

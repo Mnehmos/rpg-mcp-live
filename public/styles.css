@@ -534,6 +534,7 @@ h1 i { color: var(--amber); font-style: italic; }
 .button-quiet:hover { background: rgba(233, 167, 91, .08); }
 .note-form .form-feedback { min-height: 13px; }
 .player-panel-meta { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line); color: var(--mint); }
+.player-panel-meta #integration-state { min-width: 0; line-height: 1.45; text-align: right; overflow-wrap: anywhere; }
 .log-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 28px 0; background: rgba(8, 10, 14, .3); }
 .log-heading .tiny-label { margin-bottom: 0; }
 .log-heading > span:last-child { color: var(--faint); font-size: 9px; letter-spacing: .08em; }
