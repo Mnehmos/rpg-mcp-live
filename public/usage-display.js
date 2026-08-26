@@ -59,6 +59,7 @@ export function usageResetLabel(summary, now = new Date()) {
   const resetAt = usageResetAt(summary);
   const resetTimestamp = Date.parse(resetAt);
   if (!Number.isFinite(resetTimestamp)) return "";
+  if (resetTimestamp <= now.getTime()) return "";
 
   const dailyUsed = Number(summary?.daily?.costMicros ?? 0);
   const dailyLimit = Number(summary?.limits?.daily?.costMicros ?? 0);

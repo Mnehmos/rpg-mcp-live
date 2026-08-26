@@ -30,7 +30,7 @@ import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from 
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
-import { usageLabel, usageResetLabel } from "./usage-display.js";
+import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
 
 (function () {
   "use strict";
@@ -40,7 +40,7 @@ import { usageLabel, usageResetLabel } from "./usage-display.js";
     { id: "ember-watch", title: "The Ember Watch", tagline: "The old lighthouse is burning in a dead calm.", description: "A fast-moving rescue story on a fogbound harbor." },
     { id: "glass-under-moon", title: "Glass Under Moonlight", tagline: "Something beneath the city is answering the bells.", description: "A strange arcane investigation in an old river city." },
   ];
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -1626,6 +1626,17 @@ import { usageLabel, usageResetLabel } from "./usage-display.js";
   function renderIntegrationState() {
     var integrationState = $("#integration-state");
     if (!integrationState) return;
+    if (!state.config && !state.session && !state.subscription && !state.usage) return;
+    if (state.config && !state.config.clerkPublishableKey && !state.session && !state.subscription && !state.usage) {
+      integrationState.textContent = state.config.devAuthBypass ? "LOCAL PREVIEW" : "AUTH NEEDED";
+      return;
+    }
+    var resetAt = state.usage ? usageResetAt(state.usage) : "";
+    var resetTimestamp = Date.parse(resetAt);
+    if (Number.isFinite(resetTimestamp) && resetTimestamp <= Date.now() && state.usageResetRefreshAt !== resetAt) {
+      state.usageResetRefreshAt = resetAt;
+      window.setTimeout(function () { refreshSession(); }, 0);
+    }
     var usageParts = state.usage
       ? [usageLabel(state.usage), usageResetLabel(state.usage, new Date())].filter(Boolean)
       : [];
@@ -1638,7 +1649,10 @@ import { usageLabel, usageResetLabel } from "./usage-display.js";
     var previousSessionId = state.session && state.session.id;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "state")) state.engineState = payload.state;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "subscription")) state.subscription = payload.subscription;
-    if (payload && Object.prototype.hasOwnProperty.call(payload, "usage")) state.usage = payload.usage;
+    if (payload && Object.prototype.hasOwnProperty.call(payload, "usage")) {
+      state.usageResetRefreshAt = null;
+      state.usage = payload.usage;
+    }
     if (payload && Object.prototype.hasOwnProperty.call(payload, "engineBackend")) state.engineBackend = payload.engineBackend;
     state.session = session || null;
     if (session && session.id) writeActiveCampaignId(session.id);

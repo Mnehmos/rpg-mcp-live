@@ -72,4 +72,15 @@ describe("player-facing usage display", () => {
   it("does not expose a countdown when the reset timestamp is absent", () => {
     expect(usageResetLabel({ plan: "free", daily: { costMicros: 10 }, limits: { daily: { costMicros: 10 } } })).toBe("");
   });
+
+  it("does not keep displaying an expired countdown", () => {
+    const summary = {
+      plan: "free",
+      daily: { costMicros: 10 },
+      limits: { daily: { costMicros: 10 } },
+      resetsAt: { daily: "2026-08-27T00:00:00.000Z" },
+    };
+
+    expect(usageResetLabel(summary, new Date("2026-08-27T00:00:01.000Z"))).toBe("");
+  });
 });
