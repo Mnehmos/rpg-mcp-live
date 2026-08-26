@@ -113,6 +113,9 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("give only adds an item and does not remove it from the player");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("exact questId and objective IDs returned by quest_manage.create");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Never derive an objective ID");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("improvisation_manage with action stunt");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not ask the player to roll");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("nonexistent roll_skill_check");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("call activate_tools with the smallest set");
   });
 
@@ -1873,6 +1876,16 @@ describe("reference DM scene authoring contract", () => {
     expect(buildAuthoritativeActionRoutingHint("I attack and take cover.")).not.toContain("item acquisition");
   });
 
+  it("routes explicit checks to the engine's generic stunt adjudicator", () => {
+    expect(hasAuthoritativeActionIntent("I am rolling an Arcana check to identify the sigil.")).toBe(true);
+    const hint = buildAuthoritativeActionRoutingHint("I am rolling an Arcana check to identify the sigil.");
+    expect(hint).toContain('improvisation_manage with { action: "stunt"');
+    expect(hint).toContain("do not ask the player to roll");
+    expect(hint).toContain("effectType: \"none\"");
+    expect(hasAuthoritativeActionIntent("I attempt to decipher the seal.")).toBe(true);
+    expect(buildAuthoritativeActionRoutingHint("I attempt to decipher the seal.")).toContain("improvisation_manage");
+  });
+
   it("makes creative scene authoring and MCP commitment explicit", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Invent places, people, pressures, clues");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("There are no rooms, locations, NPCs, enemies, items, quests, clues");
@@ -1944,6 +1957,63 @@ describe("reference DM scene authoring contract", () => {
       targetId: "enemy-1",
       encounterId: "encounter-1",
     }));
+  });
+
+  it("fills the player's actor id when the DM calls the generic check tool", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-check-actor-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    let capturedCheckArgs: Record<string, unknown> | null = null;
+    const client = fakeClient({
+      ...CHARACTER_FIXTURES,
+      "improvisation_manage.stunt": (args) => {
+        capturedCheckArgs = args;
+        return {
+          actionType: "stunt",
+          success: true,
+          skill: args.skill,
+          roll: 14,
+          modifier: 2,
+          total: 16,
+          dc: args.dc,
+        };
+      },
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["improvisation_manage"]), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return openRouterMessage(null, [{
+          id: "check-1",
+          type: "function",
+          function: {
+            name: "improvisation_manage",
+            arguments: JSON.stringify({ action: "stunt", skill: "arcana", dc: 12, effectType: "none" }),
+          },
+        }]);
+      }
+      return openRouterMessage("The sigil answers your careful study with a thread of blue fire.");
+    }));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I roll an Arcana check to identify the sigil.");
+
+    expect(capturedCheckArgs).toEqual(expect.objectContaining({
+      actorId: "char-1",
+      action: "stunt",
+      skill: "arcana",
+      dc: 12,
+      effectType: "none",
+    }));
+    gameStore.close();
   });
 
   it("records the DM's tool-authored opening scene in state memory", async () => {

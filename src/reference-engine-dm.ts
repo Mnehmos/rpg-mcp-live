@@ -351,6 +351,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Prose, improvisation_manage, a docket entry, or an NPC/agent proposal never creates a concrete possession, quest, party membership, or light state. When the player acquires or discovers an item, author it with item_manage, then commit possession with inventory_manage give or transfer before narrating ownership. When a durable goal becomes real, create it with quest_manage and use the exact returned IDs. When a companion joins the party, commit party_manage membership and spatial placement before treating the companion as present. For light, use inventory_manage action use to light a carried source and action extinguish to put it out; narrate only the authoritative result.",
   "Material-action routing is mandatory even when the same action appeared in earlier prose: take, pick up, collect, keep, put away, or claim an absent object means item_manage create (or an existing authoritative item lookup) followed by inventory_manage give with the returned itemId and the player's exact characterId; light, ignite, extinguish, or shield a carried source means inventory_manage use or extinguish; equip or remove gear means inventory_manage equip or unequip; hand, offer, slide, or give a carried item to another character means inventory_manage transfer. Do not substitute improvisation_manage, scene_manage, narrative memory, or prose for these concrete calls. A prose-only completion is not final for one of these material actions.",
   "When creating or advancing a quest, use the exact questId and objective IDs returned by quest_manage.create, quest_manage.get, or quest_manage.get_log. Never derive an objective ID from a quest ID, objective name, or array position; if the ID is unavailable, read the quest log before updating or completing it.",
+  "When an action has meaningful uncertainty, adjudicate it yourself. Do not ask the player to roll or click a roll control: call improvisation_manage with action stunt, the appropriate skill, a reasoned DC, the player's actor, and effectType none for a non-damaging check. The engine rolls the d20 and applies the character modifier; translate the accepted result into diegetic narration. Use combat_action for attacks and combat saves, and never use the nonexistent roll_skill_check, roll_ability_check, or roll_saving_throw tools.",
   "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4-flash, and competencyOverride {model: deepseek/deepseek-v4-flash} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, use maxTokens 8192 or higher and omit budgetTokens (or use a clearly session-sized budget, never a tiny 300/1000 budget). Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
@@ -426,11 +427,12 @@ const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 // completion must enter the tool loop so the DM can choose and commit the
 // appropriate RPG MCP action before it narrates.  Keep the vocabulary narrow:
 // ordinary conversational or observational turns should remain tool_choice=auto.
-const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|check|checks|checked)\b/i;
+const AUTHORITATIVE_ACTION_INTENT = /\b(?:pick(?:s|ed|ing)?\s+up|take|takes|took|collect|collects|collected|pocket|pockets|pocketed|tuck|tucks|tucked|keep|keeps|kept|claim|claims|claimed|loot|loots|looted|retrieve|retrieves|retrieved|grab|grabs|grabbed|light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished|equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore|hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave|invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed|attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate|roll|rolls|rolled|rolling|check|checks|checked|checking|attempt|attempts|attempted|attempting)\b/i;
 const COMPANION_ACTION_INTENT = /(?:\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b[\s\S]{0,80}\b(?:join|come|travel|fight|adventure)\b[\s\S]{0,40}\b(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed)\b[\s\S]{0,80}\b(?:into|to|as)\s+(?:our|the|a|an)\s+(?:party|group|company|team|companion|ally)\b|\bjoin(?:s|ed)?\s+(?:us|me|our|the\s+(?:party|group|company|team))\b|\b(?:form|forms|formed)\s+(?:a|the)\s+(?:party|group|company|team)\b)/i;
 const COMPANION_ACTION_VERB = /^(?:invite|invites|invited|recruit|recruits|recruited|welcome|welcomes|welcomed|join|joins|joined|form|forms|formed)$/i;
 const TRANSFER_ACTION_INTENT = /\b(?:hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave)\b/i;
 const LIGHT_ACTION_INTENT = /\b(?:light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished)\b/i;
+const CHECK_ACTION_INTENT = /\b(?:roll|rolls|rolled|rolling|check|checks|checked|checking|attempt|attempts|attempted|attempting)\b/i;
 const NON_ACTION_LOOK_IDIOM = /\btake\s+(?:a|an|the|my)\s+(?:(?:closer|close|quick|brief)\s+)?look\b/i;
 const HYPOTHETICAL_OR_QUESTION = /^\s*(?:what if|what happens if|should I|can I|could I|would it|may I|might I|do I|did I|is it|are we)\b/i;
 const NEGATED_ACTION_PREFIX = /\b(?:don't|do not|never|not|can't|cannot|won't|wouldn't|shouldn't|didn't|did not|refuse to|avoid)\b[\s\S]{0,40}$/i;
@@ -506,7 +508,8 @@ function buildGeneralAuthoritativeActionRoutingHint(playerText: string): string 
   const light = /\b(?:light|lights|lit|ignite|ignites|ignited|extinguish|extinguishes|extinguished)\b/i.test(normalized);
   const equipment = /\b(?:equip|equips|equipped|unequip|unequips|unequipped|remove|removes|removed|wear|wears|wore)\b/i.test(normalized);
   const transfer = /\b(?:hand|hands|handed|offer|offers|offered|slide|slides|slid|transfer|transfers|transferred|give|gives|gave)\b/i.test(normalized);
-  const combat = /\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|roll|rolls|rolled|check|checks|checked)\b/i.test(normalized);
+  const combat = /\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled)\b/i.test(normalized);
+  const check = CHECK_ACTION_INTENT.test(normalized);
   const movement = /\b(?:travel|travels|traveled|move|moves|moved|enter|enters|entered|open|opens|opened|rest|rests|rested|heal|heals|healed|drink|drinks|drank|eat|eats|ate)\b/i.test(normalized);
 
   if (pickup) {
@@ -521,8 +524,14 @@ function buildGeneralAuthoritativeActionRoutingHint(playerText: string): string 
   if (transfer) {
     return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested handoff through inventory_manage transfer before optional conversation or narration. Do not use inventory_manage give, improvisation_manage, scene_manage, a docket, or prose as a substitute for the atomic transfer result.";
   }
+  if (combat && check) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): resolve attacks through combat_action and resolve the requested ability or skill check through improvisation_manage with { action: \"stunt\", skill, dc, narrativeIntent, effectType: \"none\" }. The host supplies the player's actor id when omitted. Roll and adjudicate the check yourself; do not ask the player to roll or use the nonexistent roll_skill_check, roll_ability_check, or roll_saving_throw tools. Do not use scene_manage, a docket, or prose as a substitute for the authoritative result.";
+  }
   if (combat) {
     return "INTERNAL DM ROUTING HINT (not player-facing): resolve the requested combat or check action through the relevant RPG MCP combat/check tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
+  }
+  if (check) {
+    return "INTERNAL DM ROUTING HINT (not player-facing): resolve the requested ability or skill check through improvisation_manage with { action: \"stunt\", skill, dc, narrativeIntent, effectType: \"none\" }. The host supplies the player's actor id when omitted. Roll and adjudicate the check yourself; do not ask the player to roll or use the nonexistent roll_skill_check, roll_ability_check, or roll_saving_throw tools. Do not use scene_manage, a docket, or prose as a substitute for the authoritative result.";
   }
   if (movement) {
     return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested movement, rest, or recovery through the relevant RPG MCP spatial/combat/inventory tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
@@ -598,8 +607,11 @@ function seedRecentToolPalette(
     addAvailable(["inventory_manage"]);
   } else if (TRANSFER_ACTION_INTENT.test(normalized)) {
     addAvailable(["inventory_manage", "npc_manage", "party_manage"]);
-  } else if (/\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled|roll|rolls|rolled|check|checks|checked)\b/i.test(normalized)) {
+  } else if (/\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled)\b/i.test(normalized)) {
     addAvailable(["combat_manage", "combat_action"]);
+    if (CHECK_ACTION_INTENT.test(normalized)) addAvailable(["improvisation_manage"]);
+  } else if (CHECK_ACTION_INTENT.test(normalized)) {
+    addAvailable(["improvisation_manage"]);
   } else if (/\b(?:quest|objective|mission|bounty|goal)\b/i.test(normalized)) {
     addAvailable(["quest_manage"]);
   } else if (/\b(?:talk|talks|talked|ask|asks|asked|speak|speaks|spoke|question|questions|interrogate|interrogates|listen|listens|heard)\b/i.test(normalized)) {
@@ -1075,10 +1087,10 @@ export class ReferenceDungeonMaster {
     const parsedArgs = parseArguments(rawArguments);
     const toolDefinition = await this.catalog.getTool(toolName);
     const normalizedArgs = normalizeToolArguments(parsedArgs, toolDefinition);
-    const combatArgs = toolName === "combat_action"
+    const actorBoundArgs = toolName === "combat_action" || toolName === "improvisation_manage"
       ? fillMissingArgs(normalizedArgs, { actorId: fillOnlyArgs.characterId })
       : normalizedArgs;
-    const args = forceArgs(fillMissingArgs(combatArgs, fillOnlyArgs), forcedArgs);
+    const args = forceArgs(fillMissingArgs(actorBoundArgs, fillOnlyArgs), forcedArgs);
     const requestedCharacterId = args.characterId;
     if (typeof requestedCharacterId === "string" && requestedCharacterId && !knownCharacterIds.has(requestedCharacterId)) {
       const text = JSON.stringify({

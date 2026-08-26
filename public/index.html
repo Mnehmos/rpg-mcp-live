@@ -111,8 +111,17 @@
             <strong id="campaign-name">No campaign selected</strong>
             <span id="campaign-tagline">Build a world, then step into it.</span>
           </div>
-          <div class="play-context-actions"><button id="phase-label" class="phase-label phase-button" type="button" data-action="show-campaign-form">SET UP CAMPAIGN</button><button id="manage-campaign-button" class="text-button" data-action="open-campaign-manager" hidden>Manage campaigns</button></div>
+          <div class="play-context-actions"><button id="phase-label" class="phase-label phase-button" type="button" data-action="show-quickstarts">PLAY HERE</button><button id="manage-campaign-button" class="text-button" data-action="open-campaign-manager" hidden>Manage campaigns</button></div>
         </div>
+
+        <section id="quickstart-panel" class="onboarding-panel quickstart-panel" hidden>
+          <div class="onboarding-header">
+            <div><p class="eyebrow">PLAY HERE</p><h3>Choose a story and start playing.</h3><p>No campaign planning or character sheet required. Pick a table and the DM will put you in the first scene.</p></div>
+            <span class="onboarding-count">QUICKSTART</span>
+          </div>
+          <div id="quickstart-list" class="quickstart-list" aria-live="polite"></div>
+          <div class="quickstart-footer"><span>Want to build everything yourself?</span><button class="button button-quiet" data-action="show-campaign-form">Build my own campaign <span>↗</span></button></div>
+        </section>
 
         <section id="campaign-manager" class="onboarding-panel" hidden>
           <div class="onboarding-header">

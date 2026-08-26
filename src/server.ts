@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { clerkMiddleware, createClerkClient, getAuth } from "@clerk/express";
@@ -28,6 +29,7 @@ import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
+import { getQuickstartPreset, listQuickstartPresets } from "./quickstarts.js";
 import {
   ReferenceDmCommandAlreadyFailedError,
   ReferenceDmCommandIdReuseError,
@@ -297,15 +299,18 @@ async function sendCampaignCommand(
       return;
     }
     if (error instanceof ReferenceDmCommandAlreadyFailedError) {
+      const commitStatus = error.details?.commitStatus;
       response.status(502).json({
         code: "reference_dm_unavailable",
-        error: error.details?.commitStatus === "not_committed"
+        failureType: commitStatus === "not_committed" ? "not_committed" : "uncertain",
+        retryable: commitStatus === "not_committed",
+        stateChanged: commitStatus === "not_committed" ? "not_committed" : "unknown",
+        error: commitStatus === "not_committed"
           ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
           : "That turn already has a recorded failure. The table may have changed; refresh before continuing.",
         ...(error.details ? {
           correlationId: error.details.correlationId,
           commitStatus: error.details.commitStatus,
-          retryable: error.details.commitStatus === "not_committed",
           providerCalls: error.details.providerCalls ?? 0,
           toolRounds: error.details.toolRounds,
           activatedTools: error.details.activatedTools ?? [],
@@ -325,6 +330,9 @@ async function sendCampaignCommand(
     if (usageError) {
       response.status(429).json({
         code: usageError.code,
+        failureType: "usage_limit",
+        retryable: false,
+        stateChanged: "not_committed",
         error: usageError.message,
         period: usageError.period,
         limitMicros: usageError.limit,
@@ -348,12 +356,14 @@ async function sendCampaignCommand(
       }));
       response.status(502).json({
         code: "reference_dm_unavailable",
+        failureType: error.details.commitStatus === "not_committed" ? "not_committed" : "uncertain",
+        retryable: error.details.commitStatus === "not_committed",
+        stateChanged: error.details.commitStatus === "not_committed" ? "not_committed" : "unknown",
         error: error.details.commitStatus === "not_committed"
           ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
           : "The reference-engine DM stopped after a state change; refresh the table before continuing.",
         correlationId: error.details.correlationId,
         commitStatus: error.details.commitStatus,
-        retryable: error.details.commitStatus === "not_committed",
         providerCalls: error.details.providerCalls ?? 0,
         toolRounds: error.details.toolRounds,
         activatedTools: error.details.activatedTools ?? [],
@@ -370,17 +380,23 @@ async function sendCampaignCommand(
 
 function sendReferenceEngineError(response: Response, error: unknown): void {
   if (error instanceof ReferenceEngineNotRoutedError) {
-    response.status(404).json({ code: "campaign_not_found", error: error.message });
+    response.status(404).json({ code: "campaign_not_found", error: error.message, failureType: "campaign_not_found" });
     return;
   }
   if (error instanceof ReferenceEngineUnsupportedError) {
-    response.status(409).json({ code: "unsupported_on_reference_backend", error: error.message });
+    response.status(409).json({ code: "unsupported_on_reference_backend", error: error.message, failureType: "unsupported" });
     return;
   }
   console.error(error instanceof Error ? error.message : "Unable to reach the reference engine.");
   response
     .status(502)
-    .json({ code: "reference_engine_unavailable", error: "The reference engine is unavailable. Try again shortly." });
+    .json({
+      code: "reference_engine_unavailable",
+      failureType: "reference_engine_unavailable",
+      retryable: true,
+      stateChanged: "unknown",
+      error: "The reference engine is unavailable. Your campaign was not confirmed changed. Try again shortly.",
+    });
 }
 
 app.get("/api/health", async (_request, response) => {
@@ -553,6 +569,10 @@ app.get("/api/content-catalog", async (request, response) => {
   response.json({ catalog: referenceContentCatalog });
 });
 
+app.get("/api/quickstarts", (_request, response) => {
+  response.json({ quickstarts: listQuickstartPresets() });
+});
+
 app.post("/api/campaigns", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
@@ -590,6 +610,50 @@ app.post("/api/campaigns", async (request, response) => {
       state: null,
       campaign: result.campaign,
       campaigns: await listAllCampaigns(userId),
+      subscription: store.getSubscription(userId),
+      usage: llmUsageStore.getSummary(userId),
+    });
+  } catch (error) {
+    sendReferenceEngineError(response, error);
+  }
+});
+
+app.post("/api/quickstarts/:quickstartId", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  const preset = getQuickstartPreset(request.params.quickstartId);
+  if (!preset) {
+    response.status(404).json({ code: "quickstart_not_found", error: "That quickstart is not available." });
+    return;
+  }
+
+  try {
+    const created = await referenceEngineAdapter.createCampaign(userId, userId, preset.campaign);
+    const character = await referenceEngineAdapter.executeToolCall(userId, userId, created.campaign.id, {
+      clientCommandId: randomUUID(),
+      expectedCampaignVersion: created.campaign.version,
+      toolName: "character_create",
+      arguments: preset.character,
+    });
+    if (!character.accepted) {
+      response.status(502).json({
+        code: "quickstart_setup_failed",
+        failureType: "quickstart_setup_failed",
+        retryable: false,
+        stateChanged: "campaign_created",
+        campaignId: created.campaign.id,
+        error: character.message || "The quickstart character could not be placed in the world.",
+      });
+      return;
+    }
+    const result = await referenceEngineAdapter.getCampaign(userId, userId, created.campaign.id);
+    response.status(201).json({
+      quickstart: { id: preset.id, title: preset.title },
+      session: result.campaign,
+      state: null,
+      campaign: result.campaign,
+      campaigns: await listAllCampaigns(userId),
+      autoOpen: true,
       subscription: store.getSubscription(userId),
       usage: llmUsageStore.getSummary(userId),
     });
@@ -664,6 +728,8 @@ app.get("/api/campaigns/:campaignId/commands/:clientCommandId", async (request, 
       ...(command.failure ? {
         correlationId: command.failure.correlationId,
         commitStatus: command.failure.commitStatus,
+        failureType: command.failure.commitStatus === "not_committed" ? "not_committed" : "uncertain",
+        stateChanged: command.failure.commitStatus === "not_committed" ? "not_committed" : "unknown",
         retryable: command.failure.commitStatus === "not_committed",
         error: command.failure.commitStatus === "not_committed"
           ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
@@ -769,7 +835,16 @@ app.post("/api/campaigns/:campaignId/character", async (request, response) => {
         toolProficiencies: parsed.data.toolProficiencies,
       },
     });
-    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    const current = await referenceEngineAdapter.getCampaign(userId, userId, request.params.campaignId);
+    response.json({
+      ...result,
+      session: current.campaign,
+      campaign: current.campaign,
+      state: null,
+      autoOpen: true,
+      subscription: store.getSubscription(userId),
+      usage: llmUsageStore.getSummary(userId),
+    });
   } catch (error) {
     sendReferenceEngineError(response, error);
   }

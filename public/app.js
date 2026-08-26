@@ -26,7 +26,7 @@ import {
   shouldSubmitOnEnter,
   updateComposerCounter,
 } from "./turn-composer.js";
-import { commandFailureMessage, isStaleCommandStatus } from "./command-status.js";
+import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
@@ -35,7 +35,12 @@ import { usageLabel } from "./usage-display.js";
 (function () {
   "use strict";
 
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], subscription: null, usage: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
+  var QUICKSTART_FALLBACKS = [
+    { id: "salt-road", title: "The Salt Road", tagline: "A missing courier. One night before the tide turns.", description: "A grounded mystery on a dangerous coast." },
+    { id: "ember-watch", title: "The Ember Watch", tagline: "The old lighthouse is burning in a dead calm.", description: "A fast-moving rescue story on a fogbound harbor." },
+    { id: "glass-under-moon", title: "Glass Under Moonlight", tagline: "Something beneath the city is answering the bells.", description: "A strange arcane investigation in an old river city." },
+  ];
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -1467,6 +1472,24 @@ import { usageLabel } from "./usage-display.js";
     }).join("");
   }
 
+  function renderQuickstarts() {
+    var list = $("#quickstart-list");
+    if (!list) return;
+    list.innerHTML = state.quickstarts.map(function (quickstart) {
+      return '<button class="quickstart-card" type="button" data-quickstart-id="' + escapeHtml(quickstart.id) + '"' + (state.quickstartLoading ? " disabled" : "") + '><span class="tiny-label">READY TABLE</span><strong>' + escapeHtml(quickstart.title) + '</strong><span class="quickstart-tagline">' + escapeHtml(quickstart.tagline) + '</span><small>' + escapeHtml(quickstart.description) + '</small><span class="quickstart-cta">Play this story ↗</span></button>';
+    }).join("");
+  }
+
+  function loadQuickstarts() {
+    return requestJson("/api/quickstarts").then(function (result) {
+      if (!result.response.ok || !Array.isArray(result.data.quickstarts)) throw new Error("Quickstarts unavailable");
+      state.quickstarts = result.data.quickstarts;
+      renderQuickstarts();
+    }).catch(function () {
+      renderQuickstarts();
+    });
+  }
+
   function renderCampaignList() {
     var wrap = $("#campaign-list-wrap");
     var list = $("#campaign-list");
@@ -1491,6 +1514,7 @@ import { usageLabel } from "./usage-display.js";
     if (payload && Array.isArray(payload.campaigns)) state.campaigns = payload.campaigns;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "setupRequired")) state.setupRequired = payload.setupRequired;
     renderCampaignList();
+    renderQuickstarts();
 
     var campaign = session && session.campaign || snapshot.campaign || null;
     var phase = session && session.phase || snapshot.phase || null;
@@ -1499,7 +1523,7 @@ import { usageLabel } from "./usage-display.js";
     var phaseButton = $("#phase-label");
     if (phaseButton) {
       phaseButton.hidden = Boolean(session);
-      phaseButton.textContent = session ? titleCase(phase ? phase.replace(/_/g, " ") : "campaign") : "SET UP CAMPAIGN";
+      phaseButton.textContent = session ? titleCase(phase ? phase.replace(/_/g, " ") : "campaign") : (state.managerOpen ? "BUILD A CAMPAIGN" : "PLAY HERE");
     }
     var manageButton = $("#manage-campaign-button");
     if (manageButton) {
@@ -1507,33 +1531,35 @@ import { usageLabel } from "./usage-display.js";
       manageButton.textContent = state.managerOpen ? "Return to campaign" : "Manage campaigns";
     }
 
-    if (!session && state.managerOpen && isSignedIn()) {
+    if (!session && state.managerOpen) {
       setText("#play-title", "Manage your campaigns.");
-      setPanel("#game-shell", true);
-      setPanel("#character-setup", true);
-      setPanel("#tutorial-panel", true);
-      setPanel("#campaign-manager", false);
-      setPanel("#campaign-auth-gate", true);
-      setPanel("#campaign-form", !state.createMode && state.campaigns.length > 0);
-      setPanel("#show-campaign-form", state.createMode || state.campaigns.length === 0);
-      setText("#campaign-manager-copy", "Open a campaign, start a new one, or remove an old world from your account.");
-      return;
-    }
-
-    if (!session) {
-      setText("#play-title", isSignedIn() ? "Build your campaign." : "Take your seat.");
+      setPanel("#quickstart-panel", true);
       setPanel("#game-shell", true);
       setPanel("#character-setup", true);
       setPanel("#tutorial-panel", true);
       setPanel("#campaign-manager", false);
       setPanel("#campaign-auth-gate", isSignedIn());
-      setPanel("#campaign-form", !isSignedIn());
+      setPanel("#campaign-form", !isSignedIn() || (!state.createMode && state.campaigns.length > 0));
+      setPanel("#show-campaign-form", !isSignedIn() || state.createMode || state.campaigns.length === 0);
+      setText("#campaign-manager-copy", isSignedIn() ? "Open a campaign, start a new one, or remove an old world from your account." : "Sign in to build a campaign from scratch. Quickstart stories are ready whenever you are.");
+      return;
+    }
+
+    if (!session) {
+      setText("#play-title", isSignedIn() ? "Choose your story." : "Play here.");
+      setPanel("#game-shell", true);
+      setPanel("#character-setup", true);
+      setPanel("#tutorial-panel", true);
+      setPanel("#quickstart-panel", state.managerOpen);
+      setPanel("#campaign-manager", true);
+      setPanel("#campaign-auth-gate", true);
+      setPanel("#campaign-form", true);
       setPanel("#show-campaign-form", true);
-      setText("#campaign-manager-copy", isSignedIn() ? "Give the Dungeon Master a place, a premise, and a promise. You decide what kind of story this becomes." : "Sign in before creating a campaign. Your worlds and characters belong to your account.");
       return;
     }
 
     if (state.managerOpen) {
+      setPanel("#quickstart-panel", true);
       setPanel("#game-shell", true);
       setPanel("#character-setup", true);
       setPanel("#tutorial-panel", true);
@@ -1546,6 +1572,7 @@ import { usageLabel } from "./usage-display.js";
     }
 
     setPanel("#campaign-manager", true);
+    setPanel("#quickstart-panel", true);
     setPanel("#campaign-auth-gate", true);
     setPanel("#show-campaign-form", true);
     if (phase === "character_creation") {
@@ -1599,7 +1626,7 @@ import { usageLabel } from "./usage-display.js";
   function renderSession(payload) {
     var session = payload && payload.session;
     var previousSessionId = state.session && state.session.id;
-    if (payload && payload.state) state.engineState = payload.state;
+    if (payload && Object.prototype.hasOwnProperty.call(payload, "state")) state.engineState = payload.state;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "subscription")) state.subscription = payload.subscription;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "usage")) state.usage = payload.usage;
     if (payload && Object.prototype.hasOwnProperty.call(payload, "engineBackend")) state.engineBackend = payload.engineBackend;
@@ -2143,6 +2170,18 @@ import { usageLabel } from "./usage-display.js";
     return reconciliation;
   }
 
+  function finishKnownCommandFailure(campaignId, commandId, payload, status) {
+    var message = commandFailureMessage(payload, status);
+    clearPendingCommand(commandId, campaignId);
+    state.pendingPlayerText = null;
+    state.uncertainPlayerText = null;
+    if (payload && payload.usage) state.usage = payload.usage;
+    renderSession({ session: state.session, state: state.engineState, subscription: state.subscription, usage: state.usage });
+    setStatus(message, "error");
+    showToast(message);
+    return false;
+  }
+
   function submitCommand(command, clientCommandId) {
     if (!state.session) {
       if (isSignedIn()) {
@@ -2209,6 +2248,11 @@ import { usageLabel } from "./usage-display.js";
       if (result.response.status === 409 && result.data.code === "command_conflict") {
         return startPendingReconciliation(campaignId, commandId);
       }
+      if (result.data && result.data.usage) state.usage = result.data.usage;
+      var failureType = commandFailureType(result.data, result.response.status);
+      if (result.response.status === 429 || failureType === "usage_limit" || failureType === "not_committed") {
+        return finishKnownCommandFailure(campaignId, commandId, result.data, result.response.status);
+      }
       if (result.response.status >= 500 || result.response.status === 408 || result.response.status === 429) {
         return startPendingReconciliation(campaignId, commandId);
       }
@@ -2261,6 +2305,46 @@ import { usageLabel } from "./usage-display.js";
 
   function playText(playerText, clientCommandId) {
     return submitCommand({ playerText: playerText }, clientCommandId);
+  }
+
+  function startQuickstart(quickstartId) {
+    if (!isSignedIn()) {
+      openAuth();
+      return Promise.resolve(false);
+    }
+    if (state.quickstartLoading) return Promise.resolve(false);
+    state.quickstartLoading = quickstartId;
+    renderQuickstarts();
+    setStatus("Setting the table", "thinking");
+    return requestJson("/api/quickstarts/" + encodeURIComponent(quickstartId), {
+      method: "POST",
+      body: JSON.stringify({}),
+    }).then(function (result) {
+      if (!result.response.ok) {
+        var quickstartError = new Error(commandFailureMessage(result.data, result.response.status));
+        quickstartError.reconcile = false;
+        throw quickstartError;
+      }
+      state.managerOpen = false;
+      state.createMode = false;
+      renderSession(result.data);
+      setStatus("Your story is ready", "ready");
+      if (result.data.autoOpen && state.session && !state.session.worldContext) {
+        setStatus("The DM is opening your first scene", "thinking");
+        return beginCampaignOpening(true).then(function (opened) {
+          if (opened) setStatus("Your story is open", "ready");
+          return opened;
+        });
+      }
+      return true;
+    }).catch(function (error) {
+      setStatus(error.message, "error");
+      showToast(error.message);
+      return false;
+    }).finally(function () {
+      state.quickstartLoading = null;
+      renderQuickstarts();
+    });
   }
 
   function createCampaign(event) {
@@ -2327,8 +2411,9 @@ import { usageLabel } from "./usage-display.js";
     });
   }
 
-  function beginCampaignOpening() {
-    if (!state.session || state.session.phase !== "tutorial") return Promise.resolve(false);
+  function beginCampaignOpening(allowSandbox) {
+    var phase = state.session && state.session.phase;
+    if (!state.session || (phase !== "tutorial" && !(allowSandbox && phase === "sandbox"))) return Promise.resolve(false);
     var snapshot = state.engineState || {};
     if (state.session.worldContext || snapshot.worldContext) return Promise.resolve(true);
     if (state.openingLoadingCampaignId === state.session.id) return Promise.resolve(false);
@@ -2347,11 +2432,12 @@ import { usageLabel } from "./usage-display.js";
         renderSession({ session: result.data.session, state: result.data.state, campaigns: state.campaigns, subscription: state.subscription });
         return false;
       }
-      if (!result.response.ok) throw new Error(result.data.error || "The DM could not open the story.");
+      if (!result.response.ok) throw new Error(commandFailureMessage(result.data, result.response.status));
       renderSession(result.data);
       return true;
     }).catch(function (error) {
       if (feedback) feedback.textContent = error.message + " You can try again.";
+      setStatus(error.message, "error");
       showToast(error.message);
       return false;
     }).finally(function () {
@@ -2449,8 +2535,8 @@ import { usageLabel } from "./usage-display.js";
       if (!result.response.ok) throw new Error(result.data.error || "The character could not be created.");
       renderSession(result.data);
       setStatus("The DM is opening your story", "thinking");
-      return beginCampaignOpening().then(function (opened) {
-        setStatus(opened ? "Your story is open" : "The story is waiting for the DM", opened ? "ready" : "error");
+      return beginCampaignOpening(true).then(function (opened) {
+        if (opened) setStatus("Your story is open", "ready");
         return true;
       });
     }).catch(function (error) {
@@ -2867,6 +2953,15 @@ import { usageLabel } from "./usage-display.js";
         renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
       });
     });
+    document.querySelectorAll('[data-action="show-quickstarts"]').forEach(function (button) {
+      button.addEventListener("click", function () {
+        state.managerOpen = false;
+        state.createMode = false;
+        renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
+        var quickstartPanel = $("#quickstart-panel");
+        if (quickstartPanel) quickstartPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
     $("#campaign-list").addEventListener("click", function (event) {
       var deleteButton = event.target.closest("[data-delete-campaign-id]");
       if (deleteButton) {
@@ -2875,6 +2970,11 @@ import { usageLabel } from "./usage-display.js";
       }
       var button = event.target.closest("[data-campaign-id]");
       if (button) loadCampaign(button.dataset.campaignId);
+    });
+    $("#quickstart-list").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-quickstart-id]");
+      if (!button || button.disabled) return;
+      startQuickstart(button.dataset.quickstartId);
     });
     document.querySelectorAll('[data-action="checkout"]').forEach(function (button) { button.addEventListener("click", checkout); });
     document.querySelectorAll('[data-action="open-auth"]').forEach(function (button) { button.addEventListener("click", openAuth); });
@@ -2896,7 +2996,7 @@ import { usageLabel } from "./usage-display.js";
       $("#subscription-price").textContent = config.subscription.priceLabel;
       return setupClerk();
     }).then(function () {
-      return Promise.all([loadContentCatalog(), refreshSession()]).then(function () {
+      return Promise.all([loadContentCatalog(), loadQuickstarts(), refreshSession()]).then(function () {
         return loadCharacterOptions(state.session && state.session.id);
       });
     }).catch(function (error) {
