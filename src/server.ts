@@ -135,7 +135,7 @@ const characterCreateRequestSchema = z
     name: z.string().trim().min(1).max(80),
     speciesKey: z.string().trim().startsWith("open5e:species:").max(300),
     classKey: z.string().trim().startsWith("open5e:class:").max(300),
-    level: z.number().int().min(1).max(20).default(1),
+    level: z.literal(1).default(1),
     backgroundKey: z.string().trim().startsWith("open5e:background:").max(300),
     alignmentKey: z.string().trim().startsWith("open5e:alignment:").max(300),
     abilityScoreMethod: z.enum(["standard_array", "rolled"]),
@@ -446,7 +446,7 @@ app.get("/api/config", (_request, response) => {
 app.post(
   "/api/webhooks/stripe",
   express.raw({ type: "application/json", limit: "256kb" }),
-  (request, response) => {
+  async (request, response) => {
     if (!stripe || !config.stripeWebhookSecret) {
       response.status(503).json({ error: "Stripe webhooks are not configured." });
       return;
@@ -456,12 +456,19 @@ app.post(
       response.status(400).json({ error: "Missing Stripe signature." });
       return;
     }
+    let event;
     try {
-      const event = stripe.webhooks.constructEvent(request.body as Buffer, signature, config.stripeWebhookSecret);
-      handleStripeEvent(event, store);
-      response.json({ received: true });
+      event = stripe.webhooks.constructEvent(request.body as Buffer, signature, config.stripeWebhookSecret);
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : "Invalid webhook" });
+      return;
+    }
+    try {
+      await handleStripeEvent(event, store, stripe);
+      response.json({ received: true });
+    } catch (error) {
+      console.error("Stripe webhook processing failed", error);
+      response.status(500).json({ error: "Webhook processing failed; Stripe should retry." });
     }
   }
 );
