@@ -1,8 +1,8 @@
 :root {
   color-scheme: dark;
-  --ink: #f2ecdf;
-  --muted: #a9a59e;
-  --faint: #6f6b66;
+  --ink: #f7f1e5;
+  --muted: #c8c1b6;
+  --faint: #a49e95;
   --line: rgba(242, 236, 223, 0.14);
   --line-strong: rgba(242, 236, 223, 0.25);
   --night: #0b0c11;
@@ -278,6 +278,16 @@ h1 i { color: var(--amber); font-style: italic; }
 .campaign-license-choice small { color: var(--faint); font-size: 9px; line-height: 1.4; }
 .campaign-rules-help { margin: 0; color: var(--faint); font-size: 9px; line-height: 1.5; }
 .campaign-list-wrap { padding-top: 24px; }
+.quickstart-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding-top: 25px; }
+.quickstart-card { display: grid; align-content: start; gap: 9px; min-height: 215px; padding: 18px; border: 1px solid rgba(233, 167, 91, .28); background: linear-gradient(145deg, rgba(233, 167, 91, .09), rgba(8, 10, 14, .42)); color: var(--muted); text-align: left; cursor: pointer; transition: border-color .2s, background .2s, transform .2s; }
+.quickstart-card:hover, .quickstart-card:focus-visible { border-color: var(--amber-bright); background: linear-gradient(145deg, rgba(233, 167, 91, .18), rgba(8, 10, 14, .55)); transform: translateY(-2px); }
+.quickstart-card:disabled { cursor: wait; opacity: .62; transform: none; }
+.quickstart-card .tiny-label { margin: 0; color: var(--mint); }
+.quickstart-card strong { color: var(--ink); font: 24px Georgia, "Times New Roman", serif; font-weight: 400; }
+.quickstart-tagline { color: var(--amber-bright); font: 15px/1.4 Georgia, "Times New Roman", serif; }
+.quickstart-card small { color: var(--faint); font-size: 10px; line-height: 1.5; }
+.quickstart-cta { align-self: end; margin-top: auto; color: var(--mint); font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.quickstart-footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding-top: 22px; color: var(--faint); font-size: 11px; }
 .campaign-list-wrap > .tiny-label { display: block; margin-bottom: 9px; }
 .campaign-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 17px; }
 .campaign-card { display: flex; align-items: stretch; justify-content: space-between; gap: 8px; min-height: 70px; padding: 0; border: 1px solid var(--line); background: rgba(8, 10, 14, .4); color: var(--muted); text-align: left; transition: border-color .2s, background .2s, color .2s; }
@@ -338,6 +348,7 @@ h1 i { color: var(--amber); font-style: italic; }
   .onboarding-panel { padding: 25px 20px; }
   .onboarding-header h3 { font-size: 32px; }
   .campaign-list { grid-template-columns: 1fr; }
+  .quickstart-list { grid-template-columns: 1fr; }
   .character-choice-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ability-score-options, .ability-roll-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .character-tool-choice-options { grid-template-columns: 1fr; }
@@ -353,6 +364,7 @@ h1 i { color: var(--amber); font-style: italic; }
   .ability-score-method-row, .ability-score-options, .ability-roll-list { grid-template-columns: 1fr; }
   .detail-edit-grid { grid-template-columns: 1fr; }
   .setup-auth-gate, .form-actions { align-items: stretch; flex-direction: column; }
+  .quickstart-footer { align-items: stretch; flex-direction: column; }
   .campaign-rules-heading { flex-direction: column; }
   .form-actions .button, .setup-auth-gate .button { width: 100%; }
   .journey-steps span { font-size: 7px; padding-left: 4px; padding-right: 4px; }
@@ -765,9 +777,9 @@ h1 i { color: var(--amber); font-style: italic; }
 /* Quest Keeper AI launch surface: use the marketing site's neon language while
    keeping the player table quieter, denser, and easier to scan. */
 .play-app {
-  --ink: #e0e0e0;
-  --muted: #6b7280;
-  --faint: #4b5563;
+  --ink: #f5f0e6;
+  --muted: #c5cbd3;
+  --faint: #9aa4b0;
   --line: rgba(0, 255, 255, .3);
   --line-strong: rgba(0, 255, 255, .7);
   --night: #050508;
