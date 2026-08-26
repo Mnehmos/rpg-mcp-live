@@ -53,4 +53,13 @@ describe("player-facing branding", () => {
     expect(app).toContain("signInFallbackRedirectUrl");
     expect(app).not.toContain("continueSignUpUrl");
   });
+
+  it("reflects an active Player Pass instead of offering checkout again", () => {
+    expect(page).toContain('id="membership-status"');
+    expect(page).toContain('id="membership-checkout"');
+    expect(page).toContain('id="membership-portal"');
+    expect(app).toContain("PLAYER PASS ACTIVE");
+    expect(app).toContain("checkout_complete");
+    expect(app).toContain("checkoutSync");
+  });
 });

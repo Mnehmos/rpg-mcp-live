@@ -20,7 +20,7 @@ export async function createCheckoutUrl(stripe: Stripe, userId: string): Promise
     line_items: [{ price: config.stripePriceId, quantity: 1 }],
     client_reference_id: userId,
     metadata: { clerk_user_id: userId },
-    success_url: `${config.appUrl}/play?checkout=success`,
+    success_url: `${config.appUrl}/play?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${config.appUrl}/?checkout=cancelled`,
   });
 
@@ -62,6 +62,42 @@ function saveSubscription(store: GameStore, values: {
     priceId: values.priceId,
     currentPeriodEnd: values.currentPeriodEnd,
   });
+}
+
+/**
+ * Stripe normally reaches the webhook before the player returns from
+ * Checkout, but the redirect is the only reliable signal available to the
+ * browser when webhook delivery is delayed. Verify the session server-side
+ * and fill the same subscription record used by the webhook handler.
+ */
+export async function syncCompletedCheckoutSession(
+  stripe: Stripe,
+  sessionId: string,
+  userId: string,
+  store: GameStore,
+): Promise<boolean> {
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  const sessionUserId = session.metadata?.clerk_user_id ?? session.client_reference_id;
+  if (sessionUserId !== userId || session.mode !== "subscription" || session.status !== "complete") return false;
+
+  const subscriptionId = stripeId(session.subscription);
+  const customerId = stripeId(session.customer);
+  if (!subscriptionId && !customerId) return false;
+
+  const existing = store.getSubscription(userId);
+  // A delayed page refresh must not reactivate a subscription that a later
+  // Stripe webhook has already marked canceled, unpaid, or expired.
+  if (!existing || existing.stripeSubscriptionId !== subscriptionId) {
+    saveSubscription(store, {
+      userId,
+      customerId,
+      subscriptionId,
+      status: "checkout_complete",
+      priceId: config.stripePriceId || null,
+      currentPeriodEnd: null,
+    });
+  }
+  return true;
 }
 
 export function handleStripeEvent(event: Stripe.Event, store: GameStore): void {

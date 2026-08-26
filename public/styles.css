@@ -1047,3 +1047,20 @@ h1 i { color: var(--amber); font-style: italic; }
     min-height: 58px;
   }
 }
+
+.membership-actions { display: grid; gap: 10px; }
+.membership-status {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 18px;
+  padding: 13px 14px;
+  border: 1px solid rgba(155, 200, 172, .38);
+  background: rgba(155, 200, 172, .08);
+  color: var(--mint);
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: .04em;
+}
+.membership-status strong { color: var(--ink); font-size: 10px; letter-spacing: .16em; }
+.membership-status span { color: var(--muted); }
+.play-app .membership-status { border-color: rgba(0, 255, 136, .38); background: rgba(0, 255, 136, .06); }

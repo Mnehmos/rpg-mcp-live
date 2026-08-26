@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { clerkMiddleware, createClerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
-import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent } from "./billing.js";
+import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent, syncCompletedCheckoutSession } from "./billing.js";
 import { config } from "./config.js";
 
 const REFERENCE_DM_NOT_COMMITTED_MESSAGE =
@@ -487,10 +487,26 @@ async function getAnyCampaign(userId: string, campaignId: string) {
   };
 }
 
+type CheckoutSyncStatus = "none" | "synced" | "pending";
+
+async function syncCheckoutFromRequest(request: Request, userId: string): Promise<CheckoutSyncStatus> {
+  const checkout = typeof request.query.checkout === "string" ? request.query.checkout : "";
+  const sessionId = typeof request.query.session_id === "string" ? request.query.session_id.trim() : "";
+  if (checkout !== "success" || !sessionId || !stripe) return "none";
+  try {
+    return await syncCompletedCheckoutSession(stripe, sessionId, userId, store) ? "synced" : "pending";
+  } catch {
+    // Webhook delivery may still be in flight. Keep the normal session load
+    // healthy and let the browser retry its billing refresh.
+    return "pending";
+  }
+}
+
 app.get("/api/session", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
+    const checkoutSync = await syncCheckoutFromRequest(request, userId);
     const campaigns = await listAllCampaigns(userId);
     const requestedCampaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
     const selectedCampaign = requestedCampaignId
@@ -503,6 +519,7 @@ app.get("/api/session", async (request, response) => {
         campaigns,
         subscription: store.getSubscription(userId),
         usage: llmUsageStore.getSummary(userId),
+        checkoutSync,
       });
       return;
     }
@@ -517,6 +534,7 @@ app.get("/api/session", async (request, response) => {
       setupRequired: !result,
       subscription: store.getSubscription(userId),
       usage: llmUsageStore.getSummary(userId),
+      checkoutSync,
     });
   } catch (error) {
     sendReferenceEngineError(response, error);
@@ -1071,10 +1089,11 @@ app.post("/api/session/action", async (request, response) => {
   }
 });
 
-app.get("/api/billing/status", (request, response) => {
+app.get("/api/billing/status", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+  const checkoutSync = await syncCheckoutFromRequest(request, userId);
+  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId), checkoutSync });
 });
 
 app.get("/api/usage", (request, response) => {

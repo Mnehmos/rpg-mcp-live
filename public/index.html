@@ -92,7 +92,14 @@
             <li><span>✦</span> Server-kept campaign history</li>
             <li><span>✦</span> New worlds as they arrive</li>
           </ul>
-          <button class="button button-primary button-full" data-action="checkout">Claim your seat <span>↗</span></button>
+          <div id="membership-status" class="membership-status" hidden aria-live="polite">
+            <strong>PLAYER PASS ACTIVE</strong>
+            <span id="membership-status-copy">Your membership is active.</span>
+          </div>
+          <div class="membership-actions">
+            <button id="membership-checkout" class="button button-primary button-full" type="button" data-action="checkout">Claim your seat <span>↗</span></button>
+            <button id="membership-portal" class="button button-quiet button-full" type="button" data-action="portal" hidden>Manage membership <span>↗</span></button>
+          </div>
           <p class="price-footnote">Cancel from the customer portal at any time.</p>
         </div>
       </section>

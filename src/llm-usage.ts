@@ -494,7 +494,7 @@ export class LlmUsageStore {
     const row = this.db
       .prepare("SELECT status FROM subscriptions WHERE user_id = ?")
       .get(userId) as { status: string } | undefined;
-    return row && ["active", "trialing", "past_due"].includes(row.status) ? "player_pass" : "free";
+    return row && ["active", "trialing", "past_due", "checkout_complete"].includes(row.status) ? "player_pass" : "free";
   }
 
   private limitsForPlan(plan: LlmUsagePlan): {
