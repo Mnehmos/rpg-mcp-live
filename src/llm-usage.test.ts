@@ -136,7 +136,7 @@ describe("LLM usage ledger", () => {
     game.close();
   });
 
-  it("treats a completed Checkout as a Player Pass before the subscription webhook arrives", () => {
+  it("does not treat an unverified Checkout marker as a Player Pass", () => {
     const { game, usage } = createStores();
     game.upsertSubscription({
       userId: "player-1",
@@ -148,8 +148,8 @@ describe("LLM usage ledger", () => {
     });
 
     expect(usage.getSummary("player-1")).toMatchObject({
-      plan: "player_pass",
-      limits: { monthly: { costMicros: 200, costUsd: 0.0002 } },
+      plan: "free",
+      limits: { monthly: { costMicros: 20, costUsd: 0.00002 } },
     });
     game.close();
   });

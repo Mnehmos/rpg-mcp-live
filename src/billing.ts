@@ -20,6 +20,7 @@ export async function createCheckoutUrl(stripe: Stripe, userId: string): Promise
     line_items: [{ price: config.stripePriceId, quantity: 1 }],
     client_reference_id: userId,
     metadata: { clerk_user_id: userId },
+    subscription_data: { metadata: { clerk_user_id: userId } },
     success_url: `${config.appUrl}/play?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${config.appUrl}/?checkout=cancelled`,
   });
@@ -46,6 +47,10 @@ function subscriptionPriceId(subscription: Stripe.Subscription): string | null {
   return subscription.items.data[0]?.price.id ?? null;
 }
 
+function subscriptionPeriodEnd(subscription: Stripe.Subscription): number | null {
+  return subscription.items.data[0]?.current_period_end ?? null;
+}
+
 function saveSubscription(store: GameStore, values: {
   userId: string;
   customerId: string | null;
@@ -62,6 +67,39 @@ function saveSubscription(store: GameStore, values: {
     priceId: values.priceId,
     currentPeriodEnd: values.currentPeriodEnd,
   });
+}
+
+/**
+ * Persist the current Stripe subscription object, not the status implied by
+ * the Checkout event that led us to it. The second lookup protects the
+ * single-user subscription row from an old Checkout return or an out-of-order
+ * webhook replacing a newer subscription.
+ */
+async function saveAuthoritativeSubscription(
+  stripe: Stripe,
+  store: GameStore,
+  userId: string,
+  subscription: Stripe.Subscription,
+  expectedCustomerId?: string | null,
+): Promise<boolean> {
+  const customerId = stripeId(subscription.customer);
+  if (expectedCustomerId && customerId !== expectedCustomerId) return false;
+
+  const existing = store.getSubscription(userId);
+  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id) {
+    const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
+    if (current.created >= subscription.created) return false;
+  }
+
+  saveSubscription(store, {
+    userId,
+    customerId,
+    subscriptionId: subscription.id,
+    status: subscription.status,
+    priceId: subscriptionPriceId(subscription),
+    currentPeriodEnd: subscriptionPeriodEnd(subscription),
+  });
+  return true;
 }
 
 /**
@@ -82,25 +120,21 @@ export async function syncCompletedCheckoutSession(
 
   const subscriptionId = stripeId(session.subscription);
   const customerId = stripeId(session.customer);
-  if (!subscriptionId && !customerId) return false;
+  if (!subscriptionId) return false;
 
-  const existing = store.getSubscription(userId);
-  // A delayed page refresh must not reactivate a subscription that a later
-  // Stripe webhook has already marked canceled, unpaid, or expired.
-  if (!existing || existing.stripeSubscriptionId !== subscriptionId) {
-    saveSubscription(store, {
-      userId,
-      customerId,
-      subscriptionId,
-      status: "checkout_complete",
-      priceId: config.stripePriceId || null,
-      currentPeriodEnd: null,
-    });
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  const subscriptionUserId = subscription.metadata?.clerk_user_id;
+  if (subscriptionUserId && subscriptionUserId !== userId) return false;
+  if (!saveAuthoritativeSubscription(stripe, store, userId, subscription, customerId)) {
+    // The session is valid, but an equal-or-newer subscription is already the
+    // account's source of truth. It is safe for the browser to clear the
+    // return marker without replacing that newer record.
+    return true;
   }
   return true;
 }
 
-export function handleStripeEvent(event: Stripe.Event, store: GameStore): void {
+export async function handleStripeEvent(event: Stripe.Event, store: GameStore, stripe?: Stripe): Promise<void> {
   if (store.hasWebhookEvent(event.id)) return;
 
   switch (event.type) {
@@ -110,15 +144,24 @@ export function handleStripeEvent(event: Stripe.Event, store: GameStore): void {
       const subscriptionId = stripeId(session.subscription);
       const customerId = stripeId(session.customer);
 
-      if (userId && (subscriptionId || customerId)) {
-        saveSubscription(store, {
-          userId,
-          customerId,
-          subscriptionId,
-          status: "checkout_complete",
-          priceId: config.stripePriceId || null,
-          currentPeriodEnd: null,
-        });
+      if (userId && subscriptionId && stripe) {
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        if (!subscription.metadata?.clerk_user_id || subscription.metadata.clerk_user_id === userId) {
+          await saveAuthoritativeSubscription(stripe, store, userId, subscription, customerId);
+        }
+      } else if (userId && !stripe && subscriptionId) {
+        // Tests/tools without a Stripe client can retain the binding marker,
+        // but it is deliberately not an entitled status (see planForUser).
+        if (!store.getSubscription(userId)) {
+          saveSubscription(store, {
+            userId,
+            customerId,
+            subscriptionId,
+            status: "checkout_complete",
+            priceId: config.stripePriceId || null,
+            currentPeriodEnd: null,
+          });
+        }
       }
       break;
     }
@@ -127,16 +170,24 @@ export function handleStripeEvent(event: Stripe.Event, store: GameStore): void {
     case "customer.subscription.deleted": {
       const subscription = event.data.object as Stripe.Subscription;
       const customerId = stripeId(subscription.customer);
-      const userId = customerId ? store.findUserIdByStripeCustomer(customerId) : null;
+      const userId = subscription.metadata?.clerk_user_id
+        ?? (customerId ? store.findUserIdByStripeCustomer(customerId) : null);
 
-      if (userId) {
+      if (userId && stripe) {
+        const current = await stripe.subscriptions.retrieve(subscription.id);
+        const currentUserId = current.metadata?.clerk_user_id
+          ?? (stripeId(current.customer) ? store.findUserIdByStripeCustomer(stripeId(current.customer)!) : null);
+        if (currentUserId === userId) {
+          await saveAuthoritativeSubscription(stripe, store, userId, current, customerId);
+        }
+      } else if (userId) {
         saveSubscription(store, {
           userId,
           customerId,
           subscriptionId: subscription.id,
           status: subscription.status,
           priceId: subscriptionPriceId(subscription),
-          currentPeriodEnd: subscription.items.data[0]?.current_period_end ?? null,
+          currentPeriodEnd: subscriptionPeriodEnd(subscription),
         });
       }
       break;

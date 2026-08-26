@@ -59,7 +59,12 @@ describe("player-facing branding", () => {
     expect(page).toContain('id="membership-checkout"');
     expect(page).toContain('id="membership-portal"');
     expect(app).toContain("PLAYER PASS ACTIVE");
-    expect(app).toContain("checkout_complete");
     expect(app).toContain("checkoutSync");
+  });
+
+  it("does not expose unsupported higher-level character creation", () => {
+    expect(page).toContain("New characters start at level 1.");
+    expect(page).not.toContain('value="2">Level 2');
+    expect(app).toContain("higher-level progression is being reviewed");
   });
 });

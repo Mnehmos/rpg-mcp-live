@@ -243,7 +243,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
 
   function isPlayerPassActive() {
     if (state.subscription) {
-      return ["active", "trialing", "past_due", "checkout_complete"].indexOf(state.subscription.status) !== -1;
+      return ["active", "trialing", "past_due"].indexOf(state.subscription.status) !== -1;
     }
     return Boolean(state.usage && state.usage.plan === "player_pass");
   }
@@ -2580,8 +2580,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       feedback.textContent = "Choose a species, class, background, and alignment.";
       return;
     }
-    if (!Number.isInteger(level) || level < 1 || level > 20) {
-      feedback.textContent = "Choose a starting level from 1 through 20.";
+    if (level !== 1) {
+      feedback.textContent = "New characters start at level 1 while higher-level progression is being reviewed.";
       return;
     }
     var abilityScoreMethod = $("#character-ability-method").value || "standard_array";
