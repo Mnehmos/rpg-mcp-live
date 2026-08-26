@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { clerkMiddleware, createClerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
-import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent } from "./billing.js";
+import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent, syncCompletedCheckoutSession } from "./billing.js";
 import { config } from "./config.js";
 
 const REFERENCE_DM_NOT_COMMITTED_MESSAGE =
@@ -135,7 +135,7 @@ const characterCreateRequestSchema = z
     name: z.string().trim().min(1).max(80),
     speciesKey: z.string().trim().startsWith("open5e:species:").max(300),
     classKey: z.string().trim().startsWith("open5e:class:").max(300),
-    level: z.number().int().min(1).max(20).default(1),
+    level: z.literal(1).default(1),
     backgroundKey: z.string().trim().startsWith("open5e:background:").max(300),
     alignmentKey: z.string().trim().startsWith("open5e:alignment:").max(300),
     abilityScoreMethod: z.enum(["standard_array", "rolled"]),
@@ -446,7 +446,7 @@ app.get("/api/config", (_request, response) => {
 app.post(
   "/api/webhooks/stripe",
   express.raw({ type: "application/json", limit: "256kb" }),
-  (request, response) => {
+  async (request, response) => {
     if (!stripe || !config.stripeWebhookSecret) {
       response.status(503).json({ error: "Stripe webhooks are not configured." });
       return;
@@ -456,12 +456,19 @@ app.post(
       response.status(400).json({ error: "Missing Stripe signature." });
       return;
     }
+    let event;
     try {
-      const event = stripe.webhooks.constructEvent(request.body as Buffer, signature, config.stripeWebhookSecret);
-      handleStripeEvent(event, store);
-      response.json({ received: true });
+      event = stripe.webhooks.constructEvent(request.body as Buffer, signature, config.stripeWebhookSecret);
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : "Invalid webhook" });
+      return;
+    }
+    try {
+      await handleStripeEvent(event, store, stripe);
+      response.json({ received: true });
+    } catch (error) {
+      console.error("Stripe webhook processing failed", error);
+      response.status(500).json({ error: "Webhook processing failed; Stripe should retry." });
     }
   }
 );
@@ -487,10 +494,26 @@ async function getAnyCampaign(userId: string, campaignId: string) {
   };
 }
 
+type CheckoutSyncStatus = "none" | "synced" | "pending";
+
+async function syncCheckoutFromRequest(request: Request, userId: string): Promise<CheckoutSyncStatus> {
+  const checkout = typeof request.query.checkout === "string" ? request.query.checkout : "";
+  const sessionId = typeof request.query.session_id === "string" ? request.query.session_id.trim() : "";
+  if (checkout !== "success" || !sessionId || !stripe) return "none";
+  try {
+    return await syncCompletedCheckoutSession(stripe, sessionId, userId, store) ? "synced" : "pending";
+  } catch {
+    // Webhook delivery may still be in flight. Keep the normal session load
+    // healthy and let the browser retry its billing refresh.
+    return "pending";
+  }
+}
+
 app.get("/api/session", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
+    const checkoutSync = await syncCheckoutFromRequest(request, userId);
     const campaigns = await listAllCampaigns(userId);
     const requestedCampaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
     const selectedCampaign = requestedCampaignId
@@ -503,6 +526,7 @@ app.get("/api/session", async (request, response) => {
         campaigns,
         subscription: store.getSubscription(userId),
         usage: llmUsageStore.getSummary(userId),
+        checkoutSync,
       });
       return;
     }
@@ -517,6 +541,7 @@ app.get("/api/session", async (request, response) => {
       setupRequired: !result,
       subscription: store.getSubscription(userId),
       usage: llmUsageStore.getSummary(userId),
+      checkoutSync,
     });
   } catch (error) {
     sendReferenceEngineError(response, error);
@@ -1071,10 +1096,11 @@ app.post("/api/session/action", async (request, response) => {
   }
 });
 
-app.get("/api/billing/status", (request, response) => {
+app.get("/api/billing/status", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+  const checkoutSync = await syncCheckoutFromRequest(request, userId);
+  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId), checkoutSync });
 });
 
 app.get("/api/usage", (request, response) => {

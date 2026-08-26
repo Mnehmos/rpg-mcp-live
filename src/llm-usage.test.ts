@@ -136,6 +136,24 @@ describe("LLM usage ledger", () => {
     game.close();
   });
 
+  it("does not treat an unverified Checkout marker as a Player Pass", () => {
+    const { game, usage } = createStores();
+    game.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "checkout_complete",
+      priceId: "price_test",
+      currentPeriodEnd: null,
+    });
+
+    expect(usage.getSummary("player-1")).toMatchObject({
+      plan: "free",
+      limits: { monthly: { costMicros: 20, costUsd: 0.00002 } },
+    });
+    game.close();
+  });
+
   it("admits once before mutation and lets every provider call in that command finish", () => {
     const { game, usage } = createStores({
       freeDailyCostMicros: 10,
