@@ -257,7 +257,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (status) status.hidden = !active;
     if (statusCopy && active) statusCopy.textContent = "Your Player Pass is active. Your table is ready.";
     if (checkoutButton) checkoutButton.hidden = active;
-    if (portalButton) portalButton.hidden = !active || !state.subscription || !state.subscription.stripeCustomerId;
+    if (portalButton) portalButton.hidden = !active;
   }
 
   function titleCase(value) {
@@ -2124,15 +2124,26 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         throw error;
       });
     }
-    return requestSession(addCheckoutReturnQuery(campaignSessionUrl(preferredCampaignId), checkoutQuery)).then(function (result) {
+    function requestSessionWithCheckoutSync(url, checkoutAttempt) {
+      return requestSession(addCheckoutReturnQuery(url, checkoutQuery)).then(function (result) {
+        if (!result) return null;
+        if (result.data && result.data.checkoutSync === "synced") clearCheckoutReturn();
+        if (result.data && result.data.checkoutSync === "pending" && checkoutAttempt < 3 && isCurrentRequest(sequence, state.sessionRefreshSequence)) {
+          return waitForCampaignRetry(checkoutAttempt).then(function () {
+            return requestSessionWithCheckoutSync(url, checkoutAttempt + 1);
+          });
+        }
+        return result;
+      });
+    }
+    return requestSessionWithCheckoutSync(campaignSessionUrl(preferredCampaignId), 1).then(function (result) {
       if (!result) return null;
-      if (result.data && result.data.checkoutSync === "synced") clearCheckoutReturn();
       if (result.response.status === 404 && preferredCampaignId) {
         if (!isCurrentRequest(sequence, state.sessionRefreshSequence)) return null;
         var pendingForMissingCampaign = readPendingCommand(preferredCampaignId);
         if (pendingForMissingCampaign) clearPendingCommand(pendingForMissingCampaign.clientCommandId, preferredCampaignId);
         clearActiveCampaignId();
-        return requestSession(addCheckoutReturnQuery("/api/session", checkoutQuery)).then(applySessionResult);
+        return requestSessionWithCheckoutSync("/api/session", 1).then(applySessionResult);
       }
       return applySessionResult(result);
     }).catch(function (error) {

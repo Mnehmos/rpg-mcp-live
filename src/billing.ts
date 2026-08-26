@@ -125,12 +125,10 @@ export async function syncCompletedCheckoutSession(
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
   const subscriptionUserId = subscription.metadata?.clerk_user_id;
   if (subscriptionUserId && subscriptionUserId !== userId) return false;
-  if (!saveAuthoritativeSubscription(stripe, store, userId, subscription, customerId)) {
-    // The session is valid, but an equal-or-newer subscription is already the
-    // account's source of truth. It is safe for the browser to clear the
-    // return marker without replacing that newer record.
-    return true;
-  }
+  // An equal-or-newer subscription may already be the account's source of
+  // truth; either way the session is valid and the browser may clear the
+  // return marker.
+  await saveAuthoritativeSubscription(stripe, store, userId, subscription, customerId);
   return true;
 }
 

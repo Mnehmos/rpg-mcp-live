@@ -62,6 +62,16 @@ describe("player-facing branding", () => {
     expect(app).toContain("checkoutSync");
   });
 
+  it("retries a pending checkout return instead of waiting for an unrelated refresh", () => {
+    expect(app).toContain('checkoutSync === "pending"');
+    expect(app).toContain("requestSessionWithCheckoutSync");
+    expect(app).toContain('checkoutSync === "synced") clearCheckoutReturn()');
+  });
+
+  it("keeps a management action available for every active pass", () => {
+    expect(app).toContain("portalButton.hidden = !active;");
+  });
+
   it("does not expose unsupported higher-level character creation", () => {
     expect(page).toContain("New characters start at level 1.");
     expect(page).not.toContain('value="2">Level 2');
