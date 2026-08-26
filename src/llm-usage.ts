@@ -8,7 +8,6 @@ export type LlmUsageCostSource = "provider" | "provider_upstream" | "estimated";
 export interface LlmUsagePolicy {
   freeDailyCostMicros: number;
   freeMonthlyCostMicros: number;
-  playerDailyCostMicros: number;
   playerMonthlyTargetCostMicros: number;
   playerMonthlyCostMicros: number;
   globalDailyCostMicros: number;
@@ -92,7 +91,7 @@ export interface LlmUsageSummary {
     monthly: Pick<LlmUsageLimitBucket, "costMicros" | "costUsd">;
   };
   limits: {
-    daily: LlmUsageLimitBucket;
+    daily: LlmUsageLimitBucket | null;
     monthly: LlmUsageLimitBucket;
     global: {
       dailyCostMicros: number;
@@ -102,7 +101,7 @@ export interface LlmUsageSummary {
     };
   };
   remaining: {
-    daily: LlmUsageLimitBucket;
+    daily: LlmUsageLimitBucket | null;
     monthly: LlmUsageLimitBucket;
   };
 }
@@ -235,7 +234,9 @@ export class LlmUsageStore {
       const globalMonthly = this.aggregateAll(periods.monthlyStart);
       const globalReserved = this.aggregateAllReservations();
 
-      assertWithin("daily", (userDaily.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.dailyCostMicros);
+      if (limits.dailyCostMicros !== null) {
+        assertWithin("daily", (userDaily.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.dailyCostMicros);
+      }
       assertWithin("monthly", (userMonthly.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.monthlyCostMicros);
       assertWithin("global_daily", (globalDaily.cost_micros ?? 0) + globalReserved.dailyCostMicros, estimatedCostMicros, this.policy.globalDailyCostMicros);
       assertWithin("global_monthly", (globalMonthly.cost_micros ?? 0) + globalReserved.monthlyCostMicros, estimatedCostMicros, this.policy.globalMonthlyCostMicros);
@@ -302,7 +303,9 @@ export class LlmUsageStore {
         const globalMonthly = this.aggregateAll(periods.monthlyStart);
         const globalReserved = this.aggregateAllReservations();
 
-        assertWithin("daily", (userDaily.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.dailyCostMicros);
+        if (limits.dailyCostMicros !== null) {
+          assertWithin("daily", (userDaily.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.dailyCostMicros);
+        }
         assertWithin("monthly", (userMonthly.cost_micros ?? 0) + userReserved.costMicros, estimatedCostMicros, limits.monthlyCostMicros);
         assertWithin("global_daily", (globalDaily.cost_micros ?? 0) + globalReserved.dailyCostMicros, estimatedCostMicros, this.policy.globalDailyCostMicros);
         assertWithin("global_monthly", (globalMonthly.cost_micros ?? 0) + globalReserved.monthlyCostMicros, estimatedCostMicros, this.policy.globalMonthlyCostMicros);
@@ -425,7 +428,7 @@ export class LlmUsageStore {
     const periods = periodBoundaries(now);
     const daily = mapBucket(this.aggregateUser(userId, periods.dailyStart));
     const monthly = mapBucket(this.aggregateUser(userId, periods.monthlyStart));
-    const dailyLimit = mapLimit(limits.dailyCostMicros);
+    const dailyLimit = limits.dailyCostMicros === null ? null : mapLimit(limits.dailyCostMicros);
     const monthlyLimit = mapLimit(limits.monthlyCostMicros);
     const monthlyTargetCostMicros = plan === "player_pass"
       ? Math.min(this.policy.playerMonthlyTargetCostMicros, limits.monthlyCostMicros)
@@ -456,7 +459,7 @@ export class LlmUsageStore {
         },
       },
       remaining: {
-        daily: remainingLimit(dailyLimit, daily),
+        daily: dailyLimit === null ? null : remainingLimit(dailyLimit, daily),
         monthly: remainingLimit(monthlyLimit, monthly),
       },
     };
@@ -498,12 +501,12 @@ export class LlmUsageStore {
   }
 
   private limitsForPlan(plan: LlmUsagePlan): {
-    dailyCostMicros: number;
+    dailyCostMicros: number | null;
     monthlyCostMicros: number;
   } {
     return plan === "player_pass"
       ? {
-          dailyCostMicros: this.policy.playerDailyCostMicros,
+          dailyCostMicros: null,
           monthlyCostMicros: this.policy.playerMonthlyCostMicros,
         }
       : {

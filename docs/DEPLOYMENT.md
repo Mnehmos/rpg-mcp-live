@@ -124,7 +124,6 @@ OPENROUTER_FALLBACK_MODEL=<reviewed fallback model, if enabled>
 OPENROUTER_FIRST_TOKEN_TIMEOUT_MS=8000
 LLM_USAGE_INPUT_COST_USD_PER_MILLION=0.0574
 LLM_USAGE_OUTPUT_COST_USD_PER_MILLION=0.1148
-LLM_USAGE_PLAYER_DAILY_COST_USD=1.00
 LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD=2.00
 LLM_USAGE_PLAYER_MONTHLY_COST_USD=4.00
 LLM_USAGE_TURN_ADMISSION_RESERVE_COST_USD=0.01
@@ -136,6 +135,10 @@ CONTENT_BASE_DOCUMENTS=srd-2014
 CONTENT_ALLOWED_LICENSES=cc-by-40,cc0,ogl-10a
 CONTENT_ALLOWED_DOCUMENTS=core,elderberry-inn-icons,open5e,srd-2014,tdcs,toh
 ~~~
+
+Player Pass accounts are gated only by `LLM_USAGE_PLAYER_MONTHLY_COST_USD`.
+Free accounts retain their daily and monthly caps, and the global daily and
+monthly brakes remain deployment-wide provider safeguards.
 
 Web baseline:
 

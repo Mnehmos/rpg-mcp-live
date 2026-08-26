@@ -113,13 +113,13 @@ export const config = Object.freeze({
   openRouterSiteUrl,
   openRouterAppName,
   llmUsage: {
-    // Player Pass aims for $2/user/month in provider cost but admits complete
-    // turns until the $4 hard ceiling. A power user's already-admitted turn is
-    // allowed to finish; the next command is where the dollar gate applies.
+    // Player Pass has no per-user daily gate: it aims for $2/user/month in
+    // provider cost but admits complete turns until the $4 monthly hard ceiling.
+    // A power user's already-admitted turn is allowed to finish; the next
+    // command is where the dollar gate applies.
     // Deployment-wide brakes remain the final provider-balance safeguard.
     freeDailyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_DAILY_COST_USD", 0.05) * 1_000_000),
     freeMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_MONTHLY_COST_USD", 0.25) * 1_000_000),
-    playerDailyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_DAILY_COST_USD", 1) * 1_000_000),
     playerMonthlyTargetCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD", 2) * 1_000_000),
     playerMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_COST_USD", 4) * 1_000_000),
     globalDailyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_DAILY_COST_USD", 5) * 1_000_000),

@@ -22,7 +22,6 @@ function testUsagePolicy(): LlmUsagePolicy {
   return {
     freeDailyCostMicros: 10,
     freeMonthlyCostMicros: 20,
-    playerDailyCostMicros: 100,
     playerMonthlyTargetCostMicros: 150,
     playerMonthlyCostMicros: 200,
     globalDailyCostMicros: 1_000,
