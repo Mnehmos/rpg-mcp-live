@@ -28,6 +28,16 @@ describe("command status", () => {
     }, 429)).toBe("Your free play limit for today has been reached. Your campaign is safe; this turn was not committed.");
   });
 
+  it("does not mislabel a service-wide brake as a Player Pass limit", () => {
+    expect(commandFailureMessage({
+      code: "llm_usage_limit_exceeded",
+      period: "global_daily",
+      usage: { plan: "player_pass" },
+    }, 429)).toBe(
+      "Quest Keeper has reached its service-wide usage limit for today. Your campaign is safe; this turn was not committed.",
+    );
+  });
+
   it("explains safe retry when the DM failed before any state commit", () => {
     expect(commandFailureMessage({ commitStatus: "not_committed" })).toBe(
       "The Dungeon Master could not finish this turn. No game state changed, so you can safely try again."

@@ -17,6 +17,10 @@ export function commandFailureType(payload, status) {
 export function commandFailureMessage(payload, status) {
   const type = commandFailureType(payload, status);
   if (type === "usage_limit") {
+    if (payload?.period === "global_daily" || payload?.period === "global_monthly") {
+      const period = payload.period === "global_daily" ? "today" : "this month";
+      return `Quest Keeper has reached its service-wide usage limit for ${period}. Your campaign is safe; this turn was not committed.`;
+    }
     const period = payload?.period === "daily" || payload?.period === "global_daily" ? "today" : "this month";
     const plan = payload?.usage?.plan === "player_pass" ? "Player Pass" : "free play";
     return `Your ${plan} limit for ${period} has been reached. Your campaign is safe; this turn was not committed.`;
