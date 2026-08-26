@@ -8,6 +8,8 @@ export function isEntitledSubscriptionStatus(status: string): boolean {
   return ENTITLED_SUBSCRIPTION_STATUSES.includes(status as typeof ENTITLED_SUBSCRIPTION_STATUSES[number]);
 }
 
+export type EmailSubscriptionReconciliation = "linked" | "not_found" | "ambiguous" | "failed";
+
 export function createStripeClient(): Stripe | null {
   if (!config.stripeSecretKey) return null;
 
@@ -55,6 +57,53 @@ function subscriptionPriceId(subscription: Stripe.Subscription): string | null {
 
 function subscriptionPeriodEnd(subscription: Stripe.Subscription): number | null {
   return subscription.items.data[0]?.current_period_end ?? null;
+}
+
+function subscriptionUsesPrice(subscription: Stripe.Subscription, priceId: string): boolean {
+  return subscription.items.data.some((item) => item.price.id === priceId);
+}
+
+async function listAllCustomers(stripe: Stripe): Promise<Stripe.Customer[]> {
+  const customers: Stripe.Customer[] = [];
+  let startingAfter: string | undefined;
+
+  while (true) {
+    const page = await stripe.customers.list({
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    customers.push(...page.data);
+    if (!page.has_more || page.data.length === 0) return customers;
+
+    const nextStartingAfter = page.data[page.data.length - 1]?.id;
+    if (!nextStartingAfter || nextStartingAfter === startingAfter) return customers;
+    startingAfter = nextStartingAfter;
+  }
+}
+
+async function listAllCustomerSubscriptions(
+  stripe: Stripe,
+  customerId: string,
+  priceId: string,
+): Promise<Stripe.Subscription[]> {
+  const subscriptions: Stripe.Subscription[] = [];
+  let startingAfter: string | undefined;
+
+  while (true) {
+    const page = await stripe.subscriptions.list({
+      customer: customerId,
+      price: priceId,
+      status: "all",
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    });
+    subscriptions.push(...page.data);
+    if (!page.has_more || page.data.length === 0) return subscriptions;
+
+    const nextStartingAfter = page.data[page.data.length - 1]?.id;
+    if (!nextStartingAfter || nextStartingAfter === startingAfter) return subscriptions;
+    startingAfter = nextStartingAfter;
+  }
 }
 
 function saveSubscription(store: GameStore, values: {
@@ -132,6 +181,55 @@ export async function reconcileStoredSubscription(
     // A transient Stripe failure must not turn a status read into a 500 or
     // cause the checkout route to create a second subscription.
     return false;
+  }
+}
+
+/**
+ * Recover a paid account whose webhook/Checkout return never created a local
+ * subscription row. The Clerk primary email is the verified identity input;
+ * the configured Player Pass price and an exact single Stripe match are both
+ * required before a subscription is bound to the user.
+ */
+export async function reconcileSubscriptionByEmail(
+  stripe: Stripe,
+  store: GameStore,
+  userId: string,
+  email: string,
+  playerPassPriceId = config.stripePriceId,
+): Promise<EmailSubscriptionReconciliation> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail || !playerPassPriceId) return "failed";
+
+  try {
+    // Stripe's Customers List email filter can be case-sensitive. Read every
+    // customer page, then apply the normalized comparison locally so a paid
+    // account cannot be missed and sent through a second Checkout.
+    const customers = await listAllCustomers(stripe);
+    const candidates = new Map<string, Stripe.Subscription>();
+    for (const customer of customers) {
+      if (!customer.email || customer.email.trim().toLowerCase() !== normalizedEmail) continue;
+      const subscriptions = await listAllCustomerSubscriptions(stripe, customer.id, playerPassPriceId);
+      for (const subscription of subscriptions) {
+        if (isEntitledSubscriptionStatus(subscription.status)
+          && subscriptionUsesPrice(subscription, playerPassPriceId)) {
+          candidates.set(subscription.id, subscription);
+        }
+      }
+    }
+
+    if (candidates.size === 0) return "not_found";
+    if (candidates.size !== 1) return "ambiguous";
+
+    const subscription = [...candidates.values()][0];
+    const customerId = stripeId(subscription.customer);
+    const existing = store.getSubscription(userId);
+    if (!customerId || (existing?.stripeCustomerId && existing.stripeCustomerId !== customerId)) return "failed";
+    if (subscription.metadata?.clerk_user_id && subscription.metadata.clerk_user_id !== userId) return "failed";
+    return await saveAuthoritativeSubscription(stripe, store, userId, subscription, existing?.stripeCustomerId ?? customerId)
+      ? "linked"
+      : "failed";
+  } catch {
+    return "failed";
   }
 }
 

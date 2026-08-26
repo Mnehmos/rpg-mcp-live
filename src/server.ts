@@ -9,9 +9,11 @@ import {
   createPortalUrl,
   createStripeClient,
   handleStripeEvent,
+  reconcileSubscriptionByEmail,
   reconcileStoredSubscription,
   resolveCheckoutGuard,
   syncCompletedCheckoutSession,
+  type EmailSubscriptionReconciliation,
 } from "./billing.js";
 import { config } from "./config.js";
 
@@ -218,11 +220,12 @@ function clerkFrontendOrigin(): string | null {
 
 const clerkOrigin = clerkFrontendOrigin();
 
-if (config.clerkConfigured) {
-  const clerkClient = createClerkClient({
+const clerkClient = config.clerkConfigured ? createClerkClient({
     publishableKey: config.clerkPublishableKey,
     secretKey: config.clerkSecretKey,
-  });
+  }) : null;
+
+if (clerkClient) {
   app.use(clerkMiddleware({ clerkClient }));
 }
 
@@ -504,10 +507,34 @@ async function getAnyCampaign(userId: string, campaignId: string) {
 
 type CheckoutSyncStatus = "none" | "synced" | "pending";
 
-async function reconcileLegacySubscription(userId: string): Promise<void> {
+type SubscriptionRecoveryStatus = "not_needed" | EmailSubscriptionReconciliation;
+const subscriptionRecoveryCheckedAt = new Map<string, number>();
+const subscriptionRecoveryTtlMs = 60_000;
+
+async function reconcileLegacySubscription(
+  userId: string,
+  force = false,
+): Promise<SubscriptionRecoveryStatus> {
   const subscription = store.getSubscription(userId);
-  if (!stripe || subscription?.status !== "checkout_complete" || !subscription.stripeSubscriptionId) return;
-  await reconcileStoredSubscription(stripe, store, userId);
+  if (!stripe) return "not_needed";
+  if (subscription?.stripeSubscriptionId) {
+    if (subscription.status !== "checkout_complete") return "not_needed";
+    return await reconcileStoredSubscription(stripe, store, userId) ? "linked" : "failed";
+  }
+  if (!clerkClient) return "failed";
+  const checkedAt = subscriptionRecoveryCheckedAt.get(userId) ?? 0;
+  if (!force && Date.now() - checkedAt < subscriptionRecoveryTtlMs) return "not_needed";
+  subscriptionRecoveryCheckedAt.set(userId, Date.now());
+  try {
+    const clerkUser = await clerkClient.users.getUser(userId);
+    const email = clerkUser.primaryEmailAddress?.emailAddress?.trim();
+    if (!email) return "failed";
+    const result = await reconcileSubscriptionByEmail(stripe, store, userId, email);
+    if (result === "linked") subscriptionRecoveryCheckedAt.delete(userId);
+    return result;
+  } catch {
+    return "failed";
+  }
 }
 
 async function syncCheckoutFromRequest(request: Request, userId: string): Promise<CheckoutSyncStatus> {
@@ -527,7 +554,7 @@ app.get("/api/session", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
-    await reconcileLegacySubscription(userId);
+    const subscriptionSync = await reconcileLegacySubscription(userId);
     const checkoutSync = await syncCheckoutFromRequest(request, userId);
     const campaigns = await listAllCampaigns(userId);
     const requestedCampaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
@@ -542,6 +569,7 @@ app.get("/api/session", async (request, response) => {
         subscription: store.getSubscription(userId),
         usage: llmUsageStore.getSummary(userId),
         checkoutSync,
+        subscriptionSync,
       });
       return;
     }
@@ -557,6 +585,7 @@ app.get("/api/session", async (request, response) => {
       subscription: store.getSubscription(userId),
       usage: llmUsageStore.getSummary(userId),
       checkoutSync,
+      subscriptionSync,
     });
   } catch (error) {
     sendReferenceEngineError(response, error);
@@ -1114,9 +1143,9 @@ app.post("/api/session/action", async (request, response) => {
 app.get("/api/billing/status", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  await reconcileLegacySubscription(userId);
+  const subscriptionSync = await reconcileLegacySubscription(userId, true);
   const checkoutSync = await syncCheckoutFromRequest(request, userId);
-  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId), checkoutSync });
+  response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId), checkoutSync, subscriptionSync });
 });
 
 app.get("/api/usage", (request, response) => {
@@ -1133,6 +1162,15 @@ app.post("/api/billing/checkout", async (request, response) => {
     return;
   }
   try {
+    const subscriptionSync = await reconcileLegacySubscription(userId, true);
+    if (subscriptionSync === "ambiguous" || subscriptionSync === "failed") {
+      response.status(409).json({
+        code: "subscription_sync_pending",
+        existingSubscription: true,
+        error: "Your existing Player Pass is still being verified with Stripe. Try again shortly.",
+      });
+      return;
+    }
     const checkoutGuard = await resolveCheckoutGuard(stripe, store, userId);
     if (checkoutGuard.action === "portal") {
       response.json({
