@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { usageLabel, usagePercent, usageResetAt, usageResetLabel } from "./usage-display.js";
 
 describe("player-facing usage display", () => {
-  it("uses the plan target instead of exposing dollar or token values", () => {
+  it("uses the Player Pass monthly cap without exposing dollar or token values", () => {
     const summary = {
       plan: "player_pass",
       monthly: { costMicros: 500_000 },
@@ -11,8 +11,8 @@ describe("player-facing usage display", () => {
       limits: { monthly: { costMicros: 10_000_000 } },
     };
 
-    expect(usagePercent(summary)).toBe(25);
-    expect(usageLabel(summary)).toBe("PLAYER PASS · USAGE 25% USED");
+    expect(usagePercent(summary)).toBe(5);
+    expect(usageLabel(summary)).toBe("PLAYER PASS · USAGE 5% USED");
   });
 
   it("clamps over-budget values and supports the free tier", () => {
@@ -67,6 +67,19 @@ describe("player-facing usage display", () => {
 
     expect(usageResetAt(summary)).toBe("2026-09-01T00:00:00.000Z");
     expect(usageResetLabel(summary, new Date("2026-08-26T22:00:00.000Z"))).toBe("FREE PLAY IN 5D 2H");
+  });
+
+  it("always shows Player Pass users the monthly reset", () => {
+    const summary = {
+      plan: "player_pass",
+      daily: { costMicros: 100 },
+      monthly: { costMicros: 100 },
+      limits: { daily: null, monthly: { costMicros: 400 } },
+      resetsAt: { daily: "2026-08-27T00:00:00.000Z", monthly: "2026-09-01T00:00:00.000Z" },
+    };
+
+    expect(usageResetAt(summary)).toBe("2026-09-01T00:00:00.000Z");
+    expect(usageResetLabel(summary, new Date("2026-08-26T22:00:00.000Z"))).toBe("MONTHLY RESET IN 5D 2H");
   });
 
   it("does not expose a countdown when the reset timestamp is absent", () => {

@@ -9,7 +9,6 @@ function policy(overrides: Partial<LlmUsagePolicy> = {}): LlmUsagePolicy {
   return {
     freeDailyCostMicros: 10,
     freeMonthlyCostMicros: 20,
-    playerDailyCostMicros: 100,
     playerMonthlyTargetCostMicros: 150,
     playerMonthlyCostMicros: 200,
     globalDailyCostMicros: 1_000,
@@ -131,8 +130,81 @@ describe("LLM usage ledger", () => {
     expect(usage.getSummary("player-1")).toMatchObject({
       plan: "player_pass",
       targets: { monthly: { costMicros: 150, costUsd: 0.00015 } },
-      limits: { monthly: { costMicros: 200, costUsd: 0.0002 } },
+      limits: { daily: null, monthly: { costMicros: 200, costUsd: 0.0002 } },
+      remaining: { daily: null },
     });
+    game.close();
+  });
+
+  it("gates Player Pass usage only on the monthly account cap", () => {
+    const { game, usage } = createStores();
+    game.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_test",
+      stripeSubscriptionId: "sub_test",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: null,
+    });
+    const first = usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 100,
+      estimatedCompletionTokens: 100,
+      estimatedCostMicros: 150,
+    });
+    usage.settle(first.id, {
+      provider: "openrouter",
+      model: "test-model",
+      promptTokens: 100,
+      completionTokens: 100,
+      costMicros: 150,
+      costSource: "provider",
+    });
+
+    const admittedTurn = usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-2",
+      provider: "openrouter",
+      model: "test-model",
+    });
+    usage.release(admittedTurn.id);
+
+    const underMonthlyCap = usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-3",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 100,
+      estimatedCompletionTokens: 100,
+      estimatedCostMicros: 40,
+    });
+    usage.release(underMonthlyCap.id);
+
+    try {
+      usage.reserve({
+        userId: "player-1",
+        campaignId: "campaign-1",
+        clientCommandId: "command-4",
+        source: "dm",
+        provider: "openrouter",
+        model: "test-model",
+        estimatedPromptTokens: 100,
+        estimatedCompletionTokens: 100,
+        estimatedCostMicros: 60,
+      });
+      throw new Error("Expected the monthly Player Pass cap to reject the request.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(LlmUsageLimitError);
+      expect((error as LlmUsageLimitError).period).toBe("monthly");
+    }
     game.close();
   });
 

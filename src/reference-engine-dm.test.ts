@@ -479,7 +479,6 @@ describe("ReferenceDungeonMaster", () => {
     const usage = new LlmUsageStore(gameStore.getRawDb(), {
       freeDailyCostMicros: 100_000,
       freeMonthlyCostMicros: 200_000,
-      playerDailyCostMicros: 100_000,
       playerMonthlyTargetCostMicros: 150_000,
       playerMonthlyCostMicros: 200_000,
       globalDailyCostMicros: 1_000_000,
