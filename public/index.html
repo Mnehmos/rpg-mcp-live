@@ -165,9 +165,19 @@
             </div>
             <div class="form-grid form-grid-wide">
               <label>Class<select id="character-class-input" name="classKey" disabled><option value="">Loading Open5e classes…</option></select></label>
-              <label>Background<select id="character-background-choice" name="backgroundKey" disabled><option value="">Loading backgrounds…</option></select></label>
+              <label>Starting level<select id="character-level-input" name="level">
+                <option value="1" selected>Level 1 · beginner</option>
+                <option value="2">Level 2</option><option value="3">Level 3</option><option value="4">Level 4</option>
+                <option value="5">Level 5</option><option value="6">Level 6</option><option value="7">Level 7</option><option value="8">Level 8</option>
+                <option value="9">Level 9</option><option value="10">Level 10</option><option value="11">Level 11</option><option value="12">Level 12</option>
+                <option value="13">Level 13</option><option value="14">Level 14</option><option value="15">Level 15</option><option value="16">Level 16</option>
+                <option value="17">Level 17</option><option value="18">Level 18</option><option value="19">Level 19</option><option value="20">Level 20</option>
+              </select><small>Sets starting class features, proficiency bonus, hit points, and spell slots.</small></label>
             </div>
-            <label>Alignment<select id="character-alignment-choice" name="alignmentKey" disabled><option value="">Loading alignments…</option></select></label>
+            <div class="form-grid form-grid-wide">
+              <label>Background<select id="character-background-choice" name="backgroundKey" disabled><option value="">Loading backgrounds…</option></select></label>
+              <label>Alignment<select id="character-alignment-choice" name="alignmentKey" disabled><option value="">Loading alignments…</option></select></label>
+            </div>
             <div id="character-source-summary" class="character-source-summary" aria-live="polite">The table is loading the campaign's pinned SRD character options.</div>
             <section id="character-ability-scores" class="character-choice-panel ability-score-setup">
               <div class="character-choice-heading"><span>Ability scores</span><small id="character-ability-score-help">Choose a method, then assign one value to each ability.</small></div>
@@ -286,12 +296,13 @@
               </div>
               <div id="character-spellbook-section" class="sheet-subsection" hidden>
                 <div class="spell-heading"><span class="tiny-label">SPELLCASTING</span><span id="spell-selection-mode">SPELLBOOK</span></div>
+                <p id="spellcasting-rules-help" class="form-help spellcasting-rules-help"></p>
                 <div class="spellbook-editor">
-                  <button id="spellbook-toggle" class="item-action" type="button" hidden>Manage spellbook</button>
+                  <button id="spellbook-toggle" class="item-action" type="button" hidden>Manage spells</button>
                   <form id="spellbook-form" class="spellbook-form" hidden>
                     <p id="spellbook-help" class="form-help">Choose from the installed class spell list. The engine validates every saved selection.</p>
                     <div id="spellbook-options" class="spellbook-options"></div>
-                    <div class="form-actions"><p id="spellbook-feedback" class="form-feedback" role="status"></p><button class="button button-secondary" type="submit">Save spellbook</button></div>
+                    <div class="form-actions"><p id="spellbook-feedback" class="form-feedback" role="status"></p><button id="spellbook-save" class="button button-secondary" type="submit">Save spell choices</button></div>
                   </form>
                 </div>
                 <div id="character-spell-slots" class="spell-slot-grid"></div>

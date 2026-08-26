@@ -82,6 +82,7 @@ describe("ReferenceEngineAdapter", () => {
       "character_manage.create": (args) => {
         expect(args.race).toBe("human");
         expect(args.class).toBe("fighter");
+        expect(args.level).toBe(7);
         return {
           id: "char-1",
           name: "Hero",
@@ -91,7 +92,7 @@ describe("ReferenceEngineAdapter", () => {
           hp: 10,
           maxHp: 10,
           ac: 10,
-          level: 1,
+          level: 7,
           xp: 0,
           currency: { gold: 10, silver: 0, copper: 0 },
         };
@@ -111,7 +112,7 @@ describe("ReferenceEngineAdapter", () => {
         hp: 10,
         maxHp: 10,
         ac: 10,
-        level: 1,
+        level: 7,
         xp: 0,
         currency: { gold: 10, silver: 0, copper: 0 },
       }),
@@ -124,7 +125,7 @@ describe("ReferenceEngineAdapter", () => {
       "account-1",
       "actor-1",
       "campaign-1",
-      toolCall("character_create", { name: "Hero", species: "human", className: "fighter" })
+      toolCall("character_create", { name: "Hero", species: "human", className: "fighter", level: 7 })
     );
 
     expect(result.accepted).toBe(true);
@@ -148,6 +149,40 @@ describe("ReferenceEngineAdapter", () => {
     expect(character.derived.carryCapacity).toBe(240);
 
     expect(store.getRouting("account-1", "campaign-1")?.referenceCharacterId).toBe("char-1");
+  });
+
+  it("projects authoritative spell-slot usage instead of restoring every slot after refresh", async () => {
+    const store = createStore();
+    store.setBackend("account-1", "campaign-1", "reference");
+    store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+
+    const client = fakeClient({
+      "character_manage.get": () => ({
+        id: "char-1",
+        name: "Sela",
+        race: "human",
+        characterClass: "wizard",
+        stats: { str: 10, dex: 14, con: 13, int: 16, wis: 12, cha: 8 },
+        hp: 14,
+        maxHp: 14,
+        ac: 12,
+        level: 3,
+        xp: 0,
+        spellSlots: {
+          level1: { current: 1, max: 4 },
+          level2: { current: 0, max: 2 },
+        },
+      }),
+      "inventory_manage.get_detailed": () => ({ inventory: [] }),
+      "quest_manage.get_log": () => ({ quests: [] }),
+      "narrative_manage.search": () => ({ notes: [] }),
+    });
+    const adapter = new ReferenceEngineAdapter(client, store);
+
+    const { campaign } = await adapter.getCampaign("account-1", "actor-1", "campaign-1");
+
+    expect(campaign.character.spellcasting?.slotMaximums).toMatchObject({ "1": 4, "2": 2 });
+    expect(campaign.character.spellcasting?.slots).toMatchObject({ "1": 1, "2": 0 });
   });
 
   it("projects the authoritative party roster and preserves it across refresh", async () => {
