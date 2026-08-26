@@ -3,12 +3,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Stripe from "stripe";
 import { describe, expect, it } from "vitest";
-import { handleStripeEvent, syncCompletedCheckoutSession } from "./billing.js";
+import {
+  handleStripeEvent,
+  reconcileStoredSubscription,
+  resolveCheckoutGuard,
+  syncCompletedCheckoutSession,
+} from "./billing.js";
+import { LlmUsageStore, type LlmUsagePolicy } from "./llm-usage.js";
 import { GameStore } from "./store.js";
 
 function createTestStore(): GameStore {
   const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-billing-"));
   return new GameStore(join(directory, "game.db"));
+}
+
+function testUsagePolicy(): LlmUsagePolicy {
+  return {
+    freeDailyCostMicros: 10,
+    freeMonthlyCostMicros: 20,
+    playerDailyCostMicros: 100,
+    playerMonthlyTargetCostMicros: 150,
+    playerMonthlyCostMicros: 200,
+    globalDailyCostMicros: 1_000,
+    globalMonthlyCostMicros: 2_000,
+    turnAdmissionReserveCostMicros: 5,
+    maxTurnCostMicros: 500,
+    npcReserveCostMicros: 100,
+    reservationTtlMs: 60_000,
+    inputCostUsdPerMillion: 0.2,
+    outputCostUsdPerMillion: 1.2,
+  };
 }
 
 function testSubscription(overrides: Record<string, unknown> = {}): Stripe.Subscription {
@@ -35,6 +59,115 @@ function testEvent(type: string, object: Record<string, unknown>, id: string): S
 }
 
 describe("Stripe membership synchronization", () => {
+  it("reconciles a legacy Checkout marker from its stored subscription and restores Player Pass usage", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "checkout_complete",
+      priceId: "price_test",
+      currentPeriodEnd: null,
+    });
+    const usage = new LlmUsageStore(store.getRawDb(), testUsagePolicy());
+    const retrievedIds: string[] = [];
+    const stripe = {
+      subscriptions: {
+        retrieve: async (id: string) => {
+          retrievedIds.push(id);
+          return testSubscription({ id: "sub_checkout", customer: "cus_checkout", status: "active" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(true);
+    expect(retrievedIds).toEqual(["sub_checkout"]);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "active" });
+    expect(usage.getSummary("player-1").plan).toBe("player_pass");
+    store.close();
+  });
+
+  it("does not reconcile a stored subscription bound to a different Stripe customer", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_expected",
+      stripeSubscriptionId: "sub_checkout",
+      status: "checkout_complete",
+      priceId: "price_test",
+      currentPeriodEnd: null,
+    });
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => testSubscription({ customer: "cus_other", status: "active" }),
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(false);
+    expect(store.getSubscription("player-1")).toMatchObject({
+      stripeCustomerId: "cus_expected",
+      status: "checkout_complete",
+    });
+    store.close();
+  });
+
+  it("routes an existing active subscription to billing portal instead of creating Checkout", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: null,
+    });
+    let checkoutCreates = 0;
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => testSubscription({ status: "active" }),
+      },
+      checkout: {
+        sessions: {
+          create: async () => {
+            checkoutCreates += 1;
+            return { url: "https://checkout.stripe.test/session" };
+          },
+        },
+      },
+    } as unknown as Stripe;
+
+    await expect(resolveCheckoutGuard(stripe, store, "player-1")).resolves.toEqual({
+      action: "portal",
+      customerId: "cus_checkout",
+      status: "active",
+    });
+    expect(checkoutCreates).toBe(0);
+    store.close();
+  });
+
+  it("fails closed instead of opening a second Checkout when an existing binding cannot be verified", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_expected",
+      stripeSubscriptionId: "sub_checkout",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: null,
+    });
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => testSubscription({ customer: "cus_other", status: "active" }),
+      },
+    } as unknown as Stripe;
+
+    await expect(resolveCheckoutGuard(stripe, store, "player-1")).resolves.toEqual({
+      action: "pending",
+      status: "active",
+    });
+    store.close();
+  });
+
   it("binds a completed Checkout session to the authenticated Clerk user using current Stripe status", async () => {
     const store = createTestStore();
     const stripe = {

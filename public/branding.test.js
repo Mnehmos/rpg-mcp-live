@@ -68,8 +68,9 @@ describe("player-facing branding", () => {
     expect(app).toContain('checkoutSync === "synced") clearCheckoutReturn()');
   });
 
-  it("keeps a management action available for every active pass", () => {
-    expect(app).toContain("portalButton.hidden = !active;");
+  it("keeps billing management available for any bound Stripe customer", () => {
+    expect(app).toContain("portalButton.hidden = !hasStripeCustomer;");
+    expect(app).toContain("checkoutButton.hidden = active || unresolvedCheckout;");
   });
 
   it("does not expose unsupported higher-level character creation", () => {

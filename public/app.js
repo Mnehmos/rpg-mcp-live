@@ -254,10 +254,14 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var checkoutButton = $("#membership-checkout");
     var portalButton = $("#membership-portal");
     var active = isPlayerPassActive();
+    var hasStripeCustomer = Boolean(state.subscription && state.subscription.stripeCustomerId);
+    var unresolvedCheckout = Boolean(
+      hasStripeCustomer && state.subscription && state.subscription.status === "checkout_complete"
+    );
     if (status) status.hidden = !active;
     if (statusCopy && active) statusCopy.textContent = "Your Player Pass is active. Your table is ready.";
-    if (checkoutButton) checkoutButton.hidden = active;
-    if (portalButton) portalButton.hidden = !active;
+    if (checkoutButton) checkoutButton.hidden = active || unresolvedCheckout;
+    if (portalButton) portalButton.hidden = !hasStripeCustomer;
   }
 
   function titleCase(value) {

@@ -4,7 +4,15 @@ import { fileURLToPath } from "node:url";
 import express, { type Request, type Response } from "express";
 import { clerkMiddleware, createClerkClient, getAuth } from "@clerk/express";
 import { z } from "zod";
-import { createCheckoutUrl, createPortalUrl, createStripeClient, handleStripeEvent, syncCompletedCheckoutSession } from "./billing.js";
+import {
+  createCheckoutUrl,
+  createPortalUrl,
+  createStripeClient,
+  handleStripeEvent,
+  reconcileStoredSubscription,
+  resolveCheckoutGuard,
+  syncCompletedCheckoutSession,
+} from "./billing.js";
 import { config } from "./config.js";
 
 const REFERENCE_DM_NOT_COMMITTED_MESSAGE =
@@ -496,6 +504,12 @@ async function getAnyCampaign(userId: string, campaignId: string) {
 
 type CheckoutSyncStatus = "none" | "synced" | "pending";
 
+async function reconcileLegacySubscription(userId: string): Promise<void> {
+  const subscription = store.getSubscription(userId);
+  if (!stripe || subscription?.status !== "checkout_complete" || !subscription.stripeSubscriptionId) return;
+  await reconcileStoredSubscription(stripe, store, userId);
+}
+
 async function syncCheckoutFromRequest(request: Request, userId: string): Promise<CheckoutSyncStatus> {
   const checkout = typeof request.query.checkout === "string" ? request.query.checkout : "";
   const sessionId = typeof request.query.session_id === "string" ? request.query.session_id.trim() : "";
@@ -513,6 +527,7 @@ app.get("/api/session", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
   try {
+    await reconcileLegacySubscription(userId);
     const checkoutSync = await syncCheckoutFromRequest(request, userId);
     const campaigns = await listAllCampaigns(userId);
     const requestedCampaignId = typeof request.query.campaignId === "string" ? request.query.campaignId.trim() : "";
@@ -1099,6 +1114,7 @@ app.post("/api/session/action", async (request, response) => {
 app.get("/api/billing/status", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
+  await reconcileLegacySubscription(userId);
   const checkoutSync = await syncCheckoutFromRequest(request, userId);
   response.json({ subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId), checkoutSync });
 });
@@ -1117,6 +1133,23 @@ app.post("/api/billing/checkout", async (request, response) => {
     return;
   }
   try {
+    const checkoutGuard = await resolveCheckoutGuard(stripe, store, userId);
+    if (checkoutGuard.action === "portal") {
+      response.json({
+        url: await createPortalUrl(stripe, checkoutGuard.customerId),
+        existingSubscription: true,
+        status: checkoutGuard.status,
+      });
+      return;
+    }
+    if (checkoutGuard.action === "pending") {
+      response.status(409).json({
+        code: "subscription_sync_pending",
+        existingSubscription: true,
+        error: "Your existing Player Pass is still being verified with Stripe. Try again shortly.",
+      });
+      return;
+    }
     response.json({ url: await createCheckoutUrl(stripe, userId) });
   } catch (error) {
     response.status(502).json({ error: error instanceof Error ? error.message : "Unable to create Checkout session." });
