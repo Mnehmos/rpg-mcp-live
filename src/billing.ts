@@ -8,6 +8,8 @@ export function isEntitledSubscriptionStatus(status: string): boolean {
   return ENTITLED_SUBSCRIPTION_STATUSES.includes(status as typeof ENTITLED_SUBSCRIPTION_STATUSES[number]);
 }
 
+export type EmailSubscriptionReconciliation = "linked" | "not_found" | "ambiguous" | "failed";
+
 export function createStripeClient(): Stripe | null {
   if (!config.stripeSecretKey) return null;
 
@@ -55,6 +57,10 @@ function subscriptionPriceId(subscription: Stripe.Subscription): string | null {
 
 function subscriptionPeriodEnd(subscription: Stripe.Subscription): number | null {
   return subscription.items.data[0]?.current_period_end ?? null;
+}
+
+function subscriptionUsesPrice(subscription: Stripe.Subscription, priceId: string): boolean {
+  return subscription.items.data.some((item) => item.price.id === priceId);
 }
 
 function saveSubscription(store: GameStore, values: {
@@ -132,6 +138,57 @@ export async function reconcileStoredSubscription(
     // A transient Stripe failure must not turn a status read into a 500 or
     // cause the checkout route to create a second subscription.
     return false;
+  }
+}
+
+/**
+ * Recover a paid account whose webhook/Checkout return never created a local
+ * subscription row. The Clerk primary email is the verified identity input;
+ * the configured Player Pass price and an exact single Stripe match are both
+ * required before a subscription is bound to the user.
+ */
+export async function reconcileSubscriptionByEmail(
+  stripe: Stripe,
+  store: GameStore,
+  userId: string,
+  email: string,
+  playerPassPriceId = config.stripePriceId,
+): Promise<EmailSubscriptionReconciliation> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail || !playerPassPriceId) return "failed";
+
+  try {
+    const customers = await stripe.customers.list({ email: email.trim(), limit: 20 });
+    const candidates = new Map<string, Stripe.Subscription>();
+    for (const customer of customers.data) {
+      if (!customer.email || customer.email.trim().toLowerCase() !== normalizedEmail) continue;
+      const subscriptions = await stripe.subscriptions.list({
+        customer: customer.id,
+        price: playerPassPriceId,
+        status: "all",
+        limit: 100,
+      });
+      for (const subscription of subscriptions.data) {
+        if (isEntitledSubscriptionStatus(subscription.status)
+          && subscriptionUsesPrice(subscription, playerPassPriceId)) {
+          candidates.set(subscription.id, subscription);
+        }
+      }
+    }
+
+    if (candidates.size === 0) return "not_found";
+    if (candidates.size !== 1) return "ambiguous";
+
+    const subscription = [...candidates.values()][0];
+    const customerId = stripeId(subscription.customer);
+    const existing = store.getSubscription(userId);
+    if (!customerId || (existing?.stripeCustomerId && existing.stripeCustomerId !== customerId)) return "failed";
+    if (subscription.metadata?.clerk_user_id && subscription.metadata.clerk_user_id !== userId) return "failed";
+    return await saveAuthoritativeSubscription(stripe, store, userId, subscription, existing?.stripeCustomerId ?? customerId)
+      ? "linked"
+      : "failed";
+  } catch {
+    return "failed";
   }
 }
 

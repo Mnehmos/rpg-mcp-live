@@ -5,6 +5,7 @@ import type Stripe from "stripe";
 import { describe, expect, it } from "vitest";
 import {
   handleStripeEvent,
+  reconcileSubscriptionByEmail,
   reconcileStoredSubscription,
   resolveCheckoutGuard,
   syncCompletedCheckoutSession,
@@ -59,6 +60,48 @@ function testEvent(type: string, object: Record<string, unknown>, id: string): S
 }
 
 describe("Stripe membership synchronization", () => {
+  it("binds one active Player Pass by the authenticated billing email when no local row exists", async () => {
+    const store = createTestStore();
+    const stripe = {
+      customers: {
+        list: async () => ({ data: [{ id: "cus_legacy", email: "mnehmos@gmail.com" }] }),
+      },
+      subscriptions: {
+        list: async () => ({ data: [testSubscription({ id: "sub_legacy", customer: "cus_legacy" })] }),
+        retrieve: async () => testSubscription({ id: "sub_legacy", customer: "cus_legacy" }),
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileSubscriptionByEmail(stripe, store, "player-1", "MNEHMOS@gmail.com", "price_test"))
+      .resolves.toBe("linked");
+    expect(store.getSubscription("player-1")).toMatchObject({
+      stripeCustomerId: "cus_legacy",
+      stripeSubscriptionId: "sub_legacy",
+      status: "active",
+    });
+    store.close();
+  });
+
+  it("refuses to bind an ambiguous email with multiple active Player Pass subscriptions", async () => {
+    const store = createTestStore();
+    const stripe = {
+      customers: {
+        list: async () => ({ data: [{ id: "cus_one", email: "mnehmos@gmail.com" }] }),
+      },
+      subscriptions: {
+        list: async () => ({ data: [
+          testSubscription({ id: "sub_one", customer: "cus_one" }),
+          testSubscription({ id: "sub_two", customer: "cus_one" }),
+        ] }),
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileSubscriptionByEmail(stripe, store, "player-1", "mnehmos@gmail.com", "price_test"))
+      .resolves.toBe("ambiguous");
+    expect(store.getSubscription("player-1")).toBeNull();
+    store.close();
+  });
+
   it("reconciles a legacy Checkout marker from its stored subscription and restores Player Pass usage", async () => {
     const store = createTestStore();
     store.upsertSubscription({
