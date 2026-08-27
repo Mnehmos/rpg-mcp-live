@@ -1027,12 +1027,13 @@ describe("ReferenceDungeonMaster", () => {
     expect(firstMessages).toEqual(
       expect.arrayContaining([
         { role: "user", content: "I enter the archive." },
-        { role: "assistant", content: expect.stringContaining("[PRIOR DM NARRATION — continuity only") },
+        { role: "assistant", content: "Dust swirls beneath the shelves." },
         { role: "user", content: "I search the archive." },
       ])
     );
-    expect(firstMessages.find((message) => message.role === "assistant" && message.content?.startsWith("[PRIOR DM NARRATION"))?.content)
-      .toContain("accepted RPG MCP results above are the source of truth");
+    expect(firstMessages).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ content: expect.stringContaining("[PRIOR DM NARRATION") }),
+    ]));
   });
 
   it("replays prior accepted and rejected tool calls in API-valid message order", async () => {
@@ -1115,7 +1116,7 @@ describe("ReferenceDungeonMaster", () => {
     });
     expect(firstMessages[priorPlayerIndex + 4]).toEqual({
       role: "assistant",
-      content: expect.stringContaining("[PRIOR DM NARRATION — continuity only"),
+      content: "Black water laps over the chapel floor.",
     });
     expect(firstMessages[priorPlayerIndex + 4]?.content).toContain("Black water laps over the chapel floor.");
     const currentPlayerIndex = firstMessages.findIndex((message) => message.content === "I listen at the altar.");
@@ -1892,8 +1893,8 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Treat every player intent as an invitation to author");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("scene_manage action set");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player drives what happens next");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("History is not proof");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("current authoritative projection");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Released DM narration is canonical campaign continuity");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("reconcile the result internally");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Material-action routing is mandatory");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("A prose-only completion is not final");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("spatial_manage for persistent rooms and character placement");
@@ -1904,7 +1905,7 @@ describe("reference DM scene authoring contract", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("player intent -> relevant engine action -> returned engine result -> scene_manage set -> narration");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("never turn a skipped call into an 'unresolved' continuity fact");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("plain, diegetic D&D narration");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("do not paste headings, roll ledgers, HP/AC tables");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not paste headings, roll ledgers, HP/AC tables");
   });
 
   it("fills only the player's combat actor id while leaving other tool ids model-driven", async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EngineToolDisclosure } from "./engine-contracts.js";
+import { sanitizeReleasedNarration } from "./narration-provenance.js";
 
 export type EngineBackend = "reference";
 
@@ -13,6 +14,19 @@ export interface StoredLogMessage {
 }
 
 const MAX_LOG_MESSAGES = 40;
+
+function sanitizeStoredResult(result: unknown): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const record = result as Record<string, unknown>;
+  const narration = record.narration;
+  if (!narration || typeof narration !== "object" || Array.isArray(narration)) return result;
+  const narrationRecord = narration as Record<string, unknown>;
+  if (typeof narrationRecord.text !== "string") return result;
+  return {
+    ...record,
+    narration: { ...narrationRecord, text: sanitizeReleasedNarration(narrationRecord.text) },
+  };
+}
 
 /**
  * A DM turn has a bounded provider budget, but the process can still die after
@@ -202,7 +216,7 @@ export class ReferenceEngineStore {
           throw new Error("A client command ID cannot be reused for a different reference-engine turn.");
         }
         if (existing.status === "resolved" && existing.result_json) {
-          return { status: "resolved", result: JSON.parse(existing.result_json) };
+          return { status: "resolved", result: sanitizeStoredResult(JSON.parse(existing.result_json)) };
         }
         if (existing.status === "failed") {
           return {
@@ -301,7 +315,7 @@ export class ReferenceEngineStore {
          SET status = 'resolved', result_json = ?, failure_json = NULL, updated_at = ?
          WHERE user_id = ? AND campaign_id = ? AND client_command_id = ? AND status = 'processing'`
       )
-      .run(JSON.stringify(result), new Date().toISOString(), userId, campaignId, clientCommandId);
+      .run(JSON.stringify(sanitizeStoredResult(result)), new Date().toISOString(), userId, campaignId, clientCommandId);
   }
 
   public failReferenceCommand(
@@ -356,7 +370,7 @@ export class ReferenceEngineStore {
       expectedCampaignVersion: row.expected_version,
       requestJson: row.request_json,
       status: row.status,
-      result: row.result_json ? JSON.parse(row.result_json) : null,
+      result: row.result_json ? sanitizeStoredResult(JSON.parse(row.result_json)) : null,
       failure: row.failure_json ? JSON.parse(row.failure_json) as ReferenceCommandFailure : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -513,7 +527,10 @@ export class ReferenceEngineStore {
       .prepare("SELECT log_json FROM reference_engine_sessions WHERE user_id = ? AND campaign_id = ?")
       .get(userId, campaignId) as { log_json: string } | undefined;
     const current = row ? (JSON.parse(row.log_json) as StoredLogMessage[]) : [];
-    const next = [...current, ...messages].slice(-MAX_LOG_MESSAGES);
+    const sanitizedMessages = messages.map((message) => message.kind === "narration"
+      ? { ...message, text: sanitizeReleasedNarration(message.text) }
+      : message);
+    const next = [...current, ...sanitizedMessages].slice(-MAX_LOG_MESSAGES);
     this.db
       .prepare(
         `UPDATE reference_engine_sessions
@@ -528,7 +545,11 @@ export class ReferenceEngineStore {
     const row = this.db
       .prepare("SELECT log_json FROM reference_engine_sessions WHERE user_id = ? AND campaign_id = ?")
       .get(userId, campaignId) as { log_json: string } | undefined;
-    return row ? (JSON.parse(row.log_json) as StoredLogMessage[]) : [];
+    return row
+      ? (JSON.parse(row.log_json) as StoredLogMessage[]).map((message) => message.kind === "narration"
+        ? { ...message, text: sanitizeReleasedNarration(message.text) }
+        : message)
+      : [];
   }
 
   public deleteRouting(userId: string, campaignId: string): void {

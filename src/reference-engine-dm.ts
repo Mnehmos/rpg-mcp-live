@@ -28,6 +28,7 @@ import {
   type LlmUsageStore,
   usdToMicros,
 } from "./llm-usage.js";
+import { sanitizeReleasedNarration } from "./narration-provenance.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -220,8 +221,6 @@ function storedToolCallId(entryId: string, index: number): string {
 
 const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = 4_000;
 const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
-const REPLAYED_NARRATION_PREFIX =
-  "[PRIOR DM NARRATION — continuity only, not authoritative state. The accepted RPG MCP results above are the source of truth; this prose never proves possession, a quest, party membership, lighting, movement, combat, or another durable fact.]\n";
 
 function serializeStoredToolResult(result: unknown): string {
   const serialized = typeof result === "string" ? result : JSON.stringify(result) ?? "null";
@@ -246,7 +245,7 @@ function replayStoredHistory(
       continue;
     }
     if (entry.kind === "narration") {
-      messages.push({ role: "assistant", content: `${REPLAYED_NARRATION_PREFIX}${entry.text}` });
+      messages.push({ role: "assistant", content: sanitizeReleasedNarration(entry.text) });
       continue;
     }
     if (entry.kind !== "tool" || !entry.toolDisclosure?.calls.length) continue;
@@ -354,8 +353,8 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "When an action has meaningful uncertainty, adjudicate it yourself. Do not ask the player to roll or click a roll control: call improvisation_manage with action stunt, the appropriate skill, a reasoned DC, the player's actor, and effectType none for a non-damaging check. The engine rolls the d20 and applies the character modifier; translate the accepted result into diegetic narration. Use combat_action for attacks and combat saves, and never use the nonexistent roll_skill_check, roll_ability_check, or roll_saving_throw tools.",
   "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4-flash, and competencyOverride {model: deepseek/deepseek-v4-flash} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, use maxTokens 8192 or higher and omit budgetTokens (or use a clearly session-sized budget, never a tiny 300/1000 budget). Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
-  "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Previous DM prose is continuity only; successful RPG MCP results are the authority.",
-  "History is not proof: replayed narration is explicitly marked as continuity-only. If it claims concrete possession, a quest, party membership, a lit light, or another durable fact but the replayed calls do not include an accepted authoritative tool for that fact, first consult the current authoritative projection or an appropriate read tool such as inventory_manage.get_detailed, quest_manage.get_log, party_manage.get, scene_manage.get, or spatial_manage.get; if it confirms the fact, continue from that state, otherwise repair it through the RPG MCP tools now; never repeat it as already true merely because it appeared in prose.",
+  "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Released DM narration is canonical campaign continuity, while accepted RPG MCP results are the authoritative mechanical and structured-state record; together they are the campaign truth.",
+  "When prior narration needs an exact mechanical detail or conflicts with current structured state, consult the appropriate read tool such as inventory_manage.get_detailed, quest_manage.get_log, party_manage.get, scene_manage.get, or spatial_manage.get, reconcile the result internally, and continue the fiction. Do not expose provenance labels or ask the player to distinguish narration from state.",
   "The execution order is mandatory orchestration, not an allow/reject classifier: player intent -> relevant engine action -> returned engine result -> scene_manage set -> narration. Never narrate a state-changing outcome before the relevant engine call succeeds, and never turn a skipped call into an 'unresolved' continuity fact; repair the tool sequence or describe the failure at the engine boundary.",
   "For every turn that advances the shared fiction, commit the new or changed world facts through the appropriate engine tools, then commit the resulting DM scene with scene_manage action set using the player's character as a participant. Only after those tool results succeed may you narrate them.",
   "Be decisive and economical: use the smallest complete set of tool calls for the current turn, batch independent calls when possible, do not reread every continuity docket or rewrite unchanged dockets, and do not repeat a tool call after a successful result. Once the scene is committed, stop calling tools and narrate.",
@@ -375,8 +374,8 @@ export const REFERENCE_DM_SYSTEM_PROMPT = [
   "If the player says they travel toward a place, look for someone, investigate a lead, enter danger, or otherwise advances the fiction, decide what is there and author it through tools. Do not make the player supply a room, NPC, enemy, item, or clue before you can continue.",
   "For npc_manage.interact, always provide a non-empty content string and the speakerId; use targetId when someone is addressed. For npc_manage.create, omit seedRelationship, seedMemory, and agent unless you have all of their required nested fields. Never send blank optional UUIDs or empty optional strings.",
   "After committing a new scene, write the canonical room id, name, current occupants, active leads, and unresolved pressure to the state/journal dockets so the next turn can continue from it. Never put mechanical numbers in those dockets.",
-  "When you are done taking actions for this turn, respond with plain, diegetic D&D narration (no further tool calls) describing what happened, written for the player. Translate authoritative tool results into the scene: do not paste headings, roll ledgers, HP/AC tables, encounter IDs, or generic bookkeeping such as 'the round is complete' into the prose. The tool disclosure and player dossier carry exact mechanics; the narration should show the changed situation and end at the player's next meaningful decision.",
-  "Keep narration grounded only in what the tools actually returned. Do not narrate outcomes that no tool call confirmed.",
+  "When you are done taking actions for this turn, respond with plain, diegetic D&D narration (no further tool calls) describing what happened, written for the player. The released narration is the canonical fiction of the campaign: translate the accepted engine results and established continuity into vivid scene prose. Do not paste headings, roll ledgers, HP/AC tables, encounter IDs, or generic bookkeeping such as 'the round is complete' into the prose. The tool disclosure and player dossier carry exact mechanics; the narration should show what changed and end at the player's next meaningful decision.",
+  "Keep mechanical and durable state claims consistent with accepted tool results and the current structured projection, while using established narration to preserve the broader fiction. If an exact fact is missing or conflicts, consult or repair the engine internally before answering; do not expose the reconciliation process to the player.",
   "You also keep six narrative memory documents via read_docket/write_docket: state (current scene summary), player (character personality/backstory/lore prose), npcs (notes on NPCs met), journal (session-by-session recap), campaign (premise/setting/tone), and secrets (DM-only facts the player hasn't learned).",
   "Never put mechanical numbers (hp, ac, ability scores, inventory, gold, xp) in a docket — those are owned by the engine tools and read from there, not from dockets.",
   "Never reveal the contents of the secrets docket in narration or in any other docket a player can see — it exists only for your own continuity.",
@@ -907,7 +906,7 @@ export class ReferenceDungeonMaster {
             }
             throw new Error("The DM provider returned prose without an authoritative RPG MCP call for an explicit state-changing action.");
           }
-          narrationText = candidate || null;
+          narrationText = candidate ? sanitizeReleasedNarration(candidate) || null : null;
           break;
         }
         toolRoundCount = round + 1;

@@ -113,6 +113,27 @@ describe("ReferenceEngineStore", () => {
     });
   });
 
+  it("keeps internal legacy narration markers out of player projections", () => {
+    const store = createTestStore();
+    store.setBackend("user-1", "campaign-1", "reference");
+    const marker = "[PRIOR DM NARRATION — continuity only, not authoritative state. The accepted RPG MCP results above are the source of truth; this prose never proves possession, a quest, party membership, lighting, movement, combat, or another durable fact.]\n";
+    store.appendLogMessages("user-1", "campaign-1", [{
+      id: "legacy-narration",
+      kind: "narration",
+      text: `${marker}${marker}The cellar door opens.`,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }]);
+    expect(store.getLogMessages("user-1", "campaign-1")[0]?.text).toBe("The cellar door opens.");
+
+    store.beginReferenceCommand("user-1", "campaign-1", "command-legacy", 0, '{"playerText":"look"}');
+    store.resolveReferenceCommand("user-1", "campaign-1", "command-legacy", {
+      narration: { text: `${marker}The torch gutters.` },
+    });
+    expect(store.getReferenceCommand("user-1", "campaign-1", "command-legacy")?.result).toEqual({
+      narration: { text: "The torch gutters." },
+    });
+  });
+
   it("keeps failed receipts retry-safe and rejects stale or reused command ids", () => {
     const store = createTestStore();
     store.setBackend("user-1", "campaign-1", "reference");
