@@ -15,17 +15,42 @@ export interface StoredLogMessage {
 
 const MAX_LOG_MESSAGES = 40;
 
+function sanitizeStoredLogMessages(messages: unknown): unknown {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((message) => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+    const record = message as Record<string, unknown>;
+    return record.kind === "narration" && typeof record.text === "string"
+      ? { ...record, text: sanitizeReleasedNarration(record.text) }
+      : message;
+  });
+}
+
 function sanitizeStoredResult(result: unknown): unknown {
   if (!result || typeof result !== "object" || Array.isArray(result)) return result;
   const record = result as Record<string, unknown>;
+  let sanitized: Record<string, unknown> = record;
   const narration = record.narration;
-  if (!narration || typeof narration !== "object" || Array.isArray(narration)) return result;
-  const narrationRecord = narration as Record<string, unknown>;
-  if (typeof narrationRecord.text !== "string") return result;
-  return {
-    ...record,
-    narration: { ...narrationRecord, text: sanitizeReleasedNarration(narrationRecord.text) },
-  };
+  if (narration && typeof narration === "object" && !Array.isArray(narration)) {
+    const narrationRecord = narration as Record<string, unknown>;
+    if (typeof narrationRecord.text === "string") {
+      sanitized = {
+        ...sanitized,
+        narration: { ...narrationRecord, text: sanitizeReleasedNarration(narrationRecord.text) },
+      };
+    }
+  }
+  const session = record.session;
+  if (session && typeof session === "object" && !Array.isArray(session)) {
+    const sessionRecord = session as Record<string, unknown>;
+    if (Array.isArray(sessionRecord.log)) {
+      sanitized = {
+        ...sanitized,
+        session: { ...sessionRecord, log: sanitizeStoredLogMessages(sessionRecord.log) },
+      };
+    }
+  }
+  return sanitized;
 }
 
 /**
@@ -527,9 +552,7 @@ export class ReferenceEngineStore {
       .prepare("SELECT log_json FROM reference_engine_sessions WHERE user_id = ? AND campaign_id = ?")
       .get(userId, campaignId) as { log_json: string } | undefined;
     const current = row ? (JSON.parse(row.log_json) as StoredLogMessage[]) : [];
-    const sanitizedMessages = messages.map((message) => message.kind === "narration"
-      ? { ...message, text: sanitizeReleasedNarration(message.text) }
-      : message);
+    const sanitizedMessages = sanitizeStoredLogMessages(messages) as StoredLogMessage[];
     const next = [...current, ...sanitizedMessages].slice(-MAX_LOG_MESSAGES);
     this.db
       .prepare(
@@ -545,11 +568,7 @@ export class ReferenceEngineStore {
     const row = this.db
       .prepare("SELECT log_json FROM reference_engine_sessions WHERE user_id = ? AND campaign_id = ?")
       .get(userId, campaignId) as { log_json: string } | undefined;
-    return row
-      ? (JSON.parse(row.log_json) as StoredLogMessage[]).map((message) => message.kind === "narration"
-        ? { ...message, text: sanitizeReleasedNarration(message.text) }
-        : message)
-      : [];
+    return row ? sanitizeStoredLogMessages(JSON.parse(row.log_json)) as StoredLogMessage[] : [];
   }
 
   public deleteRouting(userId: string, campaignId: string): void {

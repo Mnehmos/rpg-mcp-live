@@ -128,9 +128,25 @@ describe("ReferenceEngineStore", () => {
     store.beginReferenceCommand("user-1", "campaign-1", "command-legacy", 0, '{"playerText":"look"}');
     store.resolveReferenceCommand("user-1", "campaign-1", "command-legacy", {
       narration: { text: `${marker}The torch gutters.` },
+      session: {
+        log: [{
+          id: "legacy-nested-narration",
+          kind: "narration",
+          text: `${marker}The cellar door opens wider.`,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }],
+      },
     });
     expect(store.getReferenceCommand("user-1", "campaign-1", "command-legacy")?.result).toEqual({
       narration: { text: "The torch gutters." },
+      session: {
+        log: [{
+          id: "legacy-nested-narration",
+          kind: "narration",
+          text: "The cellar door opens wider.",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }],
+      },
     });
   });
 
