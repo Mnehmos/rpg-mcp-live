@@ -25,7 +25,7 @@
       <nav class="top-nav" aria-label="Primary navigation">
         <a href="#how-it-works">How it works</a>
         <a href="#membership">Membership</a>
-        <a class="button button-quiet" href="#play">Enter the game</a>
+        <a id="table-entry-cta" class="button button-quiet" href="#play">Enter the game</a>
         <span id="user-button" class="user-button" hidden></span>
       </nav>
     </header>
@@ -40,7 +40,7 @@
             respond to what you do.
           </p>
           <div class="hero-actions">
-            <a class="button button-primary" href="#play">Start your first session <span>↗</span></a>
+            <a id="first-session-cta" class="button button-primary" href="#play">Start your first session <span>↗</span></a>
             <a class="text-link" href="#how-it-works">See how the table works <span>↓</span></a>
           </div>
           <p class="micro-copy">No group chat to schedule. No rails to follow. Just the next decision.</p>
@@ -411,7 +411,7 @@
                 <span id="composer-status" class="composer-status" data-state="ready" role="status" aria-live="polite"><span class="composer-status-dot" aria-hidden="true"></span><span id="composer-status-text">Ready</span></span>
                 <button class="button button-primary chat-submit" type="submit">Send <span>↗</span></button>
               </div>
-              <p class="chat-hint">Speak naturally. The engine rolls only when the fiction calls for a risk.</p>
+              <p id="chat-hint" class="chat-hint">Speak naturally. The engine rolls only when the fiction calls for a risk.</p>
             </form>
             <div id="action-heading" class="action-heading"><span class="tiny-label">NEXT MOVES</span><span id="action-subtitle">Suggested by the DM</span></div>
             <div id="action-row" class="action-row" aria-label="Suggested next moves"></div>

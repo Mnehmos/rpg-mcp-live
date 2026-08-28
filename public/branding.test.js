@@ -37,6 +37,8 @@ describe("player-facing branding", () => {
     expect(styles).toContain("height: auto;");
     expect(styles).toContain("min-height: 620px;");
     expect(styles).toContain("max-height: min(78vh, 820px);");
+    expect(styles).toContain(".play-app .game-log.is-opening");
+    expect(styles).toContain("min-height: 340px;");
     expect(styles).toContain(".play-app .player-panel");
     expect(styles).toContain("overflow: visible;");
     expect(styles).toContain("overscroll-behavior: contain;");
@@ -71,6 +73,23 @@ describe("player-facing branding", () => {
   it("keeps billing management available for any bound Stripe customer", () => {
     expect(app).toContain("portalButton.hidden = !hasStripeCustomer;");
     expect(app).toContain("checkoutButton.hidden = active || unresolvedCheckout;");
+  });
+
+  it("retires first-session acquisition chrome after a campaign exists", () => {
+    expect(page).toContain('id="first-session-cta"');
+    expect(page).toContain('id="table-entry-cta"');
+    expect(app).toContain('firstSessionCta.hidden = hasCampaign');
+    expect(app).toContain('document.body.classList.toggle("has-campaign", hasCampaign)');
+    expect(app).toContain('hasCampaign ? "Return to campaign" : "Enter the game"');
+    expect(styles).toContain(".play-app.has-campaign .hero { display: none; }");
+    expect(styles).toContain(".play-app.has-campaign .play-section { order: -1;");
+  });
+
+  it("shows opening presence and keeps table receipts inside the DM turn", () => {
+    expect(app).toContain("renderOpeningPresence(session, snapshot");
+    expect(app).toContain("pairToolDisclosureWithNarration(entries)");
+    expect(app).toContain('gameLog.classList.toggle("is-opening", openingPending || openingFailed)');
+    expect(app).not.toContain('<span class="log-icon">TOOLS</span>');
   });
 
   it("does not expose unsupported higher-level character creation", () => {
