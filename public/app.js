@@ -2642,6 +2642,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       if (!result.response.ok) throw new Error(commandFailureMessage(result.data, result.response.status));
       renderSession(result.data);
+      setStatus("Your story is open", "ready");
       return true;
     }).catch(function (error) {
       state.openingErrorCampaignId = campaignId;

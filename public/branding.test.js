@@ -92,6 +92,10 @@ describe("player-facing branding", () => {
     expect(app).not.toContain('<span class="log-icon">TOOLS</span>');
   });
 
+  it("settles the composer after a resumed or retried opening succeeds", () => {
+    expect(app).toMatch(/renderSession\(result\.data\);\s*setStatus\("Your story is open", "ready"\);\s*return true;/);
+  });
+
   it("does not expose unsupported higher-level character creation", () => {
     expect(page).toContain("New characters start at level 1.");
     expect(page).not.toContain('value="2">Level 2');
