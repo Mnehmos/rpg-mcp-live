@@ -1409,6 +1409,39 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.diagnostics?.providerCalls).toBe(2);
   });
 
+  it("skips a transient retry when the delay would consume the turn deadline", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      turnTimeoutMs: 5000,
+    });
+
+    const fetchMock = vi.fn(async () => new Response("upstream busy", {
+      status: 429,
+      headers: { "retry-after": "4" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const clientCommandId = "00000000-0000-4000-8000-000000000002";
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.", {
+      clientCommandId,
+      expectedCampaignVersion: 0,
+    })).rejects.toThrow(ReferenceDmProviderUnavailableError);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(store.getReferenceCommand("account-1", "campaign-1", clientCommandId))
+      .toMatchObject({ failure: { providerCalls: 1, phase: "tool_loop" } });
+  });
+
   it("throws ReferenceDmProviderUnavailableError when the retry also returns an empty choices array", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));

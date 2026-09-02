@@ -221,6 +221,7 @@ function storedToolCallId(entryId: string, index: number): string {
 
 const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = 4_000;
 const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
+const MIN_RETRY_REQUEST_BUDGET_MS = 1_000;
 
 function serializeStoredToolResult(result: unknown): string {
   const serialized = typeof result === "string" ? result : JSON.stringify(result) ?? "null";
@@ -1224,7 +1225,8 @@ export class ReferenceDungeonMaster {
       const retryDelayMs = error instanceof RetryableProviderHttpError ? error.retryDelayMs : 0;
       if (retryDelayMs > 0) {
         const remainingMs = deadlineAt === null ? null : deadlineAt - Date.now();
-        if (remainingMs !== null && remainingMs <= retryDelayMs) throw error;
+        const minimumRequestBudgetMs = Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs);
+        if (remainingMs !== null && remainingMs <= retryDelayMs + minimumRequestBudgetMs) throw error;
         await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
       }
       if (error instanceof EmptyCompletionError) {
