@@ -1374,6 +1374,41 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.diagnostics?.providerCalls).toBe(2);
   });
 
+  it("retries once after a transient OpenRouter 429, then succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: { message: "upstream busy" } }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": "0" },
+        });
+      }
+      return openRouterMessage("The room is quiet again.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.narration.text).toBe("The room is quiet again.");
+    expect(result.diagnostics?.providerCalls).toBe(2);
+  });
+
   it("throws ReferenceDmProviderUnavailableError when the retry also returns an empty choices array", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -1448,14 +1483,13 @@ describe("ReferenceDungeonMaster", () => {
       timeoutMs: 5000,
     });
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("boom", { status: 500 }))
-    );
+    const fetchMock = vi.fn(async () => new Response("boom", { status: 500, headers: { "retry-after": "0" } }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "hello")).rejects.toThrow(
       ReferenceDmProviderUnavailableError
     );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("write_docket persists via the store without ever reaching the remote reference engine", async () => {

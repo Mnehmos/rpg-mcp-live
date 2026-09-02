@@ -1219,8 +1219,19 @@ export class ReferenceDungeonMaster {
       const result = await attempt();
       return { ...result, providerCalls };
     } catch (error) {
-      if (!(error instanceof EmptyCompletionError)) throw error;
-      console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
+      const retryable = error instanceof EmptyCompletionError || error instanceof RetryableProviderHttpError;
+      if (!retryable || providerCalls >= 2) throw error;
+      const retryDelayMs = error instanceof RetryableProviderHttpError ? error.retryDelayMs : 0;
+      if (retryDelayMs > 0) {
+        const remainingMs = deadlineAt === null ? null : deadlineAt - Date.now();
+        if (remainingMs !== null && remainingMs <= retryDelayMs) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+      if (error instanceof EmptyCompletionError) {
+        console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
+      } else {
+        console.warn(`[reference-dm] retrying after transient OpenRouter response: status=${error.status} delayMs=${retryDelayMs}`);
+      }
       const result = await attempt();
       return { ...result, providerCalls };
     }
@@ -1277,7 +1288,11 @@ export class ReferenceDungeonMaster {
       });
       if (!response.ok) {
         const responseBody = await response.text().catch(() => "");
-        throw new Error(`OpenRouter request failed with status ${response.status}: ${responseBody.slice(0, 500)}`);
+        const message = `OpenRouter request failed with status ${response.status}: ${responseBody.slice(0, 500)}`;
+        if (response.status === 429 || response.status >= 500) {
+          throw new RetryableProviderHttpError(response.status, message, retryDelayFromHeader(response.headers));
+        }
+        throw new Error(message);
       }
       const data = (await response.json()) as {
         id?: string;
@@ -1304,6 +1319,27 @@ export class ReferenceDungeonMaster {
 }
 
 class EmptyCompletionError extends Error {}
+
+class RetryableProviderHttpError extends Error {
+  public constructor(
+    public readonly status: number,
+    message: string,
+    public readonly retryDelayMs: number,
+  ) {
+    super(message);
+    this.name = "RetryableProviderHttpError";
+  }
+}
+
+function retryDelayFromHeader(headers: Headers): number {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (!retryAfter) return 250;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds)) return Math.min(4_000, Math.max(0, Math.round(seconds * 1_000)));
+  const retryAt = Date.parse(retryAfter);
+  if (!Number.isNaN(retryAt)) return Math.min(4_000, Math.max(0, retryAt - Date.now()));
+  return 250;
+}
 
 function buildCompletionUsage(
   data: {
