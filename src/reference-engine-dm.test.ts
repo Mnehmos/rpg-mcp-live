@@ -16,6 +16,7 @@ import {
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
 import { LlmUsageStore } from "./llm-usage.js";
+import { ProviderGate } from "./provider-gate.js";
 import { config } from "./config.js";
 
 function ok(payload: unknown, text = ""): ReferenceToolCallResult {
@@ -2237,5 +2238,109 @@ describe("reference DM scene authoring contract", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(17);
     expect(result.narration.text).toContain("chamber");
+  });
+});
+
+describe("Provider capacity handling", () => {
+  function rateLimited(): Response {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: "Provider returned error",
+          code: 429,
+          metadata: { provider_name: "DeepInfra", is_byok: false, limit_source: "upstream_provider_shared_pool" },
+        },
+      }),
+      { status: 429, headers: { "retry-after": "0" } },
+    );
+  }
+
+  function buildDm(overrides: Record<string, unknown>) {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-capacity-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "primary-model",
+      timeoutMs: 5_000,
+      ...overrides,
+    });
+    return { dm };
+  }
+
+  it("spends the retry on the fallback model when the primary is rate-limited", async () => {
+    const { dm } = buildDm({ fallbackModel: "fallback-model" });
+    const models: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      models.push(JSON.parse(init.body).model as string);
+      return models.length === 1 ? rateLimited() : openRouterMessage("The doors part.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    // Retrying the same saturated model is close to useless; the retry must
+    // land on the configured fallback instead.
+    expect(models).toEqual(["primary-model", "fallback-model"]);
+    expect(result.narration.text).toBe("The doors part.");
+  });
+
+  it("retries the primary model when no fallback is configured", async () => {
+    const { dm } = buildDm({});
+    const models: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      models.push(JSON.parse(init.body).model as string);
+      return models.length === 1 ? rateLimited() : openRouterMessage("The doors part.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    expect(models).toEqual(["primary-model", "primary-model"]);
+  });
+
+  it("does not switch models for a non-rate-limit error", async () => {
+    const { dm } = buildDm({ fallbackModel: "fallback-model" });
+    const models: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      models.push(JSON.parse(init.body).model as string);
+      // A 500 is worth one straight retry: the model itself is not the problem.
+      return models.length === 1
+        ? new Response("upstream exploded", { status: 500 })
+        : openRouterMessage("The doors part.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    expect(models).toEqual(["primary-model", "primary-model"]);
+  });
+
+  it("runs provider calls through the gate and releases the slot afterwards", async () => {
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
+    const { dm } = buildDm({ gate });
+    vi.stubGlobal("fetch", vi.fn(async () => openRouterMessage("The doors part.")));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    // A leaked slot would wedge the whole deployment at maxConcurrent.
+    expect(gate.snapshot().inFlight).toBe(0);
+    expect(gate.snapshot().queueDepth).toBe(0);
+  });
+
+  it("releases the gate slot when the provider call fails outright", async () => {
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
+    const { dm } = buildDm({ gate });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 400 })));
+
+    await expect(
+      dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors."),
+    ).rejects.toBeInstanceOf(ReferenceDmProviderUnavailableError);
+
+    expect(gate.snapshot().inFlight).toBe(0);
   });
 });

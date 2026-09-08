@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ProviderGate } from "./provider-gate.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
 import type { TenantIdentity } from "./reference-engine-tenant.js";
@@ -222,6 +223,14 @@ function storedToolCallId(entryId: string, index: number): string {
 const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = 4_000;
 const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
 const MIN_RETRY_REQUEST_BUDGET_MS = 1_000;
+/** Upper bound on the random share added to a provider retry delay. */
+const RETRY_JITTER_FRACTION = 0.5;
+/**
+ * Gate key for calls with no authenticated account (local development and
+ * tooling). Grouping them under one key keeps unattributed traffic from
+ * escaping the per-account ceiling by having no account at all.
+ */
+const ANONYMOUS_GATE_ACCOUNT = "anonymous";
 
 function serializeStoredToolResult(result: unknown): string {
   const serialized = typeof result === "string" ? result : JSON.stringify(result) ?? "null";
@@ -678,6 +687,16 @@ export class ReferenceDungeonMaster {
       maxTokens?: number;
       turnTimeoutMs?: number;
       usage?: LlmUsageStore;
+      /**
+       * Tried once when the primary model is rate-limited or failing
+       * upstream. Absent means the turn fails instead of switching voice.
+       */
+      fallbackModel?: string;
+      /**
+       * Bounds simultaneous upstream calls. Absent means unbounded, which is
+       * only appropriate for tests and single-player local runs.
+       */
+      gate?: ProviderGate;
     }
   ) {}
 
@@ -1201,10 +1220,10 @@ export class ReferenceDungeonMaster {
     toolChoice: "auto" | "none" | "required" = "auto",
   ): Promise<ChatCompletionResult> {
     let providerCalls = 0;
-    const attempt = async (): Promise<ChatCompletionResult> => {
+    const attempt = async (model?: string): Promise<ChatCompletionResult> => {
       providerCalls += 1;
       try {
-        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice, model);
       } catch (error) {
         // The resolve loop increments its diagnostic counter only after a
         // completion returns. Preserve the attempted-call count on failures,
@@ -1222,7 +1241,28 @@ export class ReferenceDungeonMaster {
     } catch (error) {
       const retryable = error instanceof EmptyCompletionError || error instanceof RetryableProviderHttpError;
       if (!retryable || providerCalls >= 2) throw error;
-      const retryDelayMs = error instanceof RetryableProviderHttpError ? error.retryDelayMs : 0;
+
+      /**
+       * Retrying a rate-limited model against the same model is the one case
+       * where a straight repeat is close to useless: the pool that just
+       * refused us is still saturated a second later. When a fallback model
+       * is configured, spend the retry on it instead.
+       */
+      const rateLimited = error instanceof RetryableProviderHttpError && error.status === 429;
+      const retryModel = rateLimited && this.openRouter.fallbackModel
+        ? this.openRouter.fallbackModel
+        : undefined;
+
+      const baseDelayMs = error instanceof RetryableProviderHttpError ? error.retryDelayMs : 0;
+      /**
+       * Jitter matters more than the delay itself here. Every concurrent turn
+       * that hits one upstream 429 gets the same Retry-After, so an unjittered
+       * retry re-collides the whole burst at the same instant and produces a
+       * second, identical wave of 429s.
+       */
+      const retryDelayMs = baseDelayMs > 0
+        ? Math.round(baseDelayMs * (1 + Math.random() * RETRY_JITTER_FRACTION))
+        : 0;
       if (retryDelayMs > 0) {
         const remainingMs = deadlineAt === null ? null : deadlineAt - Date.now();
         const minimumRequestBudgetMs = Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs);
@@ -1232,9 +1272,12 @@ export class ReferenceDungeonMaster {
       if (error instanceof EmptyCompletionError) {
         console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
       } else {
-        console.warn(`[reference-dm] retrying after transient OpenRouter response: status=${error.status} delayMs=${retryDelayMs}`);
+        console.warn(
+          `[reference-dm] retrying after transient OpenRouter response: status=${error.status} delayMs=${retryDelayMs}`
+          + (retryModel ? ` fallbackModel=${retryModel}` : ""),
+        );
       }
-      const result = await attempt();
+      const result = await attempt(retryModel);
       return { ...result, providerCalls };
     }
   }
@@ -1245,7 +1288,9 @@ export class ReferenceDungeonMaster {
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
     toolChoice: "auto" | "none" | "required" = "auto",
+    modelOverride?: string,
   ): Promise<ChatCompletionResult> {
+    const model = modelOverride ?? this.openRouter.model;
     const remainingMs = deadlineAt === null
       ? this.openRouter.timeoutMs
       : Math.min(this.openRouter.timeoutMs, deadlineAt - Date.now());
@@ -1253,9 +1298,9 @@ export class ReferenceDungeonMaster {
     const maxTokens = this.openRouter.maxTokens !== undefined
       ? Math.max(1, Math.floor(this.openRouter.maxTokens))
       : undefined;
-    const reasoningModel = /(?:gpt-5|o[1-9]|reasoning|luna)/i.test(this.openRouter.model);
+    const reasoningModel = /(?:gpt-5|o[1-9]|reasoning|luna)/i.test(model);
     const body: Record<string, unknown> = {
-      model: this.openRouter.model,
+      model,
       messages,
       tools,
       tool_choice: toolChoice,
@@ -1264,6 +1309,21 @@ export class ReferenceDungeonMaster {
     };
     const usageStore = this.openRouter.usage;
     const estimatedPromptTokens = Math.ceil(estimateLlmTokens({ messages, tools }) * 1.25);
+
+    /**
+     * Take the provider slot before reserving budget, not after. A cost
+     * reservation has a TTL, and holding one across an unbounded queue wait
+     * would let it expire mid-queue and charge the account for a call that
+     * never happened.
+     */
+    const slot = this.openRouter.gate
+      ? await this.openRouter.gate.acquire(
+        usageContext?.userId ?? ANONYMOUS_GATE_ACCOUNT,
+        deadlineAt,
+        Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs),
+      )
+      : null;
+
     const reservation = usageStore && usageContext
       ? usageStore.reserve({
         userId: usageContext.userId,
@@ -1271,7 +1331,7 @@ export class ReferenceDungeonMaster {
         clientCommandId: usageContext.clientCommandId,
         source: "dm",
         provider: "openrouter",
-        model: this.openRouter.model,
+        model,
         estimatedPromptTokens,
         estimatedCompletionTokens: maxTokens ?? 900,
         estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, maxTokens ?? 900),
@@ -1316,6 +1376,8 @@ export class ReferenceDungeonMaster {
     } catch (error) {
       if (reservation) usageStore!.release(reservation.id);
       throw error;
+    } finally {
+      slot?.release();
     }
   }
 }

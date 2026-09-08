@@ -37,6 +37,12 @@ import { characterOptionPolicy } from "./character-option-policy.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
+import { AbuseBlockedError, AbuseGuard, AbuseRateLimitError } from "./abuse-guard.js";
+import {
+  ProviderGate,
+  ProviderGateAccountBusyError,
+  ProviderGateTimeoutError,
+} from "./provider-gate.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
 import { getQuickstartPreset, listQuickstartPresets } from "./quickstarts.js";
@@ -57,6 +63,14 @@ const store = new GameStore(config.databasePath);
 const stripe = createStripeClient();
 const referenceEngineStore = new ReferenceEngineStore(store.getRawDb());
 const llmUsageStore = new LlmUsageStore(store.getRawDb(), config.llmUsage);
+/**
+ * Shapes concurrent turns into a bounded line of upstream calls. Without it a
+ * traffic spike fans out one provider request per player and the shared pool
+ * answers the burst with 429s.
+ */
+const providerGate = new ProviderGate(config.providerGate);
+/** Burst limits, signup clustering, and the chargeback block list. */
+const abuseGuard = new AbuseGuard(store.getRawDb(), config.abuse);
 if (!config.referenceEngineConfigured) {
   throw new Error("REFERENCE_ENGINE_URL and REFERENCE_ENGINE_TOKEN are required; the Lantern engine is not wired.");
 }
@@ -88,6 +102,8 @@ const referenceDungeonMaster = config.openRouterConfigured
         timeoutMs: 60_000,
         turnTimeoutMs: config.referenceDmTimeoutMs,
         usage: llmUsageStore,
+        fallbackModel: config.openRouterFallbackModel || undefined,
+        gate: providerGate,
       }
     )
   : null;
@@ -280,6 +296,43 @@ async function sendCampaignCommand(
     return;
   }
 
+  /**
+   * Abuse admission runs before any engine or provider work, so a burst or a
+   * suspended account costs one indexed row read rather than a provider call.
+   * Nothing has been committed at this point, so both refusals are cleanly
+   * not-committed and safe for the client to surface as-is.
+   */
+  try {
+    abuseGuard.admitTurn(userId);
+  } catch (error) {
+    if (error instanceof AbuseRateLimitError) {
+      response
+        .status(429)
+        .set("retry-after", String(Math.ceil(error.retryAfterMs / 1000)))
+        .json({
+          code: error.code,
+          failureType: "rate_limited",
+          retryable: true,
+          stateChanged: "not_committed",
+          error: error.message,
+          retryAfterMs: error.retryAfterMs,
+        });
+      return;
+    }
+    if (error instanceof AbuseBlockedError) {
+      response.status(403).json({
+        code: error.code,
+        failureType: "account_blocked",
+        retryable: false,
+        stateChanged: "not_committed",
+        error: error.message,
+        reason: error.reason,
+      });
+      return;
+    }
+    throw error;
+  }
+
   const playerText = parsed.data.playerText
     ?? `The player chose the ${parsed.data.action} action.`;
   try {
@@ -334,6 +387,32 @@ async function sendCampaignCommand(
       });
       return;
     }
+    /**
+     * Gate refusals mean the request never reached the provider, so the turn
+     * is definitively not-committed and the player can simply send it again.
+     * That is a materially better outcome than the 502 an overloaded provider
+     * would have produced, and it must not be reported as a provider failure.
+     */
+    const gateError = error instanceof ProviderGateTimeoutError || error instanceof ProviderGateAccountBusyError
+      ? error
+      : error instanceof ReferenceDmProviderUnavailableError
+        && (error.cause instanceof ProviderGateTimeoutError || error.cause instanceof ProviderGateAccountBusyError)
+        ? error.cause
+        : null;
+    if (gateError) {
+      response.status(429).json({
+        code: gateError.code,
+        failureType: "capacity",
+        retryable: true,
+        stateChanged: "not_committed",
+        error: gateError.message,
+        ...(gateError instanceof ProviderGateTimeoutError
+          ? { waitedMs: gateError.waitedMs, queueDepth: gateError.queueDepth }
+          : { inFlight: gateError.inFlight, limit: gateError.limit }),
+      });
+      return;
+    }
+
     const usageError = error instanceof LlmUsageLimitError
       ? error
       : error instanceof ReferenceDmProviderUnavailableError && error.cause instanceof LlmUsageLimitError
@@ -475,7 +554,7 @@ app.post(
       return;
     }
     try {
-      await handleStripeEvent(event, store, stripe);
+      await handleStripeEvent(event, store, stripe, abuseGuard);
       response.json({ received: true });
     } catch (error) {
       console.error("Stripe webhook processing failed", error);
