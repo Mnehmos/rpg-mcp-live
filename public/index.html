@@ -281,37 +281,51 @@
               <div class="combat-resource-row"><span>HIT DICE <b id="character-hit-dice">—</b></span><span>TEMP HP <b id="character-temp-hp">0</b></span><span id="character-inspiration" class="inspiration-indicator">INSPIRATION · OFF</span></div>
               <div class="currency-row" aria-label="Currency"><span><b id="character-platinum-coins">0</b> pp</span><span><b id="character-gold-coins">0</b> gp</span><span><b id="character-electrum-coins">0</b> ep</span><span><b id="character-silver-coins">0</b> sp</span><span><b id="character-copper-coins">0</b> cp</span></div>
               <div class="carry-row"><span>CARRY</span><strong><span id="character-carry-weight">0</span> / <span id="character-carry-capacity">0</span> lb</strong></div>
-              <div class="sheet-subsection">
-                <span class="tiny-label">ABILITIES</span>
-                <div id="character-abilities" class="ability-grid"></div>
-              </div>
-              <div class="sheet-subsection">
-                <span class="tiny-label">SAVES &amp; SKILLS</span>
-                <div id="character-skills" class="skill-grid"></div>
-              </div>
-              <div class="sheet-subsection">
-                <span class="tiny-label">ATTACKS &amp; SPELLCASTING</span>
-                <div id="character-attacks" class="attack-list"></div>
-              </div>
-              <div class="sheet-subsection">
-                <span class="tiny-label">FEATURES &amp; PROFICIENCIES</span>
+              <div class="death-save-row"><span>DEATH SAVES</span><strong id="character-death-saves">0 / 0</strong></div>
+            </div>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">ABILITIES</span><span id="glance-abilities" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-abilities" class="ability-grid"></div></div>
+            </details>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">SAVES &amp; SKILLS</span><span id="glance-skills" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-skills" class="skill-grid"></div></div>
+            </details>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">ATTACKS &amp; SPELLCASTING</span><span id="glance-attacks" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-attacks" class="attack-list"></div></div>
+            </details>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">FEATURES &amp; PROFICIENCIES</span><span id="glance-features" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body">
                 <div id="character-features" class="feature-list"></div>
                 <div id="character-feature-details" class="feature-detail-list"></div>
               </div>
-              <div class="sheet-subsection">
-                <span class="tiny-label">OTHER PROFICIENCIES &amp; LANGUAGES</span>
-                <div id="character-proficiencies" class="proficiency-list"></div>
-              </div>
-              <div id="character-lore-section" class="sheet-subsection" hidden>
-                <span class="tiny-label">CHARACTER STORY</span>
-                <div id="character-lore" class="lore-grid"></div>
-              </div>
-              <div id="character-source-section" class="sheet-subsection" hidden>
-                <span class="tiny-label">SOURCE-BACKED RULES</span>
-                <div id="character-source-details" class="source-detail-list"></div>
-              </div>
-              <div id="character-spellbook-section" class="sheet-subsection" hidden>
-                <div class="spell-heading"><span class="tiny-label">SPELLCASTING</span><span id="spell-selection-mode">SPELLBOOK</span></div>
+            </details>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">OTHER PROFICIENCIES &amp; LANGUAGES</span><span id="glance-proficiencies" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-proficiencies" class="proficiency-list"></div></div>
+            </details>
+
+            <details id="character-lore-section" class="dossier-section" hidden>
+              <summary><span class="tiny-label">CHARACTER STORY</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-lore" class="lore-grid"></div></div>
+            </details>
+
+            <details id="character-source-section" class="dossier-section" hidden>
+              <summary><span class="tiny-label">SOURCE-BACKED RULES</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-source-details" class="source-detail-list"></div></div>
+            </details>
+
+            <details id="character-spellbook-section" class="dossier-section" hidden>
+              <summary><span class="tiny-label">SPELLCASTING</span><span id="glance-spells" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body">
+                <p><span id="spell-selection-mode" class="spell-list-label">SPELLBOOK</span></p>
                 <p id="spellcasting-rules-help" class="form-help spellcasting-rules-help"></p>
                 <div class="spellbook-editor">
                   <button id="spellbook-toggle" class="item-action" type="button" hidden>Manage spells</button>
@@ -328,68 +342,73 @@
                   <div><span id="prepared-spell-label" class="spell-list-label">PREPARED</span><div id="character-prepared-spells" class="spell-list"></div></div>
                 </div>
               </div>
-              <div class="sheet-subsection">
-                <span class="tiny-label">INVENTORY</span>
-                <div id="character-inventory" class="inventory-list"></div>
+            </details>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">INVENTORY</span><span id="glance-inventory" class="dossier-glance">—</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="character-inventory" class="inventory-list"></div></div>
+            </details>
+
+            <div id="character-conditions" class="condition-list" hidden></div>
+            <div id="character-custody" class="condition-list" hidden></div>
+            <div id="scene-actor-status" class="condition-list" hidden></div>
+
+            <details class="dossier-section">
+              <summary><span class="tiny-label">YOUR DETAILS</span><span class="dossier-glance">PLAYER EDIT</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body">
+                <form id="character-edit-form" class="note-form">
+                  <textarea id="character-description-input" rows="4" maxlength="2000" placeholder="Describe your character's appearance, history, ideals, bonds, and flaws in your own words."></textarea>
+                  <details class="character-details-editor"><summary>Edit the full character sheet</summary>
+                    <div class="detail-edit-grid">
+                      <label>Player name<input id="character-player-name-input" maxlength="120"></label>
+                      <label>Age<input id="character-age-input" maxlength="80"></label>
+                      <label>Height<input id="character-height-input" maxlength="80"></label>
+                      <label>Weight<input id="character-weight-input" maxlength="80"></label>
+                      <label>Eyes<input id="character-eyes-input" maxlength="80"></label>
+                      <label>Skin<input id="character-skin-input" maxlength="80"></label>
+                      <label>Hair<input id="character-hair-input" maxlength="80"></label>
+                      <label>Faction / symbol<input id="character-faction-input" maxlength="160"></label>
+                    </div>
+                    <div class="detail-edit-grid detail-edit-wide">
+                      <label>Personality traits<textarea id="character-personality-input" rows="2" maxlength="2000"></textarea></label>
+                      <label>Ideals<textarea id="character-ideals-input" rows="2" maxlength="2000"></textarea></label>
+                      <label>Bonds<textarea id="character-bonds-input" rows="2" maxlength="2000"></textarea></label>
+                      <label>Flaws<textarea id="character-flaws-input" rows="2" maxlength="2000"></textarea></label>
+                      <label>Appearance<textarea id="character-appearance-input" rows="3" maxlength="4000"></textarea></label>
+                      <label>Backstory<textarea id="character-backstory-input" rows="3" maxlength="6000"></textarea></label>
+                      <label>Allies &amp; organizations<textarea id="character-allies-input" rows="3" maxlength="4000"></textarea></label>
+                      <label>Treasure<textarea id="character-treasure-input" rows="3" maxlength="4000"></textarea></label>
+                    </div>
+                    <label class="inspiration-input"><input id="character-inspiration-input" type="checkbox"><span>My character has inspiration</span></label>
+                    <label>Temporary hit points<input id="character-temp-hp-input" type="number" min="0" max="1000000" step="1"></label>
+                  </details>
+                  <button class="button button-quiet" type="submit">Save details <span>↗</span></button>
+                  <p id="character-edit-feedback" class="form-feedback" role="status"></p>
+                </form>
               </div>
-              <div id="character-conditions" class="condition-list" hidden></div>
-              <div id="character-custody" class="condition-list" hidden></div>
-              <div id="scene-actor-status" class="condition-list" hidden></div>
-              <div class="death-save-row"><span>DEATH SAVES</span><strong id="character-death-saves">0 / 0</strong></div>
-            </div>
+            </details>
 
-            <section class="character-edit-card" aria-label="Character details editor">
-              <div class="notes-heading"><span class="tiny-label">YOUR DETAILS</span><span>PLAYER EDIT</span></div>
-              <form id="character-edit-form" class="note-form">
-                <textarea id="character-description-input" rows="4" maxlength="2000" placeholder="Describe your character's appearance, history, ideals, bonds, and flaws in your own words."></textarea>
-                <details class="character-details-editor"><summary>Edit the full character sheet</summary>
-                  <div class="detail-edit-grid">
-                    <label>Player name<input id="character-player-name-input" maxlength="120"></label>
-                    <label>Age<input id="character-age-input" maxlength="80"></label>
-                    <label>Height<input id="character-height-input" maxlength="80"></label>
-                    <label>Weight<input id="character-weight-input" maxlength="80"></label>
-                    <label>Eyes<input id="character-eyes-input" maxlength="80"></label>
-                    <label>Skin<input id="character-skin-input" maxlength="80"></label>
-                    <label>Hair<input id="character-hair-input" maxlength="80"></label>
-                    <label>Faction / symbol<input id="character-faction-input" maxlength="160"></label>
-                  </div>
-                  <div class="detail-edit-grid detail-edit-wide">
-                    <label>Personality traits<textarea id="character-personality-input" rows="2" maxlength="2000"></textarea></label>
-                    <label>Ideals<textarea id="character-ideals-input" rows="2" maxlength="2000"></textarea></label>
-                    <label>Bonds<textarea id="character-bonds-input" rows="2" maxlength="2000"></textarea></label>
-                    <label>Flaws<textarea id="character-flaws-input" rows="2" maxlength="2000"></textarea></label>
-                    <label>Appearance<textarea id="character-appearance-input" rows="3" maxlength="4000"></textarea></label>
-                    <label>Backstory<textarea id="character-backstory-input" rows="3" maxlength="6000"></textarea></label>
-                    <label>Allies &amp; organizations<textarea id="character-allies-input" rows="3" maxlength="4000"></textarea></label>
-                    <label>Treasure<textarea id="character-treasure-input" rows="3" maxlength="4000"></textarea></label>
-                  </div>
-                  <label class="inspiration-input"><input id="character-inspiration-input" type="checkbox"><span>My character has inspiration</span></label>
-                  <label>Temporary hit points<input id="character-temp-hp-input" type="number" min="0" max="1000000" step="1"></label>
-                </details>
-                <button class="button button-quiet" type="submit">Save details <span>↗</span></button>
-                <p id="character-edit-feedback" class="form-feedback" role="status"></p>
-              </form>
-            </section>
+            <details class="dossier-section">
+              <summary><span class="tiny-label">QUEST JOURNAL</span><span id="quest-count" class="dossier-glance">0</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="quest-list" class="quest-list"><p class="notes-empty">No active quests yet.</p></div></div>
+            </details>
 
-            <section class="quest-card" aria-label="Quest journal">
-              <div class="notes-heading"><span class="tiny-label">QUEST JOURNAL</span><span id="quest-count">0</span></div>
-              <div id="quest-list" class="quest-list"><p class="notes-empty">No active quests yet.</p></div>
-            </section>
+            <details id="procedural-notice-card" class="dossier-section" aria-label="Procedural notices" hidden>
+              <summary><span class="tiny-label">PROCEDURAL NOTICES</span><span id="procedural-notice-count" class="dossier-glance">0</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body"><div id="procedural-notices" class="procedural-notices"></div></div>
+            </details>
 
-            <section id="procedural-notice-card" class="notes-card procedural-notice-card" aria-label="Procedural notices" hidden>
-              <div class="notes-heading"><span class="tiny-label">PROCEDURAL NOTICES</span><span id="procedural-notice-count">0</span></div>
-              <div id="procedural-notices" class="procedural-notices"></div>
-            </section>
-
-            <section class="notes-card" aria-label="Player notes">
-              <div class="notes-heading"><span class="tiny-label">PLAYER NOTES</span><span id="notes-count">0</span></div>
-              <div id="player-notes" class="player-notes"><p class="notes-empty">Notes you and the DM choose to keep.</p></div>
-              <form id="note-form" class="note-form">
-                <textarea id="note-input" rows="3" maxlength="4000" placeholder="Write a note for your future self…"></textarea>
-                <button class="button button-quiet" type="submit">Add note <span>↗</span></button>
-                <p id="note-feedback" class="form-feedback" role="status"></p>
-              </form>
-            </section>
+            <details class="dossier-section">
+              <summary><span class="tiny-label">PLAYER NOTES</span><span id="notes-count" class="dossier-glance">0</span><span class="dossier-chevron" aria-hidden="true">▾</span></summary>
+              <div class="dossier-body">
+                <div id="player-notes" class="player-notes"><p class="notes-empty">Notes you and the DM choose to keep.</p></div>
+                <form id="note-form" class="note-form">
+                  <textarea id="note-input" rows="3" maxlength="4000" placeholder="Write a note for your future self…"></textarea>
+                  <button class="button button-quiet" type="submit">Add note <span>↗</span></button>
+                  <p id="note-feedback" class="form-feedback" role="status"></p>
+                </form>
+              </div>
+            </details>
 
             <div id="combat-card" class="combat-card" hidden>
               <div class="combat-heading"><span class="tiny-label">ENCOUNTER</span><span id="combat-round">ROUND —</span></div>

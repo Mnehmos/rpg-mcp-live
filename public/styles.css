@@ -985,3 +985,17 @@ h1 i { color: var(--amber); font-style: italic; }
 .membership-status strong { color: var(--ink); font-size: 10px; letter-spacing: .16em; }
 .membership-status span { color: var(--muted); }
 .play-app .membership-status { border-color: rgba(0, 255, 136, .38); background: rgba(0, 255, 136, .06); }
+/* The dossier folds into titled disclosures: each summary carries the live
+   at-a-glance values for its category, so the sheet never owns the page. */
+.dossier-section { margin-top: 8px; border: 1px solid var(--line); background: rgba(19, 15, 10, .45); }
+.dossier-section > summary { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.dossier-section > summary::-webkit-details-marker { display: none; }
+.dossier-section > summary:hover { background: rgba(233, 167, 91, .05); }
+.dossier-section > summary .tiny-label { margin: 0; flex: 0 0 auto; }
+.dossier-glance { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--faint); font-size: 10px; letter-spacing: .04em; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.dossier-glance#quest-count, .dossier-glance#notes-count, .dossier-glance#procedural-notice-count { flex: 0 0 auto; color: var(--mint); font-weight: 800; }
+.dossier-chevron { flex: 0 0 auto; color: var(--amber); font-size: 10px; transition: transform .18s ease; }
+.dossier-section[open] .dossier-chevron { transform: rotate(180deg); }
+.dossier-section[open] > summary { border-bottom: 1px solid var(--line); }
+.dossier-body { padding: 12px; }
+.dossier-body > p:first-child { margin-top: 0; }
