@@ -33,12 +33,13 @@ describe("player-facing branding", () => {
     expect(styles).toContain(".site-header .top-nav .button { display: none; }");
   });
 
-  it("uses the public style guide tokens on the play surface", () => {
-    expect(styles).toContain("--amber: #00ffff");
-    expect(styles).toContain("--mint: #00ff88");
-    expect(styles).toContain('font-family: "Share Tech Mono"');
-    expect(styles).toContain(".play-app::before");
-    expect(styles).toContain(".play-app::after");
+  it("keeps one warm candlelit theme and keeps the cyberpunk skin off the page", () => {
+    expect(styles).toContain("--amber: #e6ac63");
+    expect(styles).toContain("--mint: #a3c9ad");
+    expect(styles).toContain("font-family: Inter, ui-sans-serif");
+    for (const cyberpunk of ["#00ffff", "#00ff88", "#00ff00", "#ff006e", "Share Tech Mono", "IBM Plex Mono", "play-scanline"]) {
+      expect(styles).not.toContain(cyberpunk);
+    }
   });
 
   it("keeps the desktop dossier natural while preserving mobile scrolling", () => {
