@@ -9,10 +9,18 @@ const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
 
 describe("player-facing branding", () => {
   it("uses Quest Keeper AI in the page chrome", () => {
-    expect(page).toContain("Quest Keeper AI — Your next campaign starts here");
+    expect(page).toContain("Quest Keeper AI — Play now in your browser");
     expect(page).toContain("Quest Keeper AI home");
     expect(page).toContain("QUEST KEEPER <em>/</em> AI <small>LIVE</small>");
     expect(page).not.toContain("Lantern Table");
+  });
+
+  it("leads with the two entry paths instead of tagline copy", () => {
+    expect(page).toContain('data-action="play-now"');
+    expect(page).toContain('data-action="create-character"');
+    expect(page).toContain("Create a custom character");
+    expect(page).not.toContain("Your next campaign starts");
+    expect(page).not.toContain("Start free. Stay for the story.");
   });
 
   it("uses Quest Keeper AI in the favicon accessibility label", () => {
@@ -80,7 +88,7 @@ describe("player-facing branding", () => {
     expect(page).toContain('id="table-entry-cta"');
     expect(app).toContain('firstSessionCta.hidden = hasCampaign');
     expect(app).toContain('document.body.classList.toggle("has-campaign", hasCampaign)');
-    expect(app).toContain('hasCampaign ? "Return to campaign" : "Enter the game"');
+    expect(app).toContain('hasCampaign ? "Return to campaign" : "Play now"');
     expect(styles).toContain(".play-app.has-campaign .hero { display: none; }");
     expect(styles).toContain(".play-app.has-campaign .play-section { order: -1;");
   });

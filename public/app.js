@@ -41,7 +41,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     { id: "ember-watch", title: "The Ember Watch", tagline: "The old lighthouse is burning in a dead calm.", description: "A fast-moving rescue story on a fogbound harbor." },
     { id: "glass-under-moon", title: "Glass Under Moonlight", tagline: "Something beneath the city is answering the bells.", description: "A strange arcane investigation in an old river city." },
   ];
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, pendingQuickstartId: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -195,6 +195,19 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function openAuth() {
+    var authCopy = $("#auth-dialog .dialog-copy");
+    if (authCopy) {
+      if (state.pendingQuickstartId === "random") {
+        authCopy.textContent = "One step left. Sign in and your character hits the table immediately — your first session is free.";
+      } else {
+        var pending = state.pendingQuickstartId
+          ? (state.quickstarts || []).find(function (q) { return q.id === state.pendingQuickstartId; })
+          : null;
+        authCopy.textContent = pending
+          ? "One step left. Sign in and \"" + pending.title + "\" launches immediately — your first session is free."
+          : "Sign in to keep your campaign waiting for you.";
+      }
+    }
     if (isSignedIn()) {
       if (state.session) {
         state.managerOpen = true;
@@ -1560,7 +1573,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var firstSessionCta = $("#first-session-cta");
     var tableEntryCta = $("#table-entry-cta");
     if (firstSessionCta) firstSessionCta.hidden = hasCampaign;
-    if (tableEntryCta) tableEntryCta.textContent = hasCampaign ? "Return to campaign" : "Enter the game";
+    if (tableEntryCta) tableEntryCta.textContent = hasCampaign ? "Return to campaign" : "Play now";
     document.body.classList.toggle("has-campaign", hasCampaign);
   }
 
@@ -1631,15 +1644,15 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     }
 
     if (!session) {
-      setText("#play-title", isSignedIn() ? "Choose your story." : "Play here.");
+      setText("#play-title", isSignedIn() ? "Press play, or pick your story." : "Press play to begin.");
       setPanel("#game-shell", true);
       setPanel("#character-setup", true);
       setPanel("#tutorial-panel", true);
-      setPanel("#quickstart-panel", state.managerOpen);
+      setPanel("#quickstart-panel", false);
       setPanel("#campaign-manager", true);
-      setPanel("#campaign-auth-gate", true);
-      setPanel("#campaign-form", true);
-      setPanel("#show-campaign-form", true);
+      setPanel("#campaign-auth-gate", isSignedIn());
+      setPanel("#campaign-form", Boolean(state.createMode));
+      setPanel("#show-campaign-form", !state.createMode);
       return;
     }
 
@@ -2514,13 +2527,17 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
 
   function startQuickstart(quickstartId) {
     if (!isSignedIn()) {
+      state.pendingQuickstartId = quickstartId;
+      setStatus(quickstartId === "random"
+        ? "Sign in once — your character hits the table right after."
+        : "Sign in to start this story — it launches right after.", "thinking");
       openAuth();
       return Promise.resolve(false);
     }
     if (state.quickstartLoading) return Promise.resolve(false);
     state.quickstartLoading = quickstartId;
     renderQuickstarts();
-    setStatus("Setting the table", "thinking");
+    setStatus(quickstartId === "random" ? "Rolling up your character" : "Setting the table", "thinking");
     return requestJson("/api/quickstarts/" + encodeURIComponent(quickstartId), {
       method: "POST",
       body: JSON.stringify({}),
@@ -2533,9 +2550,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       state.managerOpen = false;
       state.createMode = false;
       renderSession(result.data);
-      setStatus("Your story is ready", "ready");
+      var rolledName = result.data.quickstart && result.data.quickstart.character;
+      setStatus(rolledName ? "You are " + rolledName + ". Your story is ready" : "Your story is ready", "ready");
       if (result.data.autoOpen && state.session && !state.session.worldContext) {
-        setStatus("The DM is opening your first scene", "thinking");
+        setStatus(rolledName
+          ? "You are " + rolledName + ". The DM is opening the first scene"
+          : "The DM is opening your first scene", "thinking");
         return beginCampaignOpening(true).then(function (opened) {
           if (opened) setStatus("Your story is open", "ready");
           return opened;
@@ -2550,6 +2570,20 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       state.quickstartLoading = null;
       renderQuickstarts();
     });
+  }
+
+  function playNow() {
+    var playSection = $("#play");
+    if (playSection) playSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    return startQuickstart("random");
+  }
+
+  function createCustomCharacter() {
+    state.managerOpen = true;
+    state.createMode = true;
+    renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
+    var manager = $("#campaign-manager");
+    if (manager) manager.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function createCampaign(event) {
@@ -3095,14 +3129,19 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (typeof state.clerk.addListener === "function") {
           state.clerk.addListener(function () {
             renderIdentity();
+            var pendingQuickstart = state.pendingQuickstartId;
+            state.pendingQuickstartId = null;
             if (state.clerk.isSignedIn) {
+              closeAuth();
               loadCharacterOptions();
               loadContentCatalog();
             } else {
               state.characterOptions = null;
               state.contentCatalog = null;
             }
-            refreshSession();
+            refreshSession().then(function () {
+              if (pendingQuickstart && state.clerk.isSignedIn) startQuickstart(pendingQuickstart);
+            });
           });
         }
         renderIdentity();
@@ -3200,6 +3239,18 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         state.managerOpen = true;
         state.createMode = true;
         renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
+      });
+    });
+    document.querySelectorAll('[data-action="play-now"]').forEach(function (button) {
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        playNow();
+      });
+    });
+    document.querySelectorAll('[data-action="create-character"]').forEach(function (button) {
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        createCustomCharacter();
       });
     });
     document.querySelectorAll('[data-action="show-quickstarts"]').forEach(function (button) {

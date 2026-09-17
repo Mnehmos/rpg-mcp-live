@@ -37,6 +37,8 @@ a { color: inherit; text-decoration: none; }
 .button:hover { transform: translateY(-2px); }
 .button-primary { background: var(--amber); color: #19140f; }
 .button-primary:hover { background: var(--amber-bright); }
+.button-secondary { border-color: rgba(233, 167, 91, .55); color: var(--amber-bright); background: transparent; }
+.button-secondary:hover { border-color: var(--amber-bright); background: rgba(233, 167, 91, .08); }
 .button-quiet { border-color: var(--line-strong); color: var(--ink); min-height: 34px; padding: 0 14px; }
 .button-quiet:hover { border-color: var(--amber); }
 .button-full { width: 100%; }
@@ -312,6 +314,9 @@ h1 i { color: var(--amber); font-style: italic; }
 .campaign-license-choice small { color: var(--faint); font-size: 9px; line-height: 1.4; }
 .campaign-rules-help { margin: 0; color: var(--faint); font-size: 9px; line-height: 1.5; }
 .campaign-list-wrap { padding-top: 24px; }
+.quickstart-instant { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-top: 22px; padding: 16px 18px; border: 1px solid rgba(233, 167, 91, .35); background: linear-gradient(145deg, rgba(233, 167, 91, .12), rgba(8, 10, 14, .42)); }
+.quickstart-instant .button { min-width: 170px; }
+.quickstart-instant-copy { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .quickstart-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding-top: 25px; }
 .quickstart-card { display: grid; align-content: start; gap: 9px; min-height: 215px; padding: 18px; border: 1px solid rgba(233, 167, 91, .28); background: linear-gradient(145deg, rgba(233, 167, 91, .09), rgba(8, 10, 14, .42)); color: var(--muted); text-align: left; cursor: pointer; transition: border-color .2s, background .2s, transform .2s; }
 .quickstart-card:hover, .quickstart-card:focus-visible { border-color: var(--amber-bright); background: linear-gradient(145deg, rgba(233, 167, 91, .18), rgba(8, 10, 14, .55)); transform: translateY(-2px); }
