@@ -40,7 +40,7 @@
             respond to what you do.
           </p>
           <div class="hero-actions">
-            <a class="button button-primary" href="#play">Start your first session <span>↗</span></a>
+            <a class="button button-primary" href="#play">Play free in your browser <span>↗</span></a>
             <a class="text-link" href="#how-it-works">See how the table works <span>↓</span></a>
           </div>
           <p class="micro-copy">No group chat to schedule. No rails to follow. Just the next decision.</p>
@@ -76,33 +76,6 @@
         </article>
       </section>
 
-      <section id="membership" class="membership shell">
-        <div>
-          <p class="eyebrow">FREE TABLE + PLAYER PASS</p>
-          <h2>Start free. Stay for the story.</h2>
-          <p class="section-lede">Begin on the free tier, then choose the Player Pass when you want more room for a persistent campaign.</p>
-        </div>
-        <div class="price-card">
-          <div>
-            <p class="price-label" id="subscription-label">Player Pass</p>
-            <p class="price" id="subscription-price">Configure in Stripe</p>
-          </div>
-          <ul>
-            <li><span>✦</span> Persistent player state</li>
-            <li><span>✦</span> Server-kept campaign history</li>
-            <li><span>✦</span> New worlds as they arrive</li>
-          </ul>
-          <div id="membership-status" class="membership-status" hidden aria-live="polite">
-            <strong>PLAYER PASS ACTIVE</strong>
-            <span id="membership-status-copy">Your membership is active.</span>
-          </div>
-          <div class="membership-actions">
-            <button id="membership-checkout" class="button button-primary button-full" type="button" data-action="checkout">Claim your seat <span>↗</span></button>
-            <button id="membership-portal" class="button button-quiet button-full" type="button" data-action="portal" hidden>Manage membership <span>↗</span></button>
-          </div>
-          <p class="price-footnote">Cancel from the customer portal at any time.</p>
-        </div>
-      </section>
 
       <section id="play" class="play-section shell">
         <div class="play-heading">
@@ -126,16 +99,45 @@
             <div><p class="eyebrow">PLAY HERE</p><h3>Choose a story and start playing.</h3><p>No campaign planning or character sheet required. Pick a table and the DM will put you in the first scene.</p></div>
             <span class="onboarding-count">QUICKSTART</span>
           </div>
+          <div class="journey-steps" aria-label="How to start"><span class="active">1 · PICK A STORY</span><span>2 · SIGN IN</span><span>3 · PLAY IN YOUR BROWSER</span></div>
           <div id="quickstart-list" class="quickstart-list" aria-live="polite"></div>
           <div class="quickstart-footer"><span>Want to build everything yourself?</span><button class="button button-quiet" data-action="show-campaign-form">Build my own campaign <span>↗</span></button></div>
         </section>
+
+      <section id="membership" class="membership shell">
+        <div>
+          <p class="eyebrow">FREE TABLE + PLAYER PASS</p>
+          <h2>Start free. Stay for the story.</h2>
+          <p class="section-lede">Begin on the free tier, then choose the Player Pass when you want more room for a persistent campaign.</p>
+        </div>
+        <div class="price-card">
+          <div>
+            <p class="price-label" id="subscription-label">Player Pass</p>
+            <p class="price" id="subscription-price">Configure in Stripe</p>
+          </div>
+          <ul>
+            <li><span>✦</span> Persistent player state</li>
+            <li><span>✦</span> Server-kept campaign history</li>
+            <li><span>✦</span> New worlds as they arrive</li>
+          </ul>
+          <div id="membership-status" class="membership-status" hidden aria-live="polite">
+            <strong>PLAYER PASS ACTIVE</strong>
+            <span id="membership-status-copy">Your membership is active.</span>
+          </div>
+          <div class="membership-actions">
+            <button id="membership-checkout" class="button button-primary button-full" type="button" data-action="checkout">Get the Player Pass <span>↗</span></button>
+            <button id="membership-portal" class="button button-quiet button-full" type="button" data-action="portal" hidden>Manage membership <span>↗</span></button>
+          </div>
+          <p class="price-footnote">Cancel from the customer portal at any time.</p>
+        </div>
+      </section>
 
         <section id="campaign-manager" class="onboarding-panel" hidden>
           <div class="onboarding-header">
             <div><p class="eyebrow">CAMPAIGN MANAGER</p><h3>Choose your world.</h3><p id="campaign-manager-copy">Open a campaign, start a new one, or remove an old world from your account.</p></div>
             <span class="onboarding-count">YOUR WORLDS</span>
           </div>
-          <div id="campaign-auth-gate" class="setup-auth-gate" hidden><p>Sign in to create and keep your own worlds.</p><button class="button button-primary" data-action="open-auth">Sign in to begin <span>↗</span></button></div>
+          <div id="campaign-auth-gate" class="setup-auth-gate" hidden><p>Pick a story below — sign in so your campaign is saved for you.</p><button class="button button-primary" data-action="open-auth">Sign in to begin <span>↗</span></button></div>
           <div id="campaign-list-wrap" class="campaign-list-wrap" hidden><span class="tiny-label">YOUR CAMPAIGNS</span><div id="campaign-list" class="campaign-list"></div></div>
           <button id="show-campaign-form" class="button button-quiet" data-action="show-campaign-form" hidden>Start a new campaign <span>↗</span></button>
           <form id="campaign-form" class="setup-form">
@@ -430,7 +432,7 @@
     <dialog id="auth-dialog" class="auth-dialog">
       <button class="dialog-close" data-action="close-auth" aria-label="Close sign in">×</button>
       <p class="eyebrow">WELCOME TO THE TABLE</p>
-      <h2>Take your seat.</h2>
+      <h2>One step to play.</h2>
       <p class="dialog-copy">Sign in to keep your campaign waiting for you.</p>
       <div id="auth-mount" class="auth-mount"></div>
       <p id="auth-fallback" class="auth-fallback" hidden></p>
