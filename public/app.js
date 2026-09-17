@@ -198,13 +198,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var authCopy = $("#auth-dialog .dialog-copy");
     if (authCopy) {
       if (state.pendingQuickstartId === "random") {
-        authCopy.textContent = "One step left. Sign in and your character hits the table immediately — your first session is free.";
+        authCopy.textContent = "One step left. Sign in and your character hits the table immediately — free to play, no card.";
       } else {
         var pending = state.pendingQuickstartId
           ? (state.quickstarts || []).find(function (q) { return q.id === state.pendingQuickstartId; })
           : null;
         authCopy.textContent = pending
-          ? "One step left. Sign in and \"" + pending.title + "\" launches immediately — your first session is free."
+          ? "One step left. Sign in and \"" + pending.title + "\" launches immediately — free to play, no card."
           : "Sign in to keep your campaign waiting for you.";
       }
     }
