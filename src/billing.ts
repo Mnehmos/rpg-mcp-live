@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import type { AbuseGuard } from "./abuse-guard.js";
 import { config } from "./config.js";
 import type { GameStore } from "./store.js";
 
@@ -298,7 +299,12 @@ export async function syncCompletedCheckoutSession(
   return true;
 }
 
-export async function handleStripeEvent(event: Stripe.Event, store: GameStore, stripe?: Stripe): Promise<void> {
+export async function handleStripeEvent(
+  event: Stripe.Event,
+  store: GameStore,
+  stripe?: Stripe,
+  abuseGuard?: Pick<AbuseGuard, "block">,
+): Promise<void> {
   if (store.hasWebhookEvent(event.id)) return;
 
   switch (event.type) {
@@ -356,9 +362,67 @@ export async function handleStripeEvent(event: Stripe.Event, store: GameStore, s
       }
       break;
     }
+    /**
+     * A dispute is adversarial by construction: the customer went to their
+     * bank instead of to support, and the money is already gone along with a
+     * dispute fee. Revoking the pass alone is not enough, because the account
+     * simply drops to the free tier and keeps costing provider spend, so the
+     * account is blocked outright until a human resolves it.
+     */
+    case "charge.dispute.created": {
+      const dispute = event.data.object as Stripe.Dispute;
+      const chargeId = stripeId(dispute.charge as string | null);
+      let customerId: string | null = null;
+      if (chargeId && stripe) {
+        const charge = await stripe.charges.retrieve(chargeId);
+        customerId = stripeId(charge.customer as string | Stripe.Customer | Stripe.DeletedCustomer | null);
+      }
+      const userId = customerId ? store.findUserIdByStripeCustomer(customerId) : null;
+      if (userId) {
+        revokeEntitlement(store, userId, "disputed", customerId);
+        abuseGuard?.block(userId, "payment_disputed", `stripe_dispute:${dispute.id}`);
+      }
+      break;
+    }
+
+    /**
+     * A refund is not adversarial on its own — most are issued by the
+     * operator as goodwill — so it withdraws the paid entitlement without
+     * suspending the account. The player keeps free-tier access; they simply
+     * stop getting what they no longer paid for.
+     */
+    case "charge.refunded": {
+      const charge = event.data.object as Stripe.Charge;
+      const customerId = stripeId(charge.customer as string | Stripe.Customer | Stripe.DeletedCustomer | null);
+      const userId = customerId ? store.findUserIdByStripeCustomer(customerId) : null;
+      if (userId) revokeEntitlement(store, userId, "refunded", customerId);
+      break;
+    }
     default:
       break;
   }
 
   store.recordWebhookEvent(event.id, event.type);
+}
+
+/**
+ * Writes a non-entitled status while preserving the Stripe identifiers, so
+ * the account drops to the free tier without losing the customer binding a
+ * later reconciliation or re-subscribe needs.
+ */
+function revokeEntitlement(
+  store: GameStore,
+  userId: string,
+  status: "disputed" | "refunded",
+  customerId: string | null,
+): void {
+  const existing = store.getSubscription(userId);
+  saveSubscription(store, {
+    userId,
+    customerId: customerId ?? existing?.stripeCustomerId ?? null,
+    subscriptionId: existing?.stripeSubscriptionId ?? null,
+    status,
+    priceId: existing?.priceId ?? null,
+    currentPeriodEnd: existing?.currentPeriodEnd ?? null,
+  });
 }

@@ -63,6 +63,16 @@ const openRouterReasoningEffort = readString("OPENROUTER_REASONING_EFFORT", "med
 const openRouterMaxTokens = Number.parseInt(readString("OPENROUTER_MAX_TOKENS", "900"), 10);
 const openRouterSiteUrl = readString("OPENROUTER_SITE_URL");
 const openRouterAppName = readString("OPENROUTER_APP_NAME", "Quest Keeper AI");
+// A second model to try when the primary is rate-limited or erroring upstream.
+// Empty means "no fallback": the turn fails rather than silently changing the
+// voice of the DM mid-session.
+const openRouterFallbackModel = readString("OPENROUTER_FALLBACK_MODEL");
+// The gate that keeps concurrent turns from fanning out into simultaneous
+// upstream calls. Defaults are deliberately conservative: a shared provider
+// pool answers a burst with 429s, and a queued turn beats a failed one.
+const providerMaxConcurrent = readInteger("PROVIDER_MAX_CONCURRENT", 4);
+const providerMaxConcurrentPerAccount = readInteger("PROVIDER_MAX_CONCURRENT_PER_ACCOUNT", 1);
+const providerMaxQueueWaitMs = readInteger("PROVIDER_MAX_QUEUE_WAIT_MS", 15_000);
 const referenceDmTimeoutMs = Number.parseInt(readString("REFERENCE_DM_TIMEOUT_MS", "120000"), 10);
 const referenceEngineUrl = readString("REFERENCE_ENGINE_URL");
 const referenceEngineToken = readString("REFERENCE_ENGINE_TOKEN");
@@ -112,6 +122,18 @@ export const config = Object.freeze({
   openRouterMaxTokens,
   openRouterSiteUrl,
   openRouterAppName,
+  openRouterFallbackModel,
+  providerGate: {
+    maxConcurrent: providerMaxConcurrent,
+    maxConcurrentPerAccount: providerMaxConcurrentPerAccount,
+    maxQueueWaitMs: providerMaxQueueWaitMs,
+  },
+  abuse: {
+    turnWindowMs: readInteger("ABUSE_TURN_WINDOW_MS", 60_000),
+    maxTurnsPerWindow: readInteger("ABUSE_MAX_TURNS_PER_WINDOW", 12),
+    maxAccountsPerOrigin: readInteger("ABUSE_MAX_ACCOUNTS_PER_ORIGIN", 4),
+    originWindowMs: readInteger("ABUSE_ORIGIN_WINDOW_MS", 24 * 60 * 60 * 1_000),
+  },
   llmUsage: {
     // Player Pass has no per-user daily gate: it aims for $2/user/month in
     // provider cost but admits complete turns until the $4 monthly hard ceiling.

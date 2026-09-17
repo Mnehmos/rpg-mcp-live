@@ -25,7 +25,7 @@
       <nav class="top-nav" aria-label="Primary navigation">
         <a href="#how-it-works">How it works</a>
         <a href="#membership">Membership</a>
-        <a class="button button-quiet" data-action="play-now" href="#play">Play now</a>
+        <a id="table-entry-cta" class="button button-quiet" data-action="play-now" href="#play">Play now</a>
         <span id="user-button" class="user-button" hidden></span>
       </nav>
     </header>
@@ -40,7 +40,7 @@
             starts answering every move you make. Rather roll your own? Bring a custom character instead.
           </p>
           <div class="hero-actions">
-            <button class="button button-primary" data-action="play-now" type="button">Play now <span>↗</span></button>
+            <button id="first-session-cta" class="button button-primary" data-action="play-now" type="button">Play now <span>↗</span></button>
             <button class="button button-secondary" data-action="create-character" type="button">Create a custom character</button>
           </div>
           <p class="micro-copy">No sheet to learn. No group to schedule. Your first session is free.</p>
@@ -417,7 +417,7 @@
                 <span id="composer-status" class="composer-status" data-state="ready" role="status" aria-live="polite"><span class="composer-status-dot" aria-hidden="true"></span><span id="composer-status-text">Ready</span></span>
                 <button class="button button-primary chat-submit" type="submit">Send <span>↗</span></button>
               </div>
-              <p class="chat-hint">Speak naturally. The engine rolls only when the fiction calls for a risk.</p>
+              <p id="chat-hint" class="chat-hint">Speak naturally. The engine rolls only when the fiction calls for a risk.</p>
             </form>
             <div id="action-heading" class="action-heading"><span class="tiny-label">NEXT MOVES</span><span id="action-subtitle">Suggested by the DM</span></div>
             <div id="action-row" class="action-row" aria-label="Suggested next moves"></div>

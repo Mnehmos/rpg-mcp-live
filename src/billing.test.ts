@@ -432,3 +432,100 @@ describe("Stripe membership synchronization", () => {
     store.close();
   });
 });
+
+describe("Chargeback and refund handling", () => {
+  function seedPayingPlayer(store: GameStore): void {
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_paying",
+      stripeSubscriptionId: "sub_paying",
+      status: "active",
+      priceId: "price_pass",
+      currentPeriodEnd: 1_800_000_000,
+    });
+  }
+
+  it("revokes the pass and blocks the account when a charge is disputed", async () => {
+    const store = createTestStore();
+    seedPayingPlayer(store);
+    const blocked: Array<{ userId: string; reason: string }> = [];
+    const guard = {
+      block: (userId: string, reason: string) => {
+        blocked.push({ userId, reason });
+      },
+    };
+    const stripe = {
+      charges: {
+        retrieve: async () => ({ id: "ch_disputed", customer: "cus_paying" }),
+      },
+    } as unknown as Stripe;
+    const event = testEvent(
+      "charge.dispute.created",
+      { id: "dp_1", charge: "ch_disputed" },
+      "evt_dispute",
+    );
+
+    await handleStripeEvent(event, store, stripe, guard as never);
+
+    // Status is outside the entitled set, so planForUser drops to free.
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "disputed" });
+    expect(blocked).toEqual([{ userId: "player-1", reason: "payment_disputed" }]);
+    store.close();
+  });
+
+  it("keeps the customer binding when revoking a disputed account", async () => {
+    const store = createTestStore();
+    seedPayingPlayer(store);
+    const stripe = {
+      charges: { retrieve: async () => ({ id: "ch_disputed", customer: "cus_paying" }) },
+    } as unknown as Stripe;
+
+    await handleStripeEvent(
+      testEvent("charge.dispute.created", { id: "dp_2", charge: "ch_disputed" }, "evt_dispute_binding"),
+      store,
+      stripe,
+    );
+
+    expect(store.getSubscription("player-1")).toMatchObject({
+      stripeCustomerId: "cus_paying",
+      stripeSubscriptionId: "sub_paying",
+      status: "disputed",
+    });
+    store.close();
+  });
+
+  it("revokes the pass on refund without suspending the account", async () => {
+    const store = createTestStore();
+    seedPayingPlayer(store);
+    const blocked: string[] = [];
+    const guard = { block: (userId: string) => blocked.push(userId) };
+    const event = testEvent(
+      "charge.refunded",
+      { id: "ch_refunded", customer: "cus_paying" },
+      "evt_refund",
+    );
+
+    await handleStripeEvent(event, store, undefined, guard as never);
+
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "refunded" });
+    // A goodwill refund must not lock the player out of the free tier.
+    expect(blocked).toEqual([]);
+    store.close();
+  });
+
+  it("ignores a dispute for an unknown customer", async () => {
+    const store = createTestStore();
+    const stripe = {
+      charges: { retrieve: async () => ({ id: "ch_x", customer: "cus_unknown" }) },
+    } as unknown as Stripe;
+
+    await handleStripeEvent(
+      testEvent("charge.dispute.created", { id: "dp_3", charge: "ch_x" }, "evt_dispute_unknown"),
+      store,
+      stripe,
+    );
+
+    expect(store.getSubscription("player-1")).toBeNull();
+    store.close();
+  });
+});
