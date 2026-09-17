@@ -8,7 +8,7 @@
       name="description"
       content="Quest Keeper AI is a one-player tabletop adventure with an AI Dungeon Master."
     />
-    <title>Quest Keeper AI — Your next campaign starts here</title>
+    <title>Quest Keeper AI — Play now in your browser</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -25,7 +25,7 @@
       <nav class="top-nav" aria-label="Primary navigation">
         <a href="#how-it-works">How it works</a>
         <a href="#membership">Membership</a>
-        <a class="button button-quiet" href="#play">Enter the game</a>
+        <a class="button button-quiet" data-action="play-now" href="#play">Play now</a>
         <span id="user-button" class="user-button" hidden></span>
       </nav>
     </header>
@@ -34,16 +34,16 @@
       <section class="hero shell">
         <div class="hero-copy">
           <p class="eyebrow"><span class="status-dot"></span> A living tabletop for one</p>
-          <h1>Your next campaign starts <i>here.</i></h1>
+          <h1>Sit down and <i>play.</i></h1>
           <p class="hero-lede">
-            You bring the character. The Dungeon Master, the world, and every voice in the dark
-            respond to what you do.
+            Press Play now and the DM rolls up a character, opens the first scene, and the world
+            starts answering every move you make. Rather roll your own? Bring a custom character instead.
           </p>
           <div class="hero-actions">
-            <a class="button button-primary" href="#play">Play free in your browser <span>↗</span></a>
-            <a class="text-link" href="#how-it-works">See how the table works <span>↓</span></a>
+            <button class="button button-primary" data-action="play-now" type="button">Play now <span>↗</span></button>
+            <button class="button button-secondary" data-action="create-character" type="button">Create a custom character</button>
           </div>
-          <p class="micro-copy">No group chat to schedule. No rails to follow. Just the next decision.</p>
+          <p class="micro-copy">No sheet to learn. No group to schedule. Your first session is free.</p>
         </div>
         <div class="hero-art" aria-label="Abstract map of a living campaign world">
           <div class="world-orbit world-orbit-one"></div>
@@ -96,10 +96,14 @@
 
         <section id="quickstart-panel" class="onboarding-panel quickstart-panel" hidden>
           <div class="onboarding-header">
-            <div><p class="eyebrow">PLAY HERE</p><h3>Choose a story and start playing.</h3><p>No campaign planning or character sheet required. Pick a table and the DM will put you in the first scene.</p></div>
+            <div><p class="eyebrow">PLAY HERE</p><h3>One click and you're at the table.</h3><p>Press Play now — the DM rolls up a character and opens the first scene for you. Prefer to choose? Pick a story below.</p></div>
             <span class="onboarding-count">QUICKSTART</span>
           </div>
-          <div class="journey-steps" aria-label="How to start"><span class="active">1 · PICK A STORY</span><span>2 · SIGN IN</span><span>3 · PLAY IN YOUR BROWSER</span></div>
+          <div class="journey-steps" aria-label="How to start"><span class="active">1 · PRESS PLAY NOW</span><span>2 · SIGN IN IF ASKED</span><span>3 · YOU'RE PLAYING</span></div>
+          <div class="quickstart-instant">
+            <button class="button button-primary" data-action="play-now" type="button">Play now <span>↗</span></button>
+            <span class="quickstart-instant-copy">Rolls up a character and starts the scenario — no choices needed.</span>
+          </div>
           <div id="quickstart-list" class="quickstart-list" aria-live="polite"></div>
           <div class="quickstart-footer"><span>Want to build everything yourself?</span><button class="button button-quiet" data-action="show-campaign-form">Build my own campaign <span>↗</span></button></div>
         </section>
@@ -107,8 +111,8 @@
       <section id="membership" class="membership shell">
         <div>
           <p class="eyebrow">FREE TABLE + PLAYER PASS</p>
-          <h2>Start free. Stay for the story.</h2>
-          <p class="section-lede">Begin on the free tier, then choose the Player Pass when you want more room for a persistent campaign.</p>
+          <h2>Your first session is free.</h2>
+          <p class="section-lede">Play the free table now — no card, no setup. Take the Player Pass only when you want a world that keeps growing between sessions.</p>
         </div>
         <div class="price-card">
           <div>
@@ -137,7 +141,7 @@
             <div><p class="eyebrow">CAMPAIGN MANAGER</p><h3>Choose your world.</h3><p id="campaign-manager-copy">Open a campaign, start a new one, or remove an old world from your account.</p></div>
             <span class="onboarding-count">YOUR WORLDS</span>
           </div>
-          <div id="campaign-auth-gate" class="setup-auth-gate" hidden><p>Pick a story below — sign in so your campaign is saved for you.</p><button class="button button-primary" data-action="open-auth">Sign in to begin <span>↗</span></button></div>
+          <div id="campaign-auth-gate" class="setup-auth-gate" hidden><p>Press Play now or build your own world — sign in so your campaign is saved for you.</p><button class="button button-primary" data-action="open-auth">Sign in to begin <span>↗</span></button></div>
           <div id="campaign-list-wrap" class="campaign-list-wrap" hidden><span class="tiny-label">YOUR CAMPAIGNS</span><div id="campaign-list" class="campaign-list"></div></div>
           <button id="show-campaign-form" class="button button-quiet" data-action="show-campaign-form" hidden>Start a new campaign <span>↗</span></button>
           <form id="campaign-form" class="setup-form">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getQuickstartPreset, listQuickstartPresets } from "./quickstarts.js";
+import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset } from "./quickstarts.js";
 
 describe("quickstart catalog", () => {
   it("exposes only player-safe metadata to the listing", () => {
@@ -22,5 +22,15 @@ describe("quickstart catalog", () => {
 
   it("rejects unknown presets without throwing", () => {
     expect(getQuickstartPreset("does-not-exist")).toBeNull();
+  });
+
+  it("picks a complete preset for instant play", () => {
+    const known = new Set(listQuickstartPresets().map((entry) => entry.id));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const preset = pickRandomQuickstartPreset();
+      expect(known.has(preset.id)).toBe(true);
+      expect(preset.character.name).toBeTruthy();
+      expect(preset.campaign.name).toBeTruthy();
+    }
   });
 });

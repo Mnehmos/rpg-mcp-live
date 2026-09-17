@@ -39,7 +39,7 @@ import { ReferenceEngineStore } from "./reference-engine-store.js";
 import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
-import { getQuickstartPreset, listQuickstartPresets } from "./quickstarts.js";
+import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset } from "./quickstarts.js";
 import {
   ReferenceDmCommandAlreadyFailedError,
   ReferenceDmCommandIdReuseError,
@@ -691,7 +691,10 @@ app.post("/api/campaigns", async (request, response) => {
 app.post("/api/quickstarts/:quickstartId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  const preset = getQuickstartPreset(request.params.quickstartId);
+  const preset =
+    request.params.quickstartId === "random"
+      ? pickRandomQuickstartPreset()
+      : getQuickstartPreset(request.params.quickstartId);
   if (!preset) {
     response.status(404).json({ code: "quickstart_not_found", error: "That quickstart is not available." });
     return;
@@ -718,7 +721,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
     }
     const result = await referenceEngineAdapter.getCampaign(userId, userId, created.campaign.id);
     response.status(201).json({
-      quickstart: { id: preset.id, title: preset.title },
+      quickstart: { id: preset.id, title: preset.title, character: preset.character.name },
       session: result.campaign,
       state: null,
       campaign: result.campaign,
