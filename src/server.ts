@@ -149,6 +149,8 @@ const commandRequestSchema = z
     expectedCampaignVersion: z.number().int().nonnegative(),
     action: gameActionSchema.optional(),
     playerText: z.string().trim().min(1).max(2_000).optional(),
+    /** Stream turn progress as SSE lines instead of buffering the whole reply. */
+    stream: z.boolean().optional(),
   })
   .refine((value) => (value.action !== undefined) !== (value.playerText !== undefined), {
     message: "Send exactly one of action or playerText.",
@@ -335,6 +337,31 @@ async function sendCampaignCommand(
 
   const playerText = parsed.data.playerText
     ?? `The player chose the ${parsed.data.action} action.`;
+  if (parsed.data.stream) {
+    /**
+     * Streamed command: same contract as the streamed opening — progress and
+     * narration deltas are cosmetic SSE events; the authoritative result (or
+     * an error event) closes the wire.
+     */
+    response.status(200).set({
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    }).flushHeaders();
+    const send = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    try {
+      const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
+        clientCommandId: parsed.data.clientCommandId,
+        expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+        onProgress: send,
+      });
+      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    } catch (error) {
+      send({ type: "error", error: error instanceof Error ? error.message : "The Dungeon Master could not finish that turn. Try again." });
+    }
+    response.end();
+    return;
+  }
   try {
     const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
       clientCommandId: parsed.data.clientCommandId,
@@ -1042,6 +1069,38 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
   }
   if (!referenceDungeonMaster) {
     response.status(503).json({ code: "reference_dm_unavailable", error: "The reference-engine DM is not configured." });
+    return;
+  }
+  if (parsed.data.stream) {
+    /**
+     * Streamed opening: progress and narration deltas go out as SSE lines as
+     * they happen; the authoritative turn payload arrives as a final result
+     * event. Streamed narration is cosmetic — nothing is committed until the
+     * result event, and any failure becomes an error event on the same wire.
+     */
+    response.status(200).set({
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    }).flushHeaders();
+    const send = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    try {
+      const result = await referenceDungeonMaster.resolveTurn(
+        userId,
+        userId,
+        request.params.campaignId,
+        "Open the first situation and establish the campaign's opening scene.",
+        {
+          clientCommandId: parsed.data.clientCommandId,
+          expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+          onProgress: send,
+        },
+      );
+      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    } catch (error) {
+      send({ type: "error", error: error instanceof Error ? error.message : "The opening could not be generated. Try again." });
+    }
+    response.end();
     return;
   }
   try {

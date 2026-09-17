@@ -173,6 +173,81 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       });
   }
 
+  function streamTurn(url, body, onProgress) {
+    /**
+     * Posts with stream:true and reads the SSE reply, reporting progress and
+     * narration events as they arrive. Anything answered without a stream —
+     * validation failures, rate limits, non-streaming deployments — falls
+     * back to the exact requestJson shape, so callers work with either.
+     */
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ stream: true }, body)),
+    }).then(function (response) {
+      var contentType = response.headers.get("content-type") || "";
+      if (contentType.indexOf("text/event-stream") === -1 || !response.body || !response.body.getReader) {
+        return response.json().catch(function () { return {}; }).then(function (data) {
+          return { response: response, data: data };
+        });
+      }
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+      var captured = null;
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) {
+            return { response: response, data: captured || {} };
+          }
+          buffer += decoder.decode(chunk, { stream: true });
+          var blocks = buffer.split("\n\n");
+          buffer = blocks.pop();
+          blocks.forEach(function (block) {
+            block.split("\n").forEach(function (line) {
+              if (line.indexOf("data:") !== 0) return;
+              var payload = line.slice(5).trim();
+              if (!payload) return;
+              var event;
+              try { event = JSON.parse(payload); } catch (_error) { return; }
+              if (event.type === "result") captured = event;
+              else if (event.type === "error") captured = { type: "error", error: event.error || "The Dungeon Master could not finish that turn." };
+              else if (onProgress) onProgress(event);
+            });
+          });
+          return pump();
+        });
+      }
+      return pump().then(function (outcome) {
+        if (outcome.data && outcome.data.type === "error") {
+          return { response: { ok: false, status: 502 }, data: { error: outcome.data.error, code: "reference_dm_unavailable" } };
+        }
+        return { response: { ok: true, status: 200 }, data: outcome.data };
+      });
+    });
+  }
+
+  function showLiveNarration(text) {
+    var log = $("#game-log");
+    if (!log) return;
+    var node = document.getElementById("live-narration-entry");
+    if (!node) {
+      node = document.createElement("div");
+      node.id = "live-narration-entry";
+      node.className = "log-entry dm-response live-narration";
+      node.innerHTML = '<span class="log-icon">DM</span><div class="log-content"><div class="dm-narration live-narration-text"></div></div>';
+      log.appendChild(node);
+    }
+    var target = node.querySelector(".live-narration-text");
+    if (target) target.textContent = text;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function clearLiveNarration() {
+    var node = document.getElementById("live-narration-entry");
+    if (node) node.remove();
+  }
+
   function loadScript(source, attributes) {
     return new Promise(function (resolve, reject) {
       var script = document.createElement("script");
@@ -2465,13 +2540,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     writePendingCommand({ campaignId: campaignId, clientCommandId: commandId, playerText: state.pendingPlayerText });
     renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
     setStatus("The DM is thinking", "thinking");
-    return requestJson("/api/campaigns/" + campaignPath + "/commands", {
-      method: "POST",
-      body: JSON.stringify(Object.assign({
-        clientCommandId: commandId,
-        expectedCampaignVersion: expectedCampaignVersion
-      }, command))
+    return streamTurn("/api/campaigns/" + campaignPath + "/commands", Object.assign({
+      clientCommandId: commandId,
+      expectedCampaignVersion: expectedCampaignVersion
+    }, command), function (event) {
+      if (event.type === "narration") showLiveNarration(event.text);
     }).then(function (result) {
+      clearLiveNarration();
       if (result.response.status === 401) {
         clearPendingCommand(commandId, campaignId);
         state.pendingPlayerText = null;
@@ -2550,21 +2625,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function startQuickstart(quickstartId) {
-    // Clerk restores an existing session asynchronously after page load, so a
-    // signed-in player clicking immediately would read as signed out. Wait for
-    // the identity state to settle before deciding to demand sign-in.
-    var attempt = function () {
-      if (!isSignedIn()) {
-        state.pendingQuickstartId = quickstartId;
-        setStatus(quickstartId === "random"
-          ? "Sign in once — your character hits the table right after."
-          : "Sign in to start this story — it launches right after.", "thinking");
-        openAuth();
-        return Promise.resolve(false);
-      }
-      return launchQuickstart(quickstartId);
-    };
-    return (state.clerkReady || Promise.resolve()).then(attempt, attempt);
+    // The server session is the source of truth, not Clerk's client mirror:
+    // attempt the call and let a real 401 drive the sign-in dialog. This keeps
+    // Clerk's async session restore from misreading a signed-in player.
+    return launchQuickstart(quickstartId);
   }
 
   function launchQuickstart(quickstartId) {
@@ -2576,6 +2640,16 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       method: "POST",
       body: JSON.stringify({}),
     }).then(function (result) {
+      if (result.response.status === 401) {
+        // The browser's Clerk session was not usable for this call — ask for
+        // sign-in once and auto-launch this story when it completes.
+        state.pendingQuickstartId = quickstartId;
+        setStatus(quickstartId === "random"
+          ? "Sign in once — your character hits the table right after."
+          : "Sign in to start this story — it launches right after.", "thinking");
+        openAuth();
+        return Promise.resolve(false);
+      }
       if (!result.response.ok) {
         var quickstartError = new Error(commandFailureMessage(result.data, result.response.status));
         quickstartError.reconcile = false;
@@ -2697,13 +2771,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (feedback) feedback.textContent = "The DM is opening the first situation…";
     setStatus("The DM is opening your first scene", "thinking");
     renderSession({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription, usage: state.usage });
-    return requestJson("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
-      method: "POST",
-      body: JSON.stringify({
-        clientCommandId: newCommandId(),
-        expectedCampaignVersion: state.session.version
-      })
+    return streamTurn("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
+      clientCommandId: newCommandId(),
+      expectedCampaignVersion: state.session.version
+    }, function (event) {
+      if (event.type === "narration") showLiveNarration(event.text);
     }).then(function (result) {
+      clearLiveNarration();
       if (result.response.status === 409 && result.data.session) {
         renderSession({ session: result.data.session, state: result.data.state, campaigns: state.campaigns, subscription: state.subscription });
         return false;
@@ -2713,6 +2787,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       setStatus("Your story is open", "ready");
       return true;
     }).catch(function (error) {
+      clearLiveNarration();
       state.openingErrorCampaignId = campaignId;
       if (feedback) feedback.textContent = error.message + " You can try again.";
       setStatus(error.message, "error");
