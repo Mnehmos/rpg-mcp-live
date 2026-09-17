@@ -276,6 +276,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (statusCopy && active) statusCopy.textContent = "Your Player Pass is active. Your table is ready.";
     if (checkoutButton) checkoutButton.hidden = active || unresolvedCheckout;
     if (portalButton) portalButton.hidden = !hasStripeCustomer;
+    var summaryHint = $("#membership-summary-hint");
+    if (summaryHint) summaryHint.hidden = !active;
   }
 
   function titleCase(value) {
@@ -3260,6 +3262,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
         var quickstartPanel = $("#quickstart-panel");
         if (quickstartPanel) quickstartPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+    document.querySelectorAll('a[href="#membership"]').forEach(function (link) {
+      link.addEventListener("click", function () {
+        var details = $("#membership");
+        if (details) details.open = true;
       });
     });
     $("#campaign-list").addEventListener("click", function (event) {
