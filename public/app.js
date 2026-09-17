@@ -298,6 +298,11 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (node) node.textContent = value === undefined || value === null || value === "" ? (fallback || "—") : String(value);
   }
 
+  function setGlance(id, text) {
+    var node = document.getElementById(id);
+    if (node) node.textContent = text || "—";
+  }
+
   function fillCharacterSelect(selector, options) {
     var select = $(selector);
     if (!select) return;
@@ -1008,7 +1013,11 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     toggle.onclick = function () {
       form.hidden = !form.hidden;
       toggle.textContent = form.hidden ? copy.toggle : copy.close;
-      if (!form.hidden) loadSpellbookOptions(character, spellcasting);
+      if (!form.hidden) {
+        var spellSection = $("#character-spellbook-section");
+        if (spellSection) spellSection.open = true;
+        loadSpellbookOptions(character, spellcasting);
+      }
     };
     if (!form.dataset.bound) {
       form.dataset.bound = "true";
@@ -1178,6 +1187,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         var signedModifier = modifier === null ? "" : (modifier >= 0 ? "+" + modifier : String(modifier));
         return '<div class="ability-cell"><span>' + ability.toUpperCase() + '</span><strong>' + escapeHtml(score) + '</strong><small>' + escapeHtml(signedModifier) + '</small></div>';
       }).join("");
+      setGlance("glance-abilities", abilityNames.map(function (ability) {
+        var score = character.abilities && character.abilities[ability] !== undefined ? character.abilities[ability] : null;
+        if (typeof score !== "number") return ability.toUpperCase() + " —";
+        var modifier = Math.floor((score - 10) / 2);
+        return ability.toUpperCase() + " " + (modifier >= 0 ? "+" + modifier : modifier);
+      }).join(" · "));
     }
     var skillsNode = $("#character-skills");
     if (skillsNode) {
@@ -1194,10 +1209,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         return '<div class="skill-cell"><span>' + escapeHtml(titleCase(skill) + (value.proficient ? " ·" : "")) + '</span><strong>' + (bonus >= 0 ? "+" : "") + escapeHtml(bonus) + '</strong></div>';
       }).join("");
       skillsNode.innerHTML = saveHtml + skillHtml;
+      var proficientSkills = Object.keys(skills).filter(function (skill) { return skills[skill] && skills[skill].proficient; }).length;
+      setGlance("glance-skills", Object.keys(skills).length + " skills · " + proficientSkills + " proficient");
     }
     var attacksNode = $("#character-attacks");
     if (attacksNode) {
       var weapons = (Array.isArray(character.inventory) ? character.inventory : []).filter(function (item) { return item.kind === "weapon"; });
+      setGlance("glance-attacks", weapons.length ? weapons.length + (weapons.length === 1 ? " weapon" : " weapons") : "");
       attacksNode.innerHTML = weapons.length
         ? weapons.map(function (item) {
             var detail = [item.damage, item.properties && item.properties.join(", "), item.equipped ? "equipped" : "carried"].filter(Boolean).join(" · ");
@@ -1210,6 +1228,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       var features = Array.isArray(character.features) ? character.features : [];
       var proficiencies = character.proficiencies || {};
       var profs = [].concat(proficiencies.armor || [], proficiencies.weapons || [], proficiencies.tools || [], proficiencies.languages || []);
+      setGlance("glance-features", (features.length + profs.length) ? (features.length + profs.length) + " traits" : "");
       featuresNode.innerHTML = features.concat(profs.map(function (item) { return "Proficient: " + item; })).map(function (item) {
         return '<span class="feature-chip">' + escapeHtml(item) + '</span>';
       }).join("") || '<p class="inventory-empty">No features recorded.</p>';
@@ -1232,6 +1251,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       proficienciesNode.innerHTML = proficiencyGroups.map(function (group) {
         return '<div class="proficiency-entry"><strong>' + escapeHtml(group[0]) + '</strong><small>' + escapeHtml(group[1].length ? group[1].join(", ") : "None") + '</small></div>';
       }).join("");
+      setGlance("glance-proficiencies", (proficiencies.languages || []).length ? (proficiencies.languages || []).length + " languages" : "");
     }
     var loreNode = $("#character-lore");
     var loreSection = $("#character-lore-section");
@@ -1276,6 +1296,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       setText("#spellcasting-rules-help", managementCopy.rules, "Choose spells from the installed class list.");
       setText("#known-spell-label", selectionMode === "spellbook" ? "SPELLBOOK" : "KNOWN SPELLS", "KNOWN SPELLS");
       setText("#prepared-spell-label", selectionMode === "known" ? "PREPARATION NOT USED" : "PREPARED", "PREPARED");
+      setGlance("glance-spells", selectionDetail);
       var slotsNode = $("#character-spell-slots");
       if (slotsNode) {
         var maximums = spellcasting.slotMaximums && typeof spellcasting.slotMaximums === "object" ? spellcasting.slotMaximums : {};
@@ -1304,6 +1325,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var inventoryNode = $("#character-inventory");
     if (inventoryNode) {
       var richInventory = Array.isArray(character.inventory) ? character.inventory : [];
+      setGlance("glance-inventory", richInventory.length ? richInventory.length + (richInventory.length === 1 ? " entry" : " entries") : "");
       inventoryNode.innerHTML = richInventory.length ? richInventory.map(function (item) {
         var stateLabel = item.equipped ? " · equipped" : "";
         var action = item.kind === "consumable"
@@ -2528,14 +2550,24 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function startQuickstart(quickstartId) {
-    if (!isSignedIn()) {
-      state.pendingQuickstartId = quickstartId;
-      setStatus(quickstartId === "random"
-        ? "Sign in once — your character hits the table right after."
-        : "Sign in to start this story — it launches right after.", "thinking");
-      openAuth();
-      return Promise.resolve(false);
-    }
+    // Clerk restores an existing session asynchronously after page load, so a
+    // signed-in player clicking immediately would read as signed out. Wait for
+    // the identity state to settle before deciding to demand sign-in.
+    var attempt = function () {
+      if (!isSignedIn()) {
+        state.pendingQuickstartId = quickstartId;
+        setStatus(quickstartId === "random"
+          ? "Sign in once — your character hits the table right after."
+          : "Sign in to start this story — it launches right after.", "thinking");
+        openAuth();
+        return Promise.resolve(false);
+      }
+      return launchQuickstart(quickstartId);
+    };
+    return (state.clerkReady || Promise.resolve()).then(attempt, attempt);
+  }
+
+  function launchQuickstart(quickstartId) {
     if (state.quickstartLoading) return Promise.resolve(false);
     state.quickstartLoading = quickstartId;
     renderQuickstarts();
@@ -3102,12 +3134,16 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         $("#auth-fallback").textContent = "Add Clerk development keys to .env to enable sign in.";
         $("#auth-fallback").hidden = false;
       }
+      state.clerkReady = Promise.resolve();
       renderIdentity();
-      return Promise.resolve();
+      return state.clerkReady;
     }
     var domain = clerkDomainFromKey(key);
-    if (!domain) return Promise.reject(new Error("The Clerk publishable key is not valid."));
-    return loadScript("https://" + domain + "/npm/@clerk/ui@1/dist/ui.browser.js")
+    if (!domain) {
+      state.clerkReady = Promise.reject(new Error("The Clerk publishable key is not valid."));
+      return state.clerkReady;
+    }
+    state.clerkReady = loadScript("https://" + domain + "/npm/@clerk/ui@1/dist/ui.browser.js")
       .then(function () { return loadScript("https://" + domain + "/npm/@clerk/clerk-js@6/dist/clerk.browser.js", { "data-clerk-publishable-key": key }); })
       .then(function () {
         return window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
@@ -3132,7 +3168,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
           state.clerk.addListener(function () {
             renderIdentity();
             var pendingQuickstart = state.pendingQuickstartId;
-            state.pendingQuickstartId = null;
+            // Clerk emits several events per sign-in flow; consume the pending
+            // story only once the session actually exists, otherwise events
+            // that fire mid-flow would drop the player's Play now click.
+            if (state.clerk.isSignedIn) state.pendingQuickstartId = null;
             if (state.clerk.isSignedIn) {
               closeAuth();
               loadCharacterOptions();
