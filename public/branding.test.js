@@ -66,6 +66,7 @@ describe("player-facing branding", () => {
   });
 
   it("reflects an active Player Pass instead of offering checkout again", () => {
+    expect(page).toContain('<details id="membership"');
     expect(page).toContain('id="membership-status"');
     expect(page).toContain('id="membership-checkout"');
     expect(page).toContain('id="membership-portal"');

@@ -75,7 +75,7 @@ h1 i { color: var(--amber); font-style: italic; }
 .three-up { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; padding-top: 48px; padding-bottom: 80px; }
 .feature-card { padding: 0 42px; min-height: 145px; border-right: 1px solid var(--line); }.feature-card:first-child { padding-left: 0; }.feature-card:last-child { border-right: 0; }
 .feature-number { color: var(--amber); font-size: 10px; letter-spacing: .16em; }.feature-card h2 { font-size: 25px; letter-spacing: -.03em; margin: 15px 0 12px; }.feature-card p { color: var(--muted); font-size: 13px; line-height: 1.65; max-width: 275px; margin-bottom: 0; }.feature-card-highlight h2 { color: var(--amber-bright); }
-.membership { display: grid; grid-template-columns: 1fr 390px; align-items: center; gap: 120px; padding-top: 80px; padding-bottom: 100px; background: radial-gradient(circle at 10% 50%, rgba(233,167,91,.06), transparent 33%); }
+.membership-details { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }.membership-details > summary { display: flex; align-items: center; gap: 16px; padding: 15px 18px; cursor: pointer; list-style: none; }.membership-details > summary::-webkit-details-marker { display: none; }.membership-details > summary:hover { background: rgba(233, 167, 91, .05); }.membership-details[open] > summary { border-bottom: 1px solid var(--line); }.membership-summary-label { color: var(--amber); font-size: 10px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; white-space: nowrap; }.membership-summary-copy { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }.membership-summary-hint { color: var(--mint); border: 1px solid rgba(163, 201, 173, .35); padding: 3px 6px; font-size: 9px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; white-space: nowrap; }.membership-summary-toggle { color: var(--faint); transition: transform .2s ease; }.membership-details[open] .membership-summary-toggle { transform: rotate(180deg); }.membership { display: grid; grid-template-columns: 1fr minmax(290px, 380px); align-items: center; gap: 44px; padding: 26px 18px 36px; }
 .membership h2 { font-size: clamp(40px, 5vw, 65px); letter-spacing: -.055em; margin-bottom: 18px; }.section-lede { max-width: 390px; color: var(--muted); line-height: 1.7; font-size: 15px; }
 .price-card { background: var(--panel-light); border: 1px solid var(--line-strong); padding: 30px; }.price-label { color: var(--amber); text-transform: uppercase; letter-spacing: .16em; font-size: 10px; font-weight: 800; margin-bottom: 13px; }.price { font-family: Georgia, serif; font-size: 34px; margin-bottom: 25px; }.price-card ul { list-style: none; padding: 17px 0 21px; margin: 0 0 22px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }.price-card li { color: var(--muted); font-size: 12px; padding: 7px 0; }.price-card li span { color: var(--amber); padding-right: 9px; }.price-footnote { color: var(--faint); font-size: 10px; margin: 16px 0 0; text-align: center; }
 .play-section { padding-top: 70px; padding-bottom: 110px; }.play-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 25px; }.play-heading h2 { font-size: 50px; letter-spacing: -.05em; margin: 0; }.session-status { color: var(--faint); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; margin: 0; }
@@ -87,7 +87,7 @@ h1 i { color: var(--amber); font-style: italic; }
 @media (max-width: 860px) {
   .shell { width: min(100% - 32px, 620px); }
   .top-nav a:not(.button), .top-nav .user-button { display: none; }
-  .hero { grid-template-columns: 1fr; gap: 35px; padding-top: 72px; }.hero-art { height: 390px; }.three-up { grid-template-columns: 1fr; gap: 32px; }.feature-card, .feature-card:first-child { padding: 0 0 30px; border-right: 0; border-bottom: 1px solid var(--line); }.feature-card:last-child { border-bottom: 0; padding-bottom: 0; }.membership { grid-template-columns: 1fr; gap: 42px; padding-top: 65px; }.play-heading { align-items: start; flex-direction: column; gap: 20px; }.game-shell { grid-template-columns: 1fr; }.scene-panel { border-right: 0; border-bottom: 1px solid var(--line); }.scene-illustration { min-height: 150px; margin-bottom: 20px; }.table-panel { min-height: 500px; }.action-row { grid-template-columns: repeat(2, 1fr); }.site-footer { gap: 18px; flex-wrap: wrap; padding: 28px 0; }.site-footer p { order: 3; width: 100%; }.footer-note { margin-left: auto; }
+  .hero { grid-template-columns: 1fr; gap: 35px; padding-top: 72px; }.hero-art { height: 390px; }.three-up { grid-template-columns: 1fr; gap: 32px; }.feature-card, .feature-card:first-child { padding: 0 0 30px; border-right: 0; border-bottom: 1px solid var(--line); }.feature-card:last-child { border-bottom: 0; padding-bottom: 0; }.membership { grid-template-columns: 1fr; gap: 24px; }.play-heading { align-items: start; flex-direction: column; gap: 20px; }.game-shell { grid-template-columns: 1fr; }.scene-panel { border-right: 0; border-bottom: 1px solid var(--line); }.scene-illustration { min-height: 150px; margin-bottom: 20px; }.table-panel { min-height: 500px; }.action-row { grid-template-columns: repeat(2, 1fr); }.site-footer { gap: 18px; flex-wrap: wrap; padding: 28px 0; }.site-footer p { order: 3; width: 100%; }.footer-note { margin-left: auto; }
 }
 
 @media (max-width: 480px) {
@@ -845,15 +845,6 @@ h1 i { color: var(--amber); font-style: italic; }
 .play-app .micro-copy { margin-top: 24px; }
 .play-app .hero-art { display: none; }
 .play-app .three-up { display: none; }
-.play-app .membership {
-  grid-template-columns: 1fr minmax(290px, 380px);
-  gap: 44px;
-  padding-top: 30px;
-  padding-bottom: 34px;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: radial-gradient(circle at 12% 50%, rgba(230, 172, 99, .05), transparent 34%);
-}
 .play-app .membership h2 { font-size: clamp(28px, 4vw, 48px); }
 .play-app .price-card { background: rgba(30, 24, 16, .72); border-color: var(--line-strong); }
 .play-app .play-section { padding-top: 42px; }
@@ -869,7 +860,7 @@ h1 i { color: var(--amber); font-style: italic; }
 
 @media (max-width: 860px) {
   .play-app .hero { padding-top: 34px; padding-bottom: 26px; }
-  .play-app .membership { grid-template-columns: 1fr; gap: 24px; }
+  
   .play-app .play-section { padding-top: 34px; }
   .play-app .game-shell { grid-template-columns: 1fr; }
 }
