@@ -224,7 +224,15 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       return pump().then(function (outcome) {
         if (outcome.data && outcome.data.type === "error") {
-          return { response: { ok: false, status: 502 }, data: { error: outcome.data.error, code: "reference_dm_unavailable" } };
+          return {
+            response: { ok: false, status: 502 },
+            data: {
+              error: outcome.data.error,
+              code: "reference_dm_unavailable",
+              failureType: outcome.data.failureType,
+              commitStatus: outcome.data.commitStatus
+            }
+          };
         }
         return { response: { ok: true, status: 200 }, data: outcome.data };
       });

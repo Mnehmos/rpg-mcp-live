@@ -1374,6 +1374,7 @@ export class ReferenceDungeonMaster {
       if (!response.ok) {
         const responseBody = await response.text().catch(() => "");
         const message = `OpenRouter request failed with status ${response.status}: ${responseBody.slice(0, 500)}`;
+        console.error(`[reference-dm] ${message}`);
         if (response.status === 429 || response.status >= 500) {
           throw new RetryableProviderHttpError(response.status, message, retryDelayFromHeader(response.headers));
         }
@@ -1476,6 +1477,7 @@ export class ReferenceDungeonMaster {
         : undefined;
       if (reservation && actualUsage) usageStore!.settle(reservation.id, actualUsage);
       if (!message) {
+        console.error(`[reference-dm] empty completion: id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} streamed=${streaming} error=${JSON.stringify(data.error ?? null)}`);
         throw new EmptyCompletionError(
           `id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} error=${JSON.stringify(data.error ?? null)}`
         );

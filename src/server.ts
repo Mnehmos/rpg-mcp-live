@@ -274,6 +274,35 @@ function sendAppPage(_request: Request, response: Response): void {
   response.sendFile("index.html", { root: publicDirectory });
 }
 
+
+/**
+ * Streamed turns must answer failures on the same wire, with the same
+ * failureType taxonomy the buffered routes return, so the client renders the
+ * accurate message and retry semantics. Every streamed failure is logged —
+ * the SSE error event alone was invisible to server-side debugging.
+ */
+function classifyTurnFailure(error: unknown): { failureType: string; commitStatus: string; message: string } {
+  let failureType = "provider_unavailable";
+  let commitStatus = "unknown";
+  let message = error instanceof Error ? error.message : "The Dungeon Master could not finish that turn. Try again.";
+  if (error instanceof ReferenceDmVersionConflictError) failureType = "stale_version";
+  else if (error instanceof ReferenceDmCommandInProgressError) failureType = "command_conflict";
+  else if (error instanceof ReferenceDmProviderUnavailableError) {
+    commitStatus = error.details?.commitStatus ?? "unknown";
+    failureType = commitStatus === "not_committed" ? "not_committed" : "uncertain";
+    message = commitStatus === "not_committed"
+      ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
+      : "The reference-engine DM stopped after a state change; refresh the table before continuing.";
+  }
+  console.error(JSON.stringify({
+    event: "streamed_turn_failed",
+    failureType,
+    commitStatus,
+    message,
+  }));
+  return { failureType, commitStatus, message };
+}
+
 async function sendCampaignCommand(
   _request: Request,
   userId: string,
@@ -357,7 +386,8 @@ async function sendCampaignCommand(
       });
       send({ type: "result", ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
     } catch (error) {
-      send({ type: "error", error: error instanceof Error ? error.message : "The Dungeon Master could not finish that turn. Try again." });
+      const failure = classifyTurnFailure(error);
+      send({ type: "error", failureType: failure.failureType, commitStatus: failure.commitStatus, error: failure.message });
     }
     response.end();
     return;
@@ -1098,7 +1128,8 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
       );
       send({ type: "result", ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
     } catch (error) {
-      send({ type: "error", error: error instanceof Error ? error.message : "The opening could not be generated. Try again." });
+      const failure = classifyTurnFailure(error);
+      send({ type: "error", failureType: failure.failureType, commitStatus: failure.commitStatus, error: failure.message });
     }
     response.end();
     return;
