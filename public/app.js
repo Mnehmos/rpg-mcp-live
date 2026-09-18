@@ -198,9 +198,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       function pump() {
         return reader.read().then(function (chunk) {
           if (chunk.done) {
-            return { response: response, data: captured || {} };
+            if (captured) return { response: response, data: captured };
+            return {
+              response: { ok: false, status: 502 },
+              data: { error: "The Dungeon Master stream ended before the turn finished." }
+            };
           }
-          buffer += decoder.decode(chunk, { stream: true });
+          buffer += decoder.decode(chunk.value, { stream: true });
           var blocks = buffer.split("\n\n");
           buffer = blocks.pop();
           blocks.forEach(function (block) {
