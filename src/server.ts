@@ -294,11 +294,18 @@ function classifyTurnFailure(error: unknown): { failureType: string; commitStatu
       ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
       : "The reference-engine DM stopped after a state change; refresh the table before continuing.";
   }
+  const detail = error instanceof Error ? error.message : String(error);
+  const details = error instanceof ReferenceDmProviderUnavailableError ? error.details : undefined;
   console.error(JSON.stringify({
     event: "streamed_turn_failed",
     failureType,
     commitStatus,
     message,
+    detail,
+    phase: details?.phase,
+    toolRounds: details?.toolRounds,
+    providerCalls: details?.providerCalls,
+    toolCallNames: details?.toolCallNames,
   }));
   return { failureType, commitStatus, message };
 }
