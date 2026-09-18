@@ -679,6 +679,32 @@ function isDocketName(value: unknown): value is DocketName {
   return typeof value === "string" && (DOCKET_NAMES as readonly string[]).includes(value);
 }
 
+/**
+ * Player-facing gloss for a tool call in progress, shown live in the
+ * "the DM is thinking" activity line so a long tool_loop (heaviest on a
+ * campaign opening) reads as visible work rather than a stalled request.
+ */
+const TOOL_ACTIVITY_LABELS: Record<string, string> = {
+  activate_tools: "Choosing which rules apply",
+  spatial_manage: "Placing you in the world",
+  scene_manage: "Opening the scene",
+  npc_manage: "Bringing the cast to life",
+  party_manage: "Gathering your party",
+  agent_manage: "Directing the cast",
+  quest_manage: "Setting the stakes",
+  item_manage: "Placing the gear",
+  inventory_manage: "Sorting out belongings",
+  combat_manage: "Setting up the encounter",
+  combat_action: "Working out the fight",
+  improvisation_manage: "Judging the odds",
+  read_docket: "Checking continuity notes",
+  write_docket: "Recording what happened",
+};
+
+function describeToolActivity(name: string): string {
+  return TOOL_ACTIVITY_LABELS[name] ?? "Consulting the rules";
+}
+
 export class ReferenceDungeonMaster {
   public constructor(
     private readonly client: ReferenceEngineClient,
@@ -954,6 +980,7 @@ export class ReferenceDungeonMaster {
         }
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
         for (const call of toolCalls) {
+          options.onProgress?.({ type: "status", message: describeToolActivity(call.function.name) });
           const callArgs = parseArguments(call.function.arguments);
           if (call.function.name === ACTIVATE_TOOLS_NAME) {
             const requestedNames = Array.isArray(callArgs.names)
