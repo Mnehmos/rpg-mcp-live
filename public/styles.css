@@ -127,7 +127,8 @@ h1 i { color: var(--amber); font-style: italic; }
 .hp-row { color: var(--faint); font-size: 8px; letter-spacing: .15em; }
 .hp-row strong { color: var(--ink); font-size: 10px; letter-spacing: .08em; }
 .hp-meter, .enemy-health { height: 5px; margin: 8px 0 14px; overflow: hidden; border: 1px solid rgba(242, 236, 223, .12); background: #0f0c07; }
-.hp-meter span, .enemy-health span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--amber), var(--amber-bright)); transition: width .35s ease; }
+.hp-meter span, .enemy-health span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--amber), var(--amber-bright)); transition: width .35s ease, background .35s ease; }
+.hp-meter span.is-critical, .enemy-health span.is-critical { background: linear-gradient(90deg, var(--danger), #f0a99a); }
 .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
 .stat-grid div { padding: 8px 9px; border: 1px solid rgba(242, 236, 223, .09); }
 .stat-grid span { display: block; color: var(--faint); font-size: 8px; letter-spacing: .14em; margin-bottom: 4px; }
@@ -528,13 +529,13 @@ h1 i { color: var(--amber); font-style: italic; }
 .combat-enemy-summary > span:last-child { justify-items: end; text-align: right; }
 .combat-enemy-summary strong { color: var(--ink); font-weight: 500; }
 .combat-enemy-summary small { color: var(--faint); }
-.combat-enemy-summary em { color: var(--green); font-size: 7px; font-style: normal; letter-spacing: .12em; }
+.combat-enemy-summary em { color: var(--mint); font-size: 7px; font-style: normal; letter-spacing: .12em; }
 .combat-actions summary { color: var(--faint); cursor: pointer; font-size: 7px; letter-spacing: .1em; text-transform: uppercase; }
 .combat-actions ul { display: grid; gap: 4px; margin: 7px 0 0; padding: 0; list-style: none; }
 .combat-action { display: flex; justify-content: space-between; gap: 8px; padding: 5px 6px; border-left: 2px solid rgba(142, 205, 168, .35); background: rgba(142, 205, 168, .04); }
 .combat-action.is-deferred { border-left-color: rgba(242, 236, 223, .16); background: rgba(242, 236, 223, .025); }
 .combat-action > span { display: grid; gap: 2px; }
-.combat-action > span:last-child { justify-items: end; text-align: right; color: var(--green); font-size: 7px; letter-spacing: .06em; text-transform: uppercase; }
+.combat-action > span:last-child { justify-items: end; text-align: right; color: var(--mint); font-size: 7px; letter-spacing: .06em; text-transform: uppercase; }
 .combat-action.is-deferred > span:last-child { color: var(--faint); }
 .combat-action strong { color: var(--muted); font-size: 8px; font-weight: 500; }
 .combat-action small { color: var(--faint); font-size: 7px; letter-spacing: 0; text-transform: none; }
@@ -984,7 +985,6 @@ h1 i { color: var(--amber); font-style: italic; }
 }
 .membership-status strong { color: var(--ink); font-size: 10px; letter-spacing: .16em; }
 .membership-status span { color: var(--muted); }
-.play-app .membership-status { border-color: rgba(0, 255, 136, .38); background: rgba(0, 255, 136, .06); }
 /* The dossier folds into titled disclosures: each summary carries the live
    at-a-glance values for its category, so the sheet never owns the page. */
 .dossier-section { margin-top: 8px; border: 1px solid var(--line); background: rgba(19, 15, 10, .45); }

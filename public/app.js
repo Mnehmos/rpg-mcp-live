@@ -800,6 +800,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (state.characterOptionsLoading && state.characterOptionsLoadingCampaignId === requestedCampaignId) return state.characterOptionsLoading;
     state.characterOptionsLoadingCampaignId = requestedCampaignId;
     var url = "/api/character-options" + (requestedCampaignId ? "?campaignId=" + encodeURIComponent(requestedCampaignId) : "");
+    var retryButton = $("#character-options-retry");
+    if (retryButton) retryButton.hidden = true;
     state.characterOptionsLoading = requestJson(url).then(function (result) {
       if (!result.response.ok) throw new Error(result.data.error || "Open5e character options are unavailable.");
       state.characterOptions = result.data.options;
@@ -808,7 +810,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       return state.characterOptions;
     }).catch(function (error) {
       var summary = $("#character-source-summary");
-      if (summary) summary.textContent = error.message;
+      if (summary) summary.textContent = error.message + " You can retry below.";
+      if (retryButton) retryButton.hidden = false;
       showToast(error.message);
       return null;
     }).finally(function () {
@@ -1656,19 +1659,6 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   function setPanel(selector, hidden) {
     var panel = $(selector);
     if (panel) panel.hidden = hidden;
-  }
-
-  function renderCampaignList() {
-    var wrap = $("#campaign-list-wrap");
-    var list = $("#campaign-list");
-    if (!wrap || !list) return;
-    wrap.hidden = state.campaigns.length === 0;
-    list.innerHTML = state.campaigns.map(function (campaign) {
-      var active = state.session && state.session.id === campaign.id;
-      var profile = campaign.campaign || {};
-      var rules = campaign.contentPolicy && campaign.contentPolicy.gamesystem ? " · " + campaign.contentPolicy.gamesystem : "";
-      return '<button class="campaign-card' + (active ? ' active' : '') + '" data-campaign-id="' + escapeHtml(campaign.id) + '"><span><strong>' + escapeHtml(profile.name || "Unnamed Campaign") + '</strong><small>' + escapeHtml(titleCase(campaign.phase || "character_creation")) + ' · ' + escapeHtml(profile.setting || "Open fantasy") + escapeHtml(rules) + '</small></span><span class="campaign-arrow">↗</span></button>';
-    }).join("");
   }
 
   function renderQuickstarts() {
@@ -3342,6 +3332,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     $("#campaign-ogl-input").addEventListener("change", renderCampaignSourceOptions);
     $("#character-form").addEventListener("submit", createCharacter);
     $("#character-roll-stats").addEventListener("click", rollCharacterStats);
+    $("#character-options-retry").addEventListener("click", function () { loadCharacterOptions(state.session && state.session.id); });
     $("#character-ability-method").addEventListener("change", renderAbilityScoreFields);
     ["#character-species-input", "#character-class-input", "#character-level-input", "#character-background-choice", "#character-alignment-choice"].forEach(function (selector) {
       var input = $(selector);
