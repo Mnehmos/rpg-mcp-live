@@ -28,7 +28,7 @@ import {
 } from "./turn-composer.js";
 import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
-import { renderOpeningPresence } from "./dm-presence.js";
+import { renderOpeningPresence, updateOpeningPresenceActivity } from "./dm-presence.js";
 import { pairToolDisclosureWithNarration, renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
@@ -2557,6 +2557,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       expectedCampaignVersion: expectedCampaignVersion
     }, command), function (event) {
       if (event.type === "narration") showLiveNarration(event.text);
+      else if (event.type === "status") setStatus(event.message, "thinking");
     }).then(function (result) {
       clearLiveNarration();
       if (result.response.status === 401) {
@@ -2780,7 +2781,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     state.openingErrorCampaignId = null;
     state.openingLoadingCampaignId = campaignId;
     var feedback = $("#tutorial-feedback");
-    if (feedback) feedback.textContent = "The DM is opening the first situation…";
+    if (feedback) feedback.textContent = "The DM is opening the first situation… First scenes take longer than later turns while the world is built.";
     setStatus("The DM is opening your first scene", "thinking");
     renderSession({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription, usage: state.usage });
     return streamTurn("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
@@ -2788,6 +2789,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       expectedCampaignVersion: state.session.version
     }, function (event) {
       if (event.type === "narration") showLiveNarration(event.text);
+      else if (event.type === "status") {
+        updateOpeningPresenceActivity(event.message);
+        setStatus(event.message, "thinking");
+      }
     }).then(function (result) {
       clearLiveNarration();
       if (result.response.status === 409 && result.data.session) {

@@ -35,5 +35,16 @@ export function renderOpeningPresence(session, snapshot, mode) {
   var steps = copy.steps.map(function (step, index) {
     return '<li style="--step:' + index + '"><span aria-hidden="true"></span>' + escapeHtml(step) + '</li>';
   }).join("");
-  return '<div class="log-entry narration dm-response dm-presence" data-opening-state="thinking" role="status" aria-label="The DM is opening your first scene"><span class="log-icon">DM</span><div class="log-content"><p class="dm-presence-kicker"><span class="dm-presence-pulse" aria-hidden="true"></span>THE DM IS THINKING</p><p class="dm-presence-inference">' + escapeHtml(copy.inference) + '</p><ol class="dm-presence-steps">' + steps + '</ol><p class="dm-presence-note">This is a quick read, not campaign history. The finished scene replaces it when the table commits.</p></div></div>';
+  return '<div class="log-entry narration dm-response dm-presence" data-opening-state="thinking" role="status" aria-label="The DM is opening your first scene"><span class="log-icon">DM</span><div class="log-content"><p class="dm-presence-kicker"><span class="dm-presence-pulse" aria-hidden="true"></span>THE DM IS THINKING</p><p class="dm-presence-inference">' + escapeHtml(copy.inference) + '</p><ol class="dm-presence-steps">' + steps + '</ol><p class="dm-presence-activity" data-presence-live aria-live="polite">Getting started…</p><p class="dm-presence-note">First scenes take longer than later turns: the DM is building the world&mdash;people, places, and stakes&mdash;before anything is written. This is a quick read, not campaign history; the finished scene replaces it when the table commits.</p></div></div>';
+}
+
+/**
+ * Updates the live activity line in an already-rendered opening presence
+ * panel in place, so a real tool-call status (from the server's onProgress
+ * stream) doesn't require re-rendering the whole log and losing scroll
+ * position or the in-progress narration node.
+ */
+export function updateOpeningPresenceActivity(message) {
+  var node = document.querySelector('[data-opening-state="thinking"] [data-presence-live]');
+  if (node && message) node.textContent = message;
 }
