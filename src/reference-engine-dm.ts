@@ -1386,7 +1386,15 @@ export class ReferenceDungeonMaster {
         usage?: ChatCompletionUsageEnvelope;
         error?: { message?: string; code?: unknown };
       };
-      if (streaming && response.body) {
+      /**
+       * Some provider routes answer a stream:true request with a normal JSON
+       * completion. Trust the content type over the request: only an actual
+       * event-stream is parsed as SSE; otherwise the buffered path decodes it
+       * and deltas simply never emit for that round.
+       */
+      const responseContentType = response.headers.get("content-type") ?? "";
+      const sseBody = streaming && response.body && responseContentType.includes("text/event-stream");
+      if (sseBody) {
         /**
          * Streamed rounds accumulate the same shape the non-streaming response
          * produces, so every downstream consumer (usage settlement, empty
