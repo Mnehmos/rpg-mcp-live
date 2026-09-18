@@ -2483,6 +2483,8 @@ export const engineOpeningRequestSchema = z
   .object({
     clientCommandId: z.string().uuid(),
     expectedCampaignVersion: z.number().int().nonnegative(),
+    /** Stream turn progress as SSE lines instead of buffering the whole reply. */
+    stream: z.boolean().optional(),
   })
   .strict();
 export type EngineOpeningRequest = z.infer<typeof engineOpeningRequestSchema>;

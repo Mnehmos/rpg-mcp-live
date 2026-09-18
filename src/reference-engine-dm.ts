@@ -342,6 +342,13 @@ export interface AuthoredSceneState {
 export interface ReferenceResolveTurnOptions {
   clientCommandId?: string;
   expectedCampaignVersion?: number;
+  /**
+   * Live turn progress for streaming clients. `narration` events carry the
+   * accumulated narration text so far and are cosmetic — the authoritative
+   * result always arrives in the resolved turn payload. A narration preview
+   * may be discarded when its round turns out to be a tool-call round.
+   */
+  onProgress?: (event: { type: "status"; message: string } | { type: "narration"; text: string }) => void;
 }
 
 // Creative scene authoring can legitimately need room generation, placement,
@@ -886,6 +893,17 @@ export class ReferenceDungeonMaster {
           ...DOCKET_TOOLS,
         ];
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
+        options.onProgress?.({
+          type: "status",
+          message: round === 0
+            ? "Reading the table"
+            : toolRoundCount > 0
+              ? "Weaving the threads"
+              : "Consulting the rules",
+        });
+        const narrationDelta = options.onProgress
+          ? (fullText: string) => options.onProgress?.({ type: "narration", text: fullText })
+          : undefined;
         const completion = await this.chatCompletion(messages, tools, deadlineAt, {
           userId: accountId,
           campaignId,
@@ -895,7 +913,7 @@ export class ReferenceDungeonMaster {
           ? "none"
           : requiresAuthoritativeToolChoice && !authoritativeToolCallObserved
             ? "required"
-            : "auto");
+            : "auto", narrationDelta);
         providerCallCount += completion.providerCalls ?? 1;
         narrationOnlyNext = false;
         const toolCalls = completion.tool_calls ?? [];
@@ -1218,12 +1236,13 @@ export class ReferenceDungeonMaster {
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
     toolChoice: "auto" | "none" | "required" = "auto",
+    onNarrationDelta?: (fullText: string) => void,
   ): Promise<ChatCompletionResult> {
     let providerCalls = 0;
     const attempt = async (model?: string): Promise<ChatCompletionResult> => {
       providerCalls += 1;
       try {
-        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice, model);
+        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice, model, onNarrationDelta);
       } catch (error) {
         // The resolve loop increments its diagnostic counter only after a
         // completion returns. Preserve the attempted-call count on failures,
@@ -1289,6 +1308,7 @@ export class ReferenceDungeonMaster {
     usageContext?: DmUsageContext,
     toolChoice: "auto" | "none" | "required" = "auto",
     modelOverride?: string,
+    onNarrationDelta?: (fullText: string) => void,
   ): Promise<ChatCompletionResult> {
     const model = modelOverride ?? this.openRouter.model;
     const remainingMs = deadlineAt === null
@@ -1339,13 +1359,16 @@ export class ReferenceDungeonMaster {
       })
       : null;
     try {
+      const streaming = typeof onNarrationDelta === "function";
       const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${this.openRouter.apiKey}`,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(streaming
+          ? { ...body, stream: true, usage: { include: true } }
+          : body),
         signal: remainingMs > 0 ? AbortSignal.timeout(remainingMs) : undefined,
       });
       if (!response.ok) {
@@ -1356,12 +1379,97 @@ export class ReferenceDungeonMaster {
         }
         throw new Error(message);
       }
-      const data = (await response.json()) as {
+      let data: {
         id?: string;
         choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] }; finish_reason?: string }>;
         usage?: ChatCompletionUsageEnvelope;
         error?: { message?: string; code?: unknown };
       };
+      if (streaming && response.body) {
+        /**
+         * Streamed rounds accumulate the same shape the non-streaming response
+         * produces, so every downstream consumer (usage settlement, empty
+         * detection, retry policy) stays identical. Narration deltas stream
+         * out as accumulated text; once the round shows any tool-call delta,
+         * narration streaming stops — that round is a tool round, and its
+         * content (if any) is not the player-facing draft.
+         */
+        let content = "";
+        let sawToolCallDeltas = false;
+        let finishReason: string | null = null;
+        let completionId: string | undefined;
+        let usage: ChatCompletionUsageEnvelope | undefined;
+        const toolCallAccumulator = new Map<number, { id: string; name: string; arguments: string }>();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+          buffer += decoder.decode(chunk, { stream: true });
+          let newlineIndex = buffer.indexOf("\n");
+          while (newlineIndex !== -1) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            newlineIndex = buffer.indexOf("\n");
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            let event: {
+              id?: string;
+              usage?: ChatCompletionUsageEnvelope;
+              choices?: Array<{ finish_reason?: string | null; delta?: { content?: string | null; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }>;
+            };
+            try {
+              event = JSON.parse(payload);
+            } catch {
+              continue;
+            }
+            if (event.id) completionId = event.id;
+            if (event.usage) usage = event.usage;
+            const choice = event.choices?.[0];
+            if (!choice) continue;
+            if (choice.finish_reason) finishReason = choice.finish_reason;
+            const delta = choice.delta;
+            if (!delta) continue;
+            if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+              sawToolCallDeltas = true;
+              for (const fragment of delta.tool_calls) {
+                const index = Number(fragment.index ?? 0);
+                const slot = toolCallAccumulator.get(index) ?? { id: "", name: "", arguments: "" };
+                if (fragment.id) slot.id = fragment.id;
+                if (fragment.function?.name) slot.name += fragment.function.name;
+                if (fragment.function?.arguments) slot.arguments += fragment.function.arguments;
+                toolCallAccumulator.set(index, slot);
+              }
+              continue;
+            }
+            if (typeof delta.content === "string" && delta.content && !sawToolCallDeltas) {
+              content += delta.content;
+              onNarrationDelta(content);
+            }
+          }
+        }
+        const streamedToolCalls = sawToolCallDeltas
+          ? [...toolCallAccumulator.entries()]
+            .sort((left, right) => left[0] - right[0])
+            .map(([index, call]) => ({
+              id: call.id || `call_${index}`,
+              type: "function" as const,
+              function: { name: call.name, arguments: call.arguments },
+            }))
+          : undefined;
+        data = {
+          id: completionId,
+          choices: [{
+            message: {
+              content: sawToolCallDeltas ? null : (content || null),
+              tool_calls: streamedToolCalls,
+            },
+            finish_reason: finishReason ?? undefined,
+          }],
+          usage,
+        };
+      } else {
+        data = (await response.json()) as typeof data;
+      }
       const message = data.choices?.[0]?.message;
       const actualUsage = reservation
         ? buildCompletionUsage(data, message, usageStore!, reservation, this.openRouter.model)

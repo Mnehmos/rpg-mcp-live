@@ -999,3 +999,7 @@ h1 i { color: var(--amber); font-style: italic; }
 .dossier-section[open] > summary { border-bottom: 1px solid var(--line); }
 .dossier-body { padding: 12px; }
 .dossier-body > p:first-child { margin-top: 0; }
+/* Streamed narration preview: the DM's words appear as they are generated and
+   are replaced by the authoritative entry when the turn settles. */
+.log-entry.live-narration { border-color: rgba(233, 167, 91, .35); }
+.live-narration-text::after { content: "▍"; color: var(--amber); animation: composer-pulse 1.1s ease-in-out infinite; }

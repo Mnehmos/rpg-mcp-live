@@ -194,6 +194,66 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("streams narration deltas when the client asks for progress", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-streaming-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 1_000_000,
+      freeMonthlyCostMicros: 1_000_000,
+    });
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["combat_action"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+        usage,
+      },
+    );
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const progress: Array<{ type: string; message?: string; text?: string }> = [];
+    const sseChunks = [
+      'data: {"id":"gen-1","choices":[{"delta":{"content":"Mist "}}]}\n\n',
+      'data: {"id":"gen-1","choices":[{"delta":{"content":"gathers around the road."}}]}\n\n',
+      'data: {"id":"gen-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cost":0.000001}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestBodies.push(JSON.parse(init.body));
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const encoder = new TextEncoder();
+            for (const chunk of sseChunks) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road into the mist.", {
+      onProgress: (event) => progress.push(event),
+    });
+
+    expect(requestBodies.length).toBe(1);
+    expect(requestBodies[0]?.stream).toBe(true);
+    const narrationEvents = progress.filter((event) => event.type === "narration");
+    expect(narrationEvents.at(-1)?.text).toBe("Mist gathers around the road.");
+    expect(progress.some((event) => event.type === "status")).toBe(true);
+    expect(result.narration.text).toContain("Mist gathers around the road.");
+    gameStore.close();
+  });
+
   it("makes the stable authoring palette available without an activation-only round", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-core-palette-"));
     const gameStore = new GameStore(join(directory, "game.db"));
