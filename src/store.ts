@@ -112,6 +112,12 @@ export class CommandInProgressError extends Error {
   }
 }
 
+export type QuickstartClaim = {
+  state: "claimed" | "in_progress" | "done";
+  campaignId: string | null;
+  presetId: string | null;
+};
+
 export class GameStore {
   private readonly db: Database.Database;
 
@@ -171,8 +177,11 @@ export class GameStore {
       CREATE TABLE IF NOT EXISTS quickstart_requests (
         user_id TEXT NOT NULL,
         request_id TEXT NOT NULL,
-        campaign_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('claimed', 'open', 'done')),
+        campaign_id TEXT,
+        preset_id TEXT,
+        claimed_at INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
         PRIMARY KEY (user_id, request_id)
       );
     `);
@@ -355,21 +364,49 @@ export class GameStore {
       .run(eventId, eventType, new Date().toISOString());
   }
 
-  /** Campaign a replayed quickstart request already created, so a retry never makes a second one. */
-  public getQuickstartCampaignId(userId: string, requestId: string): string | null {
-    const row = this.db
-      .prepare("SELECT campaign_id FROM quickstart_requests WHERE user_id = ? AND request_id = ?")
-      .get(userId, requestId) as { campaign_id: string } | undefined;
-    return row?.campaign_id ?? null;
+  /**
+   * Claim a quickstart request before any campaign is created, so a replay
+   * (second tab, reload after sign-up) can never create a second campaign.
+   * A claim older than staleAfterMs belongs to a request that died and may be
+   * taken over; its campaign, if one was made, is resumed rather than replaced.
+   */
+  public claimQuickstartRequest(userId: string, requestId: string, staleAfterMs: number, now = Date.now()): QuickstartClaim {
+    const claim = this.db.transaction((): QuickstartClaim => {
+      const row = this.db
+        .prepare("SELECT status, campaign_id, preset_id, claimed_at FROM quickstart_requests WHERE user_id = ? AND request_id = ?")
+        .get(userId, requestId) as { status: string; campaign_id: string | null; preset_id: string | null; claimed_at: number } | undefined;
+      const prior = { campaignId: row?.campaign_id ?? null, presetId: row?.preset_id ?? null };
+      if (row?.status === "done") return { state: "done", ...prior };
+      if (row?.status === "claimed" && now - row.claimed_at < staleAfterMs) return { state: "in_progress", ...prior };
+      this.db
+        .prepare(
+          `INSERT INTO quickstart_requests (user_id, request_id, status, campaign_id, claimed_at, updated_at)
+           VALUES (?, ?, 'claimed', NULL, ?, ?)
+           ON CONFLICT (user_id, request_id) DO UPDATE SET status = 'claimed', claimed_at = excluded.claimed_at, updated_at = excluded.updated_at`
+        )
+        .run(userId, requestId, now, new Date(now).toISOString());
+      return { state: "claimed", ...prior };
+    });
+    return claim.immediate();
   }
 
-  public recordQuickstartRequest(userId: string, requestId: string, campaignId: string): void {
+  public attachQuickstartCampaign(userId: string, requestId: string, campaignId: string, presetId: string): void {
     this.db
-      .prepare(
-        `INSERT OR IGNORE INTO quickstart_requests (user_id, request_id, campaign_id, created_at)
-         VALUES (?, ?, ?, ?)`
-      )
-      .run(userId, requestId, campaignId, new Date().toISOString());
+      .prepare("UPDATE quickstart_requests SET campaign_id = ?, preset_id = ?, updated_at = ? WHERE user_id = ? AND request_id = ?")
+      .run(campaignId, presetId, new Date().toISOString(), userId, requestId);
+  }
+
+  public completeQuickstartRequest(userId: string, requestId: string): void {
+    this.db
+      .prepare("UPDATE quickstart_requests SET status = 'done', updated_at = ? WHERE user_id = ? AND request_id = ?")
+      .run(new Date().toISOString(), userId, requestId);
+  }
+
+  /** Release a failed claim; a later replay resumes its campaign instead of making another. */
+  public releaseQuickstartRequest(userId: string, requestId: string): void {
+    this.db
+      .prepare("UPDATE quickstart_requests SET status = 'open', updated_at = ? WHERE user_id = ? AND request_id = ? AND status = 'claimed'")
+      .run(new Date().toISOString(), userId, requestId);
   }
 
   public close(): void {
