@@ -37,3 +37,23 @@ export function renderOpeningPresence(session, snapshot, mode) {
   }).join("");
   return '<div class="log-entry narration dm-response dm-presence" data-opening-state="thinking" role="status" aria-label="The DM is opening your first scene"><span class="log-icon">DM</span><div class="log-content"><p class="dm-presence-kicker"><span class="dm-presence-pulse" aria-hidden="true"></span>THE DM IS THINKING</p><p class="dm-presence-inference">' + escapeHtml(copy.inference) + '</p><ol class="dm-presence-steps">' + steps + '</ol><p class="dm-presence-note">This is a quick read, not campaign history. The finished scene replaces it when the table commits.</p></div></div>';
 }
+
+/** The server sends this as the "player" line of the opening turn; it is not something the player said. */
+export var OPENING_INSTRUCTION = "Open the first situation and establish the campaign's opening scene.";
+
+/**
+ * Log entries a player should see. The opening instruction stays in the
+ * stored log (it anchors the DM's replayed history) but is never shown as a
+ * YOU line, and the campaign-created placeholder drops away once the DM has
+ * narrated.
+ */
+export function visibleLogEntries(entries) {
+  var list = Array.isArray(entries) ? entries : [];
+  var narrated = list.some(function (entry) { return entry && entry.kind === "narration"; });
+  return list.filter(function (entry) {
+    if (!entry) return false;
+    if (entry.kind === "player" && String(entry.text || "").trim() === OPENING_INSTRUCTION) return false;
+    if (narrated && entry.kind === "system" && /^Campaign created./.test(String(entry.text || ""))) return false;
+    return true;
+  });
+}

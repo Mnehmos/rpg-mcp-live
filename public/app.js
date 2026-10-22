@@ -31,7 +31,7 @@ import {
 } from "./turn-composer.js";
 import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
-import { renderOpeningPresence } from "./dm-presence.js";
+import { renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
 import { pairToolDisclosureWithNarration, renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
@@ -1983,7 +1983,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     renderSuggestedActions(sessionActions, session, snapshot);
 
     var entries = Array.isArray(session.log) ? session.log : [];
-    var pairedEntries = pairToolDisclosureWithNarration(entries);
+    var pairedEntries = pairToolDisclosureWithNarration(visibleLogEntries(entries));
     var logHtml = pairedEntries.map(function (group) {
       var entry = group.entry || {};
       var kind = String(entry.kind || "narration").replace(/[^a-z-]/g, "");
@@ -2310,7 +2310,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       if (!result.response.ok) throw new Error(result.data.error || "The table is unavailable.");
       renderSession(result.data);
       var pendingForLoadedCampaign = result.data.session && readPendingCommand(result.data.session.id);
-      if (pendingForLoadedCampaign) setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      if (pendingForLoadedCampaign) setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       else if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
@@ -2486,17 +2486,17 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (outcome.pending) schedulePendingReconciliation(campaignId, clientCommandId);
         setStatus(
           outcome.pending
-            ? "This turn is still reconciling; keep this tab open."
+            ? "The DM is still working on your turn. Hang tight."
             : "The table is current; confirm this turn before retrying.",
           "thinking"
         );
-        showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+        showToast("Still working on your turn. Your text is safe in the box below.");
         return false;
       });
     }).catch(function () {
       schedulePendingReconciliation(campaignId, clientCommandId);
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
-      showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
+      showToast("Still working on your turn. Your text is safe in the box below.");
       return false;
     });
   }
@@ -2564,7 +2564,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (isPendingCommandConflict(pendingCommand, campaignId, commandId)) {
       state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       showToast("Your earlier turn is still reconciling. Wait for it to settle before submitting another action.");
       startPendingReconciliation(pendingCommand.campaignId, pendingCommand.clientCommandId);
       return Promise.resolve(false);
@@ -2639,7 +2639,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       state.pendingPlayerText = pending && pending.clientCommandId === commandId ? pending.playerText : null;
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       showToast(error.message || "The turn is still reconciling.");
       return false;
     });
@@ -3092,7 +3092,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (pendingForCampaign && pendingForCampaign.status === "processing") {
           state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
           renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-          setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+          setStatus("The DM is still working on your turn. Hang tight.", "thinking");
           startPendingReconciliation(campaignId, pendingForCampaign.clientCommandId);
         } else if (pendingForCampaign && pendingForCampaign.status === "uncertain") {
           setStatus("The previous turn may have committed; the table is current.", "error");

@@ -97,7 +97,7 @@ describe("player-facing branding", () => {
 
   it("shows opening presence and keeps table receipts inside the DM turn", () => {
     expect(app).toContain("renderOpeningPresence(session, snapshot");
-    expect(app).toContain("pairToolDisclosureWithNarration(entries)");
+    expect(app).toContain("pairToolDisclosureWithNarration(visibleLogEntries(entries))");
     expect(app).toContain('gameLog.classList.toggle("is-opening", openingPending || openingFailed)');
     expect(app).not.toContain('<span class="log-icon">TOOLS</span>');
   });
