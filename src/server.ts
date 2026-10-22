@@ -830,6 +830,11 @@ app.post("/api/campaigns", async (request, response) => {
   }
 });
 
+function quickstartRequestId(body: unknown): string | null {
+  const value = body && typeof body === "object" ? (body as { requestId?: unknown }).requestId : undefined;
+  return typeof value === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : null;
+}
+
 app.post("/api/quickstarts/:quickstartId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
@@ -841,8 +846,29 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
     response.status(404).json({ code: "quickstart_not_found", error: "That quickstart is not available." });
     return;
   }
+  // A Play now intent can be replayed after sign-up or a reload; the request
+  // id makes that replay return the campaign it already created.
+  const requestId = quickstartRequestId(request.body);
 
   try {
+    const replayedCampaignId = requestId ? store.getQuickstartCampaignId(userId, requestId) : null;
+    if (replayedCampaignId) {
+      const replayed = await referenceEngineAdapter.getCampaign(userId, userId, replayedCampaignId).catch(() => null);
+      if (replayed) {
+        response.status(200).json({
+          quickstart: { id: preset.id, title: preset.title, character: null },
+          session: replayed.campaign,
+          state: null,
+          campaign: replayed.campaign,
+          campaigns: await listAllCampaigns(userId),
+          autoOpen: true,
+          replayed: true,
+          subscription: store.getSubscription(userId),
+          usage: llmUsageStore.getSummary(userId),
+        });
+        return;
+      }
+    }
     const created = await referenceEngineAdapter.createCampaign(userId, userId, preset.campaign);
     const character = await referenceEngineAdapter.executeToolCall(userId, userId, created.campaign.id, {
       clientCommandId: randomUUID(),
@@ -861,6 +887,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
       });
       return;
     }
+    if (requestId) store.recordQuickstartRequest(userId, requestId, created.campaign.id);
     const result = await referenceEngineAdapter.getCampaign(userId, userId, created.campaign.id);
     response.status(201).json({
       quickstart: { id: preset.id, title: preset.title, character: preset.character.name },

@@ -119,3 +119,18 @@ describe("authoritative campaign commands", () => {
     store.close();
   });
 });
+
+describe("quickstart request idempotency", () => {
+  it("returns the first campaign for a replayed request and scopes ids per player", () => {
+    const store = createTestStore();
+    const requestId = randomUUID();
+
+    expect(store.getQuickstartCampaignId("player-1", requestId)).toBeNull();
+    store.recordQuickstartRequest("player-1", requestId, "campaign-a");
+    store.recordQuickstartRequest("player-1", requestId, "campaign-b");
+
+    expect(store.getQuickstartCampaignId("player-1", requestId)).toBe("campaign-a");
+    expect(store.getQuickstartCampaignId("player-2", requestId)).toBeNull();
+    store.close();
+  });
+});

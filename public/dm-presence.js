@@ -49,11 +49,16 @@ export var OPENING_INSTRUCTION = "Open the first situation and establish the cam
  */
 export function visibleLogEntries(entries) {
   var list = Array.isArray(entries) ? entries : [];
-  var narrated = list.some(function (entry) { return entry && entry.kind === "narration"; });
+  var narrated = list.some(function (entry) { return Boolean(entry) && entry.kind === "narration"; });
   return list.filter(function (entry) {
-    if (!entry) return false;
-    if (entry.kind === "player" && String(entry.text || "").trim() === OPENING_INSTRUCTION) return false;
-    if (narrated && entry.kind === "system" && /^Campaign created./.test(String(entry.text || ""))) return false;
-    return true;
+    return Boolean(entry) && !isOpeningInstruction(entry) && !(narrated && isCampaignCreatedNotice(entry));
   });
+}
+
+function isOpeningInstruction(entry) {
+  return entry.kind === "player" && String(entry.text || "").trim() === OPENING_INSTRUCTION;
+}
+
+function isCampaignCreatedNotice(entry) {
+  return entry.kind === "system" && /^Campaign created\./.test(String(entry.text || ""));
 }

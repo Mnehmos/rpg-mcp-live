@@ -91,21 +91,45 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     }
   }
 
-  function setPendingQuickstart(quickstartId) {
-    state.pendingQuickstartId = quickstartId || null;
+  // Remember a Play now click that hit the sign-in wall. The stored copy is
+  // cleared only after the launch succeeds; the request id keeps a replay
+  // from creating a second campaign.
+  function setPendingQuickstart(quickstartId, requestId) {
+    state.pendingQuickstartId = quickstartId;
+    state.pendingQuickstartRequestId = requestId || newCommandId();
     try {
-      if (quickstartId) window.localStorage.setItem(PENDING_QUICKSTART_STORAGE_KEY, pendingQuickstartStorageValue(quickstartId));
-      else window.localStorage.removeItem(PENDING_QUICKSTART_STORAGE_KEY);
+      window.localStorage.setItem(PENDING_QUICKSTART_STORAGE_KEY, pendingQuickstartStorageValue(quickstartId, state.pendingQuickstartRequestId));
     } catch (_error) {
       // Storage can be disabled; the in-memory intent still covers in-page sign-in.
     }
   }
 
-  function readPendingQuickstart() {
+  function takeInMemoryQuickstart() {
+    var pending = state.pendingQuickstartId
+      ? { id: state.pendingQuickstartId, requestId: state.pendingQuickstartRequestId }
+      : null;
+    state.pendingQuickstartId = null;
+    state.pendingQuickstartRequestId = null;
+    return pending;
+  }
+
+  // Read the stored intent at most once per page load, so Clerk's frequent
+  // session events cannot replay a failing launch in a loop.
+  function takeStoredQuickstartOnce() {
+    if (state.storedQuickstartChecked) return null;
+    state.storedQuickstartChecked = true;
     try {
       return pendingQuickstartFromValue(window.localStorage.getItem(PENDING_QUICKSTART_STORAGE_KEY));
     } catch (_error) {
       return null;
+    }
+  }
+
+  function clearStoredQuickstart() {
+    try {
+      window.localStorage.removeItem(PENDING_QUICKSTART_STORAGE_KEY);
+    } catch (_error) {
+      // Nothing was stored when storage is disabled.
     }
   }
 
@@ -2659,26 +2683,26 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     return submitCommand({ playerText: playerText }, clientCommandId);
   }
 
-  function startQuickstart(quickstartId) {
+  function startQuickstart(quickstartId, requestId) {
     // The server session is the source of truth, not Clerk's client mirror:
     // attempt the call and let a real 401 drive the sign-in dialog. This keeps
     // Clerk's async session restore from misreading a signed-in player.
-    return launchQuickstart(quickstartId);
+    return launchQuickstart(quickstartId, requestId);
   }
 
-  function launchQuickstart(quickstartId) {
+  function launchQuickstart(quickstartId, requestId) {
     if (state.quickstartLoading) return Promise.resolve(false);
     state.quickstartLoading = quickstartId;
     renderQuickstarts();
     setStatus(quickstartId === "random" ? "Rolling up your character" : "Setting the table", "thinking");
     return requestJson("/api/quickstarts/" + encodeURIComponent(quickstartId), {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(requestId ? { requestId: requestId } : {}),
     }).then(function (result) {
       if (result.response.status === 401) {
         // The browser's Clerk session was not usable for this call — ask for
         // sign-in once and auto-launch this story when it completes.
-        setPendingQuickstart(quickstartId);
+        setPendingQuickstart(quickstartId, requestId);
         setStatus(quickstartId === "random"
           ? "Sign in once — your character hits the table right after."
           : "Sign in to start this story — it launches right after.", "thinking");
@@ -2690,6 +2714,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         quickstartError.reconcile = false;
         throw quickstartError;
       }
+      clearStoredQuickstart();
       state.managerOpen = false;
       state.createMode = false;
       renderSession(result.data);
@@ -3277,11 +3302,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (typeof state.clerk.addListener === "function") {
           state.clerk.addListener(function () {
             renderIdentity();
-            var pendingQuickstart = state.pendingQuickstartId || readPendingQuickstart();
             // Clerk emits several events per sign-in flow; consume the pending
             // story only once the session actually exists, otherwise events
             // that fire mid-flow would drop the player's Play now click.
-            if (state.clerk.isSignedIn) setPendingQuickstart(null);
+            var pendingQuickstart = state.clerk.isSignedIn
+              ? takeInMemoryQuickstart() || takeStoredQuickstartOnce()
+              : null;
             if (state.clerk.isSignedIn) {
               closeAuth();
               loadCharacterOptions();
@@ -3291,7 +3317,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
               state.contentCatalog = null;
             }
             refreshSession().then(function () {
-              if (pendingQuickstart && state.clerk.isSignedIn) startQuickstart(pendingQuickstart);
+              if (pendingQuickstart && state.clerk.isSignedIn) startQuickstart(pendingQuickstart.id, pendingQuickstart.requestId);
             });
           });
         }

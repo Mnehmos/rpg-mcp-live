@@ -167,6 +167,14 @@ export class GameStore {
         event_type TEXT NOT NULL,
         received_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS quickstart_requests (
+        user_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, request_id)
+      );
     `);
 
     this.ensureSessionVersionColumn();
@@ -345,6 +353,23 @@ export class GameStore {
          VALUES (?, ?, ?)`
       )
       .run(eventId, eventType, new Date().toISOString());
+  }
+
+  /** Campaign a replayed quickstart request already created, so a retry never makes a second one. */
+  public getQuickstartCampaignId(userId: string, requestId: string): string | null {
+    const row = this.db
+      .prepare("SELECT campaign_id FROM quickstart_requests WHERE user_id = ? AND request_id = ?")
+      .get(userId, requestId) as { campaign_id: string } | undefined;
+    return row?.campaign_id ?? null;
+  }
+
+  public recordQuickstartRequest(userId: string, requestId: string, campaignId: string): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO quickstart_requests (user_id, request_id, campaign_id, created_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(userId, requestId, campaignId, new Date().toISOString());
   }
 
   public close(): void {
