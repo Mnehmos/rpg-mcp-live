@@ -19,6 +19,9 @@ import {
   pendingCommandStorageKey,
   retryDelayMs,
   shouldRetryCampaignLoad,
+  PENDING_QUICKSTART_STORAGE_KEY,
+  pendingQuickstartFromValue,
+  pendingQuickstartStorageValue,
 } from "./campaign-resume.js";
 import {
   composerSubmission,
@@ -85,6 +88,24 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       window.localStorage.setItem(activeCampaignStorageKey(currentUserId()), normalizedCampaignId);
     } catch (_error) {
       // Storage can be disabled by privacy settings; session hydration still works.
+    }
+  }
+
+  function setPendingQuickstart(quickstartId) {
+    state.pendingQuickstartId = quickstartId || null;
+    try {
+      if (quickstartId) window.localStorage.setItem(PENDING_QUICKSTART_STORAGE_KEY, pendingQuickstartStorageValue(quickstartId));
+      else window.localStorage.removeItem(PENDING_QUICKSTART_STORAGE_KEY);
+    } catch (_error) {
+      // Storage can be disabled; the in-memory intent still covers in-page sign-in.
+    }
+  }
+
+  function readPendingQuickstart() {
+    try {
+      return pendingQuickstartFromValue(window.localStorage.getItem(PENDING_QUICKSTART_STORAGE_KEY));
+    } catch (_error) {
+      return null;
     }
   }
 
@@ -309,7 +330,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.hidden = false;
     if (state.clerk && !state.clerk.isSignedIn && !$("#auth-mount").children.length) {
-      state.clerk.mountSignIn($("#auth-mount"));
+      // withSignUp keeps account creation inside this dialog instead of
+      // sending new players to the hosted sign-up page.
+      state.clerk.mountSignIn($("#auth-mount"), { withSignUp: true });
     }
   }
 
@@ -2655,7 +2678,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       if (result.response.status === 401) {
         // The browser's Clerk session was not usable for this call — ask for
         // sign-in once and auto-launch this story when it completes.
-        state.pendingQuickstartId = quickstartId;
+        setPendingQuickstart(quickstartId);
         setStatus(quickstartId === "random"
           ? "Sign in once — your character hits the table right after."
           : "Sign in to start this story — it launches right after.", "thinking");
@@ -3254,11 +3277,11 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (typeof state.clerk.addListener === "function") {
           state.clerk.addListener(function () {
             renderIdentity();
-            var pendingQuickstart = state.pendingQuickstartId;
+            var pendingQuickstart = state.pendingQuickstartId || readPendingQuickstart();
             // Clerk emits several events per sign-in flow; consume the pending
             // story only once the session actually exists, otherwise events
             // that fire mid-flow would drop the player's Play now click.
-            if (state.clerk.isSignedIn) state.pendingQuickstartId = null;
+            if (state.clerk.isSignedIn) setPendingQuickstart(null);
             if (state.clerk.isSignedIn) {
               closeAuth();
               loadCharacterOptions();

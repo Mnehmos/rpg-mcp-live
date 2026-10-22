@@ -117,3 +117,29 @@ export function commandReconciliationPolicy(engineBackend) {
     : { maxAttempts: 80, pollDelayMs: 1500 };
 }
 
+
+/**
+ * A Play now click survives the trip through sign-up (hosted pages, OAuth
+ * redirects, email verification) so the story launches when the player
+ * returns signed in. Stale intents are ignored.
+ */
+export const PENDING_QUICKSTART_STORAGE_KEY = "lantern.pendingQuickstart";
+export const PENDING_QUICKSTART_TTL_MS = 30 * 60 * 1000;
+
+export function pendingQuickstartStorageValue(quickstartId, now = Date.now()) {
+  const id = String(quickstartId || "").trim();
+  return id ? JSON.stringify({ id, at: now }) : "";
+}
+
+export function pendingQuickstartFromValue(value, now = Date.now()) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    const id = String(parsed?.id || "").trim();
+    const at = Number(parsed?.at);
+    if (!id || !Number.isFinite(at) || now - at > PENDING_QUICKSTART_TTL_MS || at > now) return null;
+    return id;
+  } catch (_error) {
+    return null;
+  }
+}
