@@ -254,6 +254,61 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("retries a streamed completion that carries neither prose nor tool calls", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-blank-stream-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["combat_action"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+      },
+    );
+    const blank = [
+      'data: {"id":"gen-blank","choices":[{"delta":{"reasoning":"thinking..."}}]}\n\n',
+      'data: {"id":"gen-blank","choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const narrated = [
+      'data: {"id":"gen-ok","choices":[{"delta":{"content":"The fog parts."}}]}\n\n',
+      'data: {"id":"gen-ok","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const stream = (chunks: string[]): Response => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return stream(calls === 1 ? blank : narrated);
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait for the fog to lift.", {
+      onProgress: () => {},
+    });
+
+    expect(calls).toBe(2);
+    expect(result.narration.text).toContain("The fog parts.");
+    gameStore.close();
+  });
+
   it("makes the stable authoring palette available without an activation-only round", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-core-palette-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -558,7 +613,6 @@ describe("ReferenceDungeonMaster", () => {
       baseUrl: "https://openrouter.example/api/v1",
       model: "openai/gpt-5.4",
       reasoningEffort: "medium",
-      maxTokens: 123,
       timeoutMs: 5000,
       usage,
     });
@@ -583,9 +637,10 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(requestBody).toMatchObject({
       model: "openai/gpt-5.4",
-      max_completion_tokens: 123,
       reasoning_effort: "medium",
     });
+    expect(requestBody).not.toHaveProperty("max_tokens");
+    expect(requestBody).not.toHaveProperty("max_completion_tokens");
     expect(result.turnUsage).toMatchObject({
       calls: 1,
       promptTokens: 100,
@@ -921,7 +976,6 @@ describe("ReferenceDungeonMaster", () => {
       apiKey: "key",
       baseUrl: "https://openrouter.example/api/v1",
       model: "deepseek/deepseek-v4-flash",
-      maxTokens: 1000,
       timeoutMs: 5000,
       usage,
     });

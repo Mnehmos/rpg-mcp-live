@@ -19,6 +19,9 @@ import {
   pendingCommandStorageKey,
   retryDelayMs,
   shouldRetryCampaignLoad,
+  PENDING_QUICKSTART_STORAGE_KEY,
+  pendingQuickstartFromValue,
+  pendingQuickstartStorageValue,
 } from "./campaign-resume.js";
 import {
   composerSubmission,
@@ -28,7 +31,7 @@ import {
 } from "./turn-composer.js";
 import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
-import { renderOpeningPresence } from "./dm-presence.js";
+import { renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
 import { pairToolDisclosureWithNarration, renderToolDisclosure } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
@@ -85,6 +88,48 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       window.localStorage.setItem(activeCampaignStorageKey(currentUserId()), normalizedCampaignId);
     } catch (_error) {
       // Storage can be disabled by privacy settings; session hydration still works.
+    }
+  }
+
+  // Remember a Play now click that hit the sign-in wall. The stored copy is
+  // cleared only after the launch succeeds; the request id keeps a replay
+  // from creating a second campaign.
+  function setPendingQuickstart(quickstartId, requestId) {
+    state.pendingQuickstartId = quickstartId;
+    state.pendingQuickstartRequestId = requestId || newCommandId();
+    try {
+      window.localStorage.setItem(PENDING_QUICKSTART_STORAGE_KEY, pendingQuickstartStorageValue(quickstartId, state.pendingQuickstartRequestId));
+    } catch (_error) {
+      // Storage can be disabled; the in-memory intent still covers in-page sign-in.
+    }
+  }
+
+  function takeInMemoryQuickstart() {
+    var pending = state.pendingQuickstartId
+      ? { id: state.pendingQuickstartId, requestId: state.pendingQuickstartRequestId }
+      : null;
+    state.pendingQuickstartId = null;
+    state.pendingQuickstartRequestId = null;
+    return pending;
+  }
+
+  // Read the stored intent at most once per page load, so Clerk's frequent
+  // session events cannot replay a failing launch in a loop.
+  function takeStoredQuickstartOnce() {
+    if (state.storedQuickstartChecked) return null;
+    state.storedQuickstartChecked = true;
+    try {
+      return pendingQuickstartFromValue(window.localStorage.getItem(PENDING_QUICKSTART_STORAGE_KEY));
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function clearStoredQuickstart() {
+    try {
+      window.localStorage.removeItem(PENDING_QUICKSTART_STORAGE_KEY);
+    } catch (_error) {
+      // Nothing was stored when storage is disabled.
     }
   }
 
@@ -309,7 +354,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.hidden = false;
     if (state.clerk && !state.clerk.isSignedIn && !$("#auth-mount").children.length) {
-      state.clerk.mountSignIn($("#auth-mount"));
+      // withSignUp keeps account creation inside this dialog instead of
+      // sending new players to the hosted sign-up page.
+      state.clerk.mountSignIn($("#auth-mount"), { withSignUp: true });
     }
   }
 
@@ -1960,7 +2007,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     renderSuggestedActions(sessionActions, session, snapshot);
 
     var entries = Array.isArray(session.log) ? session.log : [];
-    var pairedEntries = pairToolDisclosureWithNarration(entries);
+    var pairedEntries = pairToolDisclosureWithNarration(visibleLogEntries(entries));
     var logHtml = pairedEntries.map(function (group) {
       var entry = group.entry || {};
       var kind = String(entry.kind || "narration").replace(/[^a-z-]/g, "");
@@ -2287,7 +2334,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       if (!result.response.ok) throw new Error(result.data.error || "The table is unavailable.");
       renderSession(result.data);
       var pendingForLoadedCampaign = result.data.session && readPendingCommand(result.data.session.id);
-      if (pendingForLoadedCampaign) setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      if (pendingForLoadedCampaign) setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       else if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
@@ -2463,17 +2510,17 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (outcome.pending) schedulePendingReconciliation(campaignId, clientCommandId);
         setStatus(
           outcome.pending
-            ? "This turn is still reconciling; keep this tab open."
+            ? "The DM is still working on your turn. Hang tight."
             : "The table is current; confirm this turn before retrying.",
           "thinking"
         );
-        showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+        showToast("Still working on your turn. Your text is safe in the box below.");
         return false;
       });
     }).catch(function () {
       schedulePendingReconciliation(campaignId, clientCommandId);
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
-      showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
+      showToast("Still working on your turn. Your text is safe in the box below.");
       return false;
     });
   }
@@ -2541,7 +2588,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (isPendingCommandConflict(pendingCommand, campaignId, commandId)) {
       state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       showToast("Your earlier turn is still reconciling. Wait for it to settle before submitting another action.");
       startPendingReconciliation(pendingCommand.campaignId, pendingCommand.clientCommandId);
       return Promise.resolve(false);
@@ -2616,7 +2663,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       state.pendingPlayerText = pending && pending.clientCommandId === commandId ? pending.playerText : null;
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       showToast(error.message || "The turn is still reconciling.");
       return false;
     });
@@ -2636,26 +2683,26 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     return submitCommand({ playerText: playerText }, clientCommandId);
   }
 
-  function startQuickstart(quickstartId) {
+  function startQuickstart(quickstartId, requestId) {
     // The server session is the source of truth, not Clerk's client mirror:
     // attempt the call and let a real 401 drive the sign-in dialog. This keeps
     // Clerk's async session restore from misreading a signed-in player.
-    return launchQuickstart(quickstartId);
+    return launchQuickstart(quickstartId, requestId);
   }
 
-  function launchQuickstart(quickstartId) {
+  function launchQuickstart(quickstartId, requestId) {
     if (state.quickstartLoading) return Promise.resolve(false);
     state.quickstartLoading = quickstartId;
     renderQuickstarts();
     setStatus(quickstartId === "random" ? "Rolling up your character" : "Setting the table", "thinking");
     return requestJson("/api/quickstarts/" + encodeURIComponent(quickstartId), {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(requestId ? { requestId: requestId } : {}),
     }).then(function (result) {
       if (result.response.status === 401) {
         // The browser's Clerk session was not usable for this call — ask for
         // sign-in once and auto-launch this story when it completes.
-        state.pendingQuickstartId = quickstartId;
+        setPendingQuickstart(quickstartId, requestId);
         setStatus(quickstartId === "random"
           ? "Sign in once — your character hits the table right after."
           : "Sign in to start this story — it launches right after.", "thinking");
@@ -2667,6 +2714,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         quickstartError.reconcile = false;
         throw quickstartError;
       }
+      clearStoredQuickstart();
       state.managerOpen = false;
       state.createMode = false;
       renderSession(result.data);
@@ -3069,7 +3117,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (pendingForCampaign && pendingForCampaign.status === "processing") {
           state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
           renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-          setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+          setStatus("The DM is still working on your turn. Hang tight.", "thinking");
           startPendingReconciliation(campaignId, pendingForCampaign.clientCommandId);
         } else if (pendingForCampaign && pendingForCampaign.status === "uncertain") {
           setStatus("The previous turn may have committed; the table is current.", "error");
@@ -3254,11 +3302,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (typeof state.clerk.addListener === "function") {
           state.clerk.addListener(function () {
             renderIdentity();
-            var pendingQuickstart = state.pendingQuickstartId;
             // Clerk emits several events per sign-in flow; consume the pending
             // story only once the session actually exists, otherwise events
             // that fire mid-flow would drop the player's Play now click.
-            if (state.clerk.isSignedIn) state.pendingQuickstartId = null;
+            var pendingQuickstart = state.clerk.isSignedIn
+              ? takeInMemoryQuickstart() || takeStoredQuickstartOnce()
+              : null;
             if (state.clerk.isSignedIn) {
               closeAuth();
               loadCharacterOptions();
@@ -3268,7 +3317,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
               state.contentCatalog = null;
             }
             refreshSession().then(function () {
-              if (pendingQuickstart && state.clerk.isSignedIn) startQuickstart(pendingQuickstart);
+              if (pendingQuickstart && state.clerk.isSignedIn) startQuickstart(pendingQuickstart.id, pendingQuickstart.requestId);
             });
           });
         }

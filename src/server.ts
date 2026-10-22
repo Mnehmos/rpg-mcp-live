@@ -98,7 +98,6 @@ const referenceDungeonMaster = config.openRouterConfigured
         baseUrl: config.openRouterBaseUrl,
         model: config.openRouterModel,
         reasoningEffort: config.openRouterReasoningEffort,
-        maxTokens: config.openRouterMaxTokens,
         timeoutMs: 60_000,
         turnTimeoutMs: config.referenceDmTimeoutMs,
         usage: llmUsageStore,
@@ -831,6 +830,14 @@ app.post("/api/campaigns", async (request, response) => {
   }
 });
 
+/** A claim older than this belongs to a request that died; a replay may take it over. */
+const QUICKSTART_CLAIM_STALE_MS = 2 * 60 * 1000;
+
+function quickstartRequestId(body: unknown): string | null {
+  const value = body && typeof body === "object" ? (body as { requestId?: unknown }).requestId : undefined;
+  return typeof value === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : null;
+}
+
 app.post("/api/quickstarts/:quickstartId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
@@ -842,29 +849,67 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
     response.status(404).json({ code: "quickstart_not_found", error: "That quickstart is not available." });
     return;
   }
+  // A Play now intent can be replayed after sign-up, a reload, or from a
+  // second tab. The request id is claimed before anything is created, so a
+  // replay returns or resumes the first attempt instead of making another.
+  const requestId = quickstartRequestId(request.body);
+  const claim = requestId ? store.claimQuickstartRequest(userId, requestId, QUICKSTART_CLAIM_STALE_MS) : null;
+  if (claim?.state === "in_progress") {
+    response.status(409).json({
+      code: "quickstart_in_progress",
+      failureType: "quickstart_in_progress",
+      retryable: true,
+      error: "Your story is already being set up. It will open in a moment.",
+    });
+    return;
+  }
+  const releaseClaim = () => { if (requestId) store.releaseQuickstartRequest(userId, requestId); };
 
   try {
-    const created = await referenceEngineAdapter.createCampaign(userId, userId, preset.campaign);
-    const character = await referenceEngineAdapter.executeToolCall(userId, userId, created.campaign.id, {
+    const prior = claim?.campaignId
+      ? await referenceEngineAdapter.getCampaign(userId, userId, claim.campaignId).catch(() => null)
+      : null;
+    const resumedPreset = (prior && claim?.presetId && getQuickstartPreset(claim.presetId)) || preset;
+    if (prior && claim?.state === "done") {
+      response.status(200).json({
+        quickstart: { id: resumedPreset.id, title: resumedPreset.title, character: resumedPreset.character.name },
+        session: prior.campaign,
+        state: null,
+        campaign: prior.campaign,
+        campaigns: await listAllCampaigns(userId),
+        autoOpen: true,
+        replayed: true,
+        subscription: store.getSubscription(userId),
+        usage: llmUsageStore.getSummary(userId),
+      });
+      return;
+    }
+    const campaign = prior
+      ? prior.campaign
+      : (await referenceEngineAdapter.createCampaign(userId, userId, resumedPreset.campaign)).campaign;
+    if (requestId && !prior) store.attachQuickstartCampaign(userId, requestId, campaign.id, resumedPreset.id);
+    const character = await referenceEngineAdapter.executeToolCall(userId, userId, campaign.id, {
       clientCommandId: randomUUID(),
-      expectedCampaignVersion: created.campaign.version,
+      expectedCampaignVersion: campaign.version,
       toolName: "character_create",
-      arguments: preset.character,
+      arguments: resumedPreset.character,
     });
     if (!character.accepted) {
+      releaseClaim();
       response.status(502).json({
         code: "quickstart_setup_failed",
         failureType: "quickstart_setup_failed",
-        retryable: false,
+        retryable: Boolean(requestId),
         stateChanged: "campaign_created",
-        campaignId: created.campaign.id,
+        campaignId: campaign.id,
         error: character.message || "The quickstart character could not be placed in the world.",
       });
       return;
     }
-    const result = await referenceEngineAdapter.getCampaign(userId, userId, created.campaign.id);
+    if (requestId) store.completeQuickstartRequest(userId, requestId);
+    const result = await referenceEngineAdapter.getCampaign(userId, userId, campaign.id);
     response.status(201).json({
-      quickstart: { id: preset.id, title: preset.title, character: preset.character.name },
+      quickstart: { id: resumedPreset.id, title: resumedPreset.title, character: resumedPreset.character.name },
       session: result.campaign,
       state: null,
       campaign: result.campaign,
@@ -874,6 +919,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
       usage: llmUsageStore.getSummary(userId),
     });
   } catch (error) {
+    releaseClaim();
     sendReferenceEngineError(response, error);
   }
 });

@@ -17,6 +17,9 @@ import {
   pendingCommandStorageValue,
   retryDelayMs,
   shouldRetryCampaignLoad,
+  PENDING_QUICKSTART_TTL_MS,
+  pendingQuickstartFromValue,
+  pendingQuickstartStorageValue,
 } from "./campaign-resume.js";
 
 describe("authenticated campaign resume", () => {
@@ -101,3 +104,20 @@ describe("authenticated campaign resume", () => {
   });
 });
 
+describe("pending quickstart across sign-up", () => {
+  it("round-trips a Play now intent with its request id", () => {
+    const value = pendingQuickstartStorageValue("random", "req-12345678", 1_000);
+    expect(pendingQuickstartFromValue(value, 2_000)).toEqual({ id: "random", requestId: "req-12345678" });
+  });
+
+  it("ignores stale, future, incomplete, and malformed intents", () => {
+    const value = pendingQuickstartStorageValue("salt-road", "req-12345678", 1_000);
+    expect(pendingQuickstartFromValue(value, 1_000 + PENDING_QUICKSTART_TTL_MS + 1)).toBeNull();
+    expect(pendingQuickstartFromValue(value, 999)).toBeNull();
+    expect(pendingQuickstartStorageValue("  ", "req-12345678")).toBe("");
+    expect(pendingQuickstartStorageValue("random", "")).toBe("");
+    expect(pendingQuickstartFromValue(JSON.stringify({ id: "random", at: 1_000 }), 2_000)).toBeNull();
+    expect(pendingQuickstartFromValue("")).toBeNull();
+    expect(pendingQuickstartFromValue("{not json")).toBeNull();
+  });
+});
