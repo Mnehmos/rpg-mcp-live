@@ -225,6 +225,8 @@ const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the to
 const MIN_RETRY_REQUEST_BUDGET_MS = 1_000;
 /** Upper bound on the random share added to a provider retry delay. */
 const RETRY_JITTER_FRACTION = 0.5;
+/** Ledger estimate for an in-flight reservation; not sent to the provider. */
+const ESTIMATED_COMPLETION_TOKENS = 900;
 /**
  * Gate key for calls with no authenticated account (local development and
  * tooling). Grouping them under one key keeps unattributed traffic from
@@ -691,7 +693,6 @@ export class ReferenceDungeonMaster {
       model: string;
       timeoutMs: number;
       reasoningEffort?: string;
-      maxTokens?: number;
       turnTimeoutMs?: number;
       usage?: LlmUsageStore;
       /**
@@ -1315,16 +1316,12 @@ export class ReferenceDungeonMaster {
       ? this.openRouter.timeoutMs
       : Math.min(this.openRouter.timeoutMs, deadlineAt - Date.now());
     if (remainingMs <= 0) throw new Error("The reference-engine DM turn deadline expired.");
-    const maxTokens = this.openRouter.maxTokens !== undefined
-      ? Math.max(1, Math.floor(this.openRouter.maxTokens))
-      : undefined;
     const reasoningModel = /(?:gpt-5|o[1-9]|reasoning|luna)/i.test(model);
     const body: Record<string, unknown> = {
       model,
       messages,
       tools,
       tool_choice: toolChoice,
-      ...(maxTokens === undefined ? {} : { [reasoningModel ? "max_completion_tokens" : "max_tokens"]: maxTokens }),
       ...(reasoningModel && this.openRouter.reasoningEffort ? { reasoning_effort: this.openRouter.reasoningEffort } : {}),
     };
     const usageStore = this.openRouter.usage;
@@ -1353,8 +1350,8 @@ export class ReferenceDungeonMaster {
         provider: "openrouter",
         model,
         estimatedPromptTokens,
-        estimatedCompletionTokens: maxTokens ?? 900,
-        estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, maxTokens ?? 900),
+        estimatedCompletionTokens: ESTIMATED_COMPLETION_TOKENS,
+        estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, ESTIMATED_COMPLETION_TOKENS),
         admittedTurn: usageContext.admittedTurn,
       })
       : null;
@@ -1489,6 +1486,17 @@ export class ReferenceDungeonMaster {
         throw new EmptyCompletionError(
           `id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} error=${JSON.stringify(data.error ?? null)}`
         );
+      }
+      // A streamed reply always assembles a message, so "no message" alone
+      // misses the common failure: a completion with neither prose nor tool
+      // calls. Treat it as empty so the caller retries once.
+      if (!message.tool_calls?.length && !message.content?.trim()) {
+        const finishReason = data.choices?.[0]?.finish_reason ?? "?";
+        const detail = `id=${data.id ?? "?"} finish_reason=${finishReason} model=${model} tool_choice=${toolChoice}`
+          + ` completion_tokens=${actualUsage?.completionTokens ?? "?"}`
+          + ` reasoning_tokens=${actualUsage?.reasoningTokens ?? "?"} streamed=${streaming}`;
+        console.error(`[reference-dm] blank completion: ${detail}`);
+        throw new EmptyCompletionError(detail);
       }
       return { content: message.content ?? null, tool_calls: message.tool_calls, ...(actualUsage ? { usage: actualUsage } : {}) };
     } catch (error) {

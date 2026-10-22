@@ -98,7 +98,6 @@ const referenceDungeonMaster = config.openRouterConfigured
         baseUrl: config.openRouterBaseUrl,
         model: config.openRouterModel,
         reasoningEffort: config.openRouterReasoningEffort,
-        maxTokens: config.openRouterMaxTokens,
         timeoutMs: 60_000,
         turnTimeoutMs: config.referenceDmTimeoutMs,
         usage: llmUsageStore,

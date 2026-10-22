@@ -60,7 +60,6 @@ const openRouterApiKey = readString("OPENROUTER_API_KEY");
 const openRouterBaseUrl = readString("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").replace(/\/$/, "");
 const openRouterModel = readString("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash");
 const openRouterReasoningEffort = readString("OPENROUTER_REASONING_EFFORT", "medium");
-const openRouterMaxTokens = Number.parseInt(readString("OPENROUTER_MAX_TOKENS", "900"), 10);
 const openRouterSiteUrl = readString("OPENROUTER_SITE_URL");
 const openRouterAppName = readString("OPENROUTER_APP_NAME", "Quest Keeper AI");
 // A second model to try when the primary is rate-limited or erroring upstream.
@@ -119,7 +118,6 @@ export const config = Object.freeze({
   openRouterBaseUrl,
   openRouterModel,
   openRouterReasoningEffort,
-  openRouterMaxTokens,
   openRouterSiteUrl,
   openRouterAppName,
   openRouterFallbackModel,
