@@ -111,4 +111,9 @@ describe("player-facing branding", () => {
     expect(page).not.toContain('value="2">Level 2');
     expect(app).toContain("higher-level progression is being reviewed");
   });
+
+  it("sends Return to campaign back to the player's campaign instead of a new story", () => {
+    expect(app).toContain('tableEntryCta.dataset.entry = hasCampaign ? "return" : "play"');
+    expect(app).toContain('if (button.dataset.entry === "return") returnToCampaign();');
+  });
 });
