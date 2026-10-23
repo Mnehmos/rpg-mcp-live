@@ -226,6 +226,35 @@ describe("LLM usage ledger", () => {
     game.close();
   });
 
+  it("gates free play on the monthly allowance alone when the daily limit is 0", () => {
+    const { game, usage } = createStores({ freeDailyCostMicros: 0, freeMonthlyCostMicros: 20 });
+    const admit = (command: string) => usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: command,
+      provider: "openrouter",
+      model: "test-model",
+    });
+    const spend = (command: string, costMicros: number) => {
+      const reservation = admit(command);
+      usage.settle(reservation.id, {
+        provider: "openrouter",
+        model: "test-model",
+        promptTokens: 10,
+        completionTokens: 10,
+        costMicros,
+        costSource: "provider",
+      });
+    };
+
+    // 8 + reserve 5 already exceeds the old daily limit (10); only the monthly 20 applies.
+    spend("command-1", 8);
+    spend("command-2", 8);
+    expect(usage.getSummary("player-1").limits.daily).toBeNull();
+    expect(() => admit("command-3")).toThrowError(LlmUsageLimitError);
+    game.close();
+  });
+
   it("admits once before mutation and lets every provider call in that command finish", () => {
     const { game, usage } = createStores({
       freeDailyCostMicros: 10,

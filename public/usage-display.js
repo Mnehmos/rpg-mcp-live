@@ -37,7 +37,7 @@ function exhaustedPeriod(summary) {
   if (Number.isFinite(monthlyUsed) && Number.isFinite(monthlyLimit) && monthlyLimit > 0 && monthlyUsed >= monthlyLimit) {
     return "monthly";
   }
-  return "daily";
+  return dailyLimit > 0 ? "daily" : "monthly";
 }
 
 export function usageResetAt(summary) {
