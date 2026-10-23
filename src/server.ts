@@ -54,6 +54,7 @@ import {
   ReferenceDmVersionConflictError,
   ReferenceDungeonMaster,
 } from "./reference-engine-dm.js";
+import { turnCompletedLogLine } from "./turn-log.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -384,13 +385,16 @@ async function sendCampaignCommand(
       connection: "keep-alive",
     }).flushHeaders();
     const send = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const startedAt = Date.now();
     try {
       const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
         clientCommandId: parsed.data.clientCommandId,
         expectedCampaignVersion: parsed.data.expectedCampaignVersion,
         onProgress: send,
       });
-      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+      const usage = llmUsageStore.getSummary(userId);
+      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage });
+      console.log(turnCompletedLogLine("turn", userId, usage.plan, result, Date.now() - startedAt, true));
     } catch (error) {
       const failure = classifyTurnFailure(error);
       send({ type: "error", failureType: failure.failureType, commitStatus: failure.commitStatus, error: failure.message });
@@ -398,12 +402,15 @@ async function sendCampaignCommand(
     response.end();
     return;
   }
+  const startedAt = Date.now();
   try {
     const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
     });
-    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    const usage = llmUsageStore.getSummary(userId);
+    response.json({ ...result, subscription: store.getSubscription(userId), usage });
+    console.log(turnCompletedLogLine("turn", userId, usage.plan, result, Date.now() - startedAt, false));
   } catch (error) {
     if (error instanceof ReferenceEngineNotRoutedError) {
       sendReferenceEngineError(response, error);
@@ -1167,6 +1174,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
       connection: "keep-alive",
     }).flushHeaders();
     const send = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const startedAt = Date.now();
     try {
       const result = await referenceDungeonMaster.resolveTurn(
         userId,
@@ -1179,7 +1187,9 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
           onProgress: send,
         },
       );
-      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+      const usage = llmUsageStore.getSummary(userId);
+      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage });
+      console.log(turnCompletedLogLine("opening", userId, usage.plan, result, Date.now() - startedAt, true));
     } catch (error) {
       const failure = classifyTurnFailure(error);
       send({ type: "error", failureType: failure.failureType, commitStatus: failure.commitStatus, error: failure.message });
@@ -1187,6 +1197,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
     response.end();
     return;
   }
+  const startedAt = Date.now();
   try {
     const result = await referenceDungeonMaster.resolveTurn(
       userId,
@@ -1198,7 +1209,9 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
         expectedCampaignVersion: parsed.data.expectedCampaignVersion,
       }
     );
-    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    const usage = llmUsageStore.getSummary(userId);
+    response.json({ ...result, subscription: store.getSubscription(userId), usage });
+    console.log(turnCompletedLogLine("opening", userId, usage.plan, result, Date.now() - startedAt, false));
   } catch (error) {
     sendReferenceEngineError(response, error);
   }
