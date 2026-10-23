@@ -510,7 +510,8 @@ export class LlmUsageStore {
           monthlyCostMicros: this.policy.playerMonthlyCostMicros,
         }
       : {
-          dailyCostMicros: this.policy.freeDailyCostMicros,
+          // A free daily limit of 0 means none: the monthly allowance alone gates free play.
+          dailyCostMicros: this.policy.freeDailyCostMicros > 0 ? this.policy.freeDailyCostMicros : null,
           monthlyCostMicros: this.policy.freeMonthlyCostMicros,
         };
   }
