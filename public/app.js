@@ -1731,7 +1731,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var firstSessionCta = $("#first-session-cta");
     var tableEntryCta = $("#table-entry-cta");
     if (firstSessionCta) firstSessionCta.hidden = hasCampaign;
-    if (tableEntryCta) tableEntryCta.textContent = hasCampaign ? "Return to campaign" : "Play now";
+    if (tableEntryCta) {
+      tableEntryCta.textContent = hasCampaign ? "Return to campaign" : "Play now";
+      tableEntryCta.dataset.entry = hasCampaign ? "return" : "play";
+    }
     document.body.classList.toggle("has-campaign", hasCampaign);
   }
 
@@ -2740,6 +2743,19 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     });
   }
 
+  function returnToCampaign() {
+    var playSection = $("#play");
+    if (playSection) playSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (state.session) {
+      state.managerOpen = false;
+      state.createMode = false;
+      renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
+      return Promise.resolve(true);
+    }
+    var campaignId = readActiveCampaignId() || (state.campaigns[0] && state.campaigns[0].id) || "";
+    return campaignId ? loadCampaign(campaignId) : playNow();
+  }
+
   function playNow() {
     var playSection = $("#play");
     if (playSection) playSection.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3421,7 +3437,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     document.querySelectorAll('[data-action="play-now"]').forEach(function (button) {
       button.addEventListener("click", function (event) {
         event.preventDefault();
-        playNow();
+        // The header button reads "Return to campaign" once the player has
+        // one; it must reopen that campaign, not roll a new random story.
+        if (button.dataset.entry === "return") returnToCampaign();
+        else playNow();
       });
     });
     document.querySelectorAll('[data-action="create-character"]').forEach(function (button) {
