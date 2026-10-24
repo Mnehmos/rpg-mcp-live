@@ -65,7 +65,7 @@ npm run build
 
 ## Integrations
 
-Clerk authenticates the browser session and supplies the account identity used for campaign ownership. Stripe Checkout and signed webhooks control the Player Pass entitlement. The web service owns the OpenRouter connection and tool loop using deepseek/deepseek-v4-flash; the rules engine is model-free.
+Clerk authenticates the browser session and supplies the account identity used for campaign ownership. Stripe Checkout and signed webhooks control the Player Pass entitlement. The web service owns the OpenRouter connection and tool loop using OpenRouter with `openai/gpt-5.6-luna`; the rules engine is model-free.
 
 Secrets belong in local ignored environment files or Railway secret variables. Never put Clerk secret keys, Stripe secret keys, webhook secrets, or OpenRouter keys in public browser code, Git, or a model-facing tool configuration.
 
