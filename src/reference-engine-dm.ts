@@ -353,12 +353,6 @@ export interface ReferenceResolveTurnOptions {
   onProgress?: (event: { type: "status"; message: string } | { type: "narration"; text: string }) => void;
 }
 
-// Creative scene authoring can legitimately need room generation, placement,
-// NPC/object creation, scene commitment, continuity writes, and then a final
-// narration response. This is only a runaway-loop bound; it is not a
-// deterministic test for whether a player turn is allowed.
-const MAX_TOOL_ROUNDS = 16;
-
 export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Every player turn is intent, not a pre-existing world description. The player drives what happens next; you invent the concrete world that makes that intent playable.",
   "There are no rooms, locations, NPCs, enemies, items, quests, clues, or other world facts until the DM authors them through an RPG MCP tool and a successful tool result commits them to engine state.",
@@ -751,7 +745,6 @@ export class ReferenceDungeonMaster {
     const rejectedStateChangingActionKeys = new Set<string>();
     let rejectionRecoveryPending = false;
     let rejectionRecoveryNarrationReady = false;
-    let narrationOnlyNext = false;
     let authoritativeToolCallObserved = false;
     let authoritativeRoutingRecoveryPending = false;
     let activatedToolNames = new Set<string>();
@@ -884,10 +877,10 @@ export class ReferenceDungeonMaster {
     ];
 
     try {
-      // Reserve one completion after the final allowed tool-bearing round so
-      // the DM can narrate the authored result instead of exhausting the
-      // budget immediately after a valid tool call.
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+      // No round limit: the DM keeps calling tools until it answers in prose.
+      // The engine verifies every call; the turn deadline and the dollar
+      // ledger are the only outer bounds.
+      for (let round = 0; ; round += 1) {
         const tools = [
           activationTool,
           ...allRemoteTools.filter((tool) => activeRemoteToolNames.has(tool.function.name)),
@@ -910,13 +903,10 @@ export class ReferenceDungeonMaster {
           campaignId,
           clientCommandId,
           admittedTurn: true,
-        }, narrationOnlyNext
-          ? "none"
-          : requiresAuthoritativeToolChoice && !authoritativeToolCallObserved
-            ? "required"
-            : "auto", narrationDelta);
+        }, requiresAuthoritativeToolChoice && !authoritativeToolCallObserved
+          ? "required"
+          : "auto", narrationDelta);
         providerCallCount += completion.providerCalls ?? 1;
-        narrationOnlyNext = false;
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
@@ -950,9 +940,6 @@ export class ReferenceDungeonMaster {
         }
         toolRoundCount = round + 1;
         toolCallNames.push(...toolCalls.map((call) => call.function.name));
-        if (round === MAX_TOOL_ROUNDS) {
-          break;
-        }
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
         for (const call of toolCalls) {
           const callArgs = parseArguments(call.function.arguments);
@@ -1003,17 +990,6 @@ export class ReferenceDungeonMaster {
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
         }
-        if (
-          disclosedToolCalls.at(-1)?.name === "scene_manage"
-          && disclosedToolCalls.at(-1)?.accepted
-          && authoredScene.committedScene
-          && !rejectionRecoveryPending
-        ) {
-          // The scene commit is the authoritative boundary between tool work
-          // and prose. Keep the next provider call for narration, but do not
-          // let a model that ignores the prompt start another paid tool round.
-          narrationOnlyNext = true;
-        }
       }
     } catch (error) {
       throw failTurn(error, "tool_loop");
@@ -1022,7 +998,7 @@ export class ReferenceDungeonMaster {
     if (!narrationText) {
       throw failTurn(
         new Error(
-          `The reference-engine DM did not produce narration within the tool-call round budget (toolRounds=${toolRoundCount}, toolCalls=${toolCallNames.join(",") || "none"}).`
+          `The reference-engine DM finished without narration (toolRounds=${toolRoundCount}, toolCalls=${toolCallNames.join(",") || "none"}).`
         ),
         "narration",
       );
