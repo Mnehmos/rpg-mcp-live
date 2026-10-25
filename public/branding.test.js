@@ -126,4 +126,11 @@ describe("player-facing branding", () => {
     expect(app).toContain('captured = Object.assign({}, event, { error: event.error ||');
     expect(app).toContain("status: streamedFailureStatus(envelope)");
   });
+
+  it("never reconciles the turn this tab is still streaming", () => {
+    expect(app).toContain("state.streamingCommandId = commandId;");
+    expect(app).toContain("if (isStreamingHere(pending)) return Promise.resolve(false);");
+    expect(app).toContain("if (pendingForCampaign && isStreamingHere(pendingForCampaign)) {");
+    expect(app).toContain("if (pendingForLoadedCampaign && isStreamingHere(pendingForLoadedCampaign))");
+  });
 });
