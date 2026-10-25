@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { OPENING_INSTRUCTION, openingPresenceCopy, renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
+import { OPENING_INSTRUCTION, PERSONALIZE_OPENING_PREFIX, openingPresenceCopy, renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
 
 describe("opening DM presence", () => {
   it("makes an immediate contextual inference without claiming campaign state", () => {
@@ -56,5 +56,26 @@ describe("visible campaign log", () => {
   it("matches the instruction the server sends for the opening turn", () => {
     const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
     expect(server).toContain(JSON.stringify(OPENING_INSTRUCTION));
+  });
+});
+
+describe("starter opening in the visible log", () => {
+  const starter = { kind: "narration", text: "The template opening.", starter: { roomId: "r", roomName: "Quay", sceneId: "s", title: "T" } };
+  const personalize = { kind: "player", text: PERSONALIZE_OPENING_PREFIX + " The starter scene is already committed." };
+
+  it("shows the template until the personalized opening lands, then replaces it", () => {
+    expect(visibleLogEntries([starter]).map((e) => e.text)).toEqual(["The template opening."]);
+    const after = visibleLogEntries([starter, personalize, { kind: "narration", text: "Your personalized opening." }]);
+    expect(after.map((e) => e.text)).toEqual(["Your personalized opening."]);
+  });
+
+  it("keeps the template when the player plays on after a failed personalization", () => {
+    const after = visibleLogEntries([starter, { kind: "player", text: "I walk the breakwater." }, { kind: "narration", text: "The fog parts." }]);
+    expect(after.map((e) => e.text)).toEqual(["The template opening.", "I walk the breakwater.", "The fog parts."]);
+  });
+
+  it("uses the same personalize prefix as the server", () => {
+    const server = readFileSync(new URL("../src/starter-scenes.ts", import.meta.url), "utf8");
+    expect(server).toContain(JSON.stringify(PERSONALIZE_OPENING_PREFIX));
   });
 });

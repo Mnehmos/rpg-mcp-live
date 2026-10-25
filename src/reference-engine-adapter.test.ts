@@ -743,4 +743,51 @@ describe("ReferenceEngineAdapter", () => {
       ).rejects.toThrow(ReferenceEngineUnsupportedError);
     });
   });
+
+  describe("starter scene", () => {
+    const starter = {
+      room: { name: "Brinewick Quay", baseDescription: "A stone quay under a dead-calm fog.", biomeContext: "coastal" as const, atmospherics: ["FOG" as const] },
+      scene: { title: "No Wind in Brinewick", placeLabel: "Brinewick Quay" },
+      narration: "Three days without wind. What do you do?",
+    };
+    function routedStore() {
+      const store = createStore();
+      store.setBackend("account-1", "campaign-1", "reference");
+      store.setCampaignProfile("account-1", "campaign-1", { name: "Test", premise: "p", setting: "s", tone: "t" });
+      store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+      return store;
+    }
+
+    it("commits room, placement and scene, then logs the opening as the starter", async () => {
+      const store = routedStore();
+      const calls: string[] = [];
+      const client = fakeClient({
+        "spatial_manage.generate": (args) => { calls.push("generate"); expect(args.name).toBe("Brinewick Quay"); return { roomId: "room-9", name: "Brinewick Quay" }; },
+        "spatial_manage.move": (args) => { calls.push("move"); expect(args).toMatchObject({ characterId: "char-1", roomId: "room-9" }); return { success: true, roomId: "room-9" }; },
+        "scene_manage.set": (args) => { calls.push("scene"); expect(args).toMatchObject({ worldId: "world-1", participants: ["char-1"], narration: starter.narration }); return { sceneId: "scene-3" }; },
+      });
+      const adapter = new ReferenceEngineAdapter(client, store);
+      const before = store.getRouting("account-1", "campaign-1")!.version;
+
+      await expect(adapter.commitStarterScene("account-1", "campaign-1", starter)).resolves.toBe(true);
+
+      expect(calls).toEqual(["generate", "move", "scene"]);
+      const log = store.getLogMessages("account-1", "campaign-1");
+      expect(log.at(-1)).toMatchObject({ kind: "narration", text: starter.narration, starter: { roomId: "room-9", sceneId: "scene-3", title: "No Wind in Brinewick" } });
+      expect(store.getRouting("account-1", "campaign-1")!.version).toBe(before + 1);
+    });
+
+    it("stops at the first engine refusal and logs nothing", async () => {
+      const store = routedStore();
+      const client = {
+        callTool: vi.fn(async (name: string, args: Record<string, unknown>) => (name === "spatial_manage" && args.action === "generate"
+          ? ok({ roomId: "room-9" })
+          : { text: "Character not found", isError: true, data: null, raw: null, payload: null })),
+      } as unknown as ReferenceEngineClient;
+      const adapter = new ReferenceEngineAdapter(client, store);
+
+      await expect(adapter.commitStarterScene("account-1", "campaign-1", starter)).resolves.toBe(false);
+      expect(store.getLogMessages("account-1", "campaign-1").some((entry) => entry.starter)).toBe(false);
+    });
+  });
 });

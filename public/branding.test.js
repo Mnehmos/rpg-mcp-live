@@ -117,6 +117,13 @@ describe("player-facing branding", () => {
     expect(app).toContain('if (button.dataset.entry === "return") returnToCampaign();');
   });
 
+  it("personalizes a starter scene without locking the composer, and serializes moves behind it", () => {
+    expect(app).toContain("if (quiet) state.personalizing = { campaignId: campaignId, promise: opening };");
+    expect(app).toContain("if (!state.session || state.session.id !== queuedCampaignId) {");
+    expect(app).toContain("Your move was not sent because you switched campaigns.");
+    expect(app).toContain('setStatus("The DM is tailoring your scene", "thinking");');
+  });
+
   it("keeps the whole failure envelope from a streamed turn", () => {
     expect(app).toContain('captured = Object.assign({}, event, { error: event.error ||');
     expect(app).toContain("status: streamedFailureStatus(envelope)");

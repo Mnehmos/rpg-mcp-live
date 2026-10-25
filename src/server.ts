@@ -44,6 +44,7 @@ import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset 
 import { ReferenceDmVersionConflictError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
 import { turnCompletedLogLine } from "./turn-log.js";
 import { REFERENCE_DM_NOT_COMMITTED_MESSAGE, TurnHealth, turnFailure, type TurnFailure } from "./turn-failure.js";
+import { getStarterScene, pendingStarterEntry, personalizeOpeningInstruction } from "./starter-scenes.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -765,6 +766,31 @@ app.post("/api/campaigns", async (request, response) => {
 /** A claim older than this belongs to a request that died; a replay may take it over. */
 const QUICKSTART_CLAIM_STALE_MS = 2 * 60 * 1000;
 
+/**
+ * Commit the preset's hand-written first scene (audit R01) so the player is
+ * at the table before any model call. Best effort: on failure the page falls
+ * back to the model-authored opening, exactly as before.
+ */
+async function commitQuickstartStarter(userId: string, campaignId: string, presetId: string): Promise<boolean> {
+  const starter = getStarterScene(presetId);
+  if (!starter) return false;
+  if (referenceEngineStore.getLogMessages(userId, campaignId).some((entry) => entry.starter)) return true;
+  try {
+    const committed = await referenceEngineAdapter.commitStarterScene(userId, campaignId, starter);
+    if (!committed) console.error(JSON.stringify({ event: "starter_scene_refused", campaignId, presetId }));
+    return committed;
+  } catch (error) {
+    console.error(JSON.stringify({ event: "starter_scene_failed", campaignId, presetId, detail: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
+
+/** The opening instruction: personalize a committed starter scene, or author one from nothing. */
+function openingInstruction(userId: string, campaignId: string): string {
+  const starter = pendingStarterEntry(referenceEngineStore.getLogMessages(userId, campaignId));
+  return starter ? personalizeOpeningInstruction(starter) : "Open the first situation and establish the campaign's opening scene.";
+}
+
 function quickstartRequestId(body: unknown): string | null {
   const value = body && typeof body === "object" ? (body as { requestId?: unknown }).requestId : undefined;
   return typeof value === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : null;
@@ -810,6 +836,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
         campaign: prior.campaign,
         campaigns: await listAllCampaigns(userId),
         autoOpen: true,
+        starterScene: pendingStarterEntry(referenceEngineStore.getLogMessages(userId, prior.campaign.id)) !== null,
         replayed: true,
         subscription: store.getSubscription(userId),
         usage: llmUsageStore.getSummary(userId),
@@ -838,6 +865,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
       });
       return;
     }
+    const starterScene = await commitQuickstartStarter(userId, campaign.id, resumedPreset.id);
     if (requestId) store.completeQuickstartRequest(userId, requestId);
     const result = await referenceEngineAdapter.getCampaign(userId, userId, campaign.id);
     response.status(201).json({
@@ -847,6 +875,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
       campaign: result.campaign,
       campaigns: await listAllCampaigns(userId),
       autoOpen: true,
+      starterScene,
       subscription: store.getSubscription(userId),
       usage: llmUsageStore.getSummary(userId),
     });
@@ -1105,7 +1134,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
         userId,
         userId,
         request.params.campaignId,
-        "Open the first situation and establish the campaign's opening scene.",
+        openingInstruction(userId, request.params.campaignId),
         {
           clientCommandId: parsed.data.clientCommandId,
           expectedCampaignVersion: parsed.data.expectedCampaignVersion,
@@ -1129,7 +1158,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
       userId,
       userId,
       request.params.campaignId,
-      "Open the first situation and establish the campaign's opening scene.",
+      openingInstruction(userId, request.params.campaignId),
       {
         clientCommandId: parsed.data.clientCommandId,
         expectedCampaignVersion: parsed.data.expectedCampaignVersion,

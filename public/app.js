@@ -44,7 +44,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     { id: "ember-watch", title: "The Ember Watch", tagline: "The old lighthouse is burning in a dead calm.", description: "A fast-moving rescue story on a fogbound harbor." },
     { id: "glass-under-moon", title: "Glass Under Moonlight", tagline: "Something beneath the city is answering the bells.", description: "A strange arcane investigation in an old river city." },
   ];
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, pendingQuickstartId: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, pendingQuickstartId: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, personalizing: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -2596,6 +2596,20 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       return Promise.resolve(false);
     }
+    // Turns stay serialized: a move made while the DM personalizes the starter
+    // scene is sent once that finishes, against the updated campaign version.
+    if (state.personalizing && state.personalizing.campaignId === state.session.id) {
+      var queuedCampaignId = state.session.id;
+      setStatus("The DM is finishing your opening. Your move goes next.", "thinking");
+      return state.personalizing.promise.then(function () {
+        // Only the campaign the move was made in may receive it.
+        if (!state.session || state.session.id !== queuedCampaignId) {
+          showToast("Your move was not sent because you switched campaigns.");
+          return false;
+        }
+        return submitCommand(command, clientCommandId);
+      });
+    }
 
     var campaignId = state.session.id;
     var campaignPath = encodeURIComponent(campaignId);
@@ -2751,7 +2765,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         setStatus(rolledName
           ? "You are " + rolledName + ". The DM is opening the first scene"
           : "The DM is opening your first scene", "thinking");
-        return beginCampaignOpening(true).then(function (opened) {
+        // A committed starter scene is already playable: the DM only
+        // personalizes it, quietly, and a failure leaves the template.
+        return beginCampaignOpening(true, Boolean(result.data.starterScene)).then(function (opened) {
           if (opened) setStatus("Your story is open", "ready");
           return opened;
         });
@@ -2858,20 +2874,27 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     });
   }
 
-  function beginCampaignOpening(allowSandbox) {
+  function beginCampaignOpening(allowSandbox, quiet) {
     var phase = state.session && state.session.phase;
     if (!state.session || (phase !== "tutorial" && !(allowSandbox && phase === "sandbox"))) return Promise.resolve(false);
     var snapshot = state.engineState || {};
     if (state.session.worldContext || snapshot.worldContext) return Promise.resolve(true);
     if (state.openingLoadingCampaignId === state.session.id) return Promise.resolve(false);
+    if (quiet && state.personalizing && state.personalizing.campaignId === state.session.id) return state.personalizing.promise;
     var campaignId = state.session.id;
     state.openingErrorCampaignId = null;
-    state.openingLoadingCampaignId = campaignId;
     var feedback = $("#tutorial-feedback");
-    if (feedback) feedback.textContent = "The DM is opening the first situation…";
-    setStatus("The DM is opening your first scene", "thinking");
-    renderSession({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription, usage: state.usage });
-    return streamTurn("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
+    if (quiet) {
+      // The starter scene is already playable: personalize it without locking
+      // the composer. submitCommand waits for this before sending a move.
+      setStatus("The DM is tailoring your scene", "thinking");
+    } else {
+      state.openingLoadingCampaignId = campaignId;
+      if (feedback) feedback.textContent = "The DM is opening the first situation…";
+      setStatus("The DM is opening your first scene", "thinking");
+      renderSession({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription, usage: state.usage });
+    }
+    var opening = streamTurn("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
       clientCommandId: newCommandId(),
       expectedCampaignVersion: state.session.version
     }, function (event) {
@@ -2889,17 +2912,27 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       return true;
     }).catch(function (error) {
       clearLiveNarration();
+      if (quiet) {
+        setStatus("Your story is ready", "ready");
+        return false;
+      }
       state.openingErrorCampaignId = campaignId;
       if (feedback) feedback.textContent = error.message + " You can try again.";
       setStatus(error.message, "error");
       showToast(error.message);
       return false;
     }).finally(function () {
-      state.openingLoadingCampaignId = null;
+      if (quiet) {
+        if (state.personalizing && state.personalizing.campaignId === campaignId) state.personalizing = null;
+      } else {
+        state.openingLoadingCampaignId = null;
+      }
       if (state.session && state.session.id === campaignId) {
         renderSession({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription, usage: state.usage });
       }
     });
+    if (quiet) state.personalizing = { campaignId: campaignId, promise: opening };
+    return opening;
   }
 
   function createCharacter(event) {
