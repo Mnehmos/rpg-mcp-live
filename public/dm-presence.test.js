@@ -61,21 +61,14 @@ describe("visible campaign log", () => {
 
 describe("starter opening in the visible log", () => {
   const starter = { kind: "narration", text: "The template opening.", starter: { roomId: "r", roomName: "Quay", sceneId: "s", title: "T" } };
-  const personalize = { kind: "player", text: PERSONALIZE_OPENING_PREFIX + " The starter scene is already committed." };
 
-  it("shows the template until the personalized opening lands, then replaces it", () => {
-    expect(visibleLogEntries([starter]).map((e) => e.text)).toEqual(["The template opening."]);
-    const after = visibleLogEntries([starter, personalize, { kind: "narration", text: "Your personalized opening." }]);
-    expect(after.map((e) => e.text)).toEqual(["Your personalized opening."]);
-  });
-
-  it("keeps the template when the player plays on after a failed personalization", () => {
+  it("keeps the starter opening as the first scene after the DM takes over", () => {
     const after = visibleLogEntries([starter, { kind: "player", text: "I walk the breakwater." }, { kind: "narration", text: "The fog parts." }]);
     expect(after.map((e) => e.text)).toEqual(["The template opening.", "I walk the breakwater.", "The fog parts."]);
   });
 
-  it("uses the same personalize prefix as the server", () => {
-    const server = readFileSync(new URL("../src/starter-scenes.ts", import.meta.url), "utf8");
-    expect(server).toContain(JSON.stringify(PERSONALIZE_OPENING_PREFIX));
+  it("still hides the retired personalize instruction in older logs", () => {
+    const after = visibleLogEntries([starter, { kind: "player", text: PERSONALIZE_OPENING_PREFIX + " old" }, { kind: "narration", text: "Old rewrite." }]);
+    expect(after.map((e) => e.text)).toEqual(["The template opening.", "Old rewrite."]);
   });
 });

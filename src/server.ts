@@ -44,7 +44,7 @@ import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset 
 import { ReferenceDmVersionConflictError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
 import { turnCompletedLogLine } from "./turn-log.js";
 import { REFERENCE_DM_NOT_COMMITTED_MESSAGE, TurnHealth, turnFailure, type TurnFailure } from "./turn-failure.js";
-import { getStarterScene, pendingStarterEntry, personalizeOpeningInstruction } from "./starter-scenes.js";
+import { getStarterScene } from "./starter-scenes.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -785,12 +785,6 @@ async function commitQuickstartStarter(userId: string, campaignId: string, prese
   }
 }
 
-/** The opening instruction: personalize a committed starter scene, or author one from nothing. */
-function openingInstruction(userId: string, campaignId: string): string {
-  const starter = pendingStarterEntry(referenceEngineStore.getLogMessages(userId, campaignId));
-  return starter ? personalizeOpeningInstruction(starter) : "Open the first situation and establish the campaign's opening scene.";
-}
-
 function quickstartRequestId(body: unknown): string | null {
   const value = body && typeof body === "object" ? (body as { requestId?: unknown }).requestId : undefined;
   return typeof value === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : null;
@@ -836,7 +830,7 @@ app.post("/api/quickstarts/:quickstartId", async (request, response) => {
         campaign: prior.campaign,
         campaigns: await listAllCampaigns(userId),
         autoOpen: true,
-        starterScene: pendingStarterEntry(referenceEngineStore.getLogMessages(userId, prior.campaign.id)) !== null,
+        starterScene: referenceEngineStore.getLogMessages(userId, prior.campaign.id).some((entry) => Boolean(entry.starter)),
         replayed: true,
         subscription: store.getSubscription(userId),
         usage: llmUsageStore.getSummary(userId),
@@ -1134,7 +1128,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
         userId,
         userId,
         request.params.campaignId,
-        openingInstruction(userId, request.params.campaignId),
+        "Open the first situation and establish the campaign's opening scene.",
         {
           clientCommandId: parsed.data.clientCommandId,
           expectedCampaignVersion: parsed.data.expectedCampaignVersion,
@@ -1158,7 +1152,7 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
       userId,
       userId,
       request.params.campaignId,
-      openingInstruction(userId, request.params.campaignId),
+      "Open the first situation and establish the campaign's opening scene.",
       {
         clientCommandId: parsed.data.clientCommandId,
         expectedCampaignVersion: parsed.data.expectedCampaignVersion,

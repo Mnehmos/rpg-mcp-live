@@ -40,7 +40,7 @@ export function renderOpeningPresence(session, snapshot, mode) {
 
 /** The server sends this as the "player" line of the opening turn; it is not something the player said. */
 export var OPENING_INSTRUCTION = "Open the first situation and establish the campaign's opening scene.";
-/** Start of the instruction that asks the DM to personalize a quickstart's starter scene. */
+/** A since-removed instruction (starter-scene rewrites) still present in some early logs; never shown. */
 export var PERSONALIZE_OPENING_PREFIX = "Personalize the opening scene.";
 
 /**
@@ -52,18 +52,8 @@ export var PERSONALIZE_OPENING_PREFIX = "Personalize the opening scene.";
 export function visibleLogEntries(entries) {
   var list = Array.isArray(entries) ? entries : [];
   var narrated = list.some(function (entry) { return Boolean(entry) && entry.kind === "narration"; });
-  // The DM's personalized opening (the narration answering the personalize
-  // instruction) replaces the template. Any other later narration, such as a
-  // player's first turn after a failed personalization, leaves it in place.
-  var personalized = list.some(function (entry, index) {
-    return Boolean(entry) && entry.kind === "narration" && !entry.starter
-      && list.slice(0, index).some(function (earlier) {
-        return Boolean(earlier) && earlier.kind === "player" && String(earlier.text || "").trim().indexOf(PERSONALIZE_OPENING_PREFIX) === 0;
-      });
-  });
   return list.filter(function (entry) {
-    return Boolean(entry) && !isOpeningInstruction(entry) && !(narrated && isCampaignCreatedNotice(entry))
-      && !(personalized && entry.starter);
+    return Boolean(entry) && !isOpeningInstruction(entry) && !(narrated && isCampaignCreatedNotice(entry));
   });
 }
 

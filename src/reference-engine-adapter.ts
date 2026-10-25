@@ -716,6 +716,16 @@ export class ReferenceEngineAdapter {
       createdAt: new Date().toISOString(),
       starter: { roomId, roomName: starter.room.name, sceneId: field(scene.payload, "sceneId", "id"), title: starter.scene.title },
     }]);
+    // The DM's own continuity note, so its first turn starts from this scene
+    // instead of authoring a new one.
+    this.store.setDocket(accountId, campaignId, "state", [
+      `Room id: ${roomId}`,
+      `Room: ${starter.room.name}. ${starter.room.baseDescription}`,
+      `Scene: ${starter.scene.title} (${starter.scene.placeLabel})`,
+      "Player placed here: yes",
+      "Shared scene committed: yes",
+      "The opening narration above has already been shown to the player; continue from it.",
+    ].join("\n"));
     this.store.bumpVersion(accountId, campaignId);
     return true;
   }
