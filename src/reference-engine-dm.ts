@@ -364,7 +364,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Material-action routing is mandatory even when the same action appeared in earlier prose: take, pick up, collect, keep, put away, or claim an absent object means item_manage create (or an existing authoritative item lookup) followed by inventory_manage give with the returned itemId and the player's exact characterId; light, ignite, extinguish, or shield a carried source means inventory_manage use or extinguish; equip or remove gear means inventory_manage equip or unequip; hand, offer, slide, or give a carried item to another character means inventory_manage transfer. Do not substitute improvisation_manage, scene_manage, narrative memory, or prose for these concrete calls. A prose-only completion is not final for one of these material actions.",
   "When creating or advancing a quest, use the exact questId and objective IDs returned by quest_manage.create, quest_manage.get, or quest_manage.get_log. Never derive an objective ID from a quest ID, objective name, or array position; if the ID is unavailable, read the quest log before updating or completing it.",
   "When an action has meaningful uncertainty, adjudicate it yourself. Do not ask the player to roll or click a roll control: call improvisation_manage with action stunt, the appropriate skill, a reasoned DC, the player's actor, and effectType none for a non-damaging check. The engine rolls the d20 and applies the character modifier; translate the accepted result into diegetic narration. Use combat_action for attacks and combat saves, and never use the nonexistent roll_skill_check, roll_ability_check, or roll_saving_throw tools.",
-  "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4-flash, and competencyOverride {model: deepseek/deepseek-v4-flash} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, use maxTokens 8192 or higher and omit budgetTokens (or use a clearly session-sized budget, never a tiny 300/1000 budget). Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
+  "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4.1-flash-1017, and competencyOverride {model: deepseek/deepseek-v4.1-flash-1017} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, omit maxTokens and budgetTokens so the agent is not output-capped. Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Released DM narration is canonical campaign continuity, while accepted RPG MCP results are the authoritative mechanical and structured-state record; together they are the campaign truth.",
   "When prior narration needs an exact mechanical detail or conflicts with current structured state, consult the appropriate read tool such as inventory_manage.get_detailed, quest_manage.get_log, party_manage.get, scene_manage.get, or spatial_manage.get, reconcile the result internally, and continue the fiction. Do not expose provenance labels or ask the player to distinguish narration from state.",
@@ -744,9 +744,6 @@ export class ReferenceDungeonMaster {
     let rejectedToolCalls = 0;
     const rejectedStateChangingActionKeys = new Set<string>();
     let rejectionRecoveryPending = false;
-    let rejectionRecoveryNarrationReady = false;
-    let authoritativeToolCallObserved = false;
-    let authoritativeRoutingRecoveryPending = false;
     let activatedToolNames = new Set<string>();
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
@@ -792,8 +789,6 @@ export class ReferenceDungeonMaster {
     const availableRemoteToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
     const activationTool = buildActivateToolsDefinition(allRemoteTools);
     const toolDirectory = buildToolDirectory(allRemoteTools);
-    const requiresAuthoritativeToolChoice = hasAuthoritativeActionIntent(playerText);
-    const authoritativeActionRoutingHint = buildAuthoritativeActionRoutingHint(playerText);
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
@@ -872,7 +867,6 @@ export class ReferenceDungeonMaster {
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
       ...(authoritativeStateContext ? [{ role: "system" as const, content: authoritativeStateContext }] : []),
-      ...(authoritativeActionRoutingHint ? [{ role: "system" as const, content: authoritativeActionRoutingHint }] : []),
       { role: "user", content: playerText },
     ];
 
@@ -903,16 +897,13 @@ export class ReferenceDungeonMaster {
           campaignId,
           clientCommandId,
           admittedTurn: true,
-        }, requiresAuthoritativeToolChoice && !authoritativeToolCallObserved
-          ? "required"
-          : "auto", narrationDelta);
+        }, "auto", narrationDelta);
         providerCallCount += completion.providerCalls ?? 1;
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
           if (rejectionRecoveryPending) {
             rejectionRecoveryPending = false;
-            rejectionRecoveryNarrationReady = true;
             messages.push({
               role: "system",
               content: [
@@ -922,18 +913,6 @@ export class ReferenceDungeonMaster {
               ].join(" "),
             });
             continue;
-          }
-          if (requiresAuthoritativeToolChoice && !authoritativeToolCallObserved && !rejectionRecoveryNarrationReady) {
-            if (!authoritativeRoutingRecoveryPending) {
-              authoritativeRoutingRecoveryPending = true;
-              messages.push({ role: "assistant", content: candidate || null });
-              messages.push({
-                role: "system",
-                content: "Internal DM routing correction: this turn contains an explicit state-changing action. The draft above is not final. Use the relevant RPG MCP tool or tools now, wait for their results, and only then narrate the changed situation. Do not substitute prose or improvisation for the authoritative engine call.",
-              });
-              continue;
-            }
-            throw new Error("The DM provider returned prose without an authoritative RPG MCP call for an explicit state-changing action.");
           }
           narrationText = candidate ? sanitizeReleasedNarration(candidate) || null : null;
           break;
@@ -977,7 +956,6 @@ export class ReferenceDungeonMaster {
             : null;
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) {
             acceptedStateChangingToolCalls += 1;
-            authoritativeToolCallObserved = true;
             if (rejectedActionKey) rejectedStateChangingActionKeys.delete(rejectedActionKey);
             rejectionRecoveryPending = rejectedStateChangingActionKeys.size > 0;
           }
