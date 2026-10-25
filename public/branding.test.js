@@ -116,4 +116,10 @@ describe("player-facing branding", () => {
     expect(app).toContain('tableEntryCta.dataset.entry = hasCampaign ? "return" : "play"');
     expect(app).toContain('if (button.dataset.entry === "return") returnToCampaign();');
   });
+
+  it("personalizes a starter scene without locking the composer, and serializes moves behind it", () => {
+    expect(app).toContain("if (quiet) state.personalizing = { campaignId: campaignId, promise: opening };");
+    expect(app).toContain("return state.personalizing.promise.then(function () { return submitCommand(command, clientCommandId); });");
+    expect(app).toContain('setStatus("The DM is tailoring your scene", "thinking");');
+  });
 });
