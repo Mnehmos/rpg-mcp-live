@@ -2518,6 +2518,41 @@ describe("Provider capacity handling", () => {
     return { dm };
   }
 
+  it("does not hold a provider slot when the usage reservation is refused", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-slot-leak-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    // The per-request estimate exceeds this ceiling, so reserve() refuses
+    // every provider call after the turn itself was admitted.
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 1_000_000,
+      freeMonthlyCostMicros: 1_000_000,
+      maxTurnCostMicros: 1,
+    });
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "primary-model",
+      timeoutMs: 5_000,
+      usage,
+      gate,
+    });
+    const fetchMock = vi.fn(async () => openRouterMessage("unused"));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait.")).rejects.toThrow();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(gate.snapshot()).toMatchObject({ inFlight: 0, queueDepth: 0 });
+    gameStore.close();
+  });
+
   it("spends the retry on the fallback model when the primary is rate-limited", async () => {
     const { dm } = buildDm({ fallbackModel: "fallback-model" });
     const models: string[] = [];

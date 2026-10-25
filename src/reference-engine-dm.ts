@@ -1317,14 +1317,8 @@ export class ReferenceDungeonMaster {
      * would let it expire mid-queue and charge the account for a call that
      * never happened.
      */
-    const slot = this.openRouter.gate
-      ? await this.openRouter.gate.acquire(
-        usageContext?.userId ?? ANONYMOUS_GATE_ACCOUNT,
-        deadlineAt,
-        Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs),
-      )
-      : null;
-
+    // Reserve before taking a provider slot: a refused reservation then holds
+    // nothing, and the slot is acquired inside the try that always releases it.
     const reservation = usageStore && usageContext
       ? usageStore.reserve({
         userId: usageContext.userId,
@@ -1349,8 +1343,16 @@ export class ReferenceDungeonMaster {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => idle.abort(new Error(`OpenRouter sent nothing for ${idleMs}ms`)), idleMs);
     };
-    touch();
+    let slot: Awaited<ReturnType<NonNullable<typeof this.openRouter.gate>["acquire"]>> | null = null;
     try {
+      slot = this.openRouter.gate
+        ? await this.openRouter.gate.acquire(
+          usageContext?.userId ?? ANONYMOUS_GATE_ACCOUNT,
+          deadlineAt,
+          Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs),
+        )
+        : null;
+      touch();
       const streaming = true;
       const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
         method: "POST",
