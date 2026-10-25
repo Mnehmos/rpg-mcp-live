@@ -59,5 +59,6 @@ describe("command status", () => {
     expect(commandFailureMessage({ failureType: "not_committed", reason: "provider_credit", commitStatus: "not_committed" }, 502)).toContain("offline on our side");
     expect(commandFailureMessage({ failureType: "capacity", reason: "capacity", commitStatus: "not_committed" }, 429)).toContain("busy");
     expect(commandFailureMessage({ failureType: "uncertain", reason: "provider_auth", commitStatus: "uncertain" }, 502)).toContain("checking whether this turn committed");
+    expect(commandFailureMessage({ failureType: "uncertain", reason: "capacity", commitStatus: "uncertain" }, 429)).toContain("checking whether this turn committed");
   });
 });

@@ -20,7 +20,7 @@ export function commandFailureMessage(payload, status) {
   if ((reason === "provider_auth" || reason === "provider_credit") && payload?.commitStatus === "not_committed") {
     return "The Dungeon Master is offline on our side right now. Your campaign is safe and this turn was not committed; try again later.";
   }
-  if (reason === "capacity" || type === "capacity") {
+  if ((reason === "capacity" || type === "capacity") && payload?.commitStatus !== "uncertain" && type !== "uncertain") {
     return "The table is busy right now. This turn was not committed; send it again in a moment.";
   }
   if (type === "usage_limit") {

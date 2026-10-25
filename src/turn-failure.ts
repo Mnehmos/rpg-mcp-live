@@ -111,6 +111,20 @@ export function turnFailure(error: unknown): TurnFailure {
     });
   }
 
+  // The DM's own receipt wins: if an earlier call in this turn already
+  // changed engine state, a later capacity or quota refusal must not be
+  // reported as safe to repeat.
+  const receipt: CommitStatus | null = error instanceof ReferenceDmProviderUnavailableError
+    ? (error.details.commitStatus === "not_committed" ? "not_committed" : "uncertain")
+    : null;
+  const uncertain = receipt === "uncertain";
+  const uncertainBody = (wrapper: ReferenceDmProviderUnavailableError) => ({
+    failureType: "uncertain",
+    retryable: false,
+    error: "The reference-engine DM stopped after a state change; refresh the table before continuing.",
+    ...failureDetails(wrapper.details),
+  });
+
   const gateError = error instanceof ProviderGateTimeoutError || error instanceof ProviderGateAccountBusyError
     ? error
     : error instanceof ReferenceDmProviderUnavailableError
@@ -118,15 +132,19 @@ export function turnFailure(error: unknown): TurnFailure {
       ? error.cause
       : null;
   if (gateError) {
-    // Refused before reaching the provider: definitively not committed.
+    const gateDetails = gateError instanceof ProviderGateTimeoutError
+      ? { waitedMs: gateError.waitedMs, queueDepth: gateError.queueDepth }
+      : { inFlight: gateError.inFlight, limit: gateError.limit };
+    if (uncertain) {
+      return make(429, "capacity", "uncertain", true, { code: gateError.code, ...uncertainBody(error as ReferenceDmProviderUnavailableError), ...gateDetails });
+    }
+    // Refused before any state change reached the engine: not committed.
     return make(429, "capacity", "not_committed", true, {
       code: gateError.code,
       failureType: "capacity",
       retryable: true,
       error: gateError.message,
-      ...(gateError instanceof ProviderGateTimeoutError
-        ? { waitedMs: gateError.waitedMs, queueDepth: gateError.queueDepth }
-        : { inFlight: gateError.inFlight, limit: gateError.limit }),
+      ...gateDetails,
     });
   }
 
@@ -137,14 +155,20 @@ export function turnFailure(error: unknown): TurnFailure {
       : null;
   if (usageError) {
     const serviceWide = usageError.period === "global_daily" || usageError.period === "global_monthly";
+    const usageDetails = { period: usageError.period, limitMicros: usageError.limit, requestedMicros: usageError.requested };
+    if (uncertain) {
+      return make(429, serviceWide ? "service_limit" : "usage_limit", "uncertain", serviceWide, {
+        code: usageError.code,
+        ...uncertainBody(error as ReferenceDmProviderUnavailableError),
+        ...usageDetails,
+      });
+    }
     return make(429, serviceWide ? "service_limit" : "usage_limit", "not_committed", serviceWide, {
       code: usageError.code,
       failureType: "usage_limit",
       retryable: false,
       error: usageError.message,
-      period: usageError.period,
-      limitMicros: usageError.limit,
-      requestedMicros: usageError.requested,
+      ...usageDetails,
     });
   }
 
