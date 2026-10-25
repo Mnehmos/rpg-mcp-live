@@ -44,7 +44,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     { id: "ember-watch", title: "The Ember Watch", tagline: "The old lighthouse is burning in a dead calm.", description: "A fast-moving rescue story on a fogbound harbor." },
     { id: "glass-under-moon", title: "Glass Under Moonlight", tagline: "Something beneath the city is answering the bells.", description: "A strange arcane investigation in an old river city." },
   ];
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, pendingQuickstartId: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, pendingQuickstartId: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, streamingCommandId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -216,6 +216,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
           return { response: response, data: data };
         });
       });
+  }
+
+  function isStreamingHere(pending) {
+    return Boolean(pending && state.streamingCommandId && pending.clientCommandId === state.streamingCommandId);
   }
 
   function streamTurn(url, body, onProgress) {
@@ -2327,6 +2331,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     function resumePendingCommand() {
       var pending = readPendingCommand(state.session && state.session.id);
       if (!pending || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
+      if (isStreamingHere(pending)) {
+        if (!state.pendingPlayerText) {
+          state.pendingPlayerText = pending.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        }
+        return Promise.resolve(false);
+      }
       if (pending.status === "uncertain") {
         state.pendingPlayerText = null;
         state.uncertainPlayerText = pending.playerText || "Your submitted action";
@@ -2360,7 +2371,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       if (!result.response.ok) throw new Error(result.data.error || "The table is unavailable.");
       renderSession(result.data);
       var pendingForLoadedCampaign = result.data.session && readPendingCommand(result.data.session.id);
-      if (pendingForLoadedCampaign) setStatus("The DM is still working on your turn. Hang tight.", "thinking");
+      if (pendingForLoadedCampaign && isStreamingHere(pendingForLoadedCampaign)) setStatus("The DM is thinking", "thinking");
+      else if (pendingForLoadedCampaign) setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       else if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
@@ -2625,12 +2637,17 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     writePendingCommand({ campaignId: campaignId, clientCommandId: commandId, playerText: state.pendingPlayerText });
     renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
     setStatus("The DM is thinking", "thinking");
+    // This tab is receiving this turn live; a session refresh in the meantime
+    // (e.g. a Clerk token refresh) must not treat it as an orphaned turn.
+    state.streamingCommandId = commandId;
     return streamTurn("/api/campaigns/" + campaignPath + "/commands", Object.assign({
       clientCommandId: commandId,
       expectedCampaignVersion: expectedCampaignVersion
     }, command), function (event) {
       if (event.type === "narration") showLiveNarration(event.text);
       else showLiveProgress(event);
+    }).finally(function () {
+      if (state.streamingCommandId === commandId) state.streamingCommandId = null;
     }).then(function (result) {
       clearLiveNarration();
       if (result.response.status === 401) {
@@ -3158,7 +3175,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         state.createMode = false;
         renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription, usage: result.data.usage });
         var pendingForCampaign = readPendingCommand(campaignId);
-        if (pendingForCampaign && pendingForCampaign.status === "processing") {
+        if (pendingForCampaign && isStreamingHere(pendingForCampaign)) {
+          // Still this tab's live turn: show it as busy, but do not reconcile.
+          state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+          setStatus("The DM is thinking", "thinking");
+        } else if (pendingForCampaign && pendingForCampaign.status === "processing") {
           state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
           renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
           setStatus("The DM is still working on your turn. Hang tight.", "thinking");
