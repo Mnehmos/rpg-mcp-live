@@ -1,11 +1,9 @@
-import type { StoredLogMessage } from "./reference-engine-store.js";
-
 /**
  * A playable first scene committed without the model (architecture audit R01).
  * Quickstarts commit the room, place the character there and set the scene,
  * so a new player is at the table instantly even if the provider is slow or
- * down. The DM then personalizes the same scene once; if that fails, this
- * hand-written opening stands.
+ * down. This opening is the campaign's first narration and is never
+ * replaced; the DM takes over from the player's first move, building on it.
  */
 export interface StarterScene {
   room: {
@@ -76,33 +74,4 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
 
 export function getStarterScene(presetId: string): StarterScene | null {
   return STARTER_SCENES[presetId] ?? null;
-}
-
-/** Hidden from the player's log, like the plain opening instruction. */
-export const PERSONALIZE_OPENING_PREFIX = "Personalize the opening scene.";
-
-/**
- * The committed starter narration, while the DM has not yet narrated anything
- * after it (the personalization pass has not landed).
- */
-export function pendingStarterEntry(log: readonly StoredLogMessage[]): (StoredLogMessage & { starter: StarterLogMarker }) | null {
-  let starter: (StoredLogMessage & { starter: StarterLogMarker }) | null = null;
-  for (const entry of log) {
-    if (entry.kind === "narration" && entry.starter) starter = entry as StoredLogMessage & { starter: StarterLogMarker };
-    else if (starter && entry.kind === "narration") return null;
-  }
-  return starter;
-}
-
-export function personalizeOpeningInstruction(entry: StoredLogMessage & { starter: StarterLogMarker }): string {
-  return [
-    PERSONALIZE_OPENING_PREFIX,
-    `The starter scene is already committed in the engine: the player character is in room "${entry.starter.roomName}" (roomId ${entry.starter.roomId})`
-      + (entry.starter.sceneId ? `, and scene "${entry.starter.title}" (sceneId ${entry.starter.sceneId}) is set.` : "."),
-    "Do not generate a new room, move the character, or set a new scene unless the fiction truly needs it.",
-    "Rewrite the opening below for this character, keeping its place, people, stakes and closing question, then narrate it as the first scene.",
-    "",
-    "Starter opening:",
-    entry.text,
-  ].join("\n");
 }

@@ -775,6 +775,9 @@ describe("ReferenceEngineAdapter", () => {
       const log = store.getLogMessages("account-1", "campaign-1");
       expect(log.at(-1)).toMatchObject({ kind: "narration", text: starter.narration, starter: { roomId: "room-9", sceneId: "scene-3", title: "No Wind in Brinewick" } });
       expect(store.getRouting("account-1", "campaign-1")!.version).toBe(before + 1);
+      const stateNote = store.getDocket("account-1", "campaign-1", "state");
+      expect(stateNote).toContain("Room id: room-9");
+      expect(stateNote).toContain("Shared scene committed: yes");
     });
 
     it("stops at the first engine refusal and logs nothing", async () => {
