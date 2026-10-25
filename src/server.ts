@@ -101,7 +101,6 @@ const referenceDungeonMaster = config.openRouterConfigured
         model: config.openRouterModel,
         reasoningEffort: config.openRouterReasoningEffort,
         timeoutMs: 60_000,
-        turnTimeoutMs: config.referenceDmTimeoutMs,
         usage: llmUsageStore,
         fallbackModel: config.openRouterFallbackModel || undefined,
         gate: providerGate,

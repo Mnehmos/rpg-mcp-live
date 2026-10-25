@@ -1003,3 +1003,4 @@ h1 i { color: var(--amber); font-style: italic; }
    are replaced by the authoritative entry when the turn settles. */
 .log-entry.live-narration { border-color: rgba(233, 167, 91, .35); }
 .live-narration-text::after { content: "▍"; color: var(--amber); animation: composer-pulse 1.1s ease-in-out infinite; }
+.live-narration .live-status { color: var(--muted); font-size: 12px; font-style: italic; margin: 0 0 8px; }.live-narration .live-status:empty { display: none; }.live-narration .live-table-moves { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }.live-narration .live-table-moves:empty { display: none; }

@@ -28,7 +28,7 @@ function humanizeToolName(name) {
     .replace(/\b\w/g, function (letter) { return letter.toUpperCase(); });
 }
 
-function tableMoveLabel(call) {
+export function tableMoveLabel(call) {
   var name = String(call && call.name || "").toLowerCase();
   var argumentsValue = normalizedArguments(call);
   var action = String(argumentsValue.action || argumentsValue.kind || "").toLowerCase();
