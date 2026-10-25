@@ -122,4 +122,9 @@ describe("player-facing branding", () => {
     expect(app).toContain("return state.personalizing.promise.then(function () { return submitCommand(command, clientCommandId); });");
     expect(app).toContain('setStatus("The DM is tailoring your scene", "thinking");');
   });
+
+  it("keeps the whole failure envelope from a streamed turn", () => {
+    expect(app).toContain('captured = Object.assign({}, event, { error: event.error ||');
+    expect(app).toContain("status: streamedFailureStatus(envelope)");
+  });
 });
