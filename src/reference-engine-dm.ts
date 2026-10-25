@@ -1317,28 +1317,6 @@ export class ReferenceDungeonMaster {
      * would let it expire mid-queue and charge the account for a call that
      * never happened.
      */
-    const slot = this.openRouter.gate
-      ? await this.openRouter.gate.acquire(
-        usageContext?.userId ?? ANONYMOUS_GATE_ACCOUNT,
-        deadlineAt,
-        Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs),
-      )
-      : null;
-
-    const reservation = usageStore && usageContext
-      ? usageStore.reserve({
-        userId: usageContext.userId,
-        campaignId: usageContext.campaignId,
-        clientCommandId: usageContext.clientCommandId,
-        source: "dm",
-        provider: "openrouter",
-        model,
-        estimatedPromptTokens,
-        estimatedCompletionTokens: ESTIMATED_COMPLETION_TOKENS,
-        estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, ESTIMATED_COMPLETION_TOKENS),
-        admittedTurn: usageContext.admittedTurn,
-      })
-      : null;
     // Hang detection only: the request is abandoned when the provider sends
     // nothing at all for timeoutMs. A model that is streaming, or thinking
     // behind OpenRouter keep-alive comments, is never cut off.
@@ -1349,8 +1327,34 @@ export class ReferenceDungeonMaster {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => idle.abort(new Error(`OpenRouter sent nothing for ${idleMs}ms`)), idleMs);
     };
-    touch();
+    // Slot first, then the reservation (so a queue wait cannot outlive the
+    // reservation TTL), both inside the try whose catch/finally release them:
+    // a refused reservation never strands the provider slot.
+    let slot: Awaited<ReturnType<NonNullable<typeof this.openRouter.gate>["acquire"]>> | null = null;
+    let reservation: LlmUsageReservation | null = null;
     try {
+      slot = this.openRouter.gate
+        ? await this.openRouter.gate.acquire(
+          usageContext?.userId ?? ANONYMOUS_GATE_ACCOUNT,
+          deadlineAt,
+          Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs),
+        )
+        : null;
+      reservation = usageStore && usageContext
+        ? usageStore.reserve({
+          userId: usageContext.userId,
+          campaignId: usageContext.campaignId,
+          clientCommandId: usageContext.clientCommandId,
+          source: "dm",
+          provider: "openrouter",
+          model,
+          estimatedPromptTokens,
+          estimatedCompletionTokens: ESTIMATED_COMPLETION_TOKENS,
+          estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, ESTIMATED_COMPLETION_TOKENS),
+          admittedTurn: usageContext.admittedTurn,
+        })
+        : null;
+      touch();
       const streaming = true;
       const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
         method: "POST",
