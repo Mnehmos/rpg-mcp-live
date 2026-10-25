@@ -76,7 +76,7 @@ describe("commit uncertainty survives the failure reason", () => {
   });
 
   it("does not call a quota refusal after an applied action safe to repeat", () => {
-    const failure = turnFailure(afterStateChange(new LlmUsageLimitError("turn", 0, 200_000, 100_000, "This provider request exceeds the per-request safety limit.")));
+    const failure = turnFailure(afterStateChange(new LlmUsageLimitError("monthly", 500_000, 10_000, 500_000, "LLM monthly usage limit reached.")));
     expect(failure).toMatchObject({ status: 502, reason: "usage_limit", commitStatus: "uncertain" });
     expect(failure.body).toMatchObject({ failureType: "uncertain", retryable: false });
   });
