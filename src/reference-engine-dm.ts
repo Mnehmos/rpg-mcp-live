@@ -224,6 +224,8 @@ function storedToolCallId(entryId: string, index: number): string {
 const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = REPLAY_RESULT_CHARACTER_LIMIT;
 const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
 const MIN_RETRY_REQUEST_BUDGET_MS = 1_000;
+/** Renew well inside REFERENCE_COMMAND_LEASE_MS (5 min) while a turn is working. */
+const REFERENCE_COMMAND_LEASE_RENEW_MS = 60_000;
 /** Upper bound on the random share added to a provider retry delay. */
 const RETRY_JITTER_FRACTION = 0.5;
 /** Ledger estimate for an in-flight reservation; not sent to the provider. */
@@ -694,6 +696,8 @@ export class ReferenceDungeonMaster {
       timeoutMs: number;
       reasoningEffort?: string;
       turnTimeoutMs?: number;
+      /** How often a working turn renews its command lease (tests shorten it). */
+      leaseRenewMs?: number;
       usage?: LlmUsageStore;
       /**
        * Tried once when the primary model is rate-limited or failing
@@ -882,9 +886,16 @@ export class ReferenceDungeonMaster {
       { role: "user", content: playerText },
     ];
 
+    // A single provider round may now stream for longer than the command
+    // lease. Renew it while the turn is working so polling never marks a live
+    // turn failed; a hung provider is ended by the idle watchdog instead.
+    const leaseRenewal = setInterval(
+      () => this.store.touchReferenceCommand(accountId, campaignId, clientCommandId),
+      this.openRouter.leaseRenewMs ?? REFERENCE_COMMAND_LEASE_RENEW_MS,
+    );
     try {
       // No round limit: the DM keeps calling tools until it answers in prose.
-      // The engine verifies every call; the turn deadline and the dollar
+      // The engine verifies every call; the idle watchdog and the dollar
       // ledger are the only outer bounds.
       for (let round = 0; ; round += 1) {
         const tools = [
@@ -1014,6 +1025,8 @@ export class ReferenceDungeonMaster {
       }
     } catch (error) {
       throw failTurn(error, "tool_loop");
+    } finally {
+      clearInterval(leaseRenewal);
     }
 
     if (!narrationText) {

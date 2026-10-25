@@ -328,6 +328,43 @@ data: [DONE]
     gameStore.close();
   });
 
+  it("keeps renewing the command lease while one provider round streams", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-lease-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      leaseRenewMs: 20,
+    });
+    const touch = vi.spyOn(store, "touchReferenceCommand");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        for (const word of ["Rain ", "drums ", "on ", "the ", "slate."]) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: { content: word } }] })}\n\n`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I listen to the rain.");
+
+    // One renewal at the start of the round, plus timer renewals during the ~250ms stream.
+    expect(touch.mock.calls.length).toBeGreaterThanOrEqual(5);
+    const callsAfterTurn = touch.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(touch.mock.calls.length).toBe(callsAfterTurn);
+    gameStore.close();
+  });
+
   it("abandons a provider request only after it goes silent", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-idle-hang-"));
     const gameStore = new GameStore(join(directory, "game.db"));
