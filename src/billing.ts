@@ -56,6 +56,22 @@ function subscriptionPriceId(subscription: Stripe.Subscription): string | null {
   return subscription.items.data[0]?.price.id ?? null;
 }
 
+function isMissingStripeResource(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: string }).code === "resource_missing");
+}
+
+/**
+ * An entitled row whose paid period has ended must be re-read from Stripe:
+ * either a renewal was missed (webhook not delivered) or the pass lapsed.
+ */
+export function subscriptionNeedsRefresh(
+  subscription: { status: string; currentPeriodEnd: number | null } | null | undefined,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): boolean {
+  if (!subscription || !isEntitledSubscriptionStatus(subscription.status)) return false;
+  return subscription.currentPeriodEnd !== null && subscription.currentPeriodEnd < nowSeconds;
+}
+
 function subscriptionPeriodEnd(subscription: Stripe.Subscription): number | null {
   return subscription.items.data[0]?.current_period_end ?? null;
 }
@@ -131,6 +147,20 @@ function saveSubscription(store: GameStore, values: {
  * single-user subscription row from an old Checkout return or an out-of-order
  * webhook replacing a newer subscription.
  */
+/**
+ * The Stripe account is shared with other products. Only the Player Pass
+ * price grants entitlement: an unrelated subscription is ignored, but if the
+ * account's own bound subscription moves off that price, the pass is revoked.
+ */
+export function playerPassPriceDecision(
+  subscription: Stripe.Subscription,
+  boundSubscriptionId: string | null | undefined,
+  playerPassPriceId: string,
+): "allow" | "ignore" | "revoke" {
+  if (!playerPassPriceId || subscriptionUsesPrice(subscription, playerPassPriceId)) return "allow";
+  return boundSubscriptionId === subscription.id ? "revoke" : "ignore";
+}
+
 async function saveAuthoritativeSubscription(
   stripe: Stripe,
   store: GameStore,
@@ -142,9 +172,21 @@ async function saveAuthoritativeSubscription(
   if (expectedCustomerId && customerId !== expectedCustomerId) return false;
 
   const existing = store.getSubscription(userId);
-  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id) {
-    const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
-    if (current.created >= subscription.created) return false;
+  const priceDecision = playerPassPriceDecision(subscription, existing?.stripeSubscriptionId, config.stripePriceId);
+  if (priceDecision === "ignore") return false;
+  if (priceDecision === "revoke") {
+    revokeEntitlement(store, userId, "not_player_pass", customerId);
+    return true;
+  }
+  // A binding Stripe has no record of can always be replaced by a real
+  // subscription; otherwise the newer subscription wins.
+  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id && existing.status !== "missing") {
+    try {
+      const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
+      if (current.created >= subscription.created) return false;
+    } catch (error) {
+      if (!isMissingStripeResource(error)) throw error;
+    }
   }
 
   saveSubscription(store, {
@@ -178,7 +220,13 @@ export async function reconcileStoredSubscription(
     if (existing.stripeCustomerId && customerId !== existing.stripeCustomerId) return false;
     if (subscription.metadata?.clerk_user_id && subscription.metadata.clerk_user_id !== userId) return false;
     return await saveAuthoritativeSubscription(stripe, store, userId, subscription, existing.stripeCustomerId);
-  } catch {
+  } catch (error) {
+    // Stripe has no such subscription for this key (e.g. a test-mode row in a
+    // live database): the stored entitlement has nothing behind it.
+    if (isMissingStripeResource(error)) {
+      revokeEntitlement(store, userId, "missing", existing.stripeCustomerId);
+      return true;
+    }
     // A transient Stripe failure must not turn a status read into a 500 or
     // cause the checkout route to create a second subscription.
     return false;
@@ -413,7 +461,7 @@ export async function handleStripeEvent(
 function revokeEntitlement(
   store: GameStore,
   userId: string,
-  status: "disputed" | "refunded",
+  status: "disputed" | "refunded" | "missing" | "not_player_pass",
   customerId: string | null,
 ): void {
   const existing = store.getSubscription(userId);

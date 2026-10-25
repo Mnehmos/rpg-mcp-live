@@ -100,10 +100,10 @@ describe("ReferenceDungeonMaster", () => {
     vi.unstubAllGlobals();
   });
 
-  it("instructs agent-backed NPC setup to use OpenRouter DeepSeek V4 Flash", () => {
+  it("instructs agent-backed NPC setup to use OpenRouter DeepSeek V4.1 Flash 1017 without output caps", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("provider openrouter");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model deepseek/deepseek-v4-flash");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("maxTokens 8192");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model deepseek/deepseek-v4.1-flash-1017");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("omit maxTokens and budgetTokens");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("place every newly authored companion");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Before npc_manage.interact or agent_manage.invoke");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("dispatch the normal RPG MCP tool or tools");
@@ -495,13 +495,13 @@ data: [DONE]
       "read_docket",
       "write_docket",
     ]);
-    expect(firstToolChoice).toBe("required");
+    expect(firstToolChoice).toBe("auto");
     expect(requestCount).toBe(2);
     expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
     gameStore.close();
   });
 
-  it("recovers internally when a provider ignores required tool routing", async () => {
+  it("lets the model decide whether a move needs a tool call", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-required-routing-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
@@ -529,25 +529,16 @@ data: [DONE]
       requestCount += 1;
       const body = JSON.parse(init.body) as { tool_choice?: string };
       toolChoices.push(body.tool_choice ?? "missing");
-      if (requestCount === 1) return openRouterMessage("The torch flares before the DM consults the engine.");
-      if (requestCount === 2) {
-        return openRouterMessage(null, [{
-          id: "use-torch-after-recovery",
-          type: "function",
-          function: {
-            name: "inventory_manage",
-            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
-          },
-        }]);
-      }
-      return openRouterMessage("The torch catches, and the dark gives way around you.");
+      return openRouterMessage("You hold the torch to the brazier, and the dark gives way around you.");
     }));
 
+    // No harness classifier forces a tool or fails a prose reply: the model
+    // judged this move needed no engine call, and the turn stands.
     const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
 
-    expect(toolChoices).toEqual(["required", "required", "auto"]);
-    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
-    expect(result.narration.text).toContain("torch catches");
+    expect(toolChoices).toEqual(["auto"]);
+    expect(result.toolDisclosure).toBeNull();
+    expect(result.narration.text).toContain("dark gives way");
     gameStore.close();
   });
 

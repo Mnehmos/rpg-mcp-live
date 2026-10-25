@@ -11,6 +11,7 @@ import {
   handleStripeEvent,
   reconcileSubscriptionByEmail,
   reconcileStoredSubscription,
+  subscriptionNeedsRefresh,
   resolveCheckoutGuard,
   syncCompletedCheckoutSession,
   type EmailSubscriptionReconciliation,
@@ -666,7 +667,13 @@ async function reconcileLegacySubscription(
   const subscription = store.getSubscription(userId);
   if (!stripe) return "not_needed";
   if (subscription?.stripeSubscriptionId) {
-    if (subscription.status !== "checkout_complete") return "not_needed";
+    const periodEnded = subscriptionNeedsRefresh(subscription);
+    if (subscription.status !== "checkout_complete" && !periodEnded) return "not_needed";
+    if (periodEnded) {
+      const checkedAt = subscriptionRecoveryCheckedAt.get(userId) ?? 0;
+      if (!force && Date.now() - checkedAt < subscriptionRecoveryTtlMs) return "not_needed";
+      subscriptionRecoveryCheckedAt.set(userId, Date.now());
+    }
     return await reconcileStoredSubscription(stripe, store, userId) ? "linked" : "failed";
   }
   if (!clerkClient) return "failed";
