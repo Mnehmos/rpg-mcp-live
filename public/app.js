@@ -2331,7 +2331,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     function resumePendingCommand() {
       var pending = readPendingCommand(state.session && state.session.id);
       if (!pending || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
-      if (isStreamingHere(pending)) return Promise.resolve(false);
+      if (isStreamingHere(pending)) {
+        if (!state.pendingPlayerText) {
+          state.pendingPlayerText = pending.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        }
+        return Promise.resolve(false);
+      }
       if (pending.status === "uncertain") {
         state.pendingPlayerText = null;
         state.uncertainPlayerText = pending.playerText || "Your submitted action";
@@ -3170,6 +3176,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription, usage: result.data.usage });
         var pendingForCampaign = readPendingCommand(campaignId);
         if (pendingForCampaign && isStreamingHere(pendingForCampaign)) {
+          // Still this tab's live turn: show it as busy, but do not reconcile.
+          state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
           setStatus("The DM is thinking", "thinking");
         } else if (pendingForCampaign && pendingForCampaign.status === "processing") {
           state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
