@@ -13,7 +13,6 @@ export interface LlmUsagePolicy {
   globalDailyCostMicros: number;
   globalMonthlyCostMicros: number;
   turnAdmissionReserveCostMicros: number;
-  maxTurnCostMicros: number;
   npcReserveCostMicros: number;
   reservationTtlMs: number;
   inputCostUsdPerMillion: number;
@@ -268,16 +267,9 @@ export class LlmUsageStore {
   public reserve(input: LlmUsageReservationInput): LlmUsageReservation {
     const estimatedPromptTokens = nonnegativeInteger(input.estimatedPromptTokens);
     const estimatedCompletionTokens = nonnegativeInteger(input.estimatedCompletionTokens);
+    // No per-request cost ceiling: an admitted turn is bounded by the
+    // per-account and service-wide dollar ledgers, not by a single call.
     const estimatedCostMicros = nonnegativeInteger(input.estimatedCostMicros);
-    if (estimatedCostMicros > this.policy.maxTurnCostMicros) {
-      throw new LlmUsageLimitError(
-        "turn",
-        0,
-        estimatedCostMicros,
-        this.policy.maxTurnCostMicros,
-        "This provider request exceeds the per-request safety limit.",
-      );
-    }
 
     const reservation = {
       id: randomUUID(),

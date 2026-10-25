@@ -29,7 +29,6 @@ function testUsagePolicy(): LlmUsagePolicy {
     globalDailyCostMicros: 1_000,
     globalMonthlyCostMicros: 2_000,
     turnAdmissionReserveCostMicros: 5,
-    maxTurnCostMicros: 500,
     npcReserveCostMicros: 100,
     reservationTtlMs: 60_000,
     inputCostUsdPerMillion: 0.2,

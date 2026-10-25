@@ -144,7 +144,6 @@ export const config = Object.freeze({
     globalDailyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_DAILY_COST_USD", 5) * 1_000_000),
     globalMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_MONTHLY_COST_USD", 25) * 1_000_000),
     turnAdmissionReserveCostMicros: Math.round(readNumber("LLM_USAGE_TURN_ADMISSION_RESERVE_COST_USD", 0.01) * 1_000_000),
-    maxTurnCostMicros: Math.round(readNumber("LLM_USAGE_MAX_TURN_COST_USD", 0.1) * 1_000_000),
     npcReserveCostMicros: Math.round(readNumber("LLM_USAGE_NPC_RESERVE_COST_USD", 0.02) * 1_000_000),
     reservationTtlMs: readInteger("LLM_USAGE_RESERVATION_TTL_MS", 10 * 60 * 1000),
     inputCostUsdPerMillion: readNumber("LLM_USAGE_INPUT_COST_USD_PER_MILLION", 0.0574),

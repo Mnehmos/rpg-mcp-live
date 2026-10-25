@@ -15,7 +15,7 @@ import {
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
-import { LlmUsageStore } from "./llm-usage.js";
+import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
 import { ProviderGate } from "./provider-gate.js";
 import { config } from "./config.js";
 
@@ -724,7 +724,6 @@ data: [DONE]
       globalDailyCostMicros: 1_000_000,
       globalMonthlyCostMicros: 2_000_000,
       turnAdmissionReserveCostMicros: 10_000,
-      maxTurnCostMicros: 100_000,
       npcReserveCostMicros: 50_000,
       reservationTtlMs: 60_000,
       inputCostUsdPerMillion: 0.2,
@@ -2525,13 +2524,14 @@ describe("Provider capacity handling", () => {
     setUpRoutedCampaign(store);
     const client = fakeClient({ ...CHARACTER_FIXTURES });
     const adapter = new ReferenceEngineAdapter(client, store);
-    // The per-request estimate exceeds this ceiling, so reserve() refuses
-    // every provider call after the turn itself was admitted.
     const usage = new LlmUsageStore(gameStore.getRawDb(), {
       ...config.llmUsage,
       freeDailyCostMicros: 1_000_000,
       freeMonthlyCostMicros: 1_000_000,
-      maxTurnCostMicros: 1,
+    });
+    // Admit the turn, then refuse every provider reservation.
+    vi.spyOn(usage, "reserve").mockImplementation(() => {
+      throw new LlmUsageLimitError("monthly", 1_000_000, 1, 1_000_000, "LLM monthly usage limit reached.");
     });
     const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
     const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
