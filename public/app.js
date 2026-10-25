@@ -2599,8 +2599,16 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     // Turns stay serialized: a move made while the DM personalizes the starter
     // scene is sent once that finishes, against the updated campaign version.
     if (state.personalizing && state.personalizing.campaignId === state.session.id) {
+      var queuedCampaignId = state.session.id;
       setStatus("The DM is finishing your opening. Your move goes next.", "thinking");
-      return state.personalizing.promise.then(function () { return submitCommand(command, clientCommandId); });
+      return state.personalizing.promise.then(function () {
+        // Only the campaign the move was made in may receive it.
+        if (!state.session || state.session.id !== queuedCampaignId) {
+          showToast("Your move was not sent because you switched campaigns.");
+          return false;
+        }
+        return submitCommand(command, clientCommandId);
+      });
     }
 
     var campaignId = state.session.id;

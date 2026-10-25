@@ -119,7 +119,8 @@ describe("player-facing branding", () => {
 
   it("personalizes a starter scene without locking the composer, and serializes moves behind it", () => {
     expect(app).toContain("if (quiet) state.personalizing = { campaignId: campaignId, promise: opening };");
-    expect(app).toContain("return state.personalizing.promise.then(function () { return submitCommand(command, clientCommandId); });");
+    expect(app).toContain("if (!state.session || state.session.id !== queuedCampaignId) {");
+    expect(app).toContain("Your move was not sent because you switched campaigns.");
     expect(app).toContain('setStatus("The DM is tailoring your scene", "thinking");');
   });
 
