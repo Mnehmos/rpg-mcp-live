@@ -11,6 +11,8 @@ export interface StoredLogMessage {
   text: string;
   createdAt: string;
   toolDisclosure?: EngineToolDisclosure;
+  /** Set on a quickstart's hand-written opening (starter-scenes.ts) until the DM personalizes it. */
+  starter?: { roomId: string; roomName: string; sceneId: string | null; title: string };
 }
 
 const MAX_LOG_MESSAGES = 40;

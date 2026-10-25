@@ -2755,7 +2755,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         setStatus(rolledName
           ? "You are " + rolledName + ". The DM is opening the first scene"
           : "The DM is opening your first scene", "thinking");
-        return beginCampaignOpening(true).then(function (opened) {
+        // A committed starter scene is already playable: the DM only
+        // personalizes it, quietly, and a failure leaves the template.
+        return beginCampaignOpening(true, Boolean(result.data.starterScene)).then(function (opened) {
           if (opened) setStatus("Your story is open", "ready");
           return opened;
         });
@@ -2862,7 +2864,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     });
   }
 
-  function beginCampaignOpening(allowSandbox) {
+  function beginCampaignOpening(allowSandbox, quiet) {
     var phase = state.session && state.session.phase;
     if (!state.session || (phase !== "tutorial" && !(allowSandbox && phase === "sandbox"))) return Promise.resolve(false);
     var snapshot = state.engineState || {};
@@ -2893,6 +2895,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       return true;
     }).catch(function (error) {
       clearLiveNarration();
+      if (quiet) {
+        setStatus("Your story is ready", "ready");
+        return false;
+      }
       state.openingErrorCampaignId = campaignId;
       if (feedback) feedback.textContent = error.message + " You can try again.";
       setStatus(error.message, "error");

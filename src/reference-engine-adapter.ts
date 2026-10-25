@@ -34,6 +34,7 @@ import {
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
 import type { TenantIdentity } from "./reference-engine-tenant.js";
 import { ReferenceEngineStore, type ReferenceEngineRouting } from "./reference-engine-store.js";
+import type { StarterScene } from "./starter-scenes.js";
 
 /**
  * ADR-H13 override (accepted 2026-08-11): routes real campaigns to the
@@ -664,6 +665,59 @@ export class ReferenceEngineAdapter {
       deletedEvents: 0,
       deletedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Commit a quickstart's hand-written first scene without the model: a room,
+   * the character placed in it, the shared scene, and the opening in the log.
+   * Returns false (committing nothing further) at the first engine refusal, so
+   * the caller can fall back to a model-authored opening.
+   */
+  public async commitStarterScene(accountId: string, campaignId: string, starter: StarterScene): Promise<boolean> {
+    const routing = this.requireRouting(accountId, campaignId);
+    if (!routing.referenceCharacterId || !routing.referenceWorldId) return false;
+    const tenant = this.tenantFor(accountId, campaignId, routing);
+    const field = (payload: unknown, ...keys: string[]): string | null => {
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      const nested = record.data && typeof record.data === "object" ? record.data as Record<string, unknown> : {};
+      for (const source of [record, nested, (record.scene ?? nested.scene) as Record<string, unknown> | undefined]) {
+        if (!source || typeof source !== "object") continue;
+        for (const key of keys) {
+          const value = (source as Record<string, unknown>)[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+      }
+      return null;
+    };
+
+    const room = await this.client.callTool("spatial_manage", { action: "generate", ...starter.room }, tenant);
+    const roomId = room.isError ? null : field(room.payload, "roomId", "newRoomId", "id");
+    if (!roomId) return false;
+    const moved = await this.client.callTool("spatial_manage", {
+      action: "move",
+      characterId: routing.referenceCharacterId,
+      roomId,
+    }, tenant);
+    if (moved.isError) return false;
+    const scene = await this.client.callTool("scene_manage", {
+      action: "set",
+      worldId: routing.referenceWorldId,
+      title: starter.scene.title,
+      placeLabel: starter.scene.placeLabel,
+      narration: starter.narration,
+      participants: [routing.referenceCharacterId],
+    }, tenant);
+    if (scene.isError) return false;
+
+    this.store.appendLogMessages(accountId, campaignId, [{
+      id: randomUUID(),
+      kind: "narration",
+      text: starter.narration,
+      createdAt: new Date().toISOString(),
+      starter: { roomId, roomName: starter.room.name, sceneId: field(scene.payload, "sceneId", "id"), title: starter.scene.title },
+    }]);
+    this.store.bumpVersion(accountId, campaignId);
+    return true;
   }
 
   public async executeToolCall(
