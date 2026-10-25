@@ -116,4 +116,9 @@ describe("player-facing branding", () => {
     expect(app).toContain('tableEntryCta.dataset.entry = hasCampaign ? "return" : "play"');
     expect(app).toContain('if (button.dataset.entry === "return") returnToCampaign();');
   });
+
+  it("keeps the whole failure envelope from a streamed turn", () => {
+    expect(app).toContain('captured = Object.assign({}, event, { error: event.error ||');
+    expect(app).toContain("status: streamedFailureStatus(envelope)");
+  });
 });

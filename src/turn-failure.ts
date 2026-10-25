@@ -136,7 +136,9 @@ export function turnFailure(error: unknown): TurnFailure {
       ? { waitedMs: gateError.waitedMs, queueDepth: gateError.queueDepth }
       : { inFlight: gateError.inFlight, limit: gateError.limit };
     if (uncertain) {
-      return make(429, "capacity", "uncertain", true, { code: gateError.code, ...uncertainBody(error as ReferenceDmProviderUnavailableError), ...gateDetails });
+      // 502, not 429: an uncertain turn must go to reconciliation, never be
+      // treated as a known, finished refusal.
+      return make(502, "capacity", "uncertain", true, { code: gateError.code, ...uncertainBody(error as ReferenceDmProviderUnavailableError), ...gateDetails });
     }
     // Refused before any state change reached the engine: not committed.
     return make(429, "capacity", "not_committed", true, {
@@ -157,7 +159,7 @@ export function turnFailure(error: unknown): TurnFailure {
     const serviceWide = usageError.period === "global_daily" || usageError.period === "global_monthly";
     const usageDetails = { period: usageError.period, limitMicros: usageError.limit, requestedMicros: usageError.requested };
     if (uncertain) {
-      return make(429, serviceWide ? "service_limit" : "usage_limit", "uncertain", serviceWide, {
+      return make(502, serviceWide ? "service_limit" : "usage_limit", "uncertain", serviceWide, {
         code: usageError.code,
         ...uncertainBody(error as ReferenceDmProviderUnavailableError),
         ...usageDetails,

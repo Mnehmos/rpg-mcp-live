@@ -29,7 +29,7 @@ import {
   shouldSubmitOnEnter,
   updateComposerCounter,
 } from "./turn-composer.js";
-import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
+import { commandFailureMessage, commandFailureType, isStaleCommandStatus, streamedFailureStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
 import { pairToolDisclosureWithNarration, renderToolDisclosure, tableMoveLabel } from "./tool-disclosure.js";
@@ -260,7 +260,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
               var event;
               try { event = JSON.parse(payload); } catch (_error) { return; }
               if (event.type === "result") captured = event;
-              else if (event.type === "error") captured = { type: "error", error: event.error || "The Dungeon Master could not finish that turn." };
+              else if (event.type === "error") captured = Object.assign({}, event, { error: event.error || "The Dungeon Master could not finish that turn." });
               else if (onProgress) onProgress(event);
             });
           });
@@ -269,15 +269,11 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       return pump().then(function (outcome) {
         if (outcome.data && outcome.data.type === "error") {
-          return {
-            response: { ok: false, status: 502 },
-            data: {
-              error: outcome.data.error,
-              code: "reference_dm_unavailable",
-              failureType: outcome.data.failureType,
-              commitStatus: outcome.data.commitStatus
-            }
-          };
+          // Keep the whole failure envelope (reason, commit status, quota
+          // details) and the status the buffered route would have sent.
+          var envelope = Object.assign({ code: "reference_dm_unavailable" }, outcome.data);
+          delete envelope.type;
+          return { response: { ok: false, status: streamedFailureStatus(envelope) }, data: envelope };
         }
         return { response: { ok: true, status: 200 }, data: outcome.data };
       });

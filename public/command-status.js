@@ -44,3 +44,14 @@ export function commandFailureMessage(payload, status) {
   if (payload && typeof payload.error === "string" && payload.error.trim()) return payload.error;
   return "The table could not confirm this turn. Your campaign is protected; check the table status before retrying.";
 }
+
+/**
+ * The HTTP status a streamed failure stands for, matching what the buffered
+ * route sends: an uncertain turn always goes to reconciliation (502), a clean
+ * quota or capacity refusal is a 429, anything else a 502.
+ */
+export function streamedFailureStatus(envelope) {
+  if (envelope?.commitStatus === "uncertain" || envelope?.failureType === "uncertain") return 502;
+  if (envelope?.failureType === "usage_limit" || envelope?.failureType === "capacity") return 429;
+  return 502;
+}
