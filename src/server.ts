@@ -18,8 +18,6 @@ import {
 } from "./billing.js";
 import { config } from "./config.js";
 
-const REFERENCE_DM_NOT_COMMITTED_MESSAGE =
-  "The DM provider did not return a result; no game state was committed. Your action is safe to retry.";
 import { deploymentIdentity } from "./deployment-identity.js";
 import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema } from "./engine-contracts.js";
 import { rollAbilityScoreDraft } from "./engine-domain.js";
@@ -37,25 +35,15 @@ import { contentSecurityPolicy } from "./security-headers.js";
 import { characterOptionPolicy } from "./character-option-policy.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
-import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
+import { LlmUsageStore } from "./llm-usage.js";
 import { AbuseBlockedError, AbuseGuard, AbuseRateLimitError } from "./abuse-guard.js";
-import {
-  ProviderGate,
-  ProviderGateAccountBusyError,
-  ProviderGateTimeoutError,
-} from "./provider-gate.js";
+import { ProviderGate } from "./provider-gate.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
 import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset } from "./quickstarts.js";
-import {
-  ReferenceDmCommandAlreadyFailedError,
-  ReferenceDmCommandIdReuseError,
-  ReferenceDmCommandInProgressError,
-  ReferenceDmProviderUnavailableError,
-  ReferenceDmVersionConflictError,
-  ReferenceDungeonMaster,
-} from "./reference-engine-dm.js";
+import { ReferenceDmVersionConflictError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
 import { turnCompletedLogLine } from "./turn-log.js";
+import { REFERENCE_DM_NOT_COMMITTED_MESSAGE, TurnHealth, turnFailure, type TurnFailure } from "./turn-failure.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -65,6 +53,7 @@ const store = new GameStore(config.databasePath);
 const stripe = createStripeClient();
 const referenceEngineStore = new ReferenceEngineStore(store.getRawDb());
 const llmUsageStore = new LlmUsageStore(store.getRawDb(), config.llmUsage);
+const turnHealth = new TurnHealth();
 /**
  * Shapes concurrent turns into a bounded line of upstream calls. Without it a
  * traffic spike fans out one provider request per player and the shared pool
@@ -281,33 +270,22 @@ function sendAppPage(_request: Request, response: Response): void {
  * accurate message and retry semantics. Every streamed failure is logged —
  * the SSE error event alone was invisible to server-side debugging.
  */
-function classifyTurnFailure(error: unknown): { failureType: string; commitStatus: string; message: string } {
-  let failureType = "provider_unavailable";
-  let commitStatus = "unknown";
-  let message = error instanceof Error ? error.message : "The Dungeon Master could not finish that turn. Try again.";
-  if (error instanceof ReferenceDmVersionConflictError) failureType = "stale_version";
-  else if (error instanceof ReferenceDmCommandInProgressError) failureType = "command_conflict";
-  else if (error instanceof ReferenceDmProviderUnavailableError) {
-    commitStatus = error.details?.commitStatus ?? "unknown";
-    failureType = commitStatus === "not_committed" ? "not_committed" : "uncertain";
-    message = commitStatus === "not_committed"
-      ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
-      : "The reference-engine DM stopped after a state change; refresh the table before continuing.";
-  }
-  const detail = error instanceof Error ? error.message : String(error);
-  const failureDetails = error instanceof ReferenceDmProviderUnavailableError ? error.details : undefined;
+function classifyTurnFailure(error: unknown): TurnFailure {
+  const failure = turnFailure(error);
+  turnHealth.recordFailure(failure);
   console.error(JSON.stringify({
     event: "streamed_turn_failed",
-    failureType,
-    commitStatus,
-    message,
-    detail,
-    phase: failureDetails?.phase,
-    toolRounds: failureDetails?.toolRounds,
-    providerCalls: failureDetails?.providerCalls,
-    toolCallNames: failureDetails?.toolCallNames,
+    reason: failure.reason,
+    failureType: failure.body.failureType,
+    commitStatus: failure.commitStatus,
+    message: failure.body.error,
+    detail: error instanceof Error ? error.message : String(error),
+    phase: failure.body.phase,
+    toolRounds: failure.body.toolRounds,
+    providerCalls: failure.body.providerCalls,
+    toolCallNames: failure.body.toolCallNames,
   }));
-  return { failureType, commitStatus, message };
+  return failure;
 }
 
 async function sendCampaignCommand(
@@ -395,9 +373,10 @@ async function sendCampaignCommand(
       const usage = llmUsageStore.getSummary(userId);
       send({ type: "result", ...result, subscription: store.getSubscription(userId), usage });
       console.log(turnCompletedLogLine("turn", userId, usage.plan, result, Date.now() - startedAt, true));
+      turnHealth.recordSuccess();
     } catch (error) {
       const failure = classifyTurnFailure(error);
-      send({ type: "error", failureType: failure.failureType, commitStatus: failure.commitStatus, error: failure.message });
+      send({ type: "error", ...failure.body });
     }
     response.end();
     return;
@@ -411,131 +390,17 @@ async function sendCampaignCommand(
     const usage = llmUsageStore.getSummary(userId);
     response.json({ ...result, subscription: store.getSubscription(userId), usage });
     console.log(turnCompletedLogLine("turn", userId, usage.plan, result, Date.now() - startedAt, false));
+    turnHealth.recordSuccess();
   } catch (error) {
-    if (error instanceof ReferenceEngineNotRoutedError) {
-      sendReferenceEngineError(response, error);
-      return;
-    }
     if (error instanceof ReferenceDmVersionConflictError) {
       const current = await referenceEngineAdapter.getCampaign(userId, userId, campaignId);
       response.status(409).json({
-        code: "stale_version",
-        error: "The campaign changed before this turn started.",
+        ...turnFailure(error).body,
         session: current.campaign,
       });
       return;
     }
-    if (error instanceof ReferenceDmCommandInProgressError) {
-      response.status(409).json({ code: "command_conflict", error: error.message });
-      return;
-    }
-    if (error instanceof ReferenceDmCommandIdReuseError) {
-      response.status(409).json({ code: "command_id_reuse", error: error.message });
-      return;
-    }
-    if (error instanceof ReferenceDmCommandAlreadyFailedError) {
-      const commitStatus = error.details?.commitStatus;
-      response.status(502).json({
-        code: "reference_dm_unavailable",
-        failureType: commitStatus === "not_committed" ? "not_committed" : "uncertain",
-        retryable: commitStatus === "not_committed",
-        stateChanged: commitStatus === "not_committed" ? "not_committed" : "unknown",
-        error: commitStatus === "not_committed"
-          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
-          : "That turn already has a recorded failure. The table may have changed; refresh before continuing.",
-        ...(error.details ? {
-          correlationId: error.details.correlationId,
-          commitStatus: error.details.commitStatus,
-          providerCalls: error.details.providerCalls ?? 0,
-          toolRounds: error.details.toolRounds,
-          activatedTools: error.details.activatedTools ?? [],
-          toolCallNames: error.details.toolCallNames,
-          acceptedToolCalls: error.details.acceptedToolCalls,
-          rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
-        } : {}),
-        usage: llmUsageStore.getCommandUsage(userId, campaignId, parsed.data.clientCommandId),
-      });
-      return;
-    }
-    /**
-     * Gate refusals mean the request never reached the provider, so the turn
-     * is definitively not-committed and the player can simply send it again.
-     * That is a materially better outcome than the 502 an overloaded provider
-     * would have produced, and it must not be reported as a provider failure.
-     */
-    const gateError = error instanceof ProviderGateTimeoutError || error instanceof ProviderGateAccountBusyError
-      ? error
-      : error instanceof ReferenceDmProviderUnavailableError
-        && (error.cause instanceof ProviderGateTimeoutError || error.cause instanceof ProviderGateAccountBusyError)
-        ? error.cause
-        : null;
-    if (gateError) {
-      response.status(429).json({
-        code: gateError.code,
-        failureType: "capacity",
-        retryable: true,
-        stateChanged: "not_committed",
-        error: gateError.message,
-        ...(gateError instanceof ProviderGateTimeoutError
-          ? { waitedMs: gateError.waitedMs, queueDepth: gateError.queueDepth }
-          : { inFlight: gateError.inFlight, limit: gateError.limit }),
-      });
-      return;
-    }
-
-    const usageError = error instanceof LlmUsageLimitError
-      ? error
-      : error instanceof ReferenceDmProviderUnavailableError && error.cause instanceof LlmUsageLimitError
-        ? error.cause
-        : null;
-    if (usageError) {
-      response.status(429).json({
-        code: usageError.code,
-        failureType: "usage_limit",
-        retryable: false,
-        stateChanged: "not_committed",
-        error: usageError.message,
-        period: usageError.period,
-        limitMicros: usageError.limit,
-        requestedMicros: usageError.requested,
-        usage: llmUsageStore.getSummary(userId),
-      });
-      return;
-    }
-    if (error instanceof ReferenceDmProviderUnavailableError) {
-      console.error(JSON.stringify({
-        event: "reference_dm_turn_failed",
-        correlationId: error.details.correlationId,
-        commitStatus: error.details.commitStatus,
-        phase: error.details.phase,
-        providerCalls: error.details.providerCalls ?? 0,
-        toolRounds: error.details.toolRounds,
-        activatedTools: error.details.activatedTools ?? [],
-        toolCallNames: error.details.toolCallNames,
-        acceptedToolCalls: error.details.acceptedToolCalls,
-        rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
-      }));
-      response.status(502).json({
-        code: "reference_dm_unavailable",
-        failureType: error.details.commitStatus === "not_committed" ? "not_committed" : "uncertain",
-        retryable: error.details.commitStatus === "not_committed",
-        stateChanged: error.details.commitStatus === "not_committed" ? "not_committed" : "unknown",
-        error: error.details.commitStatus === "not_committed"
-          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
-          : "The reference-engine DM stopped after a state change; refresh the table before continuing.",
-        correlationId: error.details.correlationId,
-        commitStatus: error.details.commitStatus,
-        providerCalls: error.details.providerCalls ?? 0,
-        toolRounds: error.details.toolRounds,
-        activatedTools: error.details.activatedTools ?? [],
-        toolCallNames: error.details.toolCallNames,
-        acceptedToolCalls: error.details.acceptedToolCalls,
-        rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
-        usage: llmUsageStore.getCommandUsage(userId, campaignId, parsed.data.clientCommandId),
-      });
-      return;
-    }
-    sendReferenceEngineError(response, error);
+    sendTurnFailure(response, error, userId, campaignId, parsed.data.clientCommandId);
   }
 }
 
@@ -560,7 +425,57 @@ function sendReferenceEngineError(response: Response, error: unknown): void {
     });
 }
 
+/** One envelope for every non-streamed opening and turn failure (see turn-failure.ts). */
+function sendTurnFailure(response: Response, error: unknown, userId: string, campaignId: string, clientCommandId: string): void {
+  const failure = turnFailure(error);
+  turnHealth.recordFailure(failure);
+  if (failure.systemFault) {
+    console.error(JSON.stringify({ event: "reference_dm_turn_failed", reason: failure.reason, commitStatus: failure.commitStatus, detail: error instanceof Error ? error.message : String(error), correlationId: failure.body.correlationId, phase: failure.body.phase }));
+  }
+  const usage = failure.reason === "usage_limit" || failure.reason === "service_limit"
+    ? { usage: llmUsageStore.getSummary(userId) }
+    : failure.reason === "already_failed" || failure.body.code === "reference_dm_unavailable"
+      ? { usage: llmUsageStore.getCommandUsage(userId, campaignId, clientCommandId) }
+      : {};
+  response.status(failure.status).json({ ...failure.body, ...usage });
+}
+
+/**
+ * Provider readiness, not just configuration: the Sep 18 outage (expired key)
+ * stayed green for five weeks because health only checked that a key was set.
+ * OpenRouter's key endpoint costs no tokens; the answer is cached briefly.
+ */
+const PROVIDER_CHECK_TTL_MS = 5 * 60 * 1000;
+const READINESS_FAILURE_THRESHOLD = 3;
+let providerCheck: { at: number; result: Record<string, unknown> } | null = null;
+
+async function providerReadiness(): Promise<Record<string, unknown>> {
+  if (!config.openRouterApiKey) return { status: "unconfigured" };
+  if (providerCheck && Date.now() - providerCheck.at < PROVIDER_CHECK_TTL_MS) return providerCheck.result;
+  let result: Record<string, unknown>;
+  try {
+    const keyResponse = await fetch(`${config.openRouterBaseUrl}/key`, {
+      headers: { authorization: `Bearer ${config.openRouterApiKey}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!keyResponse.ok) {
+      result = { status: keyResponse.status === 401 || keyResponse.status === 403 ? "auth_failed" : "error", httpStatus: keyResponse.status };
+    } else {
+      const body = (await keyResponse.json()) as { data?: { limit_remaining?: number | null } };
+      const remaining = body.data?.limit_remaining ?? null;
+      result = { status: remaining !== null && remaining <= 0 ? "no_credit" : "ok", limitRemainingUsd: remaining };
+    }
+  } catch (error) {
+    result = { status: "unreachable", error: error instanceof Error ? error.message : String(error) };
+  }
+  result.checkedAt = new Date().toISOString();
+  providerCheck = { at: Date.now(), result };
+  return result;
+}
+
 app.get("/api/health", async (_request, response) => {
+  const provider = await providerReadiness();
+  const turns = turnHealth.snapshot();
   let engine: Record<string, unknown>;
   try {
     engine = await referenceEngineClient.health();
@@ -582,6 +497,10 @@ app.get("/api/health", async (_request, response) => {
       referenceEngine: engine.status === "ok",
     },
     engine,
+    provider,
+    turns,
+    // "status" stays "ok" for the deploy verifiers; "ready" is whether a player can play right now.
+    ready: engine.status === "ok" && provider.status === "ok" && turns.consecutiveFailures < READINESS_FAILURE_THRESHOLD,
   });
 });
 
@@ -1196,9 +1115,10 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
       const usage = llmUsageStore.getSummary(userId);
       send({ type: "result", ...result, subscription: store.getSubscription(userId), usage });
       console.log(turnCompletedLogLine("opening", userId, usage.plan, result, Date.now() - startedAt, true));
+      turnHealth.recordSuccess();
     } catch (error) {
       const failure = classifyTurnFailure(error);
-      send({ type: "error", failureType: failure.failureType, commitStatus: failure.commitStatus, error: failure.message });
+      send({ type: "error", ...failure.body });
     }
     response.end();
     return;
@@ -1218,8 +1138,9 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
     const usage = llmUsageStore.getSummary(userId);
     response.json({ ...result, subscription: store.getSubscription(userId), usage });
     console.log(turnCompletedLogLine("opening", userId, usage.plan, result, Date.now() - startedAt, false));
+    turnHealth.recordSuccess();
   } catch (error) {
-    sendReferenceEngineError(response, error);
+    sendTurnFailure(response, error, userId, request.params.campaignId, parsed.data.clientCommandId);
   }
 });
 

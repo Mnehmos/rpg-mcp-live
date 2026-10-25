@@ -53,4 +53,11 @@ describe("command status", () => {
     expect(commandFailureMessage({ failureType: "provider_unavailable" }, 502)).toContain("temporarily unavailable");
     expect(commandFailureMessage({ failureType: "uncertain" }, 502)).toContain("checking whether this turn committed");
   });
+
+  it("tells the player when the DM is offline on our side or the table is busy", () => {
+    expect(commandFailureMessage({ failureType: "not_committed", reason: "provider_auth", commitStatus: "not_committed" }, 502)).toContain("offline on our side");
+    expect(commandFailureMessage({ failureType: "not_committed", reason: "provider_credit", commitStatus: "not_committed" }, 502)).toContain("offline on our side");
+    expect(commandFailureMessage({ failureType: "capacity", reason: "capacity", commitStatus: "not_committed" }, 429)).toContain("busy");
+    expect(commandFailureMessage({ failureType: "uncertain", reason: "provider_auth", commitStatus: "uncertain" }, 502)).toContain("checking whether this turn committed");
+  });
 });

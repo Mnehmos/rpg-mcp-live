@@ -16,6 +16,13 @@ export function commandFailureType(payload, status) {
 
 export function commandFailureMessage(payload, status) {
   const type = commandFailureType(payload, status);
+  const reason = payload?.reason;
+  if ((reason === "provider_auth" || reason === "provider_credit") && payload?.commitStatus === "not_committed") {
+    return "The Dungeon Master is offline on our side right now. Your campaign is safe and this turn was not committed; try again later.";
+  }
+  if (reason === "capacity" || type === "capacity") {
+    return "The table is busy right now. This turn was not committed; send it again in a moment.";
+  }
   if (type === "usage_limit") {
     if (payload?.period === "global_daily" || payload?.period === "global_monthly") {
       const period = payload.period === "global_daily" ? "today" : "this month";
