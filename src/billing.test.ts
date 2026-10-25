@@ -8,6 +8,7 @@ import {
   reconcileSubscriptionByEmail,
   reconcileStoredSubscription,
   resolveCheckoutGuard,
+  subscriptionNeedsRefresh,
   syncCompletedCheckoutSession,
 } from "./billing.js";
 import { LlmUsageStore, type LlmUsagePolicy } from "./llm-usage.js";
@@ -173,6 +174,84 @@ describe("Stripe membership synchronization", () => {
     expect(store.getSubscription("player-1")).toMatchObject({ status: "active" });
     expect(usage.getSummary("player-1").plan).toBe("player_pass");
     store.close();
+  });
+
+  it("refreshes a renewed subscription whose stored period has ended", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    expect(subscriptionNeedsRefresh(store.getSubscription("player-1"), 2_000)).toBe(true);
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => testSubscription({ id: "sub_checkout", customer: "cus_checkout", status: "active" }),
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(true);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "active", currentPeriodEnd: 1_900_000_000 });
+    expect(subscriptionNeedsRefresh(store.getSubscription("player-1"), 2_000)).toBe(false);
+    store.close();
+  });
+
+  it("revokes an entitlement Stripe has no subscription for", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_test",
+      stripeSubscriptionId: "sub_test_mode_only",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    const usage = new LlmUsageStore(store.getRawDb(), testUsagePolicy());
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => {
+          throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(true);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "missing", stripeSubscriptionId: "sub_test_mode_only" });
+    expect(usage.getSummary("player-1").plan).toBe("free");
+    store.close();
+  });
+
+  it("keeps the entitlement when Stripe is only temporarily unreachable", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => {
+          throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(false);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "active" });
+    store.close();
+  });
+
+  it("does not refresh rows that are not entitled or have no period end", () => {
+    expect(subscriptionNeedsRefresh({ status: "canceled", currentPeriodEnd: 1_000 }, 2_000)).toBe(false);
+    expect(subscriptionNeedsRefresh({ status: "active", currentPeriodEnd: null }, 2_000)).toBe(false);
+    expect(subscriptionNeedsRefresh({ status: "active", currentPeriodEnd: 3_000 }, 2_000)).toBe(false);
+    expect(subscriptionNeedsRefresh(null, 2_000)).toBe(false);
   });
 
   it("does not reconcile a stored subscription bound to a different Stripe customer", async () => {
