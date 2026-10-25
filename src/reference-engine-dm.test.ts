@@ -1586,7 +1586,7 @@ describe("ReferenceDungeonMaster", () => {
       .toMatchObject({ failure: { providerCalls: 2, phase: "tool_loop" } });
   });
 
-  it("throws ReferenceDmProviderUnavailableError if no narration is produced within the round budget", async () => {
+  it("lets the DM take as many tool rounds as it needs before narrating", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
@@ -1604,16 +1604,24 @@ describe("ReferenceDungeonMaster", () => {
       timeoutMs: 5000,
     });
 
-    const fetchMock = vi.fn(async () =>
-      openRouterMessage(null, [
-        { id: "call-x", type: "function", function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) } },
-      ])
-    );
+    // Well past the old 16-round cap: no harness limit ends the turn early.
+    const TOOL_ROUNDS = 20;
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      return call <= TOOL_ROUNDS
+        ? openRouterMessage(null, [
+          { id: `call-${call}`, type: "function", function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) } },
+        ])
+        : openRouterMessage("You weave between the blows until the bandit tires.");
+    });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "keep dodging forever")).rejects.toThrow(
-      ReferenceDmProviderUnavailableError
-    );
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "keep dodging");
+
+    expect(result.narration.text).toContain("bandit tires");
+    expect(result.diagnostics?.toolRounds).toBe(TOOL_ROUNDS);
+    expect(fetchMock).toHaveBeenCalledTimes(TOOL_ROUNDS + 1);
   });
 
   it("wraps an OpenRouter transport failure in ReferenceDmProviderUnavailableError", async () => {
@@ -2293,7 +2301,7 @@ describe("reference DM scene authoring contract", () => {
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Room id: room-1");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Player placed here this turn: yes");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Shared scene committed this turn: yes");
-    expect(requestBodies.at(-1)?.tool_choice).toBe("none");
+    expect(requestBodies.at(-1)?.tool_choice).toBe("auto");
     expect(result.diagnostics).toMatchObject({
       providerCalls: 4,
       toolRounds: 3,
