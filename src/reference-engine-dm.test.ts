@@ -254,6 +254,102 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("streams each engine result before the narration and logs its outcome", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-tool-progress-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES, "combat_action.dodge": () => ({ success: true }) });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? openRouterMessage(null, [{ id: "dodge", type: "function", function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) } }])
+        : openRouterMessage("You slip aside as the blade passes.");
+    }));
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => { logged.push(String(line)); });
+    const order: string[] = [];
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I dodge.", {
+      onProgress: (event) => { if (event.type !== "status") order.push(event.type === "tool" ? `tool:${event.call.name}` : event.type); },
+    });
+
+    expect(order[0]).toBe("tool:combat_action");
+    const toolLine = logged.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((entry) => entry?.event === "tool_call");
+    expect(toolLine).toMatchObject({ name: "combat_action", action: "dodge", accepted: true, outcome: { success: true } });
+    gameStore.close();
+  });
+
+  it("does not cut off a slow stream that keeps sending, however long it runs", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-idle-ok-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    // Idle limit 150ms; the stream runs ~600ms total but never goes quiet.
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 150,
+    });
+    const words = ["The ", "tide ", "turns ", "slowly ", "under ", "the ", "moon."];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        for (const word of words) {
+          await new Promise((resolve) => setTimeout(resolve, 90));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: { content: word } }] })}
+
+`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: {}, finish_reason: "stop" }] })}
+
+data: [DONE]
+
+`));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I watch the water.");
+
+    expect(result.narration.text).toContain("tide turns slowly");
+    gameStore.close();
+  });
+
+  it("abandons a provider request only after it goes silent", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-idle-hang-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 100,
+    });
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: { signal: AbortSignal }) => new Promise<Response>((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+    })));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait.")).rejects.toThrow(ReferenceDmProviderUnavailableError);
+    gameStore.close();
+  });
+
   it("retries a streamed completion that carries neither prose nor tool calls", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-blank-stream-"));
     const gameStore = new GameStore(join(directory, "game.db"));

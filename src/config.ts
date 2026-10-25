@@ -72,7 +72,6 @@ const openRouterFallbackModel = readString("OPENROUTER_FALLBACK_MODEL");
 const providerMaxConcurrent = readInteger("PROVIDER_MAX_CONCURRENT", 4);
 const providerMaxConcurrentPerAccount = readInteger("PROVIDER_MAX_CONCURRENT_PER_ACCOUNT", 1);
 const providerMaxQueueWaitMs = readInteger("PROVIDER_MAX_QUEUE_WAIT_MS", 15_000);
-const referenceDmTimeoutMs = Number.parseInt(readString("REFERENCE_DM_TIMEOUT_MS", "120000"), 10);
 const referenceEngineUrl = readString("REFERENCE_ENGINE_URL");
 const referenceEngineToken = readString("REFERENCE_ENGINE_TOKEN");
 const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TIMEOUT_MS", "30000"), 10);
@@ -151,7 +150,6 @@ export const config = Object.freeze({
     inputCostUsdPerMillion: readNumber("LLM_USAGE_INPUT_COST_USD_PER_MILLION", 0.0574),
     outputCostUsdPerMillion: readNumber("LLM_USAGE_OUTPUT_COST_USD_PER_MILLION", 0.1148),
   },
-  referenceDmTimeoutMs,
   openRouterConfigured: Boolean(openRouterApiKey),
   referenceEngineUrl: referenceEngineUrl.replace(/\/$/, ""),
   referenceEngineToken,

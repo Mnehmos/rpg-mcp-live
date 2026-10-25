@@ -32,7 +32,7 @@ import {
 import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
 import { renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
-import { pairToolDisclosureWithNarration, renderToolDisclosure } from "./tool-disclosure.js";
+import { pairToolDisclosureWithNarration, renderToolDisclosure, tableMoveLabel } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
 
@@ -284,20 +284,47 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     });
   }
 
-  function showLiveNarration(text) {
+  // One live DM entry per turn: status while the model thinks, a chip for each
+  // engine result as it lands, and narration as it streams.
+  function liveEntry() {
     var log = $("#game-log");
-    if (!log) return;
+    if (!log) return null;
     var node = document.getElementById("live-narration-entry");
     if (!node) {
       node = document.createElement("div");
       node.id = "live-narration-entry";
       node.className = "log-entry dm-response live-narration";
-      node.innerHTML = '<span class="log-icon">DM</span><div class="log-content"><div class="dm-narration live-narration-text"></div></div>';
+      node.innerHTML = '<span class="log-icon">DM</span><div class="log-content"><p class="live-status"></p><span class="table-move-labels live-table-moves"></span><div class="dm-narration live-narration-text"></div></div>';
       log.appendChild(node);
     }
+    return node;
+  }
+
+  function showLiveNarration(text) {
+    var node = liveEntry();
+    if (!node) return;
     var target = node.querySelector(".live-narration-text");
     if (target) target.textContent = text;
-    log.scrollTop = log.scrollHeight;
+    var status = node.querySelector(".live-status");
+    if (status) status.textContent = "";
+    $("#game-log").scrollTop = $("#game-log").scrollHeight;
+  }
+
+  function showLiveProgress(event) {
+    var node = liveEntry();
+    if (!node) return;
+    if (event.type === "status") {
+      var status = node.querySelector(".live-status");
+      if (status && !node.querySelector(".live-narration-text").textContent) status.textContent = event.message || "";
+    } else if (event.type === "tool" && event.call && event.call.accepted !== false) {
+      var moves = node.querySelector(".live-table-moves");
+      if (moves) {
+        var chip = document.createElement("span");
+        chip.textContent = tableMoveLabel(event.call);
+        moves.appendChild(chip);
+      }
+    }
+    $("#game-log").scrollTop = $("#game-log").scrollHeight;
   }
 
   function clearLiveNarration() {
@@ -2607,6 +2634,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       expectedCampaignVersion: expectedCampaignVersion
     }, command), function (event) {
       if (event.type === "narration") showLiveNarration(event.text);
+      else showLiveProgress(event);
     }).then(function (result) {
       clearLiveNarration();
       if (result.response.status === 401) {
@@ -2852,6 +2880,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       expectedCampaignVersion: state.session.version
     }, function (event) {
       if (event.type === "narration") showLiveNarration(event.text);
+      else showLiveProgress(event);
     }).then(function (result) {
       clearLiveNarration();
       if (result.response.status === 409 && result.data.session) {
