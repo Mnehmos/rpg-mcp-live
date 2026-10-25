@@ -9,6 +9,7 @@ import {
   reconcileStoredSubscription,
   resolveCheckoutGuard,
   subscriptionNeedsRefresh,
+  playerPassPriceDecision,
   syncCompletedCheckoutSession,
 } from "./billing.js";
 import { LlmUsageStore, type LlmUsagePolicy } from "./llm-usage.js";
@@ -245,6 +246,50 @@ describe("Stripe membership synchronization", () => {
     await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(false);
     expect(store.getSubscription("player-1")).toMatchObject({ status: "active" });
     store.close();
+  });
+
+  it("lets a new paid subscription replace a binding Stripe has no record of", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_test_mode_only",
+      status: "missing",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    const usage = new LlmUsageStore(store.getRawDb(), testUsagePolicy());
+    const stripe = {
+      subscriptions: {
+        retrieve: async (id: string) => {
+          if (id === "sub_test_mode_only") {
+            throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
+          }
+          return testSubscription({ id: "sub_new", customer: "cus_checkout", status: "active" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await handleStripeEvent(
+      testEvent("customer.subscription.created", { id: "sub_new", customer: "cus_checkout", metadata: { clerk_user_id: "player-1" } }, "evt_new_sub"),
+      store,
+      stripe,
+    );
+
+    expect(store.getSubscription("player-1")).toMatchObject({ stripeSubscriptionId: "sub_new", status: "active" });
+    expect(usage.getSummary("player-1").plan).toBe("player_pass");
+    store.close();
+  });
+
+  it("only lets the Player Pass price grant entitlement, and revokes a bound subscription that leaves it", () => {
+    const onPass = testSubscription({ id: "sub_bound", items: { data: [{ price: { id: "price_pass" }, current_period_end: 1 }] } });
+    const offPass = testSubscription({ id: "sub_bound", items: { data: [{ price: { id: "price_other_product" }, current_period_end: 1 }] } });
+
+    expect(playerPassPriceDecision(onPass, "sub_bound", "price_pass")).toBe("allow");
+    expect(playerPassPriceDecision(offPass, "sub_bound", "price_pass")).toBe("revoke");
+    expect(playerPassPriceDecision(offPass, "sub_someone_else", "price_pass")).toBe("ignore");
+    expect(playerPassPriceDecision(offPass, null, "price_pass")).toBe("ignore");
+    expect(playerPassPriceDecision(offPass, "sub_bound", "")).toBe("allow");
   });
 
   it("does not refresh rows that are not entitled or have no period end", () => {

@@ -147,6 +147,20 @@ function saveSubscription(store: GameStore, values: {
  * single-user subscription row from an old Checkout return or an out-of-order
  * webhook replacing a newer subscription.
  */
+/**
+ * The Stripe account is shared with other products. Only the Player Pass
+ * price grants entitlement: an unrelated subscription is ignored, but if the
+ * account's own bound subscription moves off that price, the pass is revoked.
+ */
+export function playerPassPriceDecision(
+  subscription: Stripe.Subscription,
+  boundSubscriptionId: string | null | undefined,
+  playerPassPriceId: string,
+): "allow" | "ignore" | "revoke" {
+  if (!playerPassPriceId || subscriptionUsesPrice(subscription, playerPassPriceId)) return "allow";
+  return boundSubscriptionId === subscription.id ? "revoke" : "ignore";
+}
+
 async function saveAuthoritativeSubscription(
   stripe: Stripe,
   store: GameStore,
@@ -156,14 +170,23 @@ async function saveAuthoritativeSubscription(
 ): Promise<boolean> {
   const customerId = stripeId(subscription.customer);
   if (expectedCustomerId && customerId !== expectedCustomerId) return false;
-  // The Stripe account is shared with other products; only the Player Pass
-  // price may grant Quest Keeper entitlement.
-  if (config.stripePriceId && !subscriptionUsesPrice(subscription, config.stripePriceId)) return false;
 
   const existing = store.getSubscription(userId);
-  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id) {
-    const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
-    if (current.created >= subscription.created) return false;
+  const priceDecision = playerPassPriceDecision(subscription, existing?.stripeSubscriptionId, config.stripePriceId);
+  if (priceDecision === "ignore") return false;
+  if (priceDecision === "revoke") {
+    revokeEntitlement(store, userId, "not_player_pass", customerId);
+    return true;
+  }
+  // A binding Stripe has no record of can always be replaced by a real
+  // subscription; otherwise the newer subscription wins.
+  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id && existing.status !== "missing") {
+    try {
+      const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
+      if (current.created >= subscription.created) return false;
+    } catch (error) {
+      if (!isMissingStripeResource(error)) throw error;
+    }
   }
 
   saveSubscription(store, {
@@ -438,7 +461,7 @@ export async function handleStripeEvent(
 function revokeEntitlement(
   store: GameStore,
   userId: string,
-  status: "disputed" | "refunded" | "missing",
+  status: "disputed" | "refunded" | "missing" | "not_player_pass",
   customerId: string | null,
 ): void {
   const existing = store.getSubscription(userId);
