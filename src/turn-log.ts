@@ -29,5 +29,8 @@ export function turnCompletedLogLine(
     providerCalls: result.diagnostics?.providerCalls ?? result.turnUsage?.calls ?? null,
     toolRounds: result.diagnostics?.toolRounds ?? null,
     stateChanges: result.diagnostics?.acceptedStateChangingToolCalls ?? null,
+    setupMs: result.diagnostics?.timings?.setupMs ?? null,
+    firstNarrationMs: result.diagnostics?.timings?.firstNarrationMs ?? null,
+    roundsMs: result.diagnostics?.timings?.roundsMs ?? null,
   });
 }
