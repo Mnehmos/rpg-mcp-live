@@ -749,6 +749,7 @@ describe("ReferenceEngineAdapter", () => {
       room: { name: "Brinewick Quay", baseDescription: "A stone quay under a dead-calm fog.", biomeContext: "coastal" as const, atmospherics: ["FOG" as const] },
       scene: { title: "No Wind in Brinewick", placeLabel: "Brinewick Quay" },
       narration: "Three days without wind. What do you do?",
+      firstMoves: [{ label: "Walk the breakwater", prompt: "I walk the breakwater." }],
     };
     function routedStore() {
       const store = createStore();
@@ -773,7 +774,7 @@ describe("ReferenceEngineAdapter", () => {
 
       expect(calls).toEqual(["generate", "move", "scene"]);
       const log = store.getLogMessages("account-1", "campaign-1");
-      expect(log.at(-1)).toMatchObject({ kind: "narration", text: starter.narration, starter: { roomId: "room-9", sceneId: "scene-3", title: "No Wind in Brinewick" } });
+      expect(log.at(-1)).toMatchObject({ kind: "narration", text: starter.narration, starter: { roomId: "room-9", sceneId: "scene-3", title: "No Wind in Brinewick", firstMoves: [{ label: "Walk the breakwater", prompt: "I walk the breakwater." }] } });
       expect(store.getRouting("account-1", "campaign-1")!.version).toBe(before + 1);
       const stateNote = store.getDocket("account-1", "campaign-1", "state");
       expect(stateNote).toContain("Room id: room-9");
