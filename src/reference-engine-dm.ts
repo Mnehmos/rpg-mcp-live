@@ -402,7 +402,7 @@ export const REFERENCE_DM_SYSTEM_PROMPT = [
   "You are the Dungeon Master for a tabletop RPG session, running on the reference rules engine.",
   REFERENCE_DM_WORLD_AUTHORING_PROTOCOL,
   "The player owns the fiction's direction; you own the concrete scene. Invent places, people, pressures, clues, and opportunities that fit the campaign profile, then use the provided RPG MCP tools to commit every durable fact before narrating it.",
-  "You control tool selection. Consult the compact RPG MCP capability directory and call activate_tools with the smallest set of capabilities needed for this turn; you may activate more later whenever the fiction demands it. Activation only reveals schemas and never changes game state.",
+  "Every RPG MCP capability is available on every round. Call whichever the fiction needs, and put independent calls in the same round.",
   "You may call the provided tools to change game state (including spatial_manage for persistent rooms and character placement, combat, inventory, movement, character updates, quests, notes, and narrative memory).",
   "The engine validates and executes every tool call; you never mutate state directly, only through tools.",
   "Do not invent characterId/worldId/partyId values — omit them and the engine will fill in the correct ones for this session.",
@@ -449,14 +449,6 @@ const DOCKET_TOOLS: OpenRouterToolDefinition[] = [
     },
   },
 ];
-
-const ACTIVATE_TOOLS_NAME = "activate_tools";
-const BASE_TOOL_PALETTE = [
-  "spatial_manage",
-  "scene_manage",
-] as const;
-const RECENT_TOOL_PALETTE_LIMIT = 8;
-const RECENT_TOOL_PALETTE_EXCLUSIONS = new Set(["improvisation_manage"]);
 
 // This is an internal routing hint, not a player-facing approval/rejection
 // classifier.  For an unambiguous state-changing verb, the first provider
@@ -573,126 +565,6 @@ function buildGeneralAuthoritativeActionRoutingHint(playerText: string): string 
     return "INTERNAL DM ROUTING HINT (not player-facing): commit the requested movement, rest, or recovery through the relevant RPG MCP spatial/combat/inventory tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
   }
   return "INTERNAL DM ROUTING HINT (not player-facing): commit the explicit state-changing action through the relevant RPG MCP tool before optional conversation or narration. Do not use improvisation_manage, scene_manage, a docket, or prose as a substitute for the authoritative result.";
-}
-
-function compactToolDescription(tool: OpenRouterToolDefinition): string {
-  const description = tool.function.description.replace(/\s+/g, " ").trim();
-  const actionSchema = tool.function.parameters.properties.action as { enum?: unknown[] } | undefined;
-  const actions = Array.isArray(actionSchema?.enum)
-    ? actionSchema.enum.filter((value): value is string => typeof value === "string").slice(0, 16)
-    : [];
-  const summary = description.length > 180 ? `${description.slice(0, 177)}...` : description;
-  return [summary || "Engine capability.", actions.length ? `Actions: ${actions.join(", ")}.` : ""]
-    .filter(Boolean)
-    .join(" ");
-}
-
-function buildToolDirectory(tools: readonly OpenRouterToolDefinition[]): string {
-  return [
-    "RPG MCP CAPABILITY DIRECTORY (selection only; successful tool results remain authoritative):",
-    "Use activate_tools to expose the full schema for the smallest useful set. You can activate additional capabilities in a later round.",
-    ...tools.map((tool) => `- ${tool.function.name}: ${compactToolDescription(tool)}`),
-  ].join("\n");
-}
-
-function buildActivateToolsDefinition(tools: readonly OpenRouterToolDefinition[]): OpenRouterToolDefinition {
-  return {
-    type: "function",
-    function: {
-      name: ACTIVATE_TOOLS_NAME,
-      description:
-        "Expose full schemas for one or more RPG MCP capabilities on the next tool round. This is DM-controlled tool selection only and does not inspect or mutate game state.",
-      parameters: {
-        type: "object",
-        properties: {
-          names: {
-            type: "array",
-            items: { type: "string", enum: tools.map((tool) => tool.function.name) },
-            description: "Capability names selected from the system directory.",
-          },
-        },
-        required: ["names"],
-      },
-    },
-  };
-}
-
-function seedRecentToolPalette(
-  priorLog: readonly StoredLogMessage[],
-  availableNames: ReadonlySet<string>,
-  playerText: string,
-): Set<string> {
-  // Keep the first request cache-stable with only the two capabilities needed
-  // for ordinary scene authoring. A turn-specific intent adds the smallest
-  // useful family; everything else remains DM-controlled through
-  // activate_tools. Recent successful tools preserve continuity but are
-  // bounded so one elaborate scene cannot permanently inflate every prompt.
-  const selected = new Set<string>(BASE_TOOL_PALETTE.filter((name) => availableNames.has(name)));
-  const normalized = playerText.replace(/\s+/g, " ").trim();
-  const addAvailable = (names: readonly string[]) => {
-    for (const name of names) {
-      if (availableNames.has(name)) selected.add(name);
-    }
-  };
-
-  if (COMPANION_ACTION_INTENT.test(normalized)) {
-    addAvailable(["npc_manage", "party_manage", "spatial_manage"]);
-  } else if (LIGHT_ACTION_INTENT.test(normalized) || /\b(?:pick(?:s|ed|ing)?\s+up|collect|loot|retrieve|grab)\b/i.test(normalized)) {
-    addAvailable(["item_manage", "inventory_manage"]);
-  } else if (/\b(?:equip|equips|equipped|unequip|unequips|unequipped|wear|wears|wore)\b/i.test(normalized)) {
-    addAvailable(["inventory_manage"]);
-  } else if (TRANSFER_ACTION_INTENT.test(normalized)) {
-    addAvailable(["inventory_manage", "npc_manage", "party_manage"]);
-  } else if (/\b(?:attack|attacks|attacked|strike|strikes|struck|shoot|shoots|shot|cast|casts|grapple|grapples|grappled)\b/i.test(normalized)) {
-    addAvailable(["combat_manage", "combat_action"]);
-    if (CHECK_ACTION_INTENT.test(normalized)) addAvailable(["improvisation_manage"]);
-  } else if (CHECK_ACTION_INTENT.test(normalized)) {
-    addAvailable(["improvisation_manage"]);
-  } else if (/\b(?:quest|objective|mission|bounty|goal)\b/i.test(normalized)) {
-    addAvailable(["quest_manage"]);
-  } else if (/\b(?:talk|talks|talked|ask|asks|asked|speak|speaks|spoke|question|questions|interrogate|interrogates|listen|listens|heard)\b/i.test(normalized)) {
-    addAvailable(["npc_manage", "agent_manage"]);
-  } else if (hasAuthoritativeActionIntent(normalized)) {
-    addAvailable(["spatial_manage", "inventory_manage", "combat_action"]);
-  }
-
-  for (let index = priorLog.length - 1; index >= 0 && selected.size < RECENT_TOOL_PALETTE_LIMIT; index -= 1) {
-    const entry = priorLog[index];
-    if (entry?.kind !== "tool") continue;
-    for (const call of entry.toolDisclosure?.calls ?? []) {
-      if (call.accepted && availableNames.has(call.name) && !RECENT_TOOL_PALETTE_EXCLUSIONS.has(call.name)) {
-        selected.add(call.name);
-      }
-      if (selected.size >= RECENT_TOOL_PALETTE_LIMIT) break;
-    }
-  }
-  return selected;
-}
-
-function activateTools(
-  args: Record<string, unknown>,
-  activeNames: Set<string>,
-  availableNames: ReadonlySet<string>,
-): string {
-  const requested = Array.isArray(args.names)
-    ? args.names.filter((name): name is string => typeof name === "string")
-    : [];
-  const activated: string[] = [];
-  const unknown: string[] = [];
-  for (const name of requested) {
-    if (!availableNames.has(name)) {
-      unknown.push(name);
-      continue;
-    }
-    if (!activeNames.has(name)) activated.push(name);
-    activeNames.add(name);
-  }
-  return JSON.stringify({
-    success: requested.length > 0 && unknown.length === 0,
-    activated,
-    active: [...activeNames],
-    ...(unknown.length ? { unknown } : {}),
-  });
 }
 
 function isDocketName(value: unknown): value is DocketName {
@@ -828,9 +700,10 @@ export class ReferenceDungeonMaster {
         ? this.adapter.getCampaign(accountId, actorId, campaignId).then((loaded) => loaded.campaign)
         : Promise.resolve(null),
     ]);
-    const availableRemoteToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
-    const activationTool = buildActivateToolsDefinition(allRemoteTools);
-    const toolDirectory = buildToolDirectory(allRemoteTools);
+    // Every tool, every round, in a stable order: no activation round, and the
+    // tool block stays an identical (cacheable) prefix across rounds and turns.
+    const tools = [...allRemoteTools, ...DOCKET_TOOLS];
+    activatedToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
@@ -886,8 +759,6 @@ export class ReferenceDungeonMaster {
     const authoritativeStateContext = campaignView ? formatAuthoritativeStateContext(campaignView) : null;
 
     const priorLog = this.store.getLogMessages(accountId, campaignId);
-    const activeRemoteToolNames = seedRecentToolPalette(priorLog, availableRemoteToolNames, playerText);
-    activatedToolNames = new Set(activeRemoteToolNames);
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
@@ -904,7 +775,6 @@ export class ReferenceDungeonMaster {
 
     const messages: ChatMessage[] = [
       { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
-      { role: "system", content: toolDirectory },
       ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
       ...(campaignDocket ? [{ role: "system" as const, content: `CAMPAIGN DOCKET (agreed world and direction; any limits recorded here are binding):\n${campaignDocket}` }] : []),
       ...(sessionZero ? [{ role: "system" as const, content: SESSION_ZERO_AGENDA }] : []),
@@ -929,11 +799,6 @@ export class ReferenceDungeonMaster {
       // The engine verifies every call; the idle watchdog and the dollar
       // ledger are the only outer bounds.
       for (let round = 0; ; round += 1) {
-        const tools = [
-          activationTool,
-          ...allRemoteTools.filter((tool) => activeRemoteToolNames.has(tool.function.name)),
-          ...DOCKET_TOOLS,
-        ];
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
         options.onProgress?.({
           type: "status",
@@ -979,18 +844,6 @@ export class ReferenceDungeonMaster {
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
         for (const call of toolCalls) {
           const callArgs = parseArguments(call.function.arguments);
-          if (call.function.name === ACTIVATE_TOOLS_NAME) {
-            const requestedNames = Array.isArray(callArgs.names)
-              ? callArgs.names.filter((name): name is string => typeof name === "string" && availableRemoteToolNames.has(name))
-              : [];
-            for (const name of requestedNames) activatedToolNames.add(name);
-            messages.push({
-              role: "tool",
-              tool_call_id: call.id,
-              content: activateTools(callArgs, activeRemoteToolNames, availableRemoteToolNames),
-            });
-            continue;
-          }
           const toolStartedAt = Date.now();
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
