@@ -4,7 +4,7 @@ import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset 
 describe("quickstart catalog", () => {
   it("exposes only player-safe metadata to the listing", () => {
     const entries = listQuickstartPresets();
-    expect(entries).toHaveLength(3);
+    expect(entries).toHaveLength(4);
     expect(entries[0]).toMatchObject({ id: "salt-road", title: "The Salt Road" });
     expect(entries[0]).not.toHaveProperty("character");
     expect(entries[0]).not.toHaveProperty("campaign");

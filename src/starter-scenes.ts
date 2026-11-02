@@ -16,6 +16,8 @@ export interface StarterScene {
   narration: string;
   /** Scene-specific suggestions for the player's very first move. */
   firstMoves: Array<{ label: string; prompt: string }>;
+  /** A session-zero welcome rather than a scene: the DM runs session-zero.ts's agenda until it is done. */
+  sessionZero?: true;
 }
 
 export interface StarterLogMarker {
@@ -24,6 +26,7 @@ export interface StarterLogMarker {
   sceneId: string | null;
   title: string;
   firstMoves?: Array<{ label: string; prompt: string }>;
+  sessionZero?: true;
 }
 
 const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
@@ -87,6 +90,27 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       { label: "Try the trapdoor", prompt: "I kneel by the iron trapdoor behind the counter and check whether it can be opened." },
       { label: "Press Hesper", prompt: "I ask Hesper what has shown up in the glass on other nights, and what she is not telling me." },
     ],
+  },
+  "session-zero": {
+    room: {
+      name: "The Unwritten Map",
+      baseDescription: "A table with a blank map spread across it, edges weighted with dice, waiting for a world to be drawn.",
+      biomeContext: "arcane",
+      atmospherics: [],
+    },
+    scene: { title: "Session Zero", placeLabel: "At the table, before the first scene" },
+    narration: [
+      "Welcome to the table. Before we roll a single die, let's build this campaign together. This is session zero: we'll settle what kind of story you want, anything you'd rather never see, the world itself, and who you are in it. Then we play.",
+      "Tap a choice below or answer in your own words. Nothing is locked in until you say so.",
+      "First question: what kind of story are we telling? Grim and dangerous, where every victory costs something? Heroic, with big swings and bigger villains? A slow-burn mystery? Or something lighter, with room to laugh?",
+    ].join("\n\n"),
+    firstMoves: [
+      { label: "Grim and dangerous", prompt: "I want a grim, dangerous story where every victory costs something." },
+      { label: "Heroic adventure", prompt: "I want a heroic adventure with big swings and bigger villains." },
+      { label: "Slow-burn mystery", prompt: "I want a slow-burn mystery full of secrets and intrigue." },
+      { label: "Light-hearted", prompt: "I want something lighter, with danger but plenty of room to laugh." },
+    ],
+    sessionZero: true,
   },
 };
 

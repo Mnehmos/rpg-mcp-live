@@ -32,6 +32,7 @@ import {
 import { sanitizeReleasedNarration } from "./narration-provenance.js";
 import { REPLAY_RESULT_CHARACTER_LIMIT, toolCallLogLine } from "./tool-call-log.js";
 import { buildSceneChoicesMessages, parseSceneChoices, type SceneChoice } from "./scene-choices.js";
+import { isSessionZeroActive, SESSION_ZERO_AGENDA } from "./session-zero.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -761,6 +762,10 @@ export class ReferenceDungeonMaster {
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
+    // The campaign docket holds what the player and DM agreed (world, palette,
+    // limits); it rides along every turn so agreed limits never drop out.
+    const campaignDocket = this.store.getDocket(accountId, campaignId, "campaign");
+    const sessionZero = isSessionZeroActive(routing.campaignProfileJson, campaignDocket);
     // Replay the actual assistant/tool exchange, not a prose-only rewrite of
     // prior turns. Besides restoring the model's own successful tool-use
     // pattern, accepted engine results safely carry discovered NPC/enemy IDs
@@ -771,6 +776,8 @@ export class ReferenceDungeonMaster {
     const messages: ChatMessage[] = [
       { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
       ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
+      ...(campaignDocket ? [{ role: "system" as const, content: `CAMPAIGN DOCKET (agreed world and direction; any limits recorded here are binding):\n${campaignDocket}` }] : []),
+      ...(sessionZero ? [{ role: "system" as const, content: SESSION_ZERO_AGENDA }] : []),
       ...historyMessages,
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
@@ -904,7 +911,11 @@ export class ReferenceDungeonMaster {
 
     timings.firstNarrationMs ??= sinceStart();
     timings.narrationDoneMs = sinceStart();
-    const choices = await this.sceneChoices(accountId, campaignId, clientCommandId, priorLog, playerText, narrationText);
+    // Choices are answers while session zero is still running after this turn.
+    const choices = await this.sceneChoices(
+      accountId, campaignId, clientCommandId, priorLog, playerText, narrationText,
+      sessionZero && isSessionZeroActive(routing.campaignProfileJson, this.store.getDocket(accountId, campaignId, "campaign")),
+    );
 
     try {
       if (authoredScene.roomId) {
@@ -1085,11 +1096,12 @@ export class ReferenceDungeonMaster {
     priorLog: StoredLogMessage[],
     playerText: string,
     narrationText: string,
+    sessionZero = false,
   ): Promise<SceneChoice[]> {
     const models = this.openRouter.choicesModels ?? [];
     if (!models.length) return [];
     const usageStore = this.openRouter.usage;
-    const messages = buildSceneChoicesMessages(priorLog, playerText, narrationText);
+    const messages = buildSceneChoicesMessages(priorLog, playerText, narrationText, sessionZero);
     const estimatedPromptTokens = Math.ceil(estimateLlmTokens(messages) * 1.25);
     // Same order as chatCompletionOnce: provider slot, then the reservation.
     let slot: Awaited<ReturnType<NonNullable<typeof this.openRouter.gate>["acquire"]>> | null = null;
