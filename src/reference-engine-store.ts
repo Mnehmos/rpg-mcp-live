@@ -13,6 +13,8 @@ export interface StoredLogMessage {
   toolDisclosure?: EngineToolDisclosure;
   /** Set on a quickstart's hand-written opening (starter-scenes.ts) until the DM personalizes it. */
   starter?: { roomId: string; roomName: string; sceneId: string | null; title: string; firstMoves?: Array<{ label: string; prompt: string }> };
+  /** Choose-your-own-adventure choices offered under this narration (scene-choices.ts). */
+  choices?: Array<{ label: string; prompt: string }>;
 }
 
 const MAX_LOG_MESSAGES = 40;

@@ -66,6 +66,10 @@ const openRouterAppName = readString("OPENROUTER_APP_NAME", "Quest Keeper AI");
 // Empty means "no fallback": the turn fails rather than silently changing the
 // voice of the DM mid-session.
 const openRouterFallbackModel = readString("OPENROUTER_FALLBACK_MODEL");
+// Cheap models that read each finished scene and offer the player choices.
+// Comma-separated: the first is preferred, the rest are OpenRouter fallbacks
+// (Inception's shared pool rate-limits often). Set to "" to turn choices off.
+const openRouterChoicesModels = process.env.OPENROUTER_CHOICES_MODELS?.trim() ?? "inception/mercury-3,google/gemini-2.5-flash-lite";
 // The gate that keeps concurrent turns from fanning out into simultaneous
 // upstream calls. Defaults are deliberately conservative: a shared provider
 // pool answers a burst with 429s, and a queued turn beats a failed one.
@@ -120,6 +124,7 @@ export const config = Object.freeze({
   openRouterSiteUrl,
   openRouterAppName,
   openRouterFallbackModel,
+  openRouterChoicesModels,
   providerGate: {
     maxConcurrent: providerMaxConcurrent,
     maxConcurrentPerAccount: providerMaxConcurrentPerAccount,

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { OPENING_INSTRUCTION, PERSONALIZE_OPENING_PREFIX, openingPresenceCopy, renderOpeningPresence, starterFirstMoves, visibleLogEntries } from "./dm-presence.js";
+import { OPENING_INSTRUCTION, PERSONALIZE_OPENING_PREFIX, openingPresenceCopy, renderOpeningPresence, sceneChoices, visibleLogEntries } from "./dm-presence.js";
 
 describe("opening DM presence", () => {
   it("makes an immediate contextual inference without claiming campaign state", () => {
@@ -73,7 +73,7 @@ describe("starter opening in the visible log", () => {
   });
 });
 
-describe("starter first moves", () => {
+describe("scene choices", () => {
   const moves = [
     { label: "Follow the cliff path", prompt: "I follow the boot prints down the cliff path." },
     { label: "Study the cut strap", prompt: "I examine the cut strap." },
@@ -81,18 +81,24 @@ describe("starter first moves", () => {
   const starter = { kind: "narration", text: "The satchel hangs open.", starter: { roomId: "r", roomName: "Milestone", sceneId: "s", title: "T", firstMoves: moves } };
 
   it("offers the starter's first moves before the player has moved", () => {
-    const offered = starterFirstMoves([{ kind: "system", text: "Campaign created. Your story starts here." }, starter]);
+    const offered = sceneChoices([{ kind: "system", text: "Campaign created. Your story starts here." }, starter]);
     expect(offered.map((move) => move.label)).toEqual(["Follow the cliff path", "Study the cut strap"]);
-    expect(offered[0]).toMatchObject({ id: "first-move-1", prompt: "I follow the boot prints down the cliff path." });
+    expect(offered[0]).toMatchObject({ id: "choice-1", prompt: "I follow the boot prints down the cliff path." });
   });
 
   it("stops offering them once the player has made a move", () => {
-    expect(starterFirstMoves([starter, { kind: "player", text: "I wait." }])).toBeNull();
-    expect(starterFirstMoves([starter, { kind: "player", text: "I wait." }, { kind: "narration", text: "Rain." }])).toBeNull();
+    expect(sceneChoices([starter, { kind: "player", text: "I wait." }])).toBeNull();
+    expect(sceneChoices([starter, { kind: "player", text: "I wait." }, { kind: "narration", text: "Rain." }])).toBeNull();
   });
 
-  it("offers nothing for an opening without a starter", () => {
-    expect(starterFirstMoves([{ kind: "narration", text: "Model opening." }])).toBeNull();
-    expect(starterFirstMoves([])).toBeNull();
+  it("offers the choices read from the DM's latest narration until the player moves", () => {
+    const page = { kind: "narration", text: "A light moves in the cave.", choices: [{ label: "Enter the cave", prompt: "I wade into the cave." }, { label: "", prompt: "dropped" }] };
+    expect(sceneChoices([starter, { kind: "player", text: "I go down." }, page])).toEqual([{ id: "choice-1", label: "Enter the cave", prompt: "I wade into the cave." }]);
+    expect(sceneChoices([page, { kind: "player", text: "I wade in." }])).toBeNull();
+  });
+
+  it("offers nothing for a narration without choices", () => {
+    expect(sceneChoices([{ kind: "narration", text: "Model opening." }])).toBeNull();
+    expect(sceneChoices([])).toBeNull();
   });
 });

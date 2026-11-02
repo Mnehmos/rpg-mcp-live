@@ -31,7 +31,7 @@ import {
 } from "./turn-composer.js";
 import { commandFailureMessage, commandFailureType, isStaleCommandStatus, streamedFailureStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
-import { renderOpeningPresence, starterFirstMoves, visibleLogEntries } from "./dm-presence.js";
+import { renderOpeningPresence, sceneChoices, visibleLogEntries } from "./dm-presence.js";
 import { pairToolDisclosureWithNarration, renderToolDisclosure, tableMoveLabel } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
@@ -1945,8 +1945,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       : "I describe what my character does next.";
     if (hint) hint.textContent = openingRequired
       ? (openingFailed ? "No turn is waiting on you. Retry when you are ready." : "Your turn begins the moment the opening lands.")
-      : starterFirstMoves(session && session.log)
-        ? "Type anything your character does or says, or pick a first move below."
+      : sceneChoices(session && session.log)
+        ? "Type anything your character does or says, or choose a path below."
         : "Speak naturally. The engine rolls only when the fiction calls for a risk.";
     if (form) form.classList.toggle("is-opening", openingRequired);
   }
@@ -2035,9 +2035,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       : null;
     var sessionActions = narrationActions || (Array.isArray(session.suggestedActions) ? session.suggestedActions : null)
       || (Array.isArray(snapshot.suggestedActions) ? snapshot.suggestedActions : []);
-    // Before the first move, a starter scene offers its own hand-written ways in.
-    var firstMoves = starterFirstMoves(session.log);
-    if (firstMoves) sessionActions = firstMoves;
+    // The latest page's choices (a starter's hand-written ways in, or the
+    // ones read from the DM's narration) until the player moves.
+    var choices = sceneChoices(session.log);
+    if (choices) sessionActions = choices;
     state.suggestedActions = sessionActions;
     renderSuggestedActions(sessionActions, session, snapshot);
 
