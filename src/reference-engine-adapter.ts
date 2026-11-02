@@ -1090,10 +1090,17 @@ export class ReferenceEngineAdapter {
 
 
     if (routing.referenceCharacterId) {
-      const result = await this.client.callTool("character_manage", {
-        action: "get",
-        characterId: routing.referenceCharacterId,
-      }, this.tenantFor(accountId, campaignId, routing));
+      // The sheet and the inventory are independent engine reads.
+      const [result, inventoryResult] = await Promise.all([
+        this.client.callTool("character_manage", {
+          action: "get",
+          characterId: routing.referenceCharacterId,
+        }, this.tenantFor(accountId, campaignId, routing)),
+        this.client.callTool("inventory_manage", {
+          action: "get_detailed",
+          characterId: routing.referenceCharacterId,
+        }, this.tenantFor(accountId, campaignId, routing)),
+      ]);
       const character = result.payload as ReferenceCharacterRecord;
       const referenceCurrencyCopper = referenceCurrencyToCopper(character.currency);
       state.character = {
@@ -1129,10 +1136,6 @@ export class ReferenceEngineAdapter {
         character.expertise ?? []
       );
 
-      const inventoryResult = await this.client.callTool("inventory_manage", {
-        action: "get_detailed",
-        characterId: routing.referenceCharacterId,
-      }, this.tenantFor(accountId, campaignId, routing));
       const inventoryPayload = inventoryResult.payload as { inventory?: ReferenceInventoryEntry[] };
       state.character.inventory = mapReferenceInventory(inventoryPayload?.inventory ?? []);
 
