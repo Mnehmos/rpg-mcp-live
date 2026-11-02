@@ -1991,15 +1991,23 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   // never downloads Three.js. It refetches the room only when the campaign
   // version moves, and walking up to someone sends the move like a choice.
   var sceneStageLoading = null;
+  var sceneStageFailed = false;
   var sceneStageKey = null;
+  var sceneRequestSequence = 0;
+  // The campaign whose room is on screen; moves only ever go to that campaign.
+  var sceneCampaignId = null;
+  function hideSceneStage(root, shell) {
+    root.hidden = true;
+    shell.classList.remove("has-scene");
+  }
   function syncSceneStage(session) {
     var root = $("#scene-stage");
     var shell = $("#game-shell");
     if (!root || !shell) return;
-    var active = Boolean(session && session.id && state.engineBackend === "reference");
-    if (!active) {
-      root.hidden = true;
-      shell.classList.remove("has-scene");
+    // Every campaign runs on the reference engine, including ones just created
+    // (whose responses carry no engineBackend), so an open campaign is enough.
+    if (!session || !session.id || sceneStageFailed) {
+      hideSceneStage(root, shell);
       return;
     }
     root.hidden = false;
@@ -2008,13 +2016,17 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       sceneStageLoading = import("./scene3d.js").then(function (module) {
         return module.createSceneStage(root, {
           onInteract: function (prompt) {
-            if (!state.pendingPlayerText) playText(prompt);
+            if (state.pendingPlayerText || !state.session || state.session.id !== sceneCampaignId) return;
+            playText(prompt);
           },
         });
-      }).catch(function () {
-        root.hidden = true;
-        shell.classList.remove("has-scene");
-        return null;
+      }).catch(function () { return null; }).then(function (stage) {
+        // No WebGL, or the module failed: stay hidden for the rest of the visit.
+        if (!stage) {
+          sceneStageFailed = true;
+          hideSceneStage(root, shell);
+        }
+        return stage;
       });
     }
     sceneStageLoading.then(function (stage) {
@@ -2025,13 +2037,22 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     sceneStageKey = key;
     var campaignId = session.id;
     var heroName = session.character && session.character.name;
+    var sequence = ++sceneRequestSequence;
+    if (sceneCampaignId !== campaignId) {
+      // Another campaign's room must not stay walkable while this one loads.
+      sceneCampaignId = null;
+      sceneStageLoading.then(function (stage) { if (stage && sequence === sceneRequestSequence) stage.clear(); });
+    }
     requestJson("/api/campaigns/" + encodeURIComponent(campaignId) + "/scene").then(function (result) {
-      if (!state.session || state.session.id !== campaignId) return null;
+      // Only the latest request may draw: an older version's room is stale.
+      if (sequence !== sceneRequestSequence) return null;
       if (!result.response.ok) { sceneStageKey = null; return null; }
       return sceneStageLoading.then(function (stage) {
-        if (stage) stage.setScene(result.data.scene, heroName);
+        if (!stage || sequence !== sceneRequestSequence) return;
+        sceneCampaignId = campaignId;
+        stage.setScene(result.data.scene, heroName);
       });
-    }).catch(function () { sceneStageKey = null; });
+    }).catch(function () { if (sequence === sceneRequestSequence) sceneStageKey = null; });
   }
 
   function renderSession(payload) {

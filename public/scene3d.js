@@ -30,8 +30,8 @@ export function createSceneStage(root, options) {
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true });
   } catch (error) {
-    root.hidden = true;
-    return { setScene: function () {}, setBusy: function () {}, dispose: function () {} };
+    // No WebGL here: the caller keeps the stage hidden.
+    return null;
   }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.shadowMap.enabled = true;
@@ -101,6 +101,19 @@ export function createSceneStage(root, options) {
     } else {
       heroPosition = stepHero(heroPosition, 0, 0, next);
     }
+  }
+
+  /** Empties the stage (no room, no targets) while another campaign's room loads. */
+  function clear() {
+    plan = null;
+    clearGroup(roomGroup);
+    pickables = [];
+    hero.group.visible = false;
+    roomLabel.textContent = "";
+    emptyNote.hidden = true;
+    moveTarget = null;
+    pendingInteraction = null;
+    updatePrompt(null);
   }
 
   function setBusy(value) {
@@ -268,7 +281,7 @@ export function createSceneStage(root, options) {
     renderer.domElement.remove();
   }
 
-  return { setScene: setScene, setBusy: setBusy, dispose: dispose };
+  return { setScene: setScene, setBusy: setBusy, clear: clear, dispose: dispose };
 }
 
 function turnToward(current, target, maxStep) {
