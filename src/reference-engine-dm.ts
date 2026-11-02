@@ -33,6 +33,7 @@ import { sanitizeReleasedNarration } from "./narration-provenance.js";
 import { REPLAY_RESULT_CHARACTER_LIMIT, toolCallLogLine } from "./tool-call-log.js";
 import { buildSceneChoicesMessages, parseSceneChoices, type SceneChoice } from "./scene-choices.js";
 import { isSessionZeroActive, SESSION_ZERO_AGENDA } from "./session-zero.js";
+import { normalizeSceneLayout, SCENE_BUILDING_GUIDE, SCENE_LAYOUT_TOOL } from "./scene-building.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -702,7 +703,7 @@ export class ReferenceDungeonMaster {
     ]);
     // Every tool, every round, in a stable order: no activation round, and the
     // tool block stays an identical (cacheable) prefix across rounds and turns.
-    const tools = [...allRemoteTools, ...DOCKET_TOOLS];
+    const tools = [...allRemoteTools, ...DOCKET_TOOLS, SCENE_LAYOUT_TOOL];
     activatedToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
@@ -778,6 +779,7 @@ export class ReferenceDungeonMaster {
       ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
       ...(campaignDocket ? [{ role: "system" as const, content: `CAMPAIGN DOCKET (agreed world and direction; any limits recorded here are binding):\n${campaignDocket}` }] : []),
       ...(sessionZero ? [{ role: "system" as const, content: SESSION_ZERO_AGENDA }] : []),
+      { role: "system" as const, content: SCENE_BUILDING_GUIDE },
       ...historyMessages,
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
@@ -848,6 +850,8 @@ export class ReferenceDungeonMaster {
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
+              : call.function.name === SCENE_LAYOUT_TOOL.function.name
+                ? await this.callSceneLayoutTool(accountId, campaignId, callArgs, routing.referenceCharacterId, tenant)
               : await this.callRemoteTool(
                 accountId,
                 campaignId,
@@ -1160,6 +1164,48 @@ export class ReferenceDungeonMaster {
     } finally {
       slot?.release();
     }
+  }
+
+  /**
+   * scene_layout is resolved here, like the dockets: the layout is the web
+   * host's presentation of a room, never engine state. The room defaults to
+   * wherever the engine has the player now.
+   */
+  private async callSceneLayoutTool(
+    accountId: string,
+    campaignId: string,
+    args: Record<string, unknown>,
+    heroId: string | null,
+    tenant: TenantIdentity,
+  ): Promise<ReferenceToolOutcome> {
+    const outcome = (accepted: boolean, stateChanging: boolean, body: unknown): ReferenceToolOutcome => ({
+      text: JSON.stringify(body),
+      accepted,
+      stateChanging,
+      payload: body,
+      effectiveArguments: args,
+    });
+    let roomId = typeof args.roomId === "string" && args.roomId.trim() ? args.roomId.trim() : null;
+    if (!roomId && heroId) {
+      const look = await this.client.callTool("spatial_manage", { action: "look", observerId: heroId }, tenant);
+      const record = look.payload && typeof look.payload === "object" ? look.payload as Record<string, unknown> : {};
+      const data = (record.data && typeof record.data === "object" ? record.data : record) as { roomId?: unknown };
+      roomId = !look.isError && typeof data.roomId === "string" ? data.roomId : null;
+    }
+    if (!roomId) {
+      return outcome(false, false, { error: "No room to lay out: pass roomId, or place the player in a room with spatial_manage first." });
+    }
+    if (args.action === "get") {
+      return outcome(true, false, { roomId, layout: this.store.getSceneLayout(accountId, campaignId, roomId) });
+    }
+    if (args.action !== "set") return outcome(false, false, { error: "action must be set or get" });
+    const { layout, dropped } = normalizeSceneLayout(args);
+    this.store.setSceneLayout(accountId, campaignId, roomId, layout);
+    return outcome(true, true, {
+      roomId,
+      laidOut: { features: layout.features.length, people: layout.people.length, paths: layout.paths.length },
+      ...(dropped.length ? { dropped } : {}),
+    });
   }
 
   private callDocketTool(

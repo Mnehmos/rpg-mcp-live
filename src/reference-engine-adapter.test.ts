@@ -750,6 +750,7 @@ describe("ReferenceEngineAdapter", () => {
       scene: { title: "No Wind in Brinewick", placeLabel: "Brinewick Quay" },
       narration: "Three days without wind. What do you do?",
       firstMoves: [{ label: "Walk the breakwater", prompt: "I walk the breakwater." }],
+      layout: { features: [{ name: "Marla Tull", kind: "person" as const, x: 1, z: 1, description: "" }], people: [], paths: [{ direction: "north" as const, label: "the breakwater" }] },
     };
     function routedStore() {
       const store = createStore();
@@ -779,6 +780,7 @@ describe("ReferenceEngineAdapter", () => {
       const stateNote = store.getDocket("account-1", "campaign-1", "state");
       expect(stateNote).toContain("Room id: room-9");
       expect(stateNote).toContain("Shared scene committed: yes");
+      expect(store.getSceneLayout("account-1", "campaign-1", "room-9")).toEqual(starter.layout);
       expect(JSON.parse(store.getRouting("account-1", "campaign-1")!.campaignProfileJson!)).not.toHaveProperty("sessionZero");
     });
 
@@ -846,8 +848,9 @@ describe("ReferenceEngineAdapter", () => {
 
       await expect(adapter.getSceneView("account-1", "campaign-1")).resolves.toEqual({
         room: { id: "room-9", name: "Brinewick Quay", description: "A stone quay under fog.", biome: "coastal", atmospherics: ["FOG"], lit: false },
-        exits: [{ direction: "north", description: "The breakwater" }],
+        exits: [{ direction: "north", description: "The breakwater", targetRoomId: null }],
         actors: [{ id: "npc-1", name: "Marla Tull", kind: "npc" }],
+        layout: null,
       });
     });
 
@@ -856,7 +859,7 @@ describe("ReferenceEngineAdapter", () => {
       const client = fakeClient({ "spatial_manage.look": () => ({ success: false, error: "Observer is not in any room." }) });
       const adapter = new ReferenceEngineAdapter(client, store);
 
-      await expect(adapter.getSceneView("account-1", "campaign-1")).resolves.toEqual({ room: null, exits: [], actors: [] });
+      await expect(adapter.getSceneView("account-1", "campaign-1")).resolves.toEqual({ room: null, exits: [], actors: [], layout: null });
     });
   });
 });

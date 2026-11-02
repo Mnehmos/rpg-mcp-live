@@ -25,6 +25,9 @@ export function createSceneStage(root, options) {
   var promptButton = root.querySelector(".scene-stage-prompt");
   var emptyNote = root.querySelector(".scene-stage-empty");
   var onInteract = options && options.onInteract ? options.onInteract : function () {};
+  // When set, acting on something hands the target over (3D mode opens an
+  // event box for it) instead of sending its default move.
+  var onTarget = options && options.onTarget ? options.onTarget : null;
 
   var renderer;
   try {
@@ -74,7 +77,7 @@ export function createSceneStage(root, options) {
   resize();
 
   function setScene(sceneView, heroName) {
-    var next = planScene(sceneView);
+    var next = planScene(sceneView, { fromRoomId: plan ? plan.roomId : null });
     hero.setName(heroName || "You");
     if (!next) {
       plan = null;
@@ -135,7 +138,8 @@ export function createSceneStage(root, options) {
 
   function act(target) {
     if (!target || busy) return;
-    onInteract(target.prompt);
+    if (onTarget) onTarget(target);
+    else onInteract(target.prompt);
   }
 
   // Keyboard: only while the scene has focus, so typing in the composer never moves the hero.
@@ -442,7 +446,7 @@ function buildRoom(group, plan, lights, scene) {
   plan.exits.forEach(function (exit) {
     var arch = new THREE.Group();
     var stone = material(style.wall, { roughness: 0.7 });
-    var glow = new THREE.MeshBasicMaterial({ color: style.accent, transparent: true, opacity: 0.35, side: THREE.DoubleSide });
+    var glow = new THREE.MeshBasicMaterial({ color: exit.unexplored ? 0xd9d4c7 : style.accent, transparent: true, opacity: exit.unexplored ? 0.22 : 0.35, side: THREE.DoubleSide });
     var left = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.4, 0.3), stone);
     var right = left.clone();
     left.position.set(-1.05, 1.2, 0);
@@ -453,7 +457,10 @@ function buildRoom(group, plan, lights, scene) {
     veil.position.set(0, 1.15, 0);
     [left, right, lintel].forEach(function (mesh) { mesh.castShadow = true; arch.add(mesh); });
     arch.add(veil);
-    var label = labelSprite(exit.label, "#e9a75b");
+    var labelText = exit.unexplored && exit.description
+      ? exit.label + " · " + (exit.description.length > 34 ? exit.description.slice(0, 33) + "…" : exit.description)
+      : exit.label;
+    var label = labelSprite(labelText, exit.unexplored ? "#d9d4c7" : "#e9a75b");
     label.position.set(0, 3.1, 0);
     arch.add(label);
     var edge = exit.wall === "north" ? -halfD : exit.wall === "south" ? halfD : exit.wall === "east" ? halfW : -halfW;
@@ -482,6 +489,20 @@ function buildRoom(group, plan, lights, scene) {
     figure.userData.target = actor;
     group.add(figure);
     pickables.push(figure);
+  });
+
+  plan.features.forEach(function (feature) {
+    var mesh = buildProp({ kind: feature.shape }, style);
+    mesh.position.set(feature.x, 0, feature.z);
+    if (feature.shape === "person") {
+      mesh.rotation.y = Math.atan2(plan.spawn.x - feature.x, plan.spawn.z - feature.z);
+      var nameplate = labelSprite(feature.name, "#f2ecdf");
+      nameplate.position.y = 2.25;
+      mesh.add(nameplate);
+    }
+    mesh.userData.target = feature;
+    group.add(mesh);
+    pickables.push(mesh);
   });
 
   plan.props.forEach(function (prop) {
@@ -548,6 +569,86 @@ function buildProp(prop, style) {
       var light = new THREE.PointLight(0xff9a40, 6, 6, 1.8);
       light.position.y = 1.2;
       group.add(light);
+      break;
+    }
+    case "chest":
+      add(new THREE.BoxGeometry(0.9, 0.5, 0.6), 0x6e4a26, 0.25);
+      add(new THREE.BoxGeometry(0.92, 0.18, 0.62), 0x8a5e30, 0.58);
+      add(new THREE.BoxGeometry(0.12, 0.2, 0.05), 0xd9b25b, 0.42, { metalness: 0.6 }).position.z = 0.32;
+      break;
+    case "table":
+      add(new THREE.BoxGeometry(2.0, 0.12, 1.0), 0x7a5634, 0.9);
+      [[-0.85, -0.38], [0.85, -0.38], [-0.85, 0.38], [0.85, 0.38]].forEach(function (leg) {
+        add(new THREE.BoxGeometry(0.1, 0.85, 0.1), 0x5a3e24, 0.42).position.set(leg[0], 0.42, leg[1]);
+      });
+      break;
+    case "altar":
+      add(new THREE.BoxGeometry(1.6, 0.9, 0.9), 0x8a8170, 0.45);
+      add(new THREE.BoxGeometry(1.8, 0.12, 1.0), 0x9d9482, 0.96);
+      break;
+    case "statue":
+      add(new THREE.BoxGeometry(0.9, 0.5, 0.9), 0x7d776c, 0.25);
+      add(new THREE.CapsuleGeometry(0.32, 1.1, 6, 10), 0x9a9486, 1.3);
+      break;
+    case "campfire": {
+      for (var log = 0; log < 3; log += 1) {
+        var stick = add(new THREE.CylinderGeometry(0.07, 0.07, 0.9, 6), 0x4a3524, 0.1);
+        stick.rotation.z = Math.PI / 2;
+        stick.rotation.y = (log * Math.PI) / 3;
+      }
+      var fire = add(new THREE.ConeGeometry(0.3, 0.6, 8), 0xffa54a, 0.4, { emissive: 0xff7a1a, emissiveIntensity: 1.6 });
+      fire.castShadow = false;
+      var campLight = new THREE.PointLight(0xff9a40, 9, 8, 1.6);
+      campLight.position.y = 0.9;
+      group.add(campLight);
+      break;
+    }
+    case "well":
+      add(new THREE.CylinderGeometry(0.8, 0.85, 0.8, 16, 1, true), 0x7d776c, 0.4, { side: THREE.DoubleSide });
+      add(new THREE.CircleGeometry(0.75, 16), 0x1d2b33, 0.55).rotation.x = -Math.PI / 2;
+      add(new THREE.BoxGeometry(0.1, 1.6, 0.1), 0x4f3c2a, 1.2).position.x = -0.75;
+      add(new THREE.BoxGeometry(0.1, 1.6, 0.1), 0x4f3c2a, 1.2).position.x = 0.75;
+      add(new THREE.BoxGeometry(1.7, 0.12, 0.12), 0x4f3c2a, 2.0);
+      break;
+    case "door":
+      add(new THREE.BoxGeometry(1.2, 0.1, 1.4), 0x3b3530, 0.05, { metalness: 0.5, roughness: 0.5 });
+      add(new THREE.TorusGeometry(0.16, 0.03, 6, 14), 0x8a8170, 0.12, { metalness: 0.7 }).rotation.x = Math.PI / 2;
+      break;
+    case "bookshelf":
+      add(new THREE.BoxGeometry(1.8, 2.2, 0.45), 0x5a3e24, 1.1);
+      for (var shelf = 0; shelf < 3; shelf += 1) {
+        add(new THREE.BoxGeometry(1.6, 0.42, 0.3), [0x7d3b2c, 0x2c4a6e, 0x6e5a2c][shelf], 0.45 + shelf * 0.62).position.z = 0.1;
+      }
+      break;
+    case "bed":
+      add(new THREE.BoxGeometry(1.0, 0.4, 2.0), 0x5a3e24, 0.2);
+      add(new THREE.BoxGeometry(0.95, 0.15, 1.9), 0xb9ae98, 0.47);
+      break;
+    case "sign":
+      add(new THREE.CylinderGeometry(0.06, 0.06, 1.4, 6), 0x4f3c2a, 0.7);
+      add(new THREE.BoxGeometry(0.9, 0.45, 0.06), 0x7a5634, 1.3);
+      break;
+    case "bones":
+      add(new THREE.SphereGeometry(0.16, 8, 6), 0xd8d0bc, 0.16);
+      add(new THREE.CylinderGeometry(0.04, 0.04, 0.6, 5), 0xd8d0bc, 0.05).rotation.z = Math.PI / 2;
+      break;
+    case "water": {
+      var pond = add(new THREE.CircleGeometry(1.9, 28), 0x2c5566, 0.03, { roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.85 });
+      pond.rotation.x = -Math.PI / 2;
+      pond.castShadow = false;
+      break;
+    }
+    case "cart":
+      add(new THREE.BoxGeometry(1.8, 0.5, 1.0), 0x6a4a2c, 0.65);
+      [-0.7, 0.7].forEach(function (offset) {
+        var wheel = add(new THREE.CylinderGeometry(0.4, 0.4, 0.1, 14), 0x3b2f20, 0.4);
+        wheel.rotation.x = Math.PI / 2;
+        wheel.position.set(offset, 0.4, 0.55);
+      });
+      break;
+    case "person": {
+      add(new THREE.CapsuleGeometry(0.36, 0.9, 6, 12), 0xc9b48a, 0.9, { roughness: 0.55 });
+      add(new THREE.CylinderGeometry(0.5, 0.55, 0.08, 24), 0x15110b, 0.04);
       break;
     }
     default:
