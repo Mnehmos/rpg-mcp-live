@@ -871,7 +871,10 @@ export class ReferenceDungeonMaster {
     const authoredScene = emptyAuthoredSceneState();
     const campaignContext = formatCampaignProfile(routing.campaignProfileJson);
     const stateMemory = this.store.getDocket(accountId, campaignId, "state");
-    const sessionZero = isSessionZeroActive(priorLog, this.store.getDocket(accountId, campaignId, "campaign"));
+    // The campaign docket holds what the player and DM agreed (world, palette,
+    // limits); it rides along every turn so agreed limits never drop out.
+    const campaignDocket = this.store.getDocket(accountId, campaignId, "campaign");
+    const sessionZero = isSessionZeroActive(routing.campaignProfileJson, campaignDocket);
     // Replay the actual assistant/tool exchange, not a prose-only rewrite of
     // prior turns. Besides restoring the model's own successful tool-use
     // pattern, accepted engine results safely carry discovered NPC/enemy IDs
@@ -883,6 +886,7 @@ export class ReferenceDungeonMaster {
       { role: "system", content: REFERENCE_DM_SYSTEM_PROMPT },
       { role: "system", content: toolDirectory },
       ...(campaignContext ? [{ role: "system" as const, content: campaignContext }] : []),
+      ...(campaignDocket ? [{ role: "system" as const, content: `CAMPAIGN DOCKET (agreed world and direction; any limits recorded here are binding):\n${campaignDocket}` }] : []),
       ...(sessionZero ? [{ role: "system" as const, content: SESSION_ZERO_AGENDA }] : []),
       ...historyMessages,
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
@@ -1030,7 +1034,7 @@ export class ReferenceDungeonMaster {
     // Choices are answers while session zero is still running after this turn.
     const choices = await this.sceneChoices(
       accountId, campaignId, clientCommandId, priorLog, playerText, narrationText,
-      sessionZero && isSessionZeroActive(priorLog, this.store.getDocket(accountId, campaignId, "campaign")),
+      sessionZero && isSessionZeroActive(routing.campaignProfileJson, this.store.getDocket(accountId, campaignId, "campaign")),
     );
 
     try {

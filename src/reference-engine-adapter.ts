@@ -716,6 +716,15 @@ export class ReferenceEngineAdapter {
       createdAt: new Date().toISOString(),
       starter: { roomId, roomName: starter.room.name, sceneId: field(scene.payload, "sceneId", "id"), title: starter.scene.title, firstMoves: starter.firstMoves, ...(starter.sessionZero ? { sessionZero: true as const } : {}) },
     }]);
+    if (starter.sessionZero) {
+      let profile: Record<string, unknown> = {};
+      try {
+        profile = routing.campaignProfileJson ? JSON.parse(routing.campaignProfileJson) : {};
+      } catch {
+        profile = {};
+      }
+      this.store.setCampaignProfile(accountId, campaignId, { ...profile, sessionZero: true });
+    }
     // The DM's own continuity note, so its first turn starts from this scene
     // instead of authoring a new one.
     this.store.setDocket(accountId, campaignId, "state", [

@@ -1,5 +1,3 @@
-import type { StoredLogMessage } from "./reference-engine-store.js";
-
 /**
  * Session zero: before the first scene, the DM and the player agree on tone
  * and limits, build the world together, and fit the character into it. The
@@ -9,8 +7,9 @@ import type { StoredLogMessage } from "./reference-engine-store.js";
  * Quiet Year-style world questions, and a Stonetop-style tie between the
  * character and the world.
  *
- * The DM runs it with its ordinary tools. It ends when the DM writes the
- * completion heading into the campaign docket; from then on the agenda is
+ * The DM runs it with its ordinary tools. It is marked in the campaign
+ * profile (durable, unlike the capped transcript) and ends when the DM writes
+ * the completion heading into the campaign docket; from then on the agenda is
  * gone and play is normal.
  */
 export const SESSION_ZERO_PRESET_ID = "session-zero";
@@ -31,6 +30,12 @@ export const SESSION_ZERO_AGENDA = [
 ].join("\n");
 
 /** True from the session-zero opening until the DM records completion. */
-export function isSessionZeroActive(priorLog: readonly StoredLogMessage[], campaignDocket: string): boolean {
-  return priorLog.some((entry) => entry.starter?.sessionZero === true) && !campaignDocket.includes(SESSION_ZERO_COMPLETE_HEADING);
+export function isSessionZeroActive(campaignProfileJson: string | null, campaignDocket: string): boolean {
+  let profile: { sessionZero?: unknown } = {};
+  try {
+    profile = campaignProfileJson ? JSON.parse(campaignProfileJson) : {};
+  } catch {
+    return false;
+  }
+  return profile.sessionZero === true && !campaignDocket.includes(SESSION_ZERO_COMPLETE_HEADING);
 }

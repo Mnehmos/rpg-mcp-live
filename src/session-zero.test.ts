@@ -3,15 +3,8 @@ import { pickRandomQuickstartPreset, getQuickstartPreset } from "./quickstarts.j
 import { buildSceneChoicesMessages, SESSION_ZERO_CHOICES_SYSTEM_PROMPT } from "./scene-choices.js";
 import { isSessionZeroActive, SESSION_ZERO_AGENDA, SESSION_ZERO_COMPLETE_HEADING } from "./session-zero.js";
 import { getStarterScene } from "./starter-scenes.js";
-import type { StoredLogMessage } from "./reference-engine-store.js";
 
-const welcome: StoredLogMessage = {
-  id: "1",
-  kind: "narration",
-  text: "Welcome to the table.",
-  createdAt: "",
-  starter: { roomId: "r", roomName: "The Unwritten Map", sceneId: null, title: "Session Zero", sessionZero: true },
-};
+const profile = JSON.stringify({ name: "A World of Our Own", sessionZero: true });
 
 describe("session zero", () => {
   it("is offered as a quickstart with a welcome that asks the first question", () => {
@@ -27,9 +20,11 @@ describe("session zero", () => {
   });
 
   it("runs from the welcome until the DM records completion in the campaign docket", () => {
-    expect(isSessionZeroActive([welcome], "")).toBe(true);
-    expect(isSessionZeroActive([welcome], `# World\nA drowned kingdom.\n${SESSION_ZERO_COMPLETE_HEADING}`)).toBe(false);
-    expect(isSessionZeroActive([{ ...welcome, starter: { ...welcome.starter!, sessionZero: undefined } }], "")).toBe(false);
+    expect(isSessionZeroActive(profile, "")).toBe(true);
+    expect(isSessionZeroActive(profile, `# World\nA drowned kingdom.\n${SESSION_ZERO_COMPLETE_HEADING}`)).toBe(false);
+    expect(isSessionZeroActive(JSON.stringify({ name: "The Salt Road" }), "")).toBe(false);
+    expect(isSessionZeroActive(null, "")).toBe(false);
+    expect(isSessionZeroActive("not json", "")).toBe(false);
   });
 
   it("tells the DM how to finish and hand over to play", () => {
