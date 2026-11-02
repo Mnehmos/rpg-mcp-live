@@ -9,3 +9,6 @@ data/*.db-wal
 data/open5e-s8-run-*/
 .DS_Store
 npm-debug.log*
+
+# Local playtest state (tools/dev-local.mjs)
+tmp/dev/

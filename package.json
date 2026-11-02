@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "npm run dev:web",
     "dev:web": "tsx watch src/server.ts",
+    "dev:local": "node tools/dev-local.mjs",
     "build": "npm run open5e:verify-pack && tsc",
     "start": "npm run start:web",
     "start:web": "node dist/server.js",
