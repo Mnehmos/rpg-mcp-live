@@ -119,3 +119,63 @@ describe("authoritative campaign commands", () => {
     store.close();
   });
 });
+
+describe("quickstart request idempotency", () => {
+  const STALE_MS = 120_000;
+
+  it("lets only the first concurrent replay claim a request", () => {
+    const store = createTestStore();
+    const requestId = randomUUID();
+
+    expect(store.claimQuickstartRequest("player-1", requestId, STALE_MS, 1_000).state).toBe("claimed");
+    expect(store.claimQuickstartRequest("player-1", requestId, STALE_MS, 2_000).state).toBe("in_progress");
+    expect(store.claimQuickstartRequest("player-2", requestId, STALE_MS, 2_000).state).toBe("claimed");
+    store.close();
+  });
+
+  it("returns the finished campaign for a replay after completion", () => {
+    const store = createTestStore();
+    const requestId = randomUUID();
+    store.claimQuickstartRequest("player-1", requestId, STALE_MS, 1_000);
+    store.attachQuickstartCampaign("player-1", requestId, "campaign-a", "salt-road");
+    store.completeQuickstartRequest("player-1", requestId);
+
+    expect(store.claimQuickstartRequest("player-1", requestId, STALE_MS, 2_000)).toEqual({
+      state: "done",
+      campaignId: "campaign-a",
+      presetId: "salt-road",
+    });
+    store.close();
+  });
+
+  it("resumes a released or stale claim with the campaign it already created", () => {
+    const store = createTestStore();
+    const released = randomUUID();
+    store.claimQuickstartRequest("player-1", released, STALE_MS, 1_000);
+    store.attachQuickstartCampaign("player-1", released, "campaign-a", "ember-watch");
+    store.releaseQuickstartRequest("player-1", released);
+    expect(store.claimQuickstartRequest("player-1", released, STALE_MS, 2_000)).toEqual({
+      state: "claimed",
+      campaignId: "campaign-a",
+      presetId: "ember-watch",
+    });
+
+    const stale = randomUUID();
+    store.claimQuickstartRequest("player-1", stale, STALE_MS, 1_000);
+    store.attachQuickstartCampaign("player-1", stale, "campaign-b", "salt-road");
+    expect(store.claimQuickstartRequest("player-1", stale, STALE_MS, 1_000 + STALE_MS).campaignId).toBe("campaign-b");
+    store.close();
+  });
+
+  it("does not reopen a completed request when a late failure releases it", () => {
+    const store = createTestStore();
+    const requestId = randomUUID();
+    store.claimQuickstartRequest("player-1", requestId, STALE_MS, 1_000);
+    store.attachQuickstartCampaign("player-1", requestId, "campaign-a", "salt-road");
+    store.completeQuickstartRequest("player-1", requestId);
+    store.releaseQuickstartRequest("player-1", requestId);
+
+    expect(store.claimQuickstartRequest("player-1", requestId, STALE_MS, 2_000).state).toBe("done");
+    store.close();
+  });
+});

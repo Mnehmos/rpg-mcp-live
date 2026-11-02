@@ -15,7 +15,8 @@ import {
 } from "./reference-engine-dm.js";
 import type { ReferenceEngineClient, ReferenceToolCallResult } from "./reference-engine-client.js";
 import type { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
-import { LlmUsageStore } from "./llm-usage.js";
+import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
+import { ProviderGate } from "./provider-gate.js";
 import { config } from "./config.js";
 
 function ok(payload: unknown, text = ""): ReferenceToolCallResult {
@@ -99,10 +100,10 @@ describe("ReferenceDungeonMaster", () => {
     vi.unstubAllGlobals();
   });
 
-  it("instructs agent-backed NPC setup to use OpenRouter DeepSeek V4 Flash", () => {
+  it("instructs agent-backed NPC setup to use OpenRouter DeepSeek V4.1 Flash 1017 without output caps", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("provider openrouter");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model deepseek/deepseek-v4-flash");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("maxTokens 8192");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("model deepseek/deepseek-v4.1-flash-1017");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("omit maxTokens and budgetTokens");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("place every newly authored companion");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Before npc_manage.interact or agent_manage.invoke");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("dispatch the normal RPG MCP tool or tools");
@@ -193,6 +194,254 @@ describe("ReferenceDungeonMaster", () => {
     gameStore.close();
   });
 
+  it("streams narration deltas when the client asks for progress", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-streaming-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 1_000_000,
+      freeMonthlyCostMicros: 1_000_000,
+    });
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["combat_action"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+        usage,
+      },
+    );
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const progress: Array<{ type: string; message?: string; text?: string }> = [];
+    const sseChunks = [
+      'data: {"id":"gen-1","choices":[{"delta":{"content":"Mist "}}]}\n\n',
+      'data: {"id":"gen-1","choices":[{"delta":{"content":"gathers around the road."}}]}\n\n',
+      'data: {"id":"gen-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cost":0.000001}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
+      requestBodies.push(JSON.parse(init.body));
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const encoder = new TextEncoder();
+            for (const chunk of sseChunks) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road into the mist.", {
+      onProgress: (event) => progress.push(event),
+    });
+
+    expect(requestBodies.length).toBe(1);
+    expect(requestBodies[0]?.stream).toBe(true);
+    const narrationEvents = progress.filter((event) => event.type === "narration");
+    expect(narrationEvents.at(-1)?.text).toBe("Mist gathers around the road.");
+    expect(progress.some((event) => event.type === "status")).toBe(true);
+    expect(result.narration.text).toContain("Mist gathers around the road.");
+    gameStore.close();
+  });
+
+  it("streams each engine result before the narration and logs its outcome", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-tool-progress-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES, "combat_action.dodge": () => ({ success: true }) });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? openRouterMessage(null, [{ id: "dodge", type: "function", function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) } }])
+        : openRouterMessage("You slip aside as the blade passes.");
+    }));
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => { logged.push(String(line)); });
+    const order: string[] = [];
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I dodge.", {
+      onProgress: (event) => { if (event.type !== "status") order.push(event.type === "tool" ? `tool:${event.call.name}` : event.type); },
+    });
+
+    expect(order[0]).toBe("tool:combat_action");
+    const toolLine = logged.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((entry) => entry?.event === "tool_call");
+    expect(toolLine).toMatchObject({ name: "combat_action", action: "dodge", accepted: true, outcome: { success: true } });
+    gameStore.close();
+  });
+
+  it("does not cut off a slow stream that keeps sending, however long it runs", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-idle-ok-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    // Idle limit 150ms; the stream runs ~600ms total but never goes quiet.
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 150,
+    });
+    const words = ["The ", "tide ", "turns ", "slowly ", "under ", "the ", "moon."];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        for (const word of words) {
+          await new Promise((resolve) => setTimeout(resolve, 90));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: { content: word } }] })}
+
+`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: {}, finish_reason: "stop" }] })}
+
+data: [DONE]
+
+`));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I watch the water.");
+
+    expect(result.narration.text).toContain("tide turns slowly");
+    gameStore.close();
+  });
+
+  it("keeps renewing the command lease while one provider round streams", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-lease-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      leaseRenewMs: 20,
+    });
+    const touch = vi.spyOn(store, "touchReferenceCommand");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        for (const word of ["Rain ", "drums ", "on ", "the ", "slate."]) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: { content: word } }] })}\n\n`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: "gen", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I listen to the rain.");
+
+    // One renewal at the start of the round, plus timer renewals during the ~250ms stream.
+    expect(touch.mock.calls.length).toBeGreaterThanOrEqual(5);
+    const callsAfterTurn = touch.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(touch.mock.calls.length).toBe(callsAfterTurn);
+    gameStore.close();
+  });
+
+  it("abandons a provider request only after it goes silent", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-idle-hang-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 100,
+    });
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: { signal: AbortSignal }) => new Promise<Response>((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+    })));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait.")).rejects.toThrow(ReferenceDmProviderUnavailableError);
+    gameStore.close();
+  });
+
+  it("retries a streamed completion that carries neither prose nor tool calls", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-blank-stream-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(
+      client,
+      store,
+      fakeCatalog(["combat_action"]),
+      adapter,
+      {
+        apiKey: "key",
+        baseUrl: "https://openrouter.example/api/v1",
+        model: "test-model",
+        timeoutMs: 5000,
+      },
+    );
+    const blank = [
+      'data: {"id":"gen-blank","choices":[{"delta":{"reasoning":"thinking..."}}]}\n\n',
+      'data: {"id":"gen-blank","choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const narrated = [
+      'data: {"id":"gen-ok","choices":[{"delta":{"content":"The fog parts."}}]}\n\n',
+      'data: {"id":"gen-ok","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const stream = (chunks: string[]): Response => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return stream(calls === 1 ? blank : narrated);
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait for the fog to lift.", {
+      onProgress: () => {},
+    });
+
+    expect(calls).toBe(2);
+    expect(result.narration.text).toContain("The fog parts.");
+    gameStore.close();
+  });
+
   it("makes the stable authoring palette available without an activation-only round", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-core-palette-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -246,13 +495,13 @@ describe("ReferenceDungeonMaster", () => {
       "read_docket",
       "write_docket",
     ]);
-    expect(firstToolChoice).toBe("required");
+    expect(firstToolChoice).toBe("auto");
     expect(requestCount).toBe(2);
     expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
     gameStore.close();
   });
 
-  it("recovers internally when a provider ignores required tool routing", async () => {
+  it("lets the model decide whether a move needs a tool call", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-required-routing-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
@@ -280,25 +529,16 @@ describe("ReferenceDungeonMaster", () => {
       requestCount += 1;
       const body = JSON.parse(init.body) as { tool_choice?: string };
       toolChoices.push(body.tool_choice ?? "missing");
-      if (requestCount === 1) return openRouterMessage("The torch flares before the DM consults the engine.");
-      if (requestCount === 2) {
-        return openRouterMessage(null, [{
-          id: "use-torch-after-recovery",
-          type: "function",
-          function: {
-            name: "inventory_manage",
-            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
-          },
-        }]);
-      }
-      return openRouterMessage("The torch catches, and the dark gives way around you.");
+      return openRouterMessage("You hold the torch to the brazier, and the dark gives way around you.");
     }));
 
+    // No harness classifier forces a tool or fails a prose reply: the model
+    // judged this move needed no engine call, and the turn stands.
     const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
 
-    expect(toolChoices).toEqual(["required", "required", "auto"]);
-    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
-    expect(result.narration.text).toContain("torch catches");
+    expect(toolChoices).toEqual(["auto"]);
+    expect(result.toolDisclosure).toBeNull();
+    expect(result.narration.text).toContain("dark gives way");
     gameStore.close();
   });
 
@@ -484,7 +724,6 @@ describe("ReferenceDungeonMaster", () => {
       globalDailyCostMicros: 1_000_000,
       globalMonthlyCostMicros: 2_000_000,
       turnAdmissionReserveCostMicros: 10_000,
-      maxTurnCostMicros: 100_000,
       npcReserveCostMicros: 50_000,
       reservationTtlMs: 60_000,
       inputCostUsdPerMillion: 0.2,
@@ -497,7 +736,6 @@ describe("ReferenceDungeonMaster", () => {
       baseUrl: "https://openrouter.example/api/v1",
       model: "openai/gpt-5.4",
       reasoningEffort: "medium",
-      maxTokens: 123,
       timeoutMs: 5000,
       usage,
     });
@@ -522,9 +760,10 @@ describe("ReferenceDungeonMaster", () => {
 
     expect(requestBody).toMatchObject({
       model: "openai/gpt-5.4",
-      max_completion_tokens: 123,
       reasoning_effort: "medium",
     });
+    expect(requestBody).not.toHaveProperty("max_tokens");
+    expect(requestBody).not.toHaveProperty("max_completion_tokens");
     expect(result.turnUsage).toMatchObject({
       calls: 1,
       promptTokens: 100,
@@ -860,7 +1099,6 @@ describe("ReferenceDungeonMaster", () => {
       apiKey: "key",
       baseUrl: "https://openrouter.example/api/v1",
       model: "deepseek/deepseek-v4-flash",
-      maxTokens: 1000,
       timeoutMs: 5000,
       usage,
     });
@@ -1374,6 +1612,74 @@ describe("ReferenceDungeonMaster", () => {
     expect(result.diagnostics?.providerCalls).toBe(2);
   });
 
+  it("retries once after a transient OpenRouter 429, then succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: { message: "upstream busy" } }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": "0" },
+        });
+      }
+      return openRouterMessage("The room is quiet again.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.narration.text).toBe("The room is quiet again.");
+    expect(result.diagnostics?.providerCalls).toBe(2);
+  });
+
+  it("skips a transient retry when the delay would consume the turn deadline", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      turnTimeoutMs: 5000,
+    });
+
+    const fetchMock = vi.fn(async () => new Response("upstream busy", {
+      status: 429,
+      headers: { "retry-after": "4" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const clientCommandId = "00000000-0000-4000-8000-000000000002";
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around.", {
+      clientCommandId,
+      expectedCampaignVersion: 0,
+    })).rejects.toThrow(ReferenceDmProviderUnavailableError);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(store.getReferenceCommand("account-1", "campaign-1", clientCommandId))
+      .toMatchObject({ failure: { providerCalls: 1, phase: "tool_loop" } });
+  });
+
   it("throws ReferenceDmProviderUnavailableError when the retry also returns an empty choices array", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -1403,7 +1709,7 @@ describe("ReferenceDungeonMaster", () => {
       .toMatchObject({ failure: { providerCalls: 2, phase: "tool_loop" } });
   });
 
-  it("throws ReferenceDmProviderUnavailableError if no narration is produced within the round budget", async () => {
+  it("lets the DM take as many tool rounds as it needs before narrating", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
@@ -1421,16 +1727,24 @@ describe("ReferenceDungeonMaster", () => {
       timeoutMs: 5000,
     });
 
-    const fetchMock = vi.fn(async () =>
-      openRouterMessage(null, [
-        { id: "call-x", type: "function", function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) } },
-      ])
-    );
+    // Well past the old 16-round cap: no harness limit ends the turn early.
+    const TOOL_ROUNDS = 20;
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      return call <= TOOL_ROUNDS
+        ? openRouterMessage(null, [
+          { id: `call-${call}`, type: "function", function: { name: "combat_action", arguments: JSON.stringify({ action: "dodge" }) } },
+        ])
+        : openRouterMessage("You weave between the blows until the bandit tires.");
+    });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "keep dodging forever")).rejects.toThrow(
-      ReferenceDmProviderUnavailableError
-    );
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "keep dodging");
+
+    expect(result.narration.text).toContain("bandit tires");
+    expect(result.diagnostics?.toolRounds).toBe(TOOL_ROUNDS);
+    expect(fetchMock).toHaveBeenCalledTimes(TOOL_ROUNDS + 1);
   });
 
   it("wraps an OpenRouter transport failure in ReferenceDmProviderUnavailableError", async () => {
@@ -1448,14 +1762,13 @@ describe("ReferenceDungeonMaster", () => {
       timeoutMs: 5000,
     });
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("boom", { status: 500 }))
-    );
+    const fetchMock = vi.fn(async () => new Response("boom", { status: 500, headers: { "retry-after": "0" } }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "hello")).rejects.toThrow(
       ReferenceDmProviderUnavailableError
     );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("write_docket persists via the store without ever reaching the remote reference engine", async () => {
@@ -2111,7 +2424,7 @@ describe("reference DM scene authoring contract", () => {
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Room id: room-1");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Player placed here this turn: yes");
     expect(store.getDocket("account-1", "campaign-1", "state")).toContain("Shared scene committed this turn: yes");
-    expect(requestBodies.at(-1)?.tool_choice).toBe("none");
+    expect(requestBodies.at(-1)?.tool_choice).toBe("auto");
     expect(result.diagnostics).toMatchObject({
       providerCalls: 4,
       toolRounds: 3,
@@ -2170,5 +2483,182 @@ describe("reference DM scene authoring contract", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(17);
     expect(result.narration.text).toContain("chamber");
+  });
+});
+
+describe("Provider capacity handling", () => {
+  function rateLimited(): Response {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: "Provider returned error",
+          code: 429,
+          metadata: { provider_name: "DeepInfra", is_byok: false, limit_source: "upstream_provider_shared_pool" },
+        },
+      }),
+      { status: 429, headers: { "retry-after": "0" } },
+    );
+  }
+
+  function buildDm(overrides: Record<string, unknown>) {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-capacity-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "primary-model",
+      timeoutMs: 5_000,
+      ...overrides,
+    });
+    return { dm };
+  }
+
+  it("does not hold a provider slot when the usage reservation is refused", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-slot-leak-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 1_000_000,
+      freeMonthlyCostMicros: 1_000_000,
+    });
+    // Admit the turn, then refuse every provider reservation.
+    vi.spyOn(usage, "reserve").mockImplementation(() => {
+      throw new LlmUsageLimitError("monthly", 1_000_000, 1, 1_000_000, "LLM monthly usage limit reached.");
+    });
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "primary-model",
+      timeoutMs: 5_000,
+      usage,
+      gate,
+    });
+    const fetchMock = vi.fn(async () => openRouterMessage("unused"));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait.")).rejects.toThrow();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(gate.snapshot()).toMatchObject({ inFlight: 0, queueDepth: 0 });
+    gameStore.close();
+  });
+
+  it("only reserves usage once a provider slot is held", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-slot-order-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const usage = new LlmUsageStore(gameStore.getRawDb(), {
+      ...config.llmUsage,
+      freeDailyCostMicros: 1_000_000,
+      freeMonthlyCostMicros: 1_000_000,
+    });
+    // Another account holds the only slot and nobody may queue, so admission fails.
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1, maxQueueWaitMs: 0 });
+    const held = await gate.acquire("someone-else", null, 0);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "primary-model",
+      timeoutMs: 5_000,
+      usage,
+      gate,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => openRouterMessage("unused")));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(dm.resolveTurn("account-1", "actor-1", "campaign-1", "I wait.")).rejects.toThrow();
+
+    const dmReservations = gameStore.getRawDb()
+      .prepare("SELECT COUNT(*) AS n FROM llm_usage_reservations WHERE source = 'dm' AND status = 'reserved'")
+      .get() as { n: number };
+    expect(dmReservations.n).toBe(0);
+    held.release();
+    expect(gate.snapshot()).toMatchObject({ inFlight: 0 });
+    gameStore.close();
+  });
+
+  it("spends the retry on the fallback model when the primary is rate-limited", async () => {
+    const { dm } = buildDm({ fallbackModel: "fallback-model" });
+    const models: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      models.push(JSON.parse(init.body).model as string);
+      return models.length === 1 ? rateLimited() : openRouterMessage("The doors part.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    // Retrying the same saturated model is close to useless; the retry must
+    // land on the configured fallback instead.
+    expect(models).toEqual(["primary-model", "fallback-model"]);
+    expect(result.narration.text).toBe("The doors part.");
+  });
+
+  it("retries the primary model when no fallback is configured", async () => {
+    const { dm } = buildDm({});
+    const models: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      models.push(JSON.parse(init.body).model as string);
+      return models.length === 1 ? rateLimited() : openRouterMessage("The doors part.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    expect(models).toEqual(["primary-model", "primary-model"]);
+  });
+
+  it("does not switch models for a non-rate-limit error", async () => {
+    const { dm } = buildDm({ fallbackModel: "fallback-model" });
+    const models: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: { body: string }) => {
+      models.push(JSON.parse(init.body).model as string);
+      // A 500 is worth one straight retry: the model itself is not the problem.
+      return models.length === 1
+        ? new Response("upstream exploded", { status: 500 })
+        : openRouterMessage("The doors part.");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    expect(models).toEqual(["primary-model", "primary-model"]);
+  });
+
+  it("runs provider calls through the gate and releases the slot afterwards", async () => {
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
+    const { dm } = buildDm({ gate });
+    vi.stubGlobal("fetch", vi.fn(async () => openRouterMessage("The doors part.")));
+
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors.");
+
+    // A leaked slot would wedge the whole deployment at maxConcurrent.
+    expect(gate.snapshot().inFlight).toBe(0);
+    expect(gate.snapshot().queueDepth).toBe(0);
+  });
+
+  it("releases the gate slot when the provider call fails outright", async () => {
+    const gate = new ProviderGate({ maxConcurrent: 1, maxConcurrentPerAccount: 1 });
+    const { dm } = buildDm({ gate });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 400 })));
+
+    await expect(
+      dm.resolveTurn("account-1", "actor-1", "campaign-1", "I push the doors."),
+    ).rejects.toBeInstanceOf(ReferenceDmProviderUnavailableError);
+
+    expect(gate.snapshot().inFlight).toBe(0);
   });
 });

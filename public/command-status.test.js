@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
+import { commandFailureMessage, commandFailureType, isStaleCommandStatus, streamedFailureStatus } from "./command-status.js";
 
 describe("command status", () => {
   it("rejects a stored result older than the current campaign", () => {
@@ -52,5 +52,20 @@ describe("command status", () => {
     expect(commandFailureType({ failureType: "provider_unavailable" }, 502)).toBe("provider_unavailable");
     expect(commandFailureMessage({ failureType: "provider_unavailable" }, 502)).toContain("temporarily unavailable");
     expect(commandFailureMessage({ failureType: "uncertain" }, 502)).toContain("checking whether this turn committed");
+  });
+
+  it("tells the player when the DM is offline on our side or the table is busy", () => {
+    expect(commandFailureMessage({ failureType: "not_committed", reason: "provider_auth", commitStatus: "not_committed" }, 502)).toContain("offline on our side");
+    expect(commandFailureMessage({ failureType: "not_committed", reason: "provider_credit", commitStatus: "not_committed" }, 502)).toContain("offline on our side");
+    expect(commandFailureMessage({ failureType: "capacity", reason: "capacity", commitStatus: "not_committed" }, 429)).toContain("busy");
+    expect(commandFailureMessage({ failureType: "uncertain", reason: "provider_auth", commitStatus: "uncertain" }, 502)).toContain("checking whether this turn committed");
+    expect(commandFailureMessage({ failureType: "uncertain", reason: "capacity", commitStatus: "uncertain" }, 429)).toContain("checking whether this turn committed");
+  });
+
+  it("gives a streamed failure the status its buffered twin would have", () => {
+    expect(streamedFailureStatus({ failureType: "capacity", commitStatus: "not_committed" })).toBe(429);
+    expect(streamedFailureStatus({ failureType: "usage_limit", commitStatus: "not_committed" })).toBe(429);
+    expect(streamedFailureStatus({ failureType: "uncertain", reason: "capacity", commitStatus: "uncertain" })).toBe(502);
+    expect(streamedFailureStatus({ failureType: "not_committed", reason: "provider_auth", commitStatus: "not_committed" })).toBe(502);
   });
 });

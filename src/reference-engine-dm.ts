@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ProviderGate } from "./provider-gate.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError } from "./reference-engine-adapter.js";
 import type { ReferenceEngineClient } from "./reference-engine-client.js";
 import type { TenantIdentity } from "./reference-engine-tenant.js";
@@ -29,6 +30,7 @@ import {
   usdToMicros,
 } from "./llm-usage.js";
 import { sanitizeReleasedNarration } from "./narration-provenance.js";
+import { REPLAY_RESULT_CHARACTER_LIMIT, toolCallLogLine } from "./tool-call-log.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -219,8 +221,21 @@ function storedToolCallId(entryId: string, index: number): string {
   return `history_${safeEntryId}_${index + 1}`;
 }
 
-const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = 4_000;
+const MAX_REPLAYED_TOOL_RESULT_CHARACTERS = REPLAY_RESULT_CHARACTER_LIMIT;
 const REPLAY_TRUNCATION_MARKER = "... [result truncated for context; call the tool again for the full payload]";
+const MIN_RETRY_REQUEST_BUDGET_MS = 1_000;
+/** Renew well inside REFERENCE_COMMAND_LEASE_MS (5 min) while a turn is working. */
+const REFERENCE_COMMAND_LEASE_RENEW_MS = 60_000;
+/** Upper bound on the random share added to a provider retry delay. */
+const RETRY_JITTER_FRACTION = 0.5;
+/** Ledger estimate for an in-flight reservation; not sent to the provider. */
+const ESTIMATED_COMPLETION_TOKENS = 900;
+/**
+ * Gate key for calls with no authenticated account (local development and
+ * tooling). Grouping them under one key keeps unattributed traffic from
+ * escaping the per-account ceiling by having no account at all.
+ */
+const ANONYMOUS_GATE_ACCOUNT = "anonymous";
 
 function serializeStoredToolResult(result: unknown): string {
   const serialized = typeof result === "string" ? result : JSON.stringify(result) ?? "null";
@@ -332,13 +347,19 @@ export interface AuthoredSceneState {
 export interface ReferenceResolveTurnOptions {
   clientCommandId?: string;
   expectedCampaignVersion?: number;
+  /**
+   * Live turn progress for streaming clients. `narration` events carry the
+   * accumulated narration text so far and are cosmetic — the authoritative
+   * result always arrives in the resolved turn payload. A narration preview
+   * may be discarded when its round turns out to be a tool-call round.
+   */
+  onProgress?: (
+    event:
+      | { type: "status"; message: string }
+      | { type: "narration"; text: string }
+      | { type: "tool"; call: EngineToolCallDisclosure },
+  ) => void;
 }
-
-// Creative scene authoring can legitimately need room generation, placement,
-// NPC/object creation, scene commitment, continuity writes, and then a final
-// narration response. This is only a runaway-loop bound; it is not a
-// deterministic test for whether a player turn is allowed.
-const MAX_TOOL_ROUNDS = 16;
 
 export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Every player turn is intent, not a pre-existing world description. The player drives what happens next; you invent the concrete world that makes that intent playable.",
@@ -351,7 +372,7 @@ export const REFERENCE_DM_WORLD_AUTHORING_PROTOCOL = [
   "Material-action routing is mandatory even when the same action appeared in earlier prose: take, pick up, collect, keep, put away, or claim an absent object means item_manage create (or an existing authoritative item lookup) followed by inventory_manage give with the returned itemId and the player's exact characterId; light, ignite, extinguish, or shield a carried source means inventory_manage use or extinguish; equip or remove gear means inventory_manage equip or unequip; hand, offer, slide, or give a carried item to another character means inventory_manage transfer. Do not substitute improvisation_manage, scene_manage, narrative memory, or prose for these concrete calls. A prose-only completion is not final for one of these material actions.",
   "When creating or advancing a quest, use the exact questId and objective IDs returned by quest_manage.create, quest_manage.get, or quest_manage.get_log. Never derive an objective ID from a quest ID, objective name, or array position; if the ID is unavailable, read the quest log before updating or completing it.",
   "When an action has meaningful uncertainty, adjudicate it yourself. Do not ask the player to roll or click a roll control: call improvisation_manage with action stunt, the appropriate skill, a reasoned DC, the player's actor, and effectType none for a non-damaging check. The engine rolls the d20 and applies the character modifier; translate the accepted result into diegetic narration. Use combat_action for attacks and combat saves, and never use the nonexistent roll_skill_check, roll_ability_check, or roll_saving_throw tools.",
-  "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4-flash, and competencyOverride {model: deepseek/deepseek-v4-flash} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, use maxTokens 8192 or higher and omit budgetTokens (or use a clearly session-sized budget, never a tiny 300/1000 budget). Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
+  "NPC agency has two deliberate modes: an ordinary NPC is DM-portrayed and must not receive an invented agent binding; an explicitly agent-backed NPC uses agent_manage only when the player, campaign, or explicit session policy asks for that mode. For this service's agent-backed NPC policy, use provider openrouter, model deepseek/deepseek-v4.1-flash-1017, and competencyOverride {model: deepseek/deepseek-v4.1-flash-1017} unless an explicit player or campaign policy overrides it; when creating that nested agent configuration, omit maxTokens and budgetTokens so the agent is not output-capped. Never choose direct provider openai unless its credential is confirmed available. Before npc_manage.interact or agent_manage.invoke for a newly authored companion, place every newly authored companion in the current shared room with spatial_manage.move and confirm the result; do not use a companion as a speaker or actor while it is roomless. agent_manage.invoke returns a plain-text NPC proposal, not committed game state; treat that proposal as the agent's creative intent, then interpret it in context and dispatch the normal RPG MCP tool or tools that make the intended companion action real. Do not stop at the proposal, ask the player to approve or select a deterministic companion action, or narrate an uncommitted choice; continue the same tool loop until the relevant tool call is accepted, including a legitimate domain failure such as a miss or failed check. Once an adjudication is accepted, stop retrying that action and continue to scene commitment and narration; retry only rejected, malformed, or otherwise unexecuted calls.",
   "When you introduce combat, make it playable through the engine: prefer combat_manage create with the player's exact character id and sheet stats plus the authored enemy participant, or use spawn_quick_enemy only when its returned encounter is then joined to the player. Use the returned encounterId and participant ids with combat_action; do not narrate an enemy as active until the combat tool result confirms it.",
   "A player mention is an invitation or intent, not proof that a named place, person, enemy, or object exists. Released DM narration is canonical campaign continuity, while accepted RPG MCP results are the authoritative mechanical and structured-state record; together they are the campaign truth.",
   "When prior narration needs an exact mechanical detail or conflicts with current structured state, consult the appropriate read tool such as inventory_manage.get_detailed, quest_manage.get_log, party_manage.get, scene_manage.get, or spatial_manage.get, reconcile the result internally, and continue the fiction. Do not expose provenance labels or ask the player to distinguish narration from state.",
@@ -674,9 +695,20 @@ export class ReferenceDungeonMaster {
       model: string;
       timeoutMs: number;
       reasoningEffort?: string;
-      maxTokens?: number;
       turnTimeoutMs?: number;
+      /** How often a working turn renews its command lease (tests shorten it). */
+      leaseRenewMs?: number;
       usage?: LlmUsageStore;
+      /**
+       * Tried once when the primary model is rate-limited or failing
+       * upstream. Absent means the turn fails instead of switching voice.
+       */
+      fallbackModel?: string;
+      /**
+       * Bounds simultaneous upstream calls. Absent means unbounded, which is
+       * only appropriate for tests and single-player local runs.
+       */
+      gate?: ProviderGate;
     }
   ) {}
 
@@ -722,10 +754,6 @@ export class ReferenceDungeonMaster {
     let rejectedToolCalls = 0;
     const rejectedStateChangingActionKeys = new Set<string>();
     let rejectionRecoveryPending = false;
-    let rejectionRecoveryNarrationReady = false;
-    let narrationOnlyNext = false;
-    let authoritativeToolCallObserved = false;
-    let authoritativeRoutingRecoveryPending = false;
     let activatedToolNames = new Set<string>();
     const correlationId = randomUUID();
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
@@ -771,8 +799,6 @@ export class ReferenceDungeonMaster {
     const availableRemoteToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
     const activationTool = buildActivateToolsDefinition(allRemoteTools);
     const toolDirectory = buildToolDirectory(allRemoteTools);
-    const requiresAuthoritativeToolChoice = hasAuthoritativeActionIntent(playerText);
-    const authoritativeActionRoutingHint = buildAuthoritativeActionRoutingHint(playerText);
     let narrationText: string | null = null;
     // worldId/partyId/sessionId scope which game/tenant a call touches, so
     // they're forced to this campaign's IDs regardless of what the model
@@ -851,39 +877,50 @@ export class ReferenceDungeonMaster {
       ...(sheetContext ? [{ role: "system" as const, content: sheetContext }] : []),
       ...(stateMemory ? [{ role: "system" as const, content: `CURRENT NARRATIVE STATE MEMORY (continuity only; RPG MCP results remain authoritative):\n${stateMemory}` }] : []),
       ...(authoritativeStateContext ? [{ role: "system" as const, content: authoritativeStateContext }] : []),
-      ...(authoritativeActionRoutingHint ? [{ role: "system" as const, content: authoritativeActionRoutingHint }] : []),
       { role: "user", content: playerText },
     ];
 
+    // A single provider round may now stream for longer than the command
+    // lease. Renew it while the turn is working so polling never marks a live
+    // turn failed; a hung provider is ended by the idle watchdog instead.
+    const leaseRenewal = setInterval(
+      () => this.store.touchReferenceCommand(accountId, campaignId, clientCommandId),
+      this.openRouter.leaseRenewMs ?? REFERENCE_COMMAND_LEASE_RENEW_MS,
+    );
     try {
-      // Reserve one completion after the final allowed tool-bearing round so
-      // the DM can narrate the authored result instead of exhausting the
-      // budget immediately after a valid tool call.
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+      // No round limit: the DM keeps calling tools until it answers in prose.
+      // The engine verifies every call; the idle watchdog and the dollar
+      // ledger are the only outer bounds.
+      for (let round = 0; ; round += 1) {
         const tools = [
           activationTool,
           ...allRemoteTools.filter((tool) => activeRemoteToolNames.has(tool.function.name)),
           ...DOCKET_TOOLS,
         ];
         this.store.touchReferenceCommand(accountId, campaignId, clientCommandId);
+        options.onProgress?.({
+          type: "status",
+          message: round === 0
+            ? "Reading the table"
+            : toolRoundCount > 0
+              ? "Weaving the threads"
+              : "Consulting the rules",
+        });
+        const narrationDelta = options.onProgress
+          ? (fullText: string) => options.onProgress?.({ type: "narration", text: fullText })
+          : undefined;
         const completion = await this.chatCompletion(messages, tools, deadlineAt, {
           userId: accountId,
           campaignId,
           clientCommandId,
           admittedTurn: true,
-        }, narrationOnlyNext
-          ? "none"
-          : requiresAuthoritativeToolChoice && !authoritativeToolCallObserved
-            ? "required"
-            : "auto");
+        }, "auto", narrationDelta);
         providerCallCount += completion.providerCalls ?? 1;
-        narrationOnlyNext = false;
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
           const candidate = completion.content?.trim() || "";
           if (rejectionRecoveryPending) {
             rejectionRecoveryPending = false;
-            rejectionRecoveryNarrationReady = true;
             messages.push({
               role: "system",
               content: [
@@ -894,26 +931,11 @@ export class ReferenceDungeonMaster {
             });
             continue;
           }
-          if (requiresAuthoritativeToolChoice && !authoritativeToolCallObserved && !rejectionRecoveryNarrationReady) {
-            if (!authoritativeRoutingRecoveryPending) {
-              authoritativeRoutingRecoveryPending = true;
-              messages.push({ role: "assistant", content: candidate || null });
-              messages.push({
-                role: "system",
-                content: "Internal DM routing correction: this turn contains an explicit state-changing action. The draft above is not final. Use the relevant RPG MCP tool or tools now, wait for their results, and only then narrate the changed situation. Do not substitute prose or improvisation for the authoritative engine call.",
-              });
-              continue;
-            }
-            throw new Error("The DM provider returned prose without an authoritative RPG MCP call for an explicit state-changing action.");
-          }
           narrationText = candidate ? sanitizeReleasedNarration(candidate) || null : null;
           break;
         }
         toolRoundCount = round + 1;
         toolCallNames.push(...toolCalls.map((call) => call.function.name));
-        if (round === MAX_TOOL_ROUNDS) {
-          break;
-        }
         messages.push({ role: "assistant", content: completion.content ?? null, tool_calls: toolCalls });
         for (const call of toolCalls) {
           const callArgs = parseArguments(call.function.arguments);
@@ -929,6 +951,7 @@ export class ReferenceDungeonMaster {
             });
             continue;
           }
+          const toolStartedAt = Date.now();
           const remoteOutcome: ReferenceToolOutcome =
             call.function.name === "read_docket" || call.function.name === "write_docket"
               ? this.callDocketTool(accountId, campaignId, call.function.name, callArgs)
@@ -944,14 +967,27 @@ export class ReferenceDungeonMaster {
                 tenant,
                 deadlineAt,
               );
-          disclosedToolCalls.push(makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome));
+          const disclosure = makeToolCallDisclosure(call.function.name, callArgs, remoteOutcome);
+          disclosedToolCalls.push(disclosure);
+          // Stream each engine result as it lands instead of after the round.
+          options.onProgress?.({ type: "tool", call: disclosure });
+          console.log(toolCallLogLine({
+            userId: accountId,
+            campaignId,
+            name: call.function.name,
+            args: callArgs,
+            accepted: remoteOutcome.accepted,
+            stateChanging: remoteOutcome.stateChanging,
+            resultText: remoteOutcome.text,
+            payload: remoteOutcome.payload,
+            durationMs: Date.now() - toolStartedAt,
+          }));
           if (remoteOutcome.accepted) acceptedToolCalls += 1;
           const rejectedActionKey = remoteOutcome.stateChanging
             ? rejectedStateChangingActionKey(call.function.name, remoteOutcome.effectiveArguments)
             : null;
           if (remoteOutcome.accepted && remoteOutcome.stateChanging) {
             acceptedStateChangingToolCalls += 1;
-            authoritativeToolCallObserved = true;
             if (rejectedActionKey) rejectedStateChangingActionKeys.delete(rejectedActionKey);
             rejectionRecoveryPending = rejectedStateChangingActionKeys.size > 0;
           }
@@ -964,26 +1000,17 @@ export class ReferenceDungeonMaster {
           markAuthoredSceneState(authoredScene, call.function.name, callArgs, remoteOutcome);
           messages.push({ role: "tool", tool_call_id: call.id, content: remoteOutcome.text });
         }
-        if (
-          disclosedToolCalls.at(-1)?.name === "scene_manage"
-          && disclosedToolCalls.at(-1)?.accepted
-          && authoredScene.committedScene
-          && !rejectionRecoveryPending
-        ) {
-          // The scene commit is the authoritative boundary between tool work
-          // and prose. Keep the next provider call for narration, but do not
-          // let a model that ignores the prompt start another paid tool round.
-          narrationOnlyNext = true;
-        }
       }
     } catch (error) {
       throw failTurn(error, "tool_loop");
+    } finally {
+      clearInterval(leaseRenewal);
     }
 
     if (!narrationText) {
       throw failTurn(
         new Error(
-          `The reference-engine DM did not produce narration within the tool-call round budget (toolRounds=${toolRoundCount}, toolCalls=${toolCallNames.join(",") || "none"}).`
+          `The reference-engine DM finished without narration (toolRounds=${toolRoundCount}, toolCalls=${toolCallNames.join(",") || "none"}).`
         ),
         "narration",
       );
@@ -1198,12 +1225,13 @@ export class ReferenceDungeonMaster {
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
     toolChoice: "auto" | "none" | "required" = "auto",
+    onNarrationDelta?: (fullText: string) => void,
   ): Promise<ChatCompletionResult> {
     let providerCalls = 0;
-    const attempt = async (): Promise<ChatCompletionResult> => {
+    const attempt = async (model?: string): Promise<ChatCompletionResult> => {
       providerCalls += 1;
       try {
-        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice);
+        return await this.chatCompletionOnce(messages, tools, deadlineAt, usageContext, toolChoice, model, onNarrationDelta);
       } catch (error) {
         // The resolve loop increments its diagnostic counter only after a
         // completion returns. Preserve the attempted-call count on failures,
@@ -1219,9 +1247,45 @@ export class ReferenceDungeonMaster {
       const result = await attempt();
       return { ...result, providerCalls };
     } catch (error) {
-      if (!(error instanceof EmptyCompletionError)) throw error;
-      console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
-      const result = await attempt();
+      const retryable = error instanceof EmptyCompletionError || error instanceof RetryableProviderHttpError;
+      if (!retryable || providerCalls >= 2) throw error;
+
+      /**
+       * Retrying a rate-limited model against the same model is the one case
+       * where a straight repeat is close to useless: the pool that just
+       * refused us is still saturated a second later. When a fallback model
+       * is configured, spend the retry on it instead.
+       */
+      const rateLimited = error instanceof RetryableProviderHttpError && error.status === 429;
+      const retryModel = rateLimited && this.openRouter.fallbackModel
+        ? this.openRouter.fallbackModel
+        : undefined;
+
+      const baseDelayMs = error instanceof RetryableProviderHttpError ? error.retryDelayMs : 0;
+      /**
+       * Jitter matters more than the delay itself here. Every concurrent turn
+       * that hits one upstream 429 gets the same Retry-After, so an unjittered
+       * retry re-collides the whole burst at the same instant and produces a
+       * second, identical wave of 429s.
+       */
+      const retryDelayMs = baseDelayMs > 0
+        ? Math.round(baseDelayMs * (1 + Math.random() * RETRY_JITTER_FRACTION))
+        : 0;
+      if (retryDelayMs > 0) {
+        const remainingMs = deadlineAt === null ? null : deadlineAt - Date.now();
+        const minimumRequestBudgetMs = Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs);
+        if (remainingMs !== null && remainingMs <= retryDelayMs + minimumRequestBudgetMs) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+      if (error instanceof EmptyCompletionError) {
+        console.error(`[reference-dm] retrying after empty OpenRouter completion: ${error.message}`);
+      } else {
+        console.warn(
+          `[reference-dm] retrying after transient OpenRouter response: status=${error.status} delayMs=${retryDelayMs}`
+          + (retryModel ? ` fallbackModel=${retryModel}` : ""),
+        );
+      }
+      const result = await attempt(retryModel);
       return { ...result, providerCalls };
     }
   }
@@ -1232,78 +1296,242 @@ export class ReferenceDungeonMaster {
     deadlineAt: number | null = null,
     usageContext?: DmUsageContext,
     toolChoice: "auto" | "none" | "required" = "auto",
+    modelOverride?: string,
+    onNarrationDelta?: (fullText: string) => void,
   ): Promise<ChatCompletionResult> {
-    const remainingMs = deadlineAt === null
-      ? this.openRouter.timeoutMs
-      : Math.min(this.openRouter.timeoutMs, deadlineAt - Date.now());
-    if (remainingMs <= 0) throw new Error("The reference-engine DM turn deadline expired.");
-    const maxTokens = this.openRouter.maxTokens !== undefined
-      ? Math.max(1, Math.floor(this.openRouter.maxTokens))
-      : undefined;
-    const reasoningModel = /(?:gpt-5|o[1-9]|reasoning|luna)/i.test(this.openRouter.model);
+    const model = modelOverride ?? this.openRouter.model;
+    const reasoningModel = /(?:gpt-5|o[1-9]|reasoning|luna)/i.test(model);
     const body: Record<string, unknown> = {
-      model: this.openRouter.model,
+      model,
       messages,
       tools,
       tool_choice: toolChoice,
-      ...(maxTokens === undefined ? {} : { [reasoningModel ? "max_completion_tokens" : "max_tokens"]: maxTokens }),
       ...(reasoningModel && this.openRouter.reasoningEffort ? { reasoning_effort: this.openRouter.reasoningEffort } : {}),
     };
     const usageStore = this.openRouter.usage;
     const estimatedPromptTokens = Math.ceil(estimateLlmTokens({ messages, tools }) * 1.25);
-    const reservation = usageStore && usageContext
-      ? usageStore.reserve({
-        userId: usageContext.userId,
-        campaignId: usageContext.campaignId,
-        clientCommandId: usageContext.clientCommandId,
-        source: "dm",
-        provider: "openrouter",
-        model: this.openRouter.model,
-        estimatedPromptTokens,
-        estimatedCompletionTokens: maxTokens ?? 900,
-        estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, maxTokens ?? 900),
-        admittedTurn: usageContext.admittedTurn,
-      })
-      : null;
+
+    /**
+     * Take the provider slot before reserving budget, not after. A cost
+     * reservation has a TTL, and holding one across an unbounded queue wait
+     * would let it expire mid-queue and charge the account for a call that
+     * never happened.
+     */
+    // Hang detection only: the request is abandoned when the provider sends
+    // nothing at all for timeoutMs. A model that is streaming, or thinking
+    // behind OpenRouter keep-alive comments, is never cut off.
+    const idleMs = this.openRouter.timeoutMs;
+    const idle = new AbortController();
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const touch = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => idle.abort(new Error(`OpenRouter sent nothing for ${idleMs}ms`)), idleMs);
+    };
+    // Slot first, then the reservation (so a queue wait cannot outlive the
+    // reservation TTL), both inside the try whose catch/finally release them:
+    // a refused reservation never strands the provider slot.
+    let slot: Awaited<ReturnType<NonNullable<typeof this.openRouter.gate>["acquire"]>> | null = null;
+    let reservation: LlmUsageReservation | null = null;
     try {
+      slot = this.openRouter.gate
+        ? await this.openRouter.gate.acquire(
+          usageContext?.userId ?? ANONYMOUS_GATE_ACCOUNT,
+          deadlineAt,
+          Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs),
+        )
+        : null;
+      reservation = usageStore && usageContext
+        ? usageStore.reserve({
+          userId: usageContext.userId,
+          campaignId: usageContext.campaignId,
+          clientCommandId: usageContext.clientCommandId,
+          source: "dm",
+          provider: "openrouter",
+          model,
+          estimatedPromptTokens,
+          estimatedCompletionTokens: ESTIMATED_COMPLETION_TOKENS,
+          estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, ESTIMATED_COMPLETION_TOKENS),
+          admittedTurn: usageContext.admittedTurn,
+        })
+        : null;
+      touch();
+      const streaming = true;
       const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${this.openRouter.apiKey}`,
         },
-        body: JSON.stringify(body),
-        signal: remainingMs > 0 ? AbortSignal.timeout(remainingMs) : undefined,
+        body: JSON.stringify(streaming
+          ? { ...body, stream: true, usage: { include: true } }
+          : body),
+        signal: idle.signal,
       });
+      touch();
       if (!response.ok) {
         const responseBody = await response.text().catch(() => "");
-        throw new Error(`OpenRouter request failed with status ${response.status}: ${responseBody.slice(0, 500)}`);
+        const message = `OpenRouter request failed with status ${response.status}: ${responseBody.slice(0, 500)}`;
+        console.error(`[reference-dm] ${message}`);
+        if (response.status === 429 || response.status >= 500) {
+          throw new RetryableProviderHttpError(response.status, message, retryDelayFromHeader(response.headers));
+        }
+        throw new Error(message);
       }
-      const data = (await response.json()) as {
+      let data: {
         id?: string;
         choices?: Array<{ message?: { content?: string | null; tool_calls?: ChatMessage["tool_calls"] }; finish_reason?: string }>;
         usage?: ChatCompletionUsageEnvelope;
         error?: { message?: string; code?: unknown };
       };
+      /**
+       * Some provider routes answer a stream:true request with a normal JSON
+       * completion. Trust the content type over the request: only an actual
+       * event-stream is parsed as SSE; otherwise the buffered path decodes it
+       * and deltas simply never emit for that round.
+       */
+      const responseContentType = response.headers.get("content-type") ?? "";
+      const sseBody = streaming && response.body && responseContentType.includes("text/event-stream");
+      if (sseBody) {
+        /**
+         * Streamed rounds accumulate the same shape the non-streaming response
+         * produces, so every downstream consumer (usage settlement, empty
+         * detection, retry policy) stays identical. Narration deltas stream
+         * out as accumulated text; once the round shows any tool-call delta,
+         * narration streaming stops — that round is a tool round, and its
+         * content (if any) is not the player-facing draft.
+         */
+        let content = "";
+        let sawToolCallDeltas = false;
+        let finishReason: string | null = null;
+        let completionId: string | undefined;
+        let usage: ChatCompletionUsageEnvelope | undefined;
+        const toolCallAccumulator = new Map<number, { id: string; name: string; arguments: string }>();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+          touch();
+          buffer += decoder.decode(chunk, { stream: true });
+          let newlineIndex = buffer.indexOf("\n");
+          while (newlineIndex !== -1) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            newlineIndex = buffer.indexOf("\n");
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            let event: {
+              id?: string;
+              usage?: ChatCompletionUsageEnvelope;
+              choices?: Array<{ finish_reason?: string | null; delta?: { content?: string | null; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }>;
+            };
+            try {
+              event = JSON.parse(payload);
+            } catch {
+              continue;
+            }
+            if (event.id) completionId = event.id;
+            if (event.usage) usage = event.usage;
+            const choice = event.choices?.[0];
+            if (!choice) continue;
+            if (choice.finish_reason) finishReason = choice.finish_reason;
+            const delta = choice.delta;
+            if (!delta) continue;
+            if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+              sawToolCallDeltas = true;
+              for (const fragment of delta.tool_calls) {
+                const index = Number(fragment.index ?? 0);
+                const slot = toolCallAccumulator.get(index) ?? { id: "", name: "", arguments: "" };
+                if (fragment.id) slot.id = fragment.id;
+                if (fragment.function?.name) slot.name += fragment.function.name;
+                if (fragment.function?.arguments) slot.arguments += fragment.function.arguments;
+                toolCallAccumulator.set(index, slot);
+              }
+              continue;
+            }
+            if (typeof delta.content === "string" && delta.content && !sawToolCallDeltas) {
+              content += delta.content;
+              onNarrationDelta?.(content);
+            }
+          }
+        }
+        const streamedToolCalls = sawToolCallDeltas
+          ? [...toolCallAccumulator.entries()]
+            .sort((left, right) => left[0] - right[0])
+            .map(([index, call]) => ({
+              id: call.id || `call_${index}`,
+              type: "function" as const,
+              function: { name: call.name, arguments: call.arguments },
+            }))
+          : undefined;
+        data = {
+          id: completionId,
+          choices: [{
+            message: {
+              content: sawToolCallDeltas ? null : (content || null),
+              tool_calls: streamedToolCalls,
+            },
+            finish_reason: finishReason ?? undefined,
+          }],
+          usage,
+        };
+      } else {
+        data = (await response.json()) as typeof data;
+      }
       const message = data.choices?.[0]?.message;
       const actualUsage = reservation
         ? buildCompletionUsage(data, message, usageStore!, reservation, this.openRouter.model)
         : undefined;
       if (reservation && actualUsage) usageStore!.settle(reservation.id, actualUsage);
       if (!message) {
+        console.error(`[reference-dm] empty completion: id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} streamed=${streaming} error=${JSON.stringify(data.error ?? null)}`);
         throw new EmptyCompletionError(
           `id=${data.id ?? "?"} finish_reason=${data.choices?.[0]?.finish_reason ?? "?"} error=${JSON.stringify(data.error ?? null)}`
         );
+      }
+      // A streamed reply always assembles a message, so "no message" alone
+      // misses the common failure: a completion with neither prose nor tool
+      // calls. Treat it as empty so the caller retries once.
+      if (!message.tool_calls?.length && !message.content?.trim()) {
+        const finishReason = data.choices?.[0]?.finish_reason ?? "?";
+        const detail = `id=${data.id ?? "?"} finish_reason=${finishReason} model=${model} tool_choice=${toolChoice}`
+          + ` completion_tokens=${actualUsage?.completionTokens ?? "?"}`
+          + ` reasoning_tokens=${actualUsage?.reasoningTokens ?? "?"} streamed=${streaming}`;
+        console.error(`[reference-dm] blank completion: ${detail}`);
+        throw new EmptyCompletionError(detail);
       }
       return { content: message.content ?? null, tool_calls: message.tool_calls, ...(actualUsage ? { usage: actualUsage } : {}) };
     } catch (error) {
       if (reservation) usageStore!.release(reservation.id);
       throw error;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      slot?.release();
     }
   }
 }
 
 class EmptyCompletionError extends Error {}
+
+class RetryableProviderHttpError extends Error {
+  public constructor(
+    public readonly status: number,
+    message: string,
+    public readonly retryDelayMs: number,
+  ) {
+    super(message);
+    this.name = "RetryableProviderHttpError";
+  }
+}
+
+function retryDelayFromHeader(headers: Headers): number {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (!retryAfter) return 250;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds)) return Math.min(4_000, Math.max(0, Math.round(seconds * 1_000)));
+  const retryAt = Date.parse(retryAfter);
+  if (!Number.isNaN(retryAt)) return Math.min(4_000, Math.max(0, retryAt - Date.now()));
+  return 250;
+}
 
 function buildCompletionUsage(
   data: {

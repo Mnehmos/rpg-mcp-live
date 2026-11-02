@@ -89,3 +89,10 @@ export function listQuickstartPresets(): Array<Pick<QuickstartPreset, "id" | "ti
 export function getQuickstartPreset(id: string): QuickstartPreset | null {
   return QUICKSTART_PRESETS.find((preset) => preset.id === id) ?? null;
 }
+
+// "Play now" asks for no story choice, so the table picks one. The pick stays
+// inside the tuned presets: each character is written for its campaign, and a
+// fully random species/class/name roll would break the opening scene.
+export function pickRandomQuickstartPreset(): QuickstartPreset {
+  return QUICKSTART_PRESETS[Math.floor(Math.random() * QUICKSTART_PRESETS.length)];
+}

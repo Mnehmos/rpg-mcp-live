@@ -31,6 +31,19 @@ describe("player-facing usage display", () => {
     expect(usageLabel({ monthly: { costMicros: 1 } })).toBe("");
   });
 
+  it("counts down to the monthly reset when the free tier has no daily limit", () => {
+    const summary = {
+      plan: "free",
+      daily: { costMicros: 5 },
+      monthly: { costMicros: 5 },
+      limits: { daily: null, monthly: { costMicros: 20 } },
+      resetsAt: { daily: "2026-08-27T00:00:00.000Z", monthly: "2026-09-01T00:00:00.000Z" },
+    };
+
+    expect(usageResetAt(summary)).toBe("2026-09-01T00:00:00.000Z");
+    expect(usageResetLabel(summary, new Date("2026-08-26T22:58:30.000Z"))).toBe("NEXT RESET IN 5D 1H");
+  });
+
   it("counts down to the daily reset while free play is available", () => {
     const summary = {
       plan: "free",

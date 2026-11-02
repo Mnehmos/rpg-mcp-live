@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import type { AbuseGuard } from "./abuse-guard.js";
 import { config } from "./config.js";
 import type { GameStore } from "./store.js";
 
@@ -14,7 +15,7 @@ export function createStripeClient(): Stripe | null {
   if (!config.stripeSecretKey) return null;
 
   return new Stripe(config.stripeSecretKey, {
-    apiVersion: "2026-07-29.dahlia",
+    apiVersion: "2026-08-26.dahlia",
     maxNetworkRetries: 2,
   });
 }
@@ -53,6 +54,22 @@ function stripeId(value: string | Stripe.Customer | Stripe.DeletedCustomer | Str
 
 function subscriptionPriceId(subscription: Stripe.Subscription): string | null {
   return subscription.items.data[0]?.price.id ?? null;
+}
+
+function isMissingStripeResource(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: string }).code === "resource_missing");
+}
+
+/**
+ * An entitled row whose paid period has ended must be re-read from Stripe:
+ * either a renewal was missed (webhook not delivered) or the pass lapsed.
+ */
+export function subscriptionNeedsRefresh(
+  subscription: { status: string; currentPeriodEnd: number | null } | null | undefined,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): boolean {
+  if (!subscription || !isEntitledSubscriptionStatus(subscription.status)) return false;
+  return subscription.currentPeriodEnd !== null && subscription.currentPeriodEnd < nowSeconds;
 }
 
 function subscriptionPeriodEnd(subscription: Stripe.Subscription): number | null {
@@ -130,6 +147,20 @@ function saveSubscription(store: GameStore, values: {
  * single-user subscription row from an old Checkout return or an out-of-order
  * webhook replacing a newer subscription.
  */
+/**
+ * The Stripe account is shared with other products. Only the Player Pass
+ * price grants entitlement: an unrelated subscription is ignored, but if the
+ * account's own bound subscription moves off that price, the pass is revoked.
+ */
+export function playerPassPriceDecision(
+  subscription: Stripe.Subscription,
+  boundSubscriptionId: string | null | undefined,
+  playerPassPriceId: string,
+): "allow" | "ignore" | "revoke" {
+  if (!playerPassPriceId || subscriptionUsesPrice(subscription, playerPassPriceId)) return "allow";
+  return boundSubscriptionId === subscription.id ? "revoke" : "ignore";
+}
+
 async function saveAuthoritativeSubscription(
   stripe: Stripe,
   store: GameStore,
@@ -141,9 +172,21 @@ async function saveAuthoritativeSubscription(
   if (expectedCustomerId && customerId !== expectedCustomerId) return false;
 
   const existing = store.getSubscription(userId);
-  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id) {
-    const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
-    if (current.created >= subscription.created) return false;
+  const priceDecision = playerPassPriceDecision(subscription, existing?.stripeSubscriptionId, config.stripePriceId);
+  if (priceDecision === "ignore") return false;
+  if (priceDecision === "revoke") {
+    revokeEntitlement(store, userId, "not_player_pass", customerId);
+    return true;
+  }
+  // A binding Stripe has no record of can always be replaced by a real
+  // subscription; otherwise the newer subscription wins.
+  if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== subscription.id && existing.status !== "missing") {
+    try {
+      const current = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
+      if (current.created >= subscription.created) return false;
+    } catch (error) {
+      if (!isMissingStripeResource(error)) throw error;
+    }
   }
 
   saveSubscription(store, {
@@ -177,7 +220,13 @@ export async function reconcileStoredSubscription(
     if (existing.stripeCustomerId && customerId !== existing.stripeCustomerId) return false;
     if (subscription.metadata?.clerk_user_id && subscription.metadata.clerk_user_id !== userId) return false;
     return await saveAuthoritativeSubscription(stripe, store, userId, subscription, existing.stripeCustomerId);
-  } catch {
+  } catch (error) {
+    // Stripe has no such subscription for this key (e.g. a test-mode row in a
+    // live database): the stored entitlement has nothing behind it.
+    if (isMissingStripeResource(error)) {
+      revokeEntitlement(store, userId, "missing", existing.stripeCustomerId);
+      return true;
+    }
     // A transient Stripe failure must not turn a status read into a 500 or
     // cause the checkout route to create a second subscription.
     return false;
@@ -298,7 +347,12 @@ export async function syncCompletedCheckoutSession(
   return true;
 }
 
-export async function handleStripeEvent(event: Stripe.Event, store: GameStore, stripe?: Stripe): Promise<void> {
+export async function handleStripeEvent(
+  event: Stripe.Event,
+  store: GameStore,
+  stripe?: Stripe,
+  abuseGuard?: Pick<AbuseGuard, "block">,
+): Promise<void> {
   if (store.hasWebhookEvent(event.id)) return;
 
   switch (event.type) {
@@ -356,9 +410,67 @@ export async function handleStripeEvent(event: Stripe.Event, store: GameStore, s
       }
       break;
     }
+    /**
+     * A dispute is adversarial by construction: the customer went to their
+     * bank instead of to support, and the money is already gone along with a
+     * dispute fee. Revoking the pass alone is not enough, because the account
+     * simply drops to the free tier and keeps costing provider spend, so the
+     * account is blocked outright until a human resolves it.
+     */
+    case "charge.dispute.created": {
+      const dispute = event.data.object as Stripe.Dispute;
+      const chargeId = stripeId(dispute.charge as string | null);
+      let customerId: string | null = null;
+      if (chargeId && stripe) {
+        const charge = await stripe.charges.retrieve(chargeId);
+        customerId = stripeId(charge.customer as string | Stripe.Customer | Stripe.DeletedCustomer | null);
+      }
+      const userId = customerId ? store.findUserIdByStripeCustomer(customerId) : null;
+      if (userId) {
+        revokeEntitlement(store, userId, "disputed", customerId);
+        abuseGuard?.block(userId, "payment_disputed", `stripe_dispute:${dispute.id}`);
+      }
+      break;
+    }
+
+    /**
+     * A refund is not adversarial on its own — most are issued by the
+     * operator as goodwill — so it withdraws the paid entitlement without
+     * suspending the account. The player keeps free-tier access; they simply
+     * stop getting what they no longer paid for.
+     */
+    case "charge.refunded": {
+      const charge = event.data.object as Stripe.Charge;
+      const customerId = stripeId(charge.customer as string | Stripe.Customer | Stripe.DeletedCustomer | null);
+      const userId = customerId ? store.findUserIdByStripeCustomer(customerId) : null;
+      if (userId) revokeEntitlement(store, userId, "refunded", customerId);
+      break;
+    }
     default:
       break;
   }
 
   store.recordWebhookEvent(event.id, event.type);
+}
+
+/**
+ * Writes a non-entitled status while preserving the Stripe identifiers, so
+ * the account drops to the free tier without losing the customer binding a
+ * later reconciliation or re-subscribe needs.
+ */
+function revokeEntitlement(
+  store: GameStore,
+  userId: string,
+  status: "disputed" | "refunded" | "missing" | "not_player_pass",
+  customerId: string | null,
+): void {
+  const existing = store.getSubscription(userId);
+  saveSubscription(store, {
+    userId,
+    customerId: customerId ?? existing?.stripeCustomerId ?? null,
+    subscriptionId: existing?.stripeSubscriptionId ?? null,
+    status,
+    priceId: existing?.priceId ?? null,
+    currentPeriodEnd: existing?.currentPeriodEnd ?? null,
+  });
 }

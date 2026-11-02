@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { openingPresenceCopy, renderOpeningPresence } from "./dm-presence.js";
+import { OPENING_INSTRUCTION, PERSONALIZE_OPENING_PREFIX, openingPresenceCopy, renderOpeningPresence, starterFirstMoves, visibleLogEntries } from "./dm-presence.js";
 
 describe("opening DM presence", () => {
   it("makes an immediate contextual inference without claiming campaign state", () => {
@@ -29,5 +30,69 @@ describe("opening DM presence", () => {
 
     expect(html).toContain("THE OPENING PAUSED");
     expect(html).toContain("data-opening-retry");
+  });
+});
+
+describe("visible campaign log", () => {
+  it("never shows the server opening instruction as a player line", () => {
+    const entries = [
+      { kind: "system", text: "Campaign created. Your story starts here." },
+      { kind: "player", text: OPENING_INSTRUCTION },
+      { kind: "narration", text: "The fog came off the water." },
+      { kind: "player", text: "I walk to the quay." },
+    ];
+
+    expect(visibleLogEntries(entries).map((entry) => entry.text)).toEqual([
+      "The fog came off the water.",
+      "I walk to the quay.",
+    ]);
+  });
+
+  it("keeps the campaign-created line until the DM has narrated", () => {
+    const entries = [{ kind: "system", text: "Campaign created. Your story starts here." }];
+    expect(visibleLogEntries(entries)).toHaveLength(1);
+  });
+
+  it("matches the instruction the server sends for the opening turn", () => {
+    const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+    expect(server).toContain(JSON.stringify(OPENING_INSTRUCTION));
+  });
+});
+
+describe("starter opening in the visible log", () => {
+  const starter = { kind: "narration", text: "The template opening.", starter: { roomId: "r", roomName: "Quay", sceneId: "s", title: "T" } };
+
+  it("keeps the starter opening as the first scene after the DM takes over", () => {
+    const after = visibleLogEntries([starter, { kind: "player", text: "I walk the breakwater." }, { kind: "narration", text: "The fog parts." }]);
+    expect(after.map((e) => e.text)).toEqual(["The template opening.", "I walk the breakwater.", "The fog parts."]);
+  });
+
+  it("still hides the retired personalize instruction in older logs", () => {
+    const after = visibleLogEntries([starter, { kind: "player", text: PERSONALIZE_OPENING_PREFIX + " old" }, { kind: "narration", text: "Old rewrite." }]);
+    expect(after.map((e) => e.text)).toEqual(["The template opening.", "Old rewrite."]);
+  });
+});
+
+describe("starter first moves", () => {
+  const moves = [
+    { label: "Follow the cliff path", prompt: "I follow the boot prints down the cliff path." },
+    { label: "Study the cut strap", prompt: "I examine the cut strap." },
+  ];
+  const starter = { kind: "narration", text: "The satchel hangs open.", starter: { roomId: "r", roomName: "Milestone", sceneId: "s", title: "T", firstMoves: moves } };
+
+  it("offers the starter's first moves before the player has moved", () => {
+    const offered = starterFirstMoves([{ kind: "system", text: "Campaign created. Your story starts here." }, starter]);
+    expect(offered.map((move) => move.label)).toEqual(["Follow the cliff path", "Study the cut strap"]);
+    expect(offered[0]).toMatchObject({ id: "first-move-1", prompt: "I follow the boot prints down the cliff path." });
+  });
+
+  it("stops offering them once the player has made a move", () => {
+    expect(starterFirstMoves([starter, { kind: "player", text: "I wait." }])).toBeNull();
+    expect(starterFirstMoves([starter, { kind: "player", text: "I wait." }, { kind: "narration", text: "Rain." }])).toBeNull();
+  });
+
+  it("offers nothing for an opening without a starter", () => {
+    expect(starterFirstMoves([{ kind: "narration", text: "Model opening." }])).toBeNull();
+    expect(starterFirstMoves([])).toBeNull();
   });
 });

@@ -8,6 +8,8 @@ import {
   reconcileSubscriptionByEmail,
   reconcileStoredSubscription,
   resolveCheckoutGuard,
+  subscriptionNeedsRefresh,
+  playerPassPriceDecision,
   syncCompletedCheckoutSession,
 } from "./billing.js";
 import { LlmUsageStore, type LlmUsagePolicy } from "./llm-usage.js";
@@ -27,7 +29,6 @@ function testUsagePolicy(): LlmUsagePolicy {
     globalDailyCostMicros: 1_000,
     globalMonthlyCostMicros: 2_000,
     turnAdmissionReserveCostMicros: 5,
-    maxTurnCostMicros: 500,
     npcReserveCostMicros: 100,
     reservationTtlMs: 60_000,
     inputCostUsdPerMillion: 0.2,
@@ -173,6 +174,128 @@ describe("Stripe membership synchronization", () => {
     expect(store.getSubscription("player-1")).toMatchObject({ status: "active" });
     expect(usage.getSummary("player-1").plan).toBe("player_pass");
     store.close();
+  });
+
+  it("refreshes a renewed subscription whose stored period has ended", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    expect(subscriptionNeedsRefresh(store.getSubscription("player-1"), 2_000)).toBe(true);
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => testSubscription({ id: "sub_checkout", customer: "cus_checkout", status: "active" }),
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(true);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "active", currentPeriodEnd: 1_900_000_000 });
+    expect(subscriptionNeedsRefresh(store.getSubscription("player-1"), 2_000)).toBe(false);
+    store.close();
+  });
+
+  it("revokes an entitlement Stripe has no subscription for", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_test",
+      stripeSubscriptionId: "sub_test_mode_only",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    const usage = new LlmUsageStore(store.getRawDb(), testUsagePolicy());
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => {
+          throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(true);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "missing", stripeSubscriptionId: "sub_test_mode_only" });
+    expect(usage.getSummary("player-1").plan).toBe("free");
+    store.close();
+  });
+
+  it("keeps the entitlement when Stripe is only temporarily unreachable", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_checkout",
+      status: "active",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    const stripe = {
+      subscriptions: {
+        retrieve: async () => {
+          throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await expect(reconcileStoredSubscription(stripe, store, "player-1")).resolves.toBe(false);
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "active" });
+    store.close();
+  });
+
+  it("lets a new paid subscription replace a binding Stripe has no record of", async () => {
+    const store = createTestStore();
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_checkout",
+      stripeSubscriptionId: "sub_test_mode_only",
+      status: "missing",
+      priceId: "price_test",
+      currentPeriodEnd: 1_000,
+    });
+    const usage = new LlmUsageStore(store.getRawDb(), testUsagePolicy());
+    const stripe = {
+      subscriptions: {
+        retrieve: async (id: string) => {
+          if (id === "sub_test_mode_only") {
+            throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
+          }
+          return testSubscription({ id: "sub_new", customer: "cus_checkout", status: "active" });
+        },
+      },
+    } as unknown as Stripe;
+
+    await handleStripeEvent(
+      testEvent("customer.subscription.created", { id: "sub_new", customer: "cus_checkout", metadata: { clerk_user_id: "player-1" } }, "evt_new_sub"),
+      store,
+      stripe,
+    );
+
+    expect(store.getSubscription("player-1")).toMatchObject({ stripeSubscriptionId: "sub_new", status: "active" });
+    expect(usage.getSummary("player-1").plan).toBe("player_pass");
+    store.close();
+  });
+
+  it("only lets the Player Pass price grant entitlement, and revokes a bound subscription that leaves it", () => {
+    const onPass = testSubscription({ id: "sub_bound", items: { data: [{ price: { id: "price_pass" }, current_period_end: 1 }] } });
+    const offPass = testSubscription({ id: "sub_bound", items: { data: [{ price: { id: "price_other_product" }, current_period_end: 1 }] } });
+
+    expect(playerPassPriceDecision(onPass, "sub_bound", "price_pass")).toBe("allow");
+    expect(playerPassPriceDecision(offPass, "sub_bound", "price_pass")).toBe("revoke");
+    expect(playerPassPriceDecision(offPass, "sub_someone_else", "price_pass")).toBe("ignore");
+    expect(playerPassPriceDecision(offPass, null, "price_pass")).toBe("ignore");
+    expect(playerPassPriceDecision(offPass, "sub_bound", "")).toBe("allow");
+  });
+
+  it("does not refresh rows that are not entitled or have no period end", () => {
+    expect(subscriptionNeedsRefresh({ status: "canceled", currentPeriodEnd: 1_000 }, 2_000)).toBe(false);
+    expect(subscriptionNeedsRefresh({ status: "active", currentPeriodEnd: null }, 2_000)).toBe(false);
+    expect(subscriptionNeedsRefresh({ status: "active", currentPeriodEnd: 3_000 }, 2_000)).toBe(false);
+    expect(subscriptionNeedsRefresh(null, 2_000)).toBe(false);
   });
 
   it("does not reconcile a stored subscription bound to a different Stripe customer", async () => {
@@ -429,6 +552,103 @@ describe("Stripe membership synchronization", () => {
       stripeCustomerId: "cus_metadata",
       status: "active",
     });
+    store.close();
+  });
+});
+
+describe("Chargeback and refund handling", () => {
+  function seedPayingPlayer(store: GameStore): void {
+    store.upsertSubscription({
+      userId: "player-1",
+      stripeCustomerId: "cus_paying",
+      stripeSubscriptionId: "sub_paying",
+      status: "active",
+      priceId: "price_pass",
+      currentPeriodEnd: 1_800_000_000,
+    });
+  }
+
+  it("revokes the pass and blocks the account when a charge is disputed", async () => {
+    const store = createTestStore();
+    seedPayingPlayer(store);
+    const blocked: Array<{ userId: string; reason: string }> = [];
+    const guard = {
+      block: (userId: string, reason: string) => {
+        blocked.push({ userId, reason });
+      },
+    };
+    const stripe = {
+      charges: {
+        retrieve: async () => ({ id: "ch_disputed", customer: "cus_paying" }),
+      },
+    } as unknown as Stripe;
+    const event = testEvent(
+      "charge.dispute.created",
+      { id: "dp_1", charge: "ch_disputed" },
+      "evt_dispute",
+    );
+
+    await handleStripeEvent(event, store, stripe, guard as never);
+
+    // Status is outside the entitled set, so planForUser drops to free.
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "disputed" });
+    expect(blocked).toEqual([{ userId: "player-1", reason: "payment_disputed" }]);
+    store.close();
+  });
+
+  it("keeps the customer binding when revoking a disputed account", async () => {
+    const store = createTestStore();
+    seedPayingPlayer(store);
+    const stripe = {
+      charges: { retrieve: async () => ({ id: "ch_disputed", customer: "cus_paying" }) },
+    } as unknown as Stripe;
+
+    await handleStripeEvent(
+      testEvent("charge.dispute.created", { id: "dp_2", charge: "ch_disputed" }, "evt_dispute_binding"),
+      store,
+      stripe,
+    );
+
+    expect(store.getSubscription("player-1")).toMatchObject({
+      stripeCustomerId: "cus_paying",
+      stripeSubscriptionId: "sub_paying",
+      status: "disputed",
+    });
+    store.close();
+  });
+
+  it("revokes the pass on refund without suspending the account", async () => {
+    const store = createTestStore();
+    seedPayingPlayer(store);
+    const blocked: string[] = [];
+    const guard = { block: (userId: string) => blocked.push(userId) };
+    const event = testEvent(
+      "charge.refunded",
+      { id: "ch_refunded", customer: "cus_paying" },
+      "evt_refund",
+    );
+
+    await handleStripeEvent(event, store, undefined, guard as never);
+
+    expect(store.getSubscription("player-1")).toMatchObject({ status: "refunded" });
+    // A goodwill refund must not lock the player out of the free tier.
+    expect(blocked).toEqual([]);
+    store.close();
+  });
+
+  it("ignores a dispute for an unknown customer", async () => {
+    const store = createTestStore();
+    const stripe = {
+      charges: { retrieve: async () => ({ id: "ch_x", customer: "cus_unknown" }) },
+    } as unknown as Stripe;
+
+    await handleStripeEvent(
+      testEvent("charge.dispute.created", { id: "dp_3", charge: "ch_x" }, "evt_dispute_unknown"),
+      store,
+      stripe,
+    );
+
+    expect(store.getSubscription("player-1")).toBeNull();
     store.close();
   });
 });

@@ -25,13 +25,13 @@
     "open5e:audit-migration": "tsx tools/production-migration-audit.ts"
   },
   "dependencies": {
-    "@clerk/express": "^2.1.52",
+    "@clerk/express": "^2.1.64",
     "better-sqlite3": "^12.9.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "openai": "^6.49.0",
     "stripe": "^22.6.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",

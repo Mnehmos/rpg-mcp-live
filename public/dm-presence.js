@@ -37,3 +37,45 @@ export function renderOpeningPresence(session, snapshot, mode) {
   }).join("");
   return '<div class="log-entry narration dm-response dm-presence" data-opening-state="thinking" role="status" aria-label="The DM is opening your first scene"><span class="log-icon">DM</span><div class="log-content"><p class="dm-presence-kicker"><span class="dm-presence-pulse" aria-hidden="true"></span>THE DM IS THINKING</p><p class="dm-presence-inference">' + escapeHtml(copy.inference) + '</p><ol class="dm-presence-steps">' + steps + '</ol><p class="dm-presence-note">This is a quick read, not campaign history. The finished scene replaces it when the table commits.</p></div></div>';
 }
+
+/** The server sends this as the "player" line of the opening turn; it is not something the player said. */
+export var OPENING_INSTRUCTION = "Open the first situation and establish the campaign's opening scene.";
+/** A since-removed instruction (starter-scene rewrites) still present in some early logs; never shown. */
+export var PERSONALIZE_OPENING_PREFIX = "Personalize the opening scene.";
+
+/**
+ * Log entries a player should see. The opening instruction stays in the
+ * stored log (it anchors the DM's replayed history) but is never shown as a
+ * YOU line, and the campaign-created placeholder drops away once the DM has
+ * narrated.
+ */
+export function visibleLogEntries(entries) {
+  var list = Array.isArray(entries) ? entries : [];
+  var narrated = list.some(function (entry) { return Boolean(entry) && entry.kind === "narration"; });
+  return list.filter(function (entry) {
+    return Boolean(entry) && !isOpeningInstruction(entry) && !(narrated && isCampaignCreatedNotice(entry));
+  });
+}
+
+function isOpeningInstruction(entry) {
+  var text = String(entry.text || "").trim();
+  return entry.kind === "player" && (text === OPENING_INSTRUCTION || text.indexOf(PERSONALIZE_OPENING_PREFIX) === 0);
+}
+
+function isCampaignCreatedNotice(entry) {
+  return entry.kind === "system" && /^Campaign created\./.test(String(entry.text || ""));
+}
+
+/**
+ * A quickstart's hand-written first moves, offered only while its starter
+ * opening is still the latest thing in the log (before the player's first move).
+ */
+export function starterFirstMoves(entries) {
+  var visible = visibleLogEntries(entries).filter(function (entry) { return entry.kind !== "system"; });
+  var last = visible[visible.length - 1];
+  var moves = last && last.kind === "narration" && last.starter && Array.isArray(last.starter.firstMoves) ? last.starter.firstMoves : [];
+  var normalized = moves.filter(function (move) { return move && move.label && move.prompt; }).map(function (move, index) {
+    return { id: "first-move-" + (index + 1), label: String(move.label), prompt: String(move.prompt) };
+  });
+  return normalized.length ? normalized : null;
+}

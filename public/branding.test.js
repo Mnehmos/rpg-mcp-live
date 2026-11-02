@@ -9,10 +9,18 @@ const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
 
 describe("player-facing branding", () => {
   it("uses Quest Keeper AI in the page chrome", () => {
-    expect(page).toContain("Quest Keeper AI — Your next campaign starts here");
+    expect(page).toContain("Quest Keeper AI — Play now in your browser");
     expect(page).toContain("Quest Keeper AI home");
     expect(page).toContain("QUEST KEEPER <em>/</em> AI <small>LIVE</small>");
     expect(page).not.toContain("Lantern Table");
+  });
+
+  it("leads with the two entry paths instead of tagline copy", () => {
+    expect(page).toContain('data-action="play-now"');
+    expect(page).toContain('data-action="create-character"');
+    expect(page).toContain("Create a custom character");
+    expect(page).not.toContain("Your next campaign starts");
+    expect(page).not.toContain("Start free. Stay for the story.");
   });
 
   it("uses Quest Keeper AI in the favicon accessibility label", () => {
@@ -25,12 +33,13 @@ describe("player-facing branding", () => {
     expect(styles).toContain(".site-header .top-nav .button { display: none; }");
   });
 
-  it("uses the public style guide tokens on the play surface", () => {
-    expect(styles).toContain("--amber: #00ffff");
-    expect(styles).toContain("--mint: #00ff88");
-    expect(styles).toContain('font-family: "Share Tech Mono"');
-    expect(styles).toContain(".play-app::before");
-    expect(styles).toContain(".play-app::after");
+  it("keeps one warm candlelit theme and keeps the cyberpunk skin off the page", () => {
+    expect(styles).toContain("--amber: #e6ac63");
+    expect(styles).toContain("--mint: #a3c9ad");
+    expect(styles).toContain("font-family: Inter, ui-sans-serif");
+    for (const cyberpunk of ["#00ffff", "#00ff88", "#00ff00", "#ff006e", "Share Tech Mono", "IBM Plex Mono", "play-scanline"]) {
+      expect(styles).not.toContain(cyberpunk);
+    }
   });
 
   it("keeps the desktop dossier natural while preserving mobile scrolling", () => {
@@ -57,6 +66,7 @@ describe("player-facing branding", () => {
   });
 
   it("reflects an active Player Pass instead of offering checkout again", () => {
+    expect(page).toContain('<details id="membership"');
     expect(page).toContain('id="membership-status"');
     expect(page).toContain('id="membership-checkout"');
     expect(page).toContain('id="membership-portal"');
@@ -80,14 +90,14 @@ describe("player-facing branding", () => {
     expect(page).toContain('id="table-entry-cta"');
     expect(app).toContain('firstSessionCta.hidden = hasCampaign');
     expect(app).toContain('document.body.classList.toggle("has-campaign", hasCampaign)');
-    expect(app).toContain('hasCampaign ? "Return to campaign" : "Enter the game"');
+    expect(app).toContain('hasCampaign ? "Return to campaign" : "Play now"');
     expect(styles).toContain(".play-app.has-campaign .hero { display: none; }");
     expect(styles).toContain(".play-app.has-campaign .play-section { order: -1;");
   });
 
   it("shows opening presence and keeps table receipts inside the DM turn", () => {
     expect(app).toContain("renderOpeningPresence(session, snapshot");
-    expect(app).toContain("pairToolDisclosureWithNarration(entries)");
+    expect(app).toContain("pairToolDisclosureWithNarration(visibleLogEntries(entries))");
     expect(app).toContain('gameLog.classList.toggle("is-opening", openingPending || openingFailed)');
     expect(app).not.toContain('<span class="log-icon">TOOLS</span>');
   });
@@ -100,5 +110,33 @@ describe("player-facing branding", () => {
     expect(page).toContain("New characters start at level 1.");
     expect(page).not.toContain('value="2">Level 2');
     expect(app).toContain("higher-level progression is being reviewed");
+  });
+
+  it("sends Return to campaign back to the player's campaign instead of a new story", () => {
+    expect(app).toContain('tableEntryCta.dataset.entry = hasCampaign ? "return" : "play"');
+    expect(app).toContain('if (button.dataset.entry === "return") returnToCampaign();');
+  });
+
+  it("treats a committed starter scene as the opening, with no rewrite call", () => {
+    expect(app).toContain("if (result.data.starterScene) return true;");
+    expect(app).not.toContain("personalizing");
+  });
+
+  it("keeps the whole failure envelope from a streamed turn", () => {
+    expect(app).toContain('captured = Object.assign({}, event, { error: event.error ||');
+    expect(app).toContain("status: streamedFailureStatus(envelope)");
+  });
+
+  it("never reconciles the turn this tab is still streaming", () => {
+    expect(app).toContain("state.streamingCommandId = commandId;");
+    expect(app).toContain("if (isStreamingHere(pending)) {");
+    expect(app).toContain("Still this tab's live turn: show it as busy, but do not reconcile.");
+    expect(app).toContain("if (pendingForCampaign && isStreamingHere(pendingForCampaign)) {");
+    expect(app).toContain("if (pendingForLoadedCampaign && isStreamingHere(pendingForLoadedCampaign))");
+  });
+
+  it("shows a starter scene's own first moves and a type-anything hint before the first move", () => {
+    expect(app).toContain("var firstMoves = starterFirstMoves(session.log);");
+    expect(app).toContain("Type anything your character does or says, or pick a first move below.");
   });
 });

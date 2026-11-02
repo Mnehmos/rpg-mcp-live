@@ -2000,7 +2000,7 @@ export function createInitialCampaign(
     log: [
       makeMessage(
         "system",
-        "Campaign created. The world is yours to shape; begin by creating the character who will enter it."
+        "Campaign created. Your story starts here."
       ),
     ],
     lastRoll: null,

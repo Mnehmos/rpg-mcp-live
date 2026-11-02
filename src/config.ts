@@ -60,10 +60,18 @@ const openRouterApiKey = readString("OPENROUTER_API_KEY");
 const openRouterBaseUrl = readString("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").replace(/\/$/, "");
 const openRouterModel = readString("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash");
 const openRouterReasoningEffort = readString("OPENROUTER_REASONING_EFFORT", "medium");
-const openRouterMaxTokens = Number.parseInt(readString("OPENROUTER_MAX_TOKENS", "900"), 10);
 const openRouterSiteUrl = readString("OPENROUTER_SITE_URL");
 const openRouterAppName = readString("OPENROUTER_APP_NAME", "Quest Keeper AI");
-const referenceDmTimeoutMs = Number.parseInt(readString("REFERENCE_DM_TIMEOUT_MS", "120000"), 10);
+// A second model to try when the primary is rate-limited or erroring upstream.
+// Empty means "no fallback": the turn fails rather than silently changing the
+// voice of the DM mid-session.
+const openRouterFallbackModel = readString("OPENROUTER_FALLBACK_MODEL");
+// The gate that keeps concurrent turns from fanning out into simultaneous
+// upstream calls. Defaults are deliberately conservative: a shared provider
+// pool answers a burst with 429s, and a queued turn beats a failed one.
+const providerMaxConcurrent = readInteger("PROVIDER_MAX_CONCURRENT", 4);
+const providerMaxConcurrentPerAccount = readInteger("PROVIDER_MAX_CONCURRENT_PER_ACCOUNT", 1);
+const providerMaxQueueWaitMs = readInteger("PROVIDER_MAX_QUEUE_WAIT_MS", 15_000);
 const referenceEngineUrl = readString("REFERENCE_ENGINE_URL");
 const referenceEngineToken = readString("REFERENCE_ENGINE_TOKEN");
 const referenceEngineTimeoutMs = Number.parseInt(readString("REFERENCE_ENGINE_TIMEOUT_MS", "30000"), 10);
@@ -109,29 +117,38 @@ export const config = Object.freeze({
   openRouterBaseUrl,
   openRouterModel,
   openRouterReasoningEffort,
-  openRouterMaxTokens,
   openRouterSiteUrl,
   openRouterAppName,
+  openRouterFallbackModel,
+  providerGate: {
+    maxConcurrent: providerMaxConcurrent,
+    maxConcurrentPerAccount: providerMaxConcurrentPerAccount,
+    maxQueueWaitMs: providerMaxQueueWaitMs,
+  },
+  abuse: {
+    turnWindowMs: readInteger("ABUSE_TURN_WINDOW_MS", 60_000),
+    maxTurnsPerWindow: readInteger("ABUSE_MAX_TURNS_PER_WINDOW", 12),
+    maxAccountsPerOrigin: readInteger("ABUSE_MAX_ACCOUNTS_PER_ORIGIN", 4),
+    originWindowMs: readInteger("ABUSE_ORIGIN_WINDOW_MS", 24 * 60 * 60 * 1_000),
+  },
   llmUsage: {
     // Player Pass has no per-user daily gate: it aims for $2/user/month in
     // provider cost but admits complete turns until the $4 monthly hard ceiling.
     // A power user's already-admitted turn is allowed to finish; the next
     // command is where the dollar gate applies.
     // Deployment-wide brakes remain the final provider-balance safeguard.
-    freeDailyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_DAILY_COST_USD", 0.05) * 1_000_000),
+    freeDailyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_DAILY_COST_USD", 0) * 1_000_000),
     freeMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_FREE_MONTHLY_COST_USD", 0.25) * 1_000_000),
     playerMonthlyTargetCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_TARGET_COST_USD", 2) * 1_000_000),
     playerMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_PLAYER_MONTHLY_COST_USD", 4) * 1_000_000),
     globalDailyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_DAILY_COST_USD", 5) * 1_000_000),
     globalMonthlyCostMicros: Math.round(readNumber("LLM_USAGE_GLOBAL_MONTHLY_COST_USD", 25) * 1_000_000),
     turnAdmissionReserveCostMicros: Math.round(readNumber("LLM_USAGE_TURN_ADMISSION_RESERVE_COST_USD", 0.01) * 1_000_000),
-    maxTurnCostMicros: Math.round(readNumber("LLM_USAGE_MAX_TURN_COST_USD", 0.1) * 1_000_000),
     npcReserveCostMicros: Math.round(readNumber("LLM_USAGE_NPC_RESERVE_COST_USD", 0.02) * 1_000_000),
     reservationTtlMs: readInteger("LLM_USAGE_RESERVATION_TTL_MS", 10 * 60 * 1000),
     inputCostUsdPerMillion: readNumber("LLM_USAGE_INPUT_COST_USD_PER_MILLION", 0.0574),
     outputCostUsdPerMillion: readNumber("LLM_USAGE_OUTPUT_COST_USD_PER_MILLION", 0.1148),
   },
-  referenceDmTimeoutMs,
   openRouterConfigured: Boolean(openRouterApiKey),
   referenceEngineUrl: referenceEngineUrl.replace(/\/$/, ""),
   referenceEngineToken,

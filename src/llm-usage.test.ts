@@ -14,7 +14,6 @@ function policy(overrides: Partial<LlmUsagePolicy> = {}): LlmUsagePolicy {
     globalDailyCostMicros: 1_000,
     globalMonthlyCostMicros: 2_000,
     turnAdmissionReserveCostMicros: 5,
-    maxTurnCostMicros: 500,
     npcReserveCostMicros: 100,
     reservationTtlMs: 60_000,
     inputCostUsdPerMillion: 0.2,
@@ -223,6 +222,54 @@ describe("LLM usage ledger", () => {
       plan: "free",
       limits: { monthly: { costMicros: 20, costUsd: 0.00002 } },
     });
+    game.close();
+  });
+
+  it("gates free play on the monthly allowance alone when the daily limit is 0", () => {
+    const { game, usage } = createStores({ freeDailyCostMicros: 0, freeMonthlyCostMicros: 20 });
+    const admit = (command: string) => usage.admitTurn({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: command,
+      provider: "openrouter",
+      model: "test-model",
+    });
+    const spend = (command: string, costMicros: number) => {
+      const reservation = admit(command);
+      usage.settle(reservation.id, {
+        provider: "openrouter",
+        model: "test-model",
+        promptTokens: 10,
+        completionTokens: 10,
+        costMicros,
+        costSource: "provider",
+      });
+    };
+
+    // 8 + reserve 5 already exceeds the old daily limit (10); only the monthly 20 applies.
+    spend("command-1", 8);
+    spend("command-2", 8);
+    expect(usage.getSummary("player-1").limits.daily).toBeNull();
+    expect(() => admit("command-3")).toThrowError(LlmUsageLimitError);
+    game.close();
+  });
+
+  it("has no per-request cost ceiling for an admitted turn", () => {
+    const { game, usage } = createStores({ freeDailyCostMicros: 0, freeMonthlyCostMicros: 20 });
+    usage.admitTurn({ userId: "player-1", campaignId: "campaign-1", clientCommandId: "command-1", provider: "openrouter", model: "test-model" });
+
+    expect(() => usage.reserve({
+      userId: "player-1",
+      campaignId: "campaign-1",
+      clientCommandId: "command-1",
+      source: "dm",
+      provider: "openrouter",
+      model: "test-model",
+      estimatedPromptTokens: 2_000_000,
+      estimatedCompletionTokens: 100,
+      estimatedCostMicros: 10_000_000,
+      admittedTurn: true,
+    })).not.toThrow();
     game.close();
   });
 

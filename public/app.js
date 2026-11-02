@@ -19,6 +19,9 @@ import {
   pendingCommandStorageKey,
   retryDelayMs,
   shouldRetryCampaignLoad,
+  PENDING_QUICKSTART_STORAGE_KEY,
+  pendingQuickstartFromValue,
+  pendingQuickstartStorageValue,
 } from "./campaign-resume.js";
 import {
   composerSubmission,
@@ -26,10 +29,10 @@ import {
   shouldSubmitOnEnter,
   updateComposerCounter,
 } from "./turn-composer.js";
-import { commandFailureMessage, commandFailureType, isStaleCommandStatus } from "./command-status.js";
+import { commandFailureMessage, commandFailureType, isStaleCommandStatus, streamedFailureStatus } from "./command-status.js";
 import { projectCustodyActors } from "./custody-status.mjs";
-import { renderOpeningPresence } from "./dm-presence.js";
-import { pairToolDisclosureWithNarration, renderToolDisclosure } from "./tool-disclosure.js";
+import { renderOpeningPresence, starterFirstMoves, visibleLogEntries } from "./dm-presence.js";
+import { pairToolDisclosureWithNarration, renderToolDisclosure, tableMoveLabel } from "./tool-disclosure.js";
 import { questProgress, questStatusLabel, visibleQuestEntries } from "./quest-projection.js";
 import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
 
@@ -41,7 +44,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     { id: "ember-watch", title: "The Ember Watch", tagline: "The old lighthouse is burning in a dead calm.", description: "A fast-moving rescue story on a fogbound harbor." },
     { id: "glass-under-moon", title: "Glass Under Moonlight", tagline: "Something beneath the city is answering the bells.", description: "A strange arcane investigation in an old river city." },
   ];
-  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
+  var state = { config: null, clerk: null, session: null, engineState: null, engineBackend: null, campaigns: [], quickstarts: QUICKSTART_FALLBACKS, quickstartLoading: null, subscription: null, usage: null, usageResetRefreshAt: null, setupRequired: false, managerOpen: false, createMode: false, pendingPlayerText: null, uncertainPlayerText: null, pendingDeleteCampaignId: null, pendingDeleteCampaignName: null, pendingQuickstartId: null, userButtonMounted: false, characterOptions: null, characterOptionsCampaignId: null, characterOptionsLoading: null, characterOptionsLoadingCampaignId: null, spellOptions: null, spellOptionsClass: null, spellOptionsLevel: null, spellOptionsLoading: false, spellOptionsLoadingKey: null, contentCatalog: null, contentCatalogLoading: null, openingLoadingCampaignId: null, openingErrorCampaignId: null, streamingCommandId: null, suggestedActions: [], sessionRefreshSequence: 0, campaignLoadSequence: 0, pendingCampaignLoadId: null, pendingReconciliations: {}, pendingReconciliationTimers: {} };
   var $ = function (selector) { return document.querySelector(selector); };
 
   function showToast(message) {
@@ -85,6 +88,48 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       window.localStorage.setItem(activeCampaignStorageKey(currentUserId()), normalizedCampaignId);
     } catch (_error) {
       // Storage can be disabled by privacy settings; session hydration still works.
+    }
+  }
+
+  // Remember a Play now click that hit the sign-in wall. The stored copy is
+  // cleared only after the launch succeeds; the request id keeps a replay
+  // from creating a second campaign.
+  function setPendingQuickstart(quickstartId, requestId) {
+    state.pendingQuickstartId = quickstartId;
+    state.pendingQuickstartRequestId = requestId || newCommandId();
+    try {
+      window.localStorage.setItem(PENDING_QUICKSTART_STORAGE_KEY, pendingQuickstartStorageValue(quickstartId, state.pendingQuickstartRequestId));
+    } catch (_error) {
+      // Storage can be disabled; the in-memory intent still covers in-page sign-in.
+    }
+  }
+
+  function takeInMemoryQuickstart() {
+    var pending = state.pendingQuickstartId
+      ? { id: state.pendingQuickstartId, requestId: state.pendingQuickstartRequestId }
+      : null;
+    state.pendingQuickstartId = null;
+    state.pendingQuickstartRequestId = null;
+    return pending;
+  }
+
+  // Read the stored intent at most once per page load, so Clerk's frequent
+  // session events cannot replay a failing launch in a loop.
+  function takeStoredQuickstartOnce() {
+    if (state.storedQuickstartChecked) return null;
+    state.storedQuickstartChecked = true;
+    try {
+      return pendingQuickstartFromValue(window.localStorage.getItem(PENDING_QUICKSTART_STORAGE_KEY));
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function clearStoredQuickstart() {
+    try {
+      window.localStorage.removeItem(PENDING_QUICKSTART_STORAGE_KEY);
+    } catch (_error) {
+      // Nothing was stored when storage is disabled.
     }
   }
 
@@ -173,6 +218,120 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       });
   }
 
+  function isStreamingHere(pending) {
+    return Boolean(pending && state.streamingCommandId && pending.clientCommandId === state.streamingCommandId);
+  }
+
+  function streamTurn(url, body, onProgress) {
+    /**
+     * Posts with stream:true and reads the SSE reply, reporting progress and
+     * narration events as they arrive. Anything answered without a stream —
+     * validation failures, rate limits, non-streaming deployments — falls
+     * back to the exact requestJson shape, so callers work with either.
+     */
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ stream: true }, body)),
+    }).then(function (response) {
+      var contentType = response.headers.get("content-type") || "";
+      if (contentType.indexOf("text/event-stream") === -1 || !response.body || !response.body.getReader) {
+        return response.json().catch(function () { return {}; }).then(function (data) {
+          return { response: response, data: data };
+        });
+      }
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+      var captured = null;
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) {
+            if (captured) return { response: response, data: captured };
+            return {
+              response: { ok: false, status: 502 },
+              data: { error: "The Dungeon Master stream ended before the turn finished." }
+            };
+          }
+          buffer += decoder.decode(chunk.value, { stream: true });
+          var blocks = buffer.split("\n\n");
+          buffer = blocks.pop();
+          blocks.forEach(function (block) {
+            block.split("\n").forEach(function (line) {
+              if (line.indexOf("data:") !== 0) return;
+              var payload = line.slice(5).trim();
+              if (!payload) return;
+              var event;
+              try { event = JSON.parse(payload); } catch (_error) { return; }
+              if (event.type === "result") captured = event;
+              else if (event.type === "error") captured = Object.assign({}, event, { error: event.error || "The Dungeon Master could not finish that turn." });
+              else if (onProgress) onProgress(event);
+            });
+          });
+          return pump();
+        });
+      }
+      return pump().then(function (outcome) {
+        if (outcome.data && outcome.data.type === "error") {
+          // Keep the whole failure envelope (reason, commit status, quota
+          // details) and the status the buffered route would have sent.
+          var envelope = Object.assign({ code: "reference_dm_unavailable" }, outcome.data);
+          delete envelope.type;
+          return { response: { ok: false, status: streamedFailureStatus(envelope) }, data: envelope };
+        }
+        return { response: { ok: true, status: 200 }, data: outcome.data };
+      });
+    });
+  }
+
+  // One live DM entry per turn: status while the model thinks, a chip for each
+  // engine result as it lands, and narration as it streams.
+  function liveEntry() {
+    var log = $("#game-log");
+    if (!log) return null;
+    var node = document.getElementById("live-narration-entry");
+    if (!node) {
+      node = document.createElement("div");
+      node.id = "live-narration-entry";
+      node.className = "log-entry dm-response live-narration";
+      node.innerHTML = '<span class="log-icon">DM</span><div class="log-content"><p class="live-status"></p><span class="table-move-labels live-table-moves"></span><div class="dm-narration live-narration-text"></div></div>';
+      log.appendChild(node);
+    }
+    return node;
+  }
+
+  function showLiveNarration(text) {
+    var node = liveEntry();
+    if (!node) return;
+    var target = node.querySelector(".live-narration-text");
+    if (target) target.textContent = text;
+    var status = node.querySelector(".live-status");
+    if (status) status.textContent = "";
+    $("#game-log").scrollTop = $("#game-log").scrollHeight;
+  }
+
+  function showLiveProgress(event) {
+    var node = liveEntry();
+    if (!node) return;
+    if (event.type === "status") {
+      var status = node.querySelector(".live-status");
+      if (status && !node.querySelector(".live-narration-text").textContent) status.textContent = event.message || "";
+    } else if (event.type === "tool" && event.call && event.call.accepted !== false) {
+      var moves = node.querySelector(".live-table-moves");
+      if (moves) {
+        var chip = document.createElement("span");
+        chip.textContent = tableMoveLabel(event.call);
+        moves.appendChild(chip);
+      }
+    }
+    $("#game-log").scrollTop = $("#game-log").scrollHeight;
+  }
+
+  function clearLiveNarration() {
+    var node = document.getElementById("live-narration-entry");
+    if (node) node.remove();
+  }
+
   function loadScript(source, attributes) {
     return new Promise(function (resolve, reject) {
       var script = document.createElement("script");
@@ -195,6 +354,19 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function openAuth() {
+    var authCopy = $("#auth-dialog .dialog-copy");
+    if (authCopy) {
+      if (state.pendingQuickstartId === "random") {
+        authCopy.textContent = "One step left. Sign in and your character hits the table immediately — free to play, no card.";
+      } else {
+        var pending = state.pendingQuickstartId
+          ? (state.quickstarts || []).find(function (q) { return q.id === state.pendingQuickstartId; })
+          : null;
+        authCopy.textContent = pending
+          ? "One step left. Sign in and \"" + pending.title + "\" launches immediately — free to play, no card."
+          : "Sign in to keep your campaign waiting for you.";
+      }
+    }
     if (isSignedIn()) {
       if (state.session) {
         state.managerOpen = true;
@@ -209,7 +381,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.hidden = false;
     if (state.clerk && !state.clerk.isSignedIn && !$("#auth-mount").children.length) {
-      state.clerk.mountSignIn($("#auth-mount"));
+      // withSignUp keeps account creation inside this dialog instead of
+      // sending new players to the hosted sign-up page.
+      state.clerk.mountSignIn($("#auth-mount"), { withSignUp: true });
     }
   }
 
@@ -263,6 +437,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (statusCopy && active) statusCopy.textContent = "Your Player Pass is active. Your table is ready.";
     if (checkoutButton) checkoutButton.hidden = active || unresolvedCheckout;
     if (portalButton) portalButton.hidden = !hasStripeCustomer;
+    var summaryHint = $("#membership-summary-hint");
+    if (summaryHint) summaryHint.hidden = !active;
   }
 
   function titleCase(value) {
@@ -281,6 +457,11 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   function setText(selector, value, fallback) {
     var node = $(selector);
     if (node) node.textContent = value === undefined || value === null || value === "" ? (fallback || "—") : String(value);
+  }
+
+  function setGlance(id, text) {
+    var node = document.getElementById(id);
+    if (node) node.textContent = text || "—";
   }
 
   function fillCharacterSelect(selector, options) {
@@ -993,7 +1174,11 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     toggle.onclick = function () {
       form.hidden = !form.hidden;
       toggle.textContent = form.hidden ? copy.toggle : copy.close;
-      if (!form.hidden) loadSpellbookOptions(character, spellcasting);
+      if (!form.hidden) {
+        var spellSection = $("#character-spellbook-section");
+        if (spellSection) spellSection.open = true;
+        loadSpellbookOptions(character, spellcasting);
+      }
     };
     if (!form.dataset.bound) {
       form.dataset.bound = "true";
@@ -1163,6 +1348,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         var signedModifier = modifier === null ? "" : (modifier >= 0 ? "+" + modifier : String(modifier));
         return '<div class="ability-cell"><span>' + ability.toUpperCase() + '</span><strong>' + escapeHtml(score) + '</strong><small>' + escapeHtml(signedModifier) + '</small></div>';
       }).join("");
+      setGlance("glance-abilities", abilityNames.map(function (ability) {
+        var score = character.abilities && character.abilities[ability] !== undefined ? character.abilities[ability] : null;
+        if (typeof score !== "number") return ability.toUpperCase() + " —";
+        var modifier = Math.floor((score - 10) / 2);
+        return ability.toUpperCase() + " " + (modifier >= 0 ? "+" + modifier : modifier);
+      }).join(" · "));
     }
     var skillsNode = $("#character-skills");
     if (skillsNode) {
@@ -1179,10 +1370,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         return '<div class="skill-cell"><span>' + escapeHtml(titleCase(skill) + (value.proficient ? " ·" : "")) + '</span><strong>' + (bonus >= 0 ? "+" : "") + escapeHtml(bonus) + '</strong></div>';
       }).join("");
       skillsNode.innerHTML = saveHtml + skillHtml;
+      var proficientSkills = Object.keys(skills).filter(function (skill) { return skills[skill] && skills[skill].proficient; }).length;
+      setGlance("glance-skills", Object.keys(skills).length + " skills · " + proficientSkills + " proficient");
     }
     var attacksNode = $("#character-attacks");
     if (attacksNode) {
       var weapons = (Array.isArray(character.inventory) ? character.inventory : []).filter(function (item) { return item.kind === "weapon"; });
+      setGlance("glance-attacks", weapons.length ? weapons.length + (weapons.length === 1 ? " weapon" : " weapons") : "");
       attacksNode.innerHTML = weapons.length
         ? weapons.map(function (item) {
             var detail = [item.damage, item.properties && item.properties.join(", "), item.equipped ? "equipped" : "carried"].filter(Boolean).join(" · ");
@@ -1195,6 +1389,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       var features = Array.isArray(character.features) ? character.features : [];
       var proficiencies = character.proficiencies || {};
       var profs = [].concat(proficiencies.armor || [], proficiencies.weapons || [], proficiencies.tools || [], proficiencies.languages || []);
+      setGlance("glance-features", (features.length + profs.length) ? (features.length + profs.length) + " traits" : "");
       featuresNode.innerHTML = features.concat(profs.map(function (item) { return "Proficient: " + item; })).map(function (item) {
         return '<span class="feature-chip">' + escapeHtml(item) + '</span>';
       }).join("") || '<p class="inventory-empty">No features recorded.</p>';
@@ -1217,6 +1412,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       proficienciesNode.innerHTML = proficiencyGroups.map(function (group) {
         return '<div class="proficiency-entry"><strong>' + escapeHtml(group[0]) + '</strong><small>' + escapeHtml(group[1].length ? group[1].join(", ") : "None") + '</small></div>';
       }).join("");
+      setGlance("glance-proficiencies", (proficiencies.languages || []).length ? (proficiencies.languages || []).length + " languages" : "");
     }
     var loreNode = $("#character-lore");
     var loreSection = $("#character-lore-section");
@@ -1261,6 +1457,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       setText("#spellcasting-rules-help", managementCopy.rules, "Choose spells from the installed class list.");
       setText("#known-spell-label", selectionMode === "spellbook" ? "SPELLBOOK" : "KNOWN SPELLS", "KNOWN SPELLS");
       setText("#prepared-spell-label", selectionMode === "known" ? "PREPARATION NOT USED" : "PREPARED", "PREPARED");
+      setGlance("glance-spells", selectionDetail);
       var slotsNode = $("#character-spell-slots");
       if (slotsNode) {
         var maximums = spellcasting.slotMaximums && typeof spellcasting.slotMaximums === "object" ? spellcasting.slotMaximums : {};
@@ -1289,6 +1486,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var inventoryNode = $("#character-inventory");
     if (inventoryNode) {
       var richInventory = Array.isArray(character.inventory) ? character.inventory : [];
+      setGlance("glance-inventory", richInventory.length ? richInventory.length + (richInventory.length === 1 ? " entry" : " entries") : "");
       inventoryNode.innerHTML = richInventory.length ? richInventory.map(function (item) {
         var stateLabel = item.equipped ? " · equipped" : "";
         var action = item.kind === "consumable"
@@ -1560,7 +1758,10 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     var firstSessionCta = $("#first-session-cta");
     var tableEntryCta = $("#table-entry-cta");
     if (firstSessionCta) firstSessionCta.hidden = hasCampaign;
-    if (tableEntryCta) tableEntryCta.textContent = hasCampaign ? "Return to campaign" : "Enter the game";
+    if (tableEntryCta) {
+      tableEntryCta.textContent = hasCampaign ? "Return to campaign" : "Play now";
+      tableEntryCta.dataset.entry = hasCampaign ? "return" : "play";
+    }
     document.body.classList.toggle("has-campaign", hasCampaign);
   }
 
@@ -1631,15 +1832,15 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     }
 
     if (!session) {
-      setText("#play-title", isSignedIn() ? "Choose your story." : "Play here.");
+      setText("#play-title", isSignedIn() ? "Press play, or pick your story." : "Press play to begin.");
       setPanel("#game-shell", true);
       setPanel("#character-setup", true);
       setPanel("#tutorial-panel", true);
-      setPanel("#quickstart-panel", state.managerOpen);
+      setPanel("#quickstart-panel", false);
       setPanel("#campaign-manager", true);
-      setPanel("#campaign-auth-gate", true);
-      setPanel("#campaign-form", true);
-      setPanel("#show-campaign-form", true);
+      setPanel("#campaign-auth-gate", isSignedIn());
+      setPanel("#campaign-form", Boolean(state.createMode));
+      setPanel("#show-campaign-form", !state.createMode);
       return;
     }
 
@@ -1744,7 +1945,9 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       : "I describe what my character does next.";
     if (hint) hint.textContent = openingRequired
       ? (openingFailed ? "No turn is waiting on you. Retry when you are ready." : "Your turn begins the moment the opening lands.")
-      : "Speak naturally. The engine rolls only when the fiction calls for a risk.";
+      : starterFirstMoves(session && session.log)
+        ? "Type anything your character does or says, or pick a first move below."
+        : "Speak naturally. The engine rolls only when the fiction calls for a risk.";
     if (form) form.classList.toggle("is-opening", openingRequired);
   }
 
@@ -1832,11 +2035,14 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       : null;
     var sessionActions = narrationActions || (Array.isArray(session.suggestedActions) ? session.suggestedActions : null)
       || (Array.isArray(snapshot.suggestedActions) ? snapshot.suggestedActions : []);
+    // Before the first move, a starter scene offers its own hand-written ways in.
+    var firstMoves = starterFirstMoves(session.log);
+    if (firstMoves) sessionActions = firstMoves;
     state.suggestedActions = sessionActions;
     renderSuggestedActions(sessionActions, session, snapshot);
 
     var entries = Array.isArray(session.log) ? session.log : [];
-    var pairedEntries = pairToolDisclosureWithNarration(entries);
+    var pairedEntries = pairToolDisclosureWithNarration(visibleLogEntries(entries));
     var logHtml = pairedEntries.map(function (group) {
       var entry = group.entry || {};
       var kind = String(entry.kind || "narration").replace(/[^a-z-]/g, "");
@@ -2130,6 +2336,13 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     function resumePendingCommand() {
       var pending = readPendingCommand(state.session && state.session.id);
       if (!pending || !state.session || state.session.id !== pending.campaignId) return Promise.resolve(false);
+      if (isStreamingHere(pending)) {
+        if (!state.pendingPlayerText) {
+          state.pendingPlayerText = pending.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+        }
+        return Promise.resolve(false);
+      }
       if (pending.status === "uncertain") {
         state.pendingPlayerText = null;
         state.uncertainPlayerText = pending.playerText || "Your submitted action";
@@ -2163,7 +2376,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       if (!result.response.ok) throw new Error(result.data.error || "The table is unavailable.");
       renderSession(result.data);
       var pendingForLoadedCampaign = result.data.session && readPendingCommand(result.data.session.id);
-      if (pendingForLoadedCampaign) setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      if (pendingForLoadedCampaign && isStreamingHere(pendingForLoadedCampaign)) setStatus("The DM is thinking", "thinking");
+      else if (pendingForLoadedCampaign) setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       else if (result.data.session && result.data.session.phase === "sandbox") setStatus("Your campaign is waiting", "ready");
       else if (result.data.session) setStatus("Your campaign is being built", "ready");
       else setStatus("Choose your world", "ready");
@@ -2339,17 +2553,17 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (outcome.pending) schedulePendingReconciliation(campaignId, clientCommandId);
         setStatus(
           outcome.pending
-            ? "This turn is still reconciling; keep this tab open."
+            ? "The DM is still working on your turn. Hang tight."
             : "The table is current; confirm this turn before retrying.",
           "thinking"
         );
-        showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+        showToast("Still working on your turn. Your text is safe in the box below.");
         return false;
       });
     }).catch(function () {
       schedulePendingReconciliation(campaignId, clientCommandId);
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
-      showToast("The server has not confirmed this turn yet. Your text remains in the composer.");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
+      showToast("Still working on your turn. Your text is safe in the box below.");
       return false;
     });
   }
@@ -2417,7 +2631,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (isPendingCommandConflict(pendingCommand, campaignId, commandId)) {
       state.pendingPlayerText = pendingCommand.playerText || "Your submitted action";
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       showToast("Your earlier turn is still reconciling. Wait for it to settle before submitting another action.");
       startPendingReconciliation(pendingCommand.campaignId, pendingCommand.clientCommandId);
       return Promise.resolve(false);
@@ -2428,13 +2642,19 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     writePendingCommand({ campaignId: campaignId, clientCommandId: commandId, playerText: state.pendingPlayerText });
     renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
     setStatus("The DM is thinking", "thinking");
-    return requestJson("/api/campaigns/" + campaignPath + "/commands", {
-      method: "POST",
-      body: JSON.stringify(Object.assign({
-        clientCommandId: commandId,
-        expectedCampaignVersion: expectedCampaignVersion
-      }, command))
+    // This tab is receiving this turn live; a session refresh in the meantime
+    // (e.g. a Clerk token refresh) must not treat it as an orphaned turn.
+    state.streamingCommandId = commandId;
+    return streamTurn("/api/campaigns/" + campaignPath + "/commands", Object.assign({
+      clientCommandId: commandId,
+      expectedCampaignVersion: expectedCampaignVersion
+    }, command), function (event) {
+      if (event.type === "narration") showLiveNarration(event.text);
+      else showLiveProgress(event);
+    }).finally(function () {
+      if (state.streamingCommandId === commandId) state.streamingCommandId = null;
     }).then(function (result) {
+      clearLiveNarration();
       if (result.response.status === 401) {
         clearPendingCommand(commandId, campaignId);
         state.pendingPlayerText = null;
@@ -2492,7 +2712,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       }
       state.pendingPlayerText = pending && pending.clientCommandId === commandId ? pending.playerText : null;
       renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-      setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+      setStatus("The DM is still working on your turn. Hang tight.", "thinking");
       showToast(error.message || "The turn is still reconciling.");
       return false;
     });
@@ -2512,30 +2732,50 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     return submitCommand({ playerText: playerText }, clientCommandId);
   }
 
-  function startQuickstart(quickstartId) {
-    if (!isSignedIn()) {
-      openAuth();
-      return Promise.resolve(false);
-    }
+  function startQuickstart(quickstartId, requestId) {
+    // The server session is the source of truth, not Clerk's client mirror:
+    // attempt the call and let a real 401 drive the sign-in dialog. This keeps
+    // Clerk's async session restore from misreading a signed-in player.
+    return launchQuickstart(quickstartId, requestId);
+  }
+
+  function launchQuickstart(quickstartId, requestId) {
     if (state.quickstartLoading) return Promise.resolve(false);
     state.quickstartLoading = quickstartId;
     renderQuickstarts();
-    setStatus("Setting the table", "thinking");
+    setStatus(quickstartId === "random" ? "Rolling up your character" : "Setting the table", "thinking");
     return requestJson("/api/quickstarts/" + encodeURIComponent(quickstartId), {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(requestId ? { requestId: requestId } : {}),
     }).then(function (result) {
+      if (result.response.status === 401) {
+        // The browser's Clerk session was not usable for this call — ask for
+        // sign-in once and auto-launch this story when it completes.
+        setPendingQuickstart(quickstartId, requestId);
+        setStatus(quickstartId === "random"
+          ? "Sign in once — your character hits the table right after."
+          : "Sign in to start this story — it launches right after.", "thinking");
+        openAuth();
+        return Promise.resolve(false);
+      }
       if (!result.response.ok) {
         var quickstartError = new Error(commandFailureMessage(result.data, result.response.status));
         quickstartError.reconcile = false;
         throw quickstartError;
       }
+      clearStoredQuickstart();
       state.managerOpen = false;
       state.createMode = false;
       renderSession(result.data);
-      setStatus("Your story is ready", "ready");
+      var rolledName = result.data.quickstart && result.data.quickstart.character;
+      setStatus(rolledName ? "You are " + rolledName + ". Your story is ready" : "Your story is ready", "ready");
+      // A committed starter scene is the opening: nothing to wait for, and the
+      // DM takes over from the player's first move.
+      if (result.data.starterScene) return true;
       if (result.data.autoOpen && state.session && !state.session.worldContext) {
-        setStatus("The DM is opening your first scene", "thinking");
+        setStatus(rolledName
+          ? "You are " + rolledName + ". The DM is opening the first scene"
+          : "The DM is opening your first scene", "thinking");
         return beginCampaignOpening(true).then(function (opened) {
           if (opened) setStatus("Your story is open", "ready");
           return opened;
@@ -2550,6 +2790,33 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       state.quickstartLoading = null;
       renderQuickstarts();
     });
+  }
+
+  function returnToCampaign() {
+    var playSection = $("#play");
+    if (playSection) playSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (state.session) {
+      state.managerOpen = false;
+      state.createMode = false;
+      renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
+      return Promise.resolve(true);
+    }
+    var campaignId = readActiveCampaignId() || (state.campaigns[0] && state.campaigns[0].id) || "";
+    return campaignId ? loadCampaign(campaignId) : playNow();
+  }
+
+  function playNow() {
+    var playSection = $("#play");
+    if (playSection) playSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    return startQuickstart("random");
+  }
+
+  function createCustomCharacter() {
+    state.managerOpen = true;
+    state.createMode = true;
+    renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
+    var manager = $("#campaign-manager");
+    if (manager) manager.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function createCampaign(event) {
@@ -2629,13 +2896,14 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (feedback) feedback.textContent = "The DM is opening the first situation…";
     setStatus("The DM is opening your first scene", "thinking");
     renderSession({ session: state.session, state: state.engineState, campaigns: state.campaigns, subscription: state.subscription, usage: state.usage });
-    return requestJson("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
-      method: "POST",
-      body: JSON.stringify({
-        clientCommandId: newCommandId(),
-        expectedCampaignVersion: state.session.version
-      })
+    return streamTurn("/api/campaigns/" + encodeURIComponent(campaignId) + "/opening", {
+      clientCommandId: newCommandId(),
+      expectedCampaignVersion: state.session.version
+    }, function (event) {
+      if (event.type === "narration") showLiveNarration(event.text);
+      else showLiveProgress(event);
     }).then(function (result) {
+      clearLiveNarration();
       if (result.response.status === 409 && result.data.session) {
         renderSession({ session: result.data.session, state: result.data.state, campaigns: state.campaigns, subscription: state.subscription });
         return false;
@@ -2645,6 +2913,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
       setStatus("Your story is open", "ready");
       return true;
     }).catch(function (error) {
+      clearLiveNarration();
       state.openingErrorCampaignId = campaignId;
       if (feedback) feedback.textContent = error.message + " You can try again.";
       setStatus(error.message, "error");
@@ -2911,10 +3180,15 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         state.createMode = false;
         renderSession({ session: result.data.campaign, state: result.data.state, campaigns: state.campaigns, subscription: result.data.subscription, usage: result.data.usage });
         var pendingForCampaign = readPendingCommand(campaignId);
-        if (pendingForCampaign && pendingForCampaign.status === "processing") {
+        if (pendingForCampaign && isStreamingHere(pendingForCampaign)) {
+          // Still this tab's live turn: show it as busy, but do not reconcile.
           state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
           renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
-          setStatus("This turn is still reconciling; keep this tab open.", "thinking");
+          setStatus("The DM is thinking", "thinking");
+        } else if (pendingForCampaign && pendingForCampaign.status === "processing") {
+          state.pendingPlayerText = pendingForCampaign.playerText || "Your submitted action";
+          renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+          setStatus("The DM is still working on your turn. Hang tight.", "thinking");
           startPendingReconciliation(campaignId, pendingForCampaign.clientCommandId);
         } else if (pendingForCampaign && pendingForCampaign.status === "uncertain") {
           setStatus("The previous turn may have committed; the table is current.", "error");
@@ -3066,12 +3340,16 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         $("#auth-fallback").textContent = "Add Clerk development keys to .env to enable sign in.";
         $("#auth-fallback").hidden = false;
       }
+      state.clerkReady = Promise.resolve();
       renderIdentity();
-      return Promise.resolve();
+      return state.clerkReady;
     }
     var domain = clerkDomainFromKey(key);
-    if (!domain) return Promise.reject(new Error("The Clerk publishable key is not valid."));
-    return loadScript("https://" + domain + "/npm/@clerk/ui@1/dist/ui.browser.js")
+    if (!domain) {
+      state.clerkReady = Promise.reject(new Error("The Clerk publishable key is not valid."));
+      return state.clerkReady;
+    }
+    state.clerkReady = loadScript("https://" + domain + "/npm/@clerk/ui@1/dist/ui.browser.js")
       .then(function () { return loadScript("https://" + domain + "/npm/@clerk/clerk-js@6/dist/clerk.browser.js", { "data-clerk-publishable-key": key }); })
       .then(function () {
         return window.Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
@@ -3095,14 +3373,23 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         if (typeof state.clerk.addListener === "function") {
           state.clerk.addListener(function () {
             renderIdentity();
+            // Clerk emits several events per sign-in flow; consume the pending
+            // story only once the session actually exists, otherwise events
+            // that fire mid-flow would drop the player's Play now click.
+            var pendingQuickstart = state.clerk.isSignedIn
+              ? takeInMemoryQuickstart() || takeStoredQuickstartOnce()
+              : null;
             if (state.clerk.isSignedIn) {
+              closeAuth();
               loadCharacterOptions();
               loadContentCatalog();
             } else {
               state.characterOptions = null;
               state.contentCatalog = null;
             }
-            refreshSession();
+            refreshSession().then(function () {
+              if (pendingQuickstart && state.clerk.isSignedIn) startQuickstart(pendingQuickstart.id, pendingQuickstart.requestId);
+            });
           });
         }
         renderIdentity();
@@ -3202,6 +3489,21 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
       });
     });
+    document.querySelectorAll('[data-action="play-now"]').forEach(function (button) {
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        // The header button reads "Return to campaign" once the player has
+        // one; it must reopen that campaign, not roll a new random story.
+        if (button.dataset.entry === "return") returnToCampaign();
+        else playNow();
+      });
+    });
+    document.querySelectorAll('[data-action="create-character"]').forEach(function (button) {
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        createCustomCharacter();
+      });
+    });
     document.querySelectorAll('[data-action="show-quickstarts"]').forEach(function (button) {
       button.addEventListener("click", function () {
         state.managerOpen = false;
@@ -3209,6 +3511,12 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
         renderOnboarding({ session: state.session, state: state.engineState, campaigns: state.campaigns });
         var quickstartPanel = $("#quickstart-panel");
         if (quickstartPanel) quickstartPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+    document.querySelectorAll('a[href="#membership"]').forEach(function (link) {
+      link.addEventListener("click", function () {
+        var details = $("#membership");
+        if (details) details.open = true;
       });
     });
     $("#campaign-list").addEventListener("click", function (event) {

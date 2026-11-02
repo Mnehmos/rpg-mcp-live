@@ -1,0 +1,37 @@
+name: Production readiness
+
+# Alert path for "players cannot play": fails (and GitHub emails the repo
+# owner) when production health reports ready=false — the DM provider key is
+# rejected or out of credit, the engine is unreachable, or several turns in a
+# row failed for system reasons. Deploy health alone stayed green through the
+# Sep 18 – Oct 22 2026 outage.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-readiness
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    name: Players can play
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check production readiness
+        env:
+          WEB_PRODUCTION_URL: ${{ vars.WEB_PRODUCTION_URL || 'https://play.questkeeperai.com' }}
+        run: |
+          set -euo pipefail
+          health=$(curl -fsS --max-time 30 "${WEB_PRODUCTION_URL%/}/api/health")
+          echo "$health" | jq '{ready, deployment: .deployment.commitSha, engine: .engine.status, provider, turns}'
+          if [ "$(echo "$health" | jq -r '.ready')" != "true" ]; then
+            echo "::error::Production is not ready for players: engine=$(echo "$health" | jq -r '.engine.status') provider=$(echo "$health" | jq -r '.provider.status') consecutiveTurnFailures=$(echo "$health" | jq -r '.turns.consecutiveFailures') lastFailure=$(echo "$health" | jq -r '.turns.lastFailureReason')"
+            exit 1
+          fi

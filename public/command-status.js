@@ -16,6 +16,13 @@ export function commandFailureType(payload, status) {
 
 export function commandFailureMessage(payload, status) {
   const type = commandFailureType(payload, status);
+  const reason = payload?.reason;
+  if ((reason === "provider_auth" || reason === "provider_credit") && payload?.commitStatus === "not_committed") {
+    return "The Dungeon Master is offline on our side right now. Your campaign is safe and this turn was not committed; try again later.";
+  }
+  if ((reason === "capacity" || type === "capacity") && payload?.commitStatus !== "uncertain" && type !== "uncertain") {
+    return "The table is busy right now. This turn was not committed; send it again in a moment.";
+  }
   if (type === "usage_limit") {
     if (payload?.period === "global_daily" || payload?.period === "global_monthly") {
       const period = payload.period === "global_daily" ? "today" : "this month";
@@ -36,4 +43,15 @@ export function commandFailureMessage(payload, status) {
   }
   if (payload && typeof payload.error === "string" && payload.error.trim()) return payload.error;
   return "The table could not confirm this turn. Your campaign is protected; check the table status before retrying.";
+}
+
+/**
+ * The HTTP status a streamed failure stands for, matching what the buffered
+ * route sends: an uncertain turn always goes to reconciliation (502), a clean
+ * quota or capacity refusal is a 429, anything else a 502.
+ */
+export function streamedFailureStatus(envelope) {
+  if (envelope?.commitStatus === "uncertain" || envelope?.failureType === "uncertain") return 502;
+  if (envelope?.failureType === "usage_limit" || envelope?.failureType === "capacity") return 429;
+  return 502;
 }

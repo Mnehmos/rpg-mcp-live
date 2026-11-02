@@ -11,14 +11,13 @@ import {
   handleStripeEvent,
   reconcileSubscriptionByEmail,
   reconcileStoredSubscription,
+  subscriptionNeedsRefresh,
   resolveCheckoutGuard,
   syncCompletedCheckoutSession,
   type EmailSubscriptionReconciliation,
 } from "./billing.js";
 import { config } from "./config.js";
 
-const REFERENCE_DM_NOT_COMMITTED_MESSAGE =
-  "The DM provider did not return a result; no game state was committed. Your action is safe to retry.";
 import { deploymentIdentity } from "./deployment-identity.js";
 import { engineCampaignCreateSchema, engineCampaignDeleteSchema, engineCharacterDetailsSchema, engineOpeningRequestSchema } from "./engine-contracts.js";
 import { rollAbilityScoreDraft } from "./engine-domain.js";
@@ -36,18 +35,16 @@ import { contentSecurityPolicy } from "./security-headers.js";
 import { characterOptionPolicy } from "./character-option-policy.js";
 import { ReferenceEngineClient } from "./reference-engine-client.js";
 import { ReferenceEngineStore } from "./reference-engine-store.js";
-import { LlmUsageLimitError, LlmUsageStore } from "./llm-usage.js";
+import { LlmUsageStore } from "./llm-usage.js";
+import { AbuseBlockedError, AbuseGuard, AbuseRateLimitError } from "./abuse-guard.js";
+import { ProviderGate } from "./provider-gate.js";
 import { ReferenceEngineAdapter, ReferenceEngineNotRoutedError, ReferenceEngineUnsupportedError } from "./reference-engine-adapter.js";
 import { ReferenceEngineToolCatalog } from "./reference-engine-tools.js";
-import { getQuickstartPreset, listQuickstartPresets } from "./quickstarts.js";
-import {
-  ReferenceDmCommandAlreadyFailedError,
-  ReferenceDmCommandIdReuseError,
-  ReferenceDmCommandInProgressError,
-  ReferenceDmProviderUnavailableError,
-  ReferenceDmVersionConflictError,
-  ReferenceDungeonMaster,
-} from "./reference-engine-dm.js";
+import { getQuickstartPreset, listQuickstartPresets, pickRandomQuickstartPreset } from "./quickstarts.js";
+import { ReferenceDmVersionConflictError, ReferenceDungeonMaster } from "./reference-engine-dm.js";
+import { turnCompletedLogLine } from "./turn-log.js";
+import { REFERENCE_DM_NOT_COMMITTED_MESSAGE, TurnHealth, turnFailure, type TurnFailure } from "./turn-failure.js";
+import { getStarterScene } from "./starter-scenes.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -57,6 +54,15 @@ const store = new GameStore(config.databasePath);
 const stripe = createStripeClient();
 const referenceEngineStore = new ReferenceEngineStore(store.getRawDb());
 const llmUsageStore = new LlmUsageStore(store.getRawDb(), config.llmUsage);
+const turnHealth = new TurnHealth();
+/**
+ * Shapes concurrent turns into a bounded line of upstream calls. Without it a
+ * traffic spike fans out one provider request per player and the shared pool
+ * answers the burst with 429s.
+ */
+const providerGate = new ProviderGate(config.providerGate);
+/** Burst limits, signup clustering, and the chargeback block list. */
+const abuseGuard = new AbuseGuard(store.getRawDb(), config.abuse);
 if (!config.referenceEngineConfigured) {
   throw new Error("REFERENCE_ENGINE_URL and REFERENCE_ENGINE_TOKEN are required; the Lantern engine is not wired.");
 }
@@ -84,10 +90,10 @@ const referenceDungeonMaster = config.openRouterConfigured
         baseUrl: config.openRouterBaseUrl,
         model: config.openRouterModel,
         reasoningEffort: config.openRouterReasoningEffort,
-        maxTokens: config.openRouterMaxTokens,
         timeoutMs: 60_000,
-        turnTimeoutMs: config.referenceDmTimeoutMs,
         usage: llmUsageStore,
+        fallbackModel: config.openRouterFallbackModel || undefined,
+        gate: providerGate,
       }
     )
   : null;
@@ -133,6 +139,8 @@ const commandRequestSchema = z
     expectedCampaignVersion: z.number().int().nonnegative(),
     action: gameActionSchema.optional(),
     playerText: z.string().trim().min(1).max(2_000).optional(),
+    /** Stream turn progress as SSE lines instead of buffering the whole reply. */
+    stream: z.boolean().optional(),
   })
   .refine((value) => (value.action !== undefined) !== (value.playerText !== undefined), {
     message: "Send exactly one of action or playerText.",
@@ -256,6 +264,31 @@ function sendAppPage(_request: Request, response: Response): void {
   response.sendFile("index.html", { root: publicDirectory });
 }
 
+
+/**
+ * Streamed turns must answer failures on the same wire, with the same
+ * failureType taxonomy the buffered routes return, so the client renders the
+ * accurate message and retry semantics. Every streamed failure is logged —
+ * the SSE error event alone was invisible to server-side debugging.
+ */
+function classifyTurnFailure(error: unknown): TurnFailure {
+  const failure = turnFailure(error);
+  turnHealth.recordFailure(failure);
+  console.error(JSON.stringify({
+    event: "streamed_turn_failed",
+    reason: failure.reason,
+    failureType: failure.body.failureType,
+    commitStatus: failure.commitStatus,
+    message: failure.body.error,
+    detail: error instanceof Error ? error.message : String(error),
+    phase: failure.body.phase,
+    toolRounds: failure.body.toolRounds,
+    providerCalls: failure.body.providerCalls,
+    toolCallNames: failure.body.toolCallNames,
+  }));
+  return failure;
+}
+
 async function sendCampaignCommand(
   _request: Request,
   userId: string,
@@ -280,113 +313,95 @@ async function sendCampaignCommand(
     return;
   }
 
+  /**
+   * Abuse admission runs before any engine or provider work, so a burst or a
+   * suspended account costs one indexed row read rather than a provider call.
+   * Nothing has been committed at this point, so both refusals are cleanly
+   * not-committed and safe for the client to surface as-is.
+   */
+  try {
+    abuseGuard.admitTurn(userId);
+  } catch (error) {
+    if (error instanceof AbuseRateLimitError) {
+      response
+        .status(429)
+        .set("retry-after", String(Math.ceil(error.retryAfterMs / 1000)))
+        .json({
+          code: error.code,
+          failureType: "rate_limited",
+          retryable: true,
+          stateChanged: "not_committed",
+          error: error.message,
+          retryAfterMs: error.retryAfterMs,
+        });
+      return;
+    }
+    if (error instanceof AbuseBlockedError) {
+      response.status(403).json({
+        code: error.code,
+        failureType: "account_blocked",
+        retryable: false,
+        stateChanged: "not_committed",
+        error: error.message,
+        reason: error.reason,
+      });
+      return;
+    }
+    throw error;
+  }
+
   const playerText = parsed.data.playerText
     ?? `The player chose the ${parsed.data.action} action.`;
+  if (parsed.data.stream) {
+    /**
+     * Streamed command: same contract as the streamed opening — progress and
+     * narration deltas are cosmetic SSE events; the authoritative result (or
+     * an error event) closes the wire.
+     */
+    response.status(200).set({
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    }).flushHeaders();
+    const send = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const startedAt = Date.now();
+    try {
+      const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
+        clientCommandId: parsed.data.clientCommandId,
+        expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+        onProgress: send,
+      });
+      const usage = llmUsageStore.getSummary(userId);
+      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage });
+      console.log(turnCompletedLogLine("turn", userId, usage.plan, result, Date.now() - startedAt, true));
+      turnHealth.recordSuccess();
+    } catch (error) {
+      const failure = classifyTurnFailure(error);
+      send({ type: "error", ...failure.body });
+    }
+    response.end();
+    return;
+  }
+  const startedAt = Date.now();
   try {
     const result = await referenceDungeonMaster.resolveTurn(userId, userId, campaignId, playerText, {
       clientCommandId: parsed.data.clientCommandId,
       expectedCampaignVersion: parsed.data.expectedCampaignVersion,
     });
-    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    const usage = llmUsageStore.getSummary(userId);
+    response.json({ ...result, subscription: store.getSubscription(userId), usage });
+    console.log(turnCompletedLogLine("turn", userId, usage.plan, result, Date.now() - startedAt, false));
+    turnHealth.recordSuccess();
   } catch (error) {
-    if (error instanceof ReferenceEngineNotRoutedError) {
-      sendReferenceEngineError(response, error);
-      return;
-    }
     if (error instanceof ReferenceDmVersionConflictError) {
       const current = await referenceEngineAdapter.getCampaign(userId, userId, campaignId);
       response.status(409).json({
-        code: "stale_version",
-        error: "The campaign changed before this turn started.",
+        ...turnFailure(error).body,
         session: current.campaign,
       });
       return;
     }
-    if (error instanceof ReferenceDmCommandInProgressError) {
-      response.status(409).json({ code: "command_conflict", error: error.message });
-      return;
-    }
-    if (error instanceof ReferenceDmCommandIdReuseError) {
-      response.status(409).json({ code: "command_id_reuse", error: error.message });
-      return;
-    }
-    if (error instanceof ReferenceDmCommandAlreadyFailedError) {
-      const commitStatus = error.details?.commitStatus;
-      response.status(502).json({
-        code: "reference_dm_unavailable",
-        failureType: commitStatus === "not_committed" ? "not_committed" : "uncertain",
-        retryable: commitStatus === "not_committed",
-        stateChanged: commitStatus === "not_committed" ? "not_committed" : "unknown",
-        error: commitStatus === "not_committed"
-          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
-          : "That turn already has a recorded failure. The table may have changed; refresh before continuing.",
-        ...(error.details ? {
-          correlationId: error.details.correlationId,
-          commitStatus: error.details.commitStatus,
-          providerCalls: error.details.providerCalls ?? 0,
-          toolRounds: error.details.toolRounds,
-          activatedTools: error.details.activatedTools ?? [],
-          toolCallNames: error.details.toolCallNames,
-          acceptedToolCalls: error.details.acceptedToolCalls,
-          rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
-        } : {}),
-        usage: llmUsageStore.getCommandUsage(userId, campaignId, parsed.data.clientCommandId),
-      });
-      return;
-    }
-    const usageError = error instanceof LlmUsageLimitError
-      ? error
-      : error instanceof ReferenceDmProviderUnavailableError && error.cause instanceof LlmUsageLimitError
-        ? error.cause
-        : null;
-    if (usageError) {
-      response.status(429).json({
-        code: usageError.code,
-        failureType: "usage_limit",
-        retryable: false,
-        stateChanged: "not_committed",
-        error: usageError.message,
-        period: usageError.period,
-        limitMicros: usageError.limit,
-        requestedMicros: usageError.requested,
-        usage: llmUsageStore.getSummary(userId),
-      });
-      return;
-    }
-    if (error instanceof ReferenceDmProviderUnavailableError) {
-      console.error(JSON.stringify({
-        event: "reference_dm_turn_failed",
-        correlationId: error.details.correlationId,
-        commitStatus: error.details.commitStatus,
-        phase: error.details.phase,
-        providerCalls: error.details.providerCalls ?? 0,
-        toolRounds: error.details.toolRounds,
-        activatedTools: error.details.activatedTools ?? [],
-        toolCallNames: error.details.toolCallNames,
-        acceptedToolCalls: error.details.acceptedToolCalls,
-        rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
-      }));
-      response.status(502).json({
-        code: "reference_dm_unavailable",
-        failureType: error.details.commitStatus === "not_committed" ? "not_committed" : "uncertain",
-        retryable: error.details.commitStatus === "not_committed",
-        stateChanged: error.details.commitStatus === "not_committed" ? "not_committed" : "unknown",
-        error: error.details.commitStatus === "not_committed"
-          ? REFERENCE_DM_NOT_COMMITTED_MESSAGE
-          : "The reference-engine DM stopped after a state change; refresh the table before continuing.",
-        correlationId: error.details.correlationId,
-        commitStatus: error.details.commitStatus,
-        providerCalls: error.details.providerCalls ?? 0,
-        toolRounds: error.details.toolRounds,
-        activatedTools: error.details.activatedTools ?? [],
-        toolCallNames: error.details.toolCallNames,
-        acceptedToolCalls: error.details.acceptedToolCalls,
-        rejectedToolCalls: error.details.rejectedToolCalls ?? 0,
-        usage: llmUsageStore.getCommandUsage(userId, campaignId, parsed.data.clientCommandId),
-      });
-      return;
-    }
-    sendReferenceEngineError(response, error);
+    sendTurnFailure(response, error, userId, campaignId, parsed.data.clientCommandId);
   }
 }
 
@@ -411,7 +426,57 @@ function sendReferenceEngineError(response: Response, error: unknown): void {
     });
 }
 
+/** One envelope for every non-streamed opening and turn failure (see turn-failure.ts). */
+function sendTurnFailure(response: Response, error: unknown, userId: string, campaignId: string, clientCommandId: string): void {
+  const failure = turnFailure(error);
+  turnHealth.recordFailure(failure);
+  if (failure.systemFault) {
+    console.error(JSON.stringify({ event: "reference_dm_turn_failed", reason: failure.reason, commitStatus: failure.commitStatus, detail: error instanceof Error ? error.message : String(error), correlationId: failure.body.correlationId, phase: failure.body.phase }));
+  }
+  const usage = failure.reason === "usage_limit" || failure.reason === "service_limit"
+    ? { usage: llmUsageStore.getSummary(userId) }
+    : failure.reason === "already_failed" || failure.body.code === "reference_dm_unavailable"
+      ? { usage: llmUsageStore.getCommandUsage(userId, campaignId, clientCommandId) }
+      : {};
+  response.status(failure.status).json({ ...failure.body, ...usage });
+}
+
+/**
+ * Provider readiness, not just configuration: the Sep 18 outage (expired key)
+ * stayed green for five weeks because health only checked that a key was set.
+ * OpenRouter's key endpoint costs no tokens; the answer is cached briefly.
+ */
+const PROVIDER_CHECK_TTL_MS = 5 * 60 * 1000;
+const READINESS_FAILURE_THRESHOLD = 3;
+let providerCheck: { at: number; result: Record<string, unknown> } | null = null;
+
+async function providerReadiness(): Promise<Record<string, unknown>> {
+  if (!config.openRouterApiKey) return { status: "unconfigured" };
+  if (providerCheck && Date.now() - providerCheck.at < PROVIDER_CHECK_TTL_MS) return providerCheck.result;
+  let result: Record<string, unknown>;
+  try {
+    const keyResponse = await fetch(`${config.openRouterBaseUrl}/key`, {
+      headers: { authorization: `Bearer ${config.openRouterApiKey}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!keyResponse.ok) {
+      result = { status: keyResponse.status === 401 || keyResponse.status === 403 ? "auth_failed" : "error", httpStatus: keyResponse.status };
+    } else {
+      const body = (await keyResponse.json()) as { data?: { limit_remaining?: number | null } };
+      const remaining = body.data?.limit_remaining ?? null;
+      result = { status: remaining !== null && remaining <= 0 ? "no_credit" : "ok", limitRemainingUsd: remaining };
+    }
+  } catch (error) {
+    result = { status: "unreachable", error: error instanceof Error ? error.message : String(error) };
+  }
+  result.checkedAt = new Date().toISOString();
+  providerCheck = { at: Date.now(), result };
+  return result;
+}
+
 app.get("/api/health", async (_request, response) => {
+  const provider = await providerReadiness();
+  const turns = turnHealth.snapshot();
   let engine: Record<string, unknown>;
   try {
     engine = await referenceEngineClient.health();
@@ -433,6 +498,10 @@ app.get("/api/health", async (_request, response) => {
       referenceEngine: engine.status === "ok",
     },
     engine,
+    provider,
+    turns,
+    // "status" stays "ok" for the deploy verifiers; "ready" is whether a player can play right now.
+    ready: engine.status === "ok" && provider.status === "ok" && turns.consecutiveFailures < READINESS_FAILURE_THRESHOLD,
   });
 });
 
@@ -475,7 +544,7 @@ app.post(
       return;
     }
     try {
-      await handleStripeEvent(event, store, stripe);
+      await handleStripeEvent(event, store, stripe, abuseGuard);
       response.json({ received: true });
     } catch (error) {
       console.error("Stripe webhook processing failed", error);
@@ -518,7 +587,13 @@ async function reconcileLegacySubscription(
   const subscription = store.getSubscription(userId);
   if (!stripe) return "not_needed";
   if (subscription?.stripeSubscriptionId) {
-    if (subscription.status !== "checkout_complete") return "not_needed";
+    const periodEnded = subscriptionNeedsRefresh(subscription);
+    if (subscription.status !== "checkout_complete" && !periodEnded) return "not_needed";
+    if (periodEnded) {
+      const checkedAt = subscriptionRecoveryCheckedAt.get(userId) ?? 0;
+      if (!force && Date.now() - checkedAt < subscriptionRecoveryTtlMs) return "not_needed";
+      subscriptionRecoveryCheckedAt.set(userId, Date.now());
+    }
     return await reconcileStoredSubscription(stripe, store, userId) ? "linked" : "failed";
   }
   if (!clerkClient) return "failed";
@@ -688,46 +763,118 @@ app.post("/api/campaigns", async (request, response) => {
   }
 });
 
+/** A claim older than this belongs to a request that died; a replay may take it over. */
+const QUICKSTART_CLAIM_STALE_MS = 2 * 60 * 1000;
+
+/**
+ * Commit the preset's hand-written first scene (audit R01) so the player is
+ * at the table before any model call. Best effort: on failure the page falls
+ * back to the model-authored opening, exactly as before.
+ */
+async function commitQuickstartStarter(userId: string, campaignId: string, presetId: string): Promise<boolean> {
+  const starter = getStarterScene(presetId);
+  if (!starter) return false;
+  if (referenceEngineStore.getLogMessages(userId, campaignId).some((entry) => entry.starter)) return true;
+  try {
+    const committed = await referenceEngineAdapter.commitStarterScene(userId, campaignId, starter);
+    if (!committed) console.error(JSON.stringify({ event: "starter_scene_refused", campaignId, presetId }));
+    return committed;
+  } catch (error) {
+    console.error(JSON.stringify({ event: "starter_scene_failed", campaignId, presetId, detail: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+}
+
+function quickstartRequestId(body: unknown): string | null {
+  const value = body && typeof body === "object" ? (body as { requestId?: unknown }).requestId : undefined;
+  return typeof value === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : null;
+}
+
 app.post("/api/quickstarts/:quickstartId", async (request, response) => {
   const userId = requireUser(request, response);
   if (!userId) return;
-  const preset = getQuickstartPreset(request.params.quickstartId);
+  const preset =
+    request.params.quickstartId === "random"
+      ? pickRandomQuickstartPreset()
+      : getQuickstartPreset(request.params.quickstartId);
   if (!preset) {
     response.status(404).json({ code: "quickstart_not_found", error: "That quickstart is not available." });
     return;
   }
+  // A Play now intent can be replayed after sign-up, a reload, or from a
+  // second tab. The request id is claimed before anything is created, so a
+  // replay returns or resumes the first attempt instead of making another.
+  const requestId = quickstartRequestId(request.body);
+  const claim = requestId ? store.claimQuickstartRequest(userId, requestId, QUICKSTART_CLAIM_STALE_MS) : null;
+  if (claim?.state === "in_progress") {
+    response.status(409).json({
+      code: "quickstart_in_progress",
+      failureType: "quickstart_in_progress",
+      retryable: true,
+      error: "Your story is already being set up. It will open in a moment.",
+    });
+    return;
+  }
+  const releaseClaim = () => { if (requestId) store.releaseQuickstartRequest(userId, requestId); };
 
   try {
-    const created = await referenceEngineAdapter.createCampaign(userId, userId, preset.campaign);
-    const character = await referenceEngineAdapter.executeToolCall(userId, userId, created.campaign.id, {
+    const prior = claim?.campaignId
+      ? await referenceEngineAdapter.getCampaign(userId, userId, claim.campaignId).catch(() => null)
+      : null;
+    const resumedPreset = (prior && claim?.presetId && getQuickstartPreset(claim.presetId)) || preset;
+    if (prior && claim?.state === "done") {
+      response.status(200).json({
+        quickstart: { id: resumedPreset.id, title: resumedPreset.title, character: resumedPreset.character.name },
+        session: prior.campaign,
+        state: null,
+        campaign: prior.campaign,
+        campaigns: await listAllCampaigns(userId),
+        autoOpen: true,
+        starterScene: referenceEngineStore.getLogMessages(userId, prior.campaign.id).some((entry) => Boolean(entry.starter)),
+        replayed: true,
+        subscription: store.getSubscription(userId),
+        usage: llmUsageStore.getSummary(userId),
+      });
+      return;
+    }
+    const campaign = prior
+      ? prior.campaign
+      : (await referenceEngineAdapter.createCampaign(userId, userId, resumedPreset.campaign)).campaign;
+    if (requestId && !prior) store.attachQuickstartCampaign(userId, requestId, campaign.id, resumedPreset.id);
+    const character = await referenceEngineAdapter.executeToolCall(userId, userId, campaign.id, {
       clientCommandId: randomUUID(),
-      expectedCampaignVersion: created.campaign.version,
+      expectedCampaignVersion: campaign.version,
       toolName: "character_create",
-      arguments: preset.character,
+      arguments: resumedPreset.character,
     });
     if (!character.accepted) {
+      releaseClaim();
       response.status(502).json({
         code: "quickstart_setup_failed",
         failureType: "quickstart_setup_failed",
-        retryable: false,
+        retryable: Boolean(requestId),
         stateChanged: "campaign_created",
-        campaignId: created.campaign.id,
+        campaignId: campaign.id,
         error: character.message || "The quickstart character could not be placed in the world.",
       });
       return;
     }
-    const result = await referenceEngineAdapter.getCampaign(userId, userId, created.campaign.id);
+    const starterScene = await commitQuickstartStarter(userId, campaign.id, resumedPreset.id);
+    if (requestId) store.completeQuickstartRequest(userId, requestId);
+    const result = await referenceEngineAdapter.getCampaign(userId, userId, campaign.id);
     response.status(201).json({
-      quickstart: { id: preset.id, title: preset.title },
+      quickstart: { id: resumedPreset.id, title: resumedPreset.title, character: resumedPreset.character.name },
       session: result.campaign,
       state: null,
       campaign: result.campaign,
       campaigns: await listAllCampaigns(userId),
       autoOpen: true,
+      starterScene,
       subscription: store.getSubscription(userId),
       usage: llmUsageStore.getSummary(userId),
     });
   } catch (error) {
+    releaseClaim();
     sendReferenceEngineError(response, error);
   }
 });
@@ -962,6 +1109,44 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
     response.status(503).json({ code: "reference_dm_unavailable", error: "The reference-engine DM is not configured." });
     return;
   }
+  if (parsed.data.stream) {
+    /**
+     * Streamed opening: progress and narration deltas go out as SSE lines as
+     * they happen; the authoritative turn payload arrives as a final result
+     * event. Streamed narration is cosmetic — nothing is committed until the
+     * result event, and any failure becomes an error event on the same wire.
+     */
+    response.status(200).set({
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    }).flushHeaders();
+    const send = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const startedAt = Date.now();
+    try {
+      const result = await referenceDungeonMaster.resolveTurn(
+        userId,
+        userId,
+        request.params.campaignId,
+        "Open the first situation and establish the campaign's opening scene.",
+        {
+          clientCommandId: parsed.data.clientCommandId,
+          expectedCampaignVersion: parsed.data.expectedCampaignVersion,
+          onProgress: send,
+        },
+      );
+      const usage = llmUsageStore.getSummary(userId);
+      send({ type: "result", ...result, subscription: store.getSubscription(userId), usage });
+      console.log(turnCompletedLogLine("opening", userId, usage.plan, result, Date.now() - startedAt, true));
+      turnHealth.recordSuccess();
+    } catch (error) {
+      const failure = classifyTurnFailure(error);
+      send({ type: "error", ...failure.body });
+    }
+    response.end();
+    return;
+  }
+  const startedAt = Date.now();
   try {
     const result = await referenceDungeonMaster.resolveTurn(
       userId,
@@ -973,9 +1158,12 @@ app.post("/api/campaigns/:campaignId/opening", async (request, response) => {
         expectedCampaignVersion: parsed.data.expectedCampaignVersion,
       }
     );
-    response.json({ ...result, subscription: store.getSubscription(userId), usage: llmUsageStore.getSummary(userId) });
+    const usage = llmUsageStore.getSummary(userId);
+    response.json({ ...result, subscription: store.getSubscription(userId), usage });
+    console.log(turnCompletedLogLine("opening", userId, usage.plan, result, Date.now() - startedAt, false));
+    turnHealth.recordSuccess();
   } catch (error) {
-    sendReferenceEngineError(response, error);
+    sendTurnFailure(response, error, userId, request.params.campaignId, parsed.data.clientCommandId);
   }
 });
 

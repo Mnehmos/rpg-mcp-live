@@ -2,7 +2,7 @@
 
 RPG MCP Live is the Lantern Table product workspace: a browser game where one player describes what their character does and a server-authoritative engine resolves the result.
 
-This repository is the new hosted Lantern boundary. The existing F:\Github\mnehmos.rpg.mcp repository is a reference engine and rules laboratory. It is not copied into this app, it is not the production backend, and it must not be routed into the Lantern player loop.
+This repository is the hosted Lantern boundary. The rules engine it calls is the `mnehmos.rpg.mcp` MCP server, deployed as its own Railway service and reached over the tenant-scoped MCP HTTP boundary (`/mcp`); the web service owns the browser surface and the DM tool loop, and never embeds engine code.
 
 ## Product boundary
 
@@ -10,31 +10,48 @@ This repository is the new hosted Lantern boundary. The existing F:\Github\mnehm
 Player browser
   -> Lantern web service (public Railway)
       -> Clerk-authenticated campaign API
-      -> private HTTP call
-          -> Lantern engine service (Railway private network)
+      -> OpenRouter DM tool loop
+      -> private MCP call
+          -> reference rules engine (Railway private network)
               -> tenant-scoped persistence
               -> structured authoritative events
-              -> OpenRouter DM tool loop
 ~~~
 
 The web page and engine are separate deployable services from the first hosted cut. KISS means two small services with one clear HTTP boundary: natural language and model output propose intent; the Lantern engine validates, resolves, and commits state.
 
 ## Local development
 
-Requirements: Node 20.18.x and npm.
+Requirements: Node 20.18.x and npm, plus a checkout of the reference engine
+(`mnehmos.rpg.mcp`) beside this one.
 
 ~~~powershell
 npm install
 Copy-Item .env.example .env
 
-# terminal 1
-npm run dev:engine
+# terminal 1 — the reference rules engine, from the mnehmos.rpg.mcp checkout.
+# RPG_MCP_TRANSPORT_TOKEN must match REFERENCE_ENGINE_TOKEN in .env, and
+# RPG_MCP_TENANT_SECRET must match REFERENCE_ENGINE_TENANT_SECRET: without the
+# tenant secret the engine refuses every tool that touches campaign state, and
+# character creation fails while campaign creation appears to succeed.
+$env:RPG_MCP_TRANSPORT_TOKEN = "lantern-dev-engine-secret"
+$env:RPG_MCP_TENANT_SECRET = "lantern-dev-tenant-secret"
+$env:PORT = "3100"
+npx tsx src/server/index.ts --http
 
-# terminal 2
+# terminal 2 — the web service, from this checkout
 npm run dev:web
 ~~~
 
-Open http://localhost:3000. The web service calls the engine at http://localhost:3100. With the example settings, the web server uses an explicit local player identity so the shell can be exercised before Clerk credentials are configured. This bypass is for local development only; set DEV_AUTH_BYPASS=false on Railway.
+Open http://localhost:3000 (or the PORT set in `.env`). `REFERENCE_ENGINE_URL`
+must point at the engine's MCP endpoint and therefore ends in `/mcp`
+(`http://localhost:3100/mcp`); the client appends nothing. With the example
+settings, the web server uses an explicit local player identity so the shell can
+be exercised before Clerk credentials are configured. This bypass is for local
+development only; set DEV_AUTH_BYPASS=false on Railway.
+
+The engine refuses to boot when a pre-split `rpg.db` still exists in its data
+directory. Point `RPG_DATA_DIR` at a scratch directory for local runs rather
+than deleting anything under `%APPDATA%\rpg-mcp`.
 
 Useful checks:
 
@@ -48,7 +65,7 @@ npm run build
 
 ## Integrations
 
-Clerk authenticates the browser session and supplies the account identity used for campaign ownership. Stripe Checkout and signed webhooks control the Player Pass entitlement. The private engine owns the OpenRouter connection and tool loop using deepseek/deepseek-v4-flash.
+Clerk authenticates the browser session and supplies the account identity used for campaign ownership. Stripe Checkout and signed webhooks control the Player Pass entitlement. The web service owns the OpenRouter connection and tool loop using deepseek/deepseek-v4-flash; the rules engine is model-free.
 
 Secrets belong in local ignored environment files or Railway secret variables. Never put Clerk secret keys, Stripe secret keys, webhook secrets, or OpenRouter keys in public browser code, Git, or a model-facing tool configuration.
 
