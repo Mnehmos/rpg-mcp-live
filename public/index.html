@@ -235,6 +235,12 @@
         </section>
 
         <div id="game-shell" class="game-shell" hidden>
+          <section id="scene-stage" class="scene-stage" aria-label="Scene view" hidden>
+            <div class="scene-stage-canvas" tabindex="0" aria-label="Scene view. Move with W A S D or the arrow keys, tap the floor to walk, drag to look around, and press E to act on whoever or whatever is in reach."></div>
+            <div class="scene-stage-hud"><span class="scene-stage-room"></span><span class="scene-stage-help">WASD or tap to move · drag to look · E to act</span></div>
+            <button class="scene-stage-prompt" type="button" hidden></button>
+            <p class="scene-stage-empty" hidden>The DM hasn't placed you in a room yet. Your first move will.</p>
+          </section>
           <aside class="player-panel" aria-label="Player dossier">
             <div class="player-panel-topline"><span>PLAYER DOSSIER</span><span id="phase-status">SANDBOX</span></div>
             <div class="campaign-dossier">

@@ -1987,6 +1987,53 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     integrationState.textContent = base + (usageParts.length ? " · " + usageParts.join(" · ") : "");
   }
 
+  // The 3D scene view (scene3d.js) loads on first use, so the landing page
+  // never downloads Three.js. It refetches the room only when the campaign
+  // version moves, and walking up to someone sends the move like a choice.
+  var sceneStageLoading = null;
+  var sceneStageKey = null;
+  function syncSceneStage(session) {
+    var root = $("#scene-stage");
+    var shell = $("#game-shell");
+    if (!root || !shell) return;
+    var active = Boolean(session && session.id && state.engineBackend === "reference");
+    if (!active) {
+      root.hidden = true;
+      shell.classList.remove("has-scene");
+      return;
+    }
+    root.hidden = false;
+    shell.classList.add("has-scene");
+    if (!sceneStageLoading) {
+      sceneStageLoading = import("./scene3d.js").then(function (module) {
+        return module.createSceneStage(root, {
+          onInteract: function (prompt) {
+            if (!state.pendingPlayerText) playText(prompt);
+          },
+        });
+      }).catch(function () {
+        root.hidden = true;
+        shell.classList.remove("has-scene");
+        return null;
+      });
+    }
+    sceneStageLoading.then(function (stage) {
+      if (stage) stage.setBusy(Boolean(state.pendingPlayerText));
+    });
+    var key = session.id + ":" + session.version;
+    if (key === sceneStageKey) return;
+    sceneStageKey = key;
+    var campaignId = session.id;
+    var heroName = session.character && session.character.name;
+    requestJson("/api/campaigns/" + encodeURIComponent(campaignId) + "/scene").then(function (result) {
+      if (!state.session || state.session.id !== campaignId) return null;
+      if (!result.response.ok) { sceneStageKey = null; return null; }
+      return sceneStageLoading.then(function (stage) {
+        if (stage) stage.setScene(result.data.scene, heroName);
+      });
+    }).catch(function () { sceneStageKey = null; });
+  }
+
   function renderSession(payload) {
     var session = payload && payload.session;
     var previousSessionId = state.session && state.session.id;
@@ -2042,6 +2089,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (choices) sessionActions = choices;
     state.suggestedActions = sessionActions;
     renderSuggestedActions(sessionActions, session, snapshot);
+    syncSceneStage(session);
 
     var entries = Array.isArray(session.log) ? session.log : [];
     var pairedEntries = pairToolDisclosureWithNarration(visibleLogEntries(entries));

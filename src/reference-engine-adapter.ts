@@ -541,6 +541,20 @@ export function serializePlayerDocket(data: {
   return lines.join("\n");
 }
 
+/** What the 3D scene view renders: the hero's room, its exits, and who is there. */
+export interface SceneView {
+  room: {
+    id: string;
+    name: string;
+    description: string;
+    biome: string;
+    atmospherics: string[];
+    lit: boolean;
+  } | null;
+  exits: Array<{ direction: string; description: string }>;
+  actors: Array<{ id: string; name: string; kind: "npc" | "enemy" }>;
+}
+
 export class ReferenceEngineAdapter {
   public constructor(
     private readonly client: ReferenceEngineClient,
@@ -619,6 +633,61 @@ export class ReferenceEngineAdapter {
       rows.map((row) => this.buildSessionView(accountId, accountId, row.campaignId, row.routing))
     );
     return views;
+  }
+
+  /**
+   * The hero's current room for the 3D scene view. Read-only engine reads:
+   * the room the engine has the character in, its visible exits, and who else
+   * is there (names resolved per id; anything that is not a character, such
+   * as an item, is skipped).
+   */
+  public async getSceneView(accountId: string, campaignId: string): Promise<SceneView> {
+    const routing = this.requireRouting(accountId, campaignId);
+    const empty: SceneView = { room: null, exits: [], actors: [] };
+    const heroId = routing.referenceCharacterId;
+    if (!heroId) return empty;
+    const tenant = this.tenantFor(accountId, campaignId, routing);
+    const look = await this.client.callTool("spatial_manage", { action: "look", observerId: heroId }, tenant);
+    const record = look.payload && typeof look.payload === "object" ? look.payload as Record<string, unknown> : {};
+    const data = (record.data && typeof record.data === "object" ? record.data : record) as {
+      success?: boolean;
+      roomId?: string;
+      roomName?: string;
+      description?: string;
+      biomeContext?: string;
+      atmospherics?: string[];
+      lightSource?: unknown;
+      exits?: Array<{ direction?: string; description?: string }>;
+      entities?: string[];
+    };
+    if (look.isError || data.success === false || !data.roomId) return empty;
+
+    const others = (data.entities ?? []).filter((id) => typeof id === "string" && id !== heroId);
+    const actors = (await Promise.all(others.map(async (id): Promise<SceneView["actors"][number] | null> => {
+      try {
+        const result = await this.client.callTool("character_manage", { action: "get", characterId: id }, tenant);
+        const character = result.payload as { name?: string; characterType?: string } | null;
+        if (result.isError || !character?.name) return null;
+        return { id, name: character.name, kind: character.characterType === "enemy" ? "enemy" : "npc" };
+      } catch {
+        return null;
+      }
+    }))).filter((actor): actor is SceneView["actors"][number] => actor !== null);
+
+    return {
+      room: {
+        id: data.roomId,
+        name: data.roomName ?? "Somewhere",
+        description: data.description ?? "",
+        biome: data.biomeContext ?? "dungeon",
+        atmospherics: Array.isArray(data.atmospherics) ? data.atmospherics : [],
+        lit: Boolean(data.lightSource),
+      },
+      exits: (data.exits ?? [])
+        .filter((exit) => typeof exit.direction === "string" && exit.direction)
+        .map((exit) => ({ direction: exit.direction!, description: exit.description ?? "" })),
+      actors,
+    };
   }
 
   public async getCampaign(
