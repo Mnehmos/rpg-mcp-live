@@ -21,6 +21,15 @@ export const SCENE_CHOICES_SYSTEM_PROMPT = [
   "Return only JSON: {\"choices\":[{\"label\":\"...\",\"prompt\":\"...\"}]}",
 ].join("\n");
 
+/** In session zero the DM is asking a question, so the choices are answers. */
+export const SESSION_ZERO_CHOICES_SYSTEM_PROMPT = [
+  "You write the choices at the foot of a choose-your-own-adventure page. Here the DM is running session zero: asking the player a question to build the campaign together before play.",
+  "Read the DM's latest question and offer 3 or 4 distinct answers the player might give. Make them specific and evocative, cover genuinely different directions, and build on what the player has already chosen.",
+  "label: 2 to 5 words the player taps (e.g. \"A drowned kingdom\").",
+  "prompt: one first-person sentence the player sends as their answer (e.g. \"I want the land to be a drowned kingdom where the old roads run under the sea.\").",
+  "Return only JSON: {\"choices\":[{\"label\":\"...\",\"prompt\":\"...\"}]}",
+].join("\n");
+
 /** Recent play gives the choices continuity; the latest narration is the page they belong to. */
 const RECENT_ENTRIES = 6;
 
@@ -28,6 +37,7 @@ export function buildSceneChoicesMessages(
   priorLog: StoredLogMessage[],
   playerText: string,
   narrationText: string,
+  sessionZero = false,
 ): Array<{ role: "system" | "user"; content: string }> {
   const recent = priorLog
     .filter((entry) => entry.kind === "player" || entry.kind === "narration")
@@ -40,7 +50,7 @@ export function buildSceneChoicesMessages(
     `DM (the scene to choose from): ${narrationText}`,
   ].join("\n");
   return [
-    { role: "system", content: SCENE_CHOICES_SYSTEM_PROMPT },
+    { role: "system", content: sessionZero ? SESSION_ZERO_CHOICES_SYSTEM_PROMPT : SCENE_CHOICES_SYSTEM_PROMPT },
     { role: "user", content: scene },
   ];
 }

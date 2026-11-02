@@ -80,6 +80,28 @@ const QUICKSTART_PRESETS: readonly QuickstartPreset[] = [
       abilityScores: { str: 8, dex: 14, con: 12, int: 15, wis: 13, cha: 10 },
     },
   },
+  {
+    id: "session-zero",
+    title: "Build a World Together",
+    tagline: "Session zero: your story, your world, your hero.",
+    description: "The DM walks you through tone, limits, and the world, then helps you make your hero before the first scene.",
+    campaign: {
+      name: "A World of Our Own",
+      premise: "A world the player and the DM build together in session zero.",
+      setting: "To be built together in session zero",
+      tone: "Chosen in session zero",
+    },
+    // A placeholder the DM reshapes (character_manage update) once the
+    // player decides who they are.
+    character: {
+      name: "Wanderer",
+      species: "human",
+      className: "fighter",
+      background: "Folk Hero",
+      alignment: "Neutral Good",
+      abilityScores: { str: 15, dex: 14, con: 13, int: 10, wis: 12, cha: 8 },
+    },
+  },
 ];
 
 export function listQuickstartPresets(): Array<Pick<QuickstartPreset, "id" | "title" | "tagline" | "description">> {
@@ -93,6 +115,8 @@ export function getQuickstartPreset(id: string): QuickstartPreset | null {
 // "Play now" asks for no story choice, so the table picks one. The pick stays
 // inside the tuned presets: each character is written for its campaign, and a
 // fully random species/class/name roll would break the opening scene.
+// Session zero is a conversation, not a story, so Play now never lands there.
 export function pickRandomQuickstartPreset(): QuickstartPreset {
-  return QUICKSTART_PRESETS[Math.floor(Math.random() * QUICKSTART_PRESETS.length)];
+  const stories = QUICKSTART_PRESETS.filter((preset) => preset.id !== "session-zero");
+  return stories[Math.floor(Math.random() * stories.length)];
 }

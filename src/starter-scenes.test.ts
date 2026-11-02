@@ -16,8 +16,9 @@ describe("starter scenes", () => {
       expect(starter!.room.baseDescription.length).toBeLessThanOrEqual(2000);
       expect(BIOMES).toContain(starter!.room.biomeContext);
       for (const atmospheric of starter!.room.atmospherics) expect(ATMOSPHERICS).toContain(atmospheric);
-      expect(starter!.narration).toMatch(/What do you do/);
-      expect(starter!.firstMoves).toHaveLength(3);
+      // Story starters end on a choice; session zero ends on its first question.
+      expect(starter!.narration).toMatch(starter!.sessionZero ? /\?$/ : /What do you do/);
+      expect(starter!.firstMoves.length).toBeGreaterThanOrEqual(3);
       for (const move of starter!.firstMoves) {
         expect(move.label.length).toBeGreaterThan(0);
         expect(move.prompt).toMatch(/^I /);

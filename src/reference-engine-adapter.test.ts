@@ -779,6 +779,23 @@ describe("ReferenceEngineAdapter", () => {
       const stateNote = store.getDocket("account-1", "campaign-1", "state");
       expect(stateNote).toContain("Room id: room-9");
       expect(stateNote).toContain("Shared scene committed: yes");
+      expect(JSON.parse(store.getRouting("account-1", "campaign-1")!.campaignProfileJson!)).not.toHaveProperty("sessionZero");
+    });
+
+    it("marks a session-zero welcome in the durable campaign profile, keeping the rest of it", async () => {
+      const store = routedStore();
+      const client = fakeClient({
+        "spatial_manage.generate": () => ({ roomId: "room-9" }),
+        "spatial_manage.move": () => ({ success: true }),
+        "scene_manage.set": () => ({ sceneId: "scene-3" }),
+      });
+      const adapter = new ReferenceEngineAdapter(client, store);
+
+      await expect(adapter.commitStarterScene("account-1", "campaign-1", { ...starter, sessionZero: true })).resolves.toBe(true);
+
+      expect(JSON.parse(store.getRouting("account-1", "campaign-1")!.campaignProfileJson!)).toEqual({
+        name: "Test", premise: "p", setting: "s", tone: "t", sessionZero: true,
+      });
     });
 
     it("stops at the first engine refusal and logs nothing", async () => {
