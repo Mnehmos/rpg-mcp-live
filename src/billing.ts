@@ -15,7 +15,7 @@ export function createStripeClient(): Stripe | null {
   if (!config.stripeSecretKey) return null;
 
   return new Stripe(config.stripeSecretKey, {
-    apiVersion: "2026-07-29.dahlia",
+    apiVersion: "2026-08-26.dahlia",
     maxNetworkRetries: 2,
   });
 }
