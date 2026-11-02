@@ -1210,8 +1210,13 @@ export class ReferenceDungeonMaster {
     const usageStore = this.openRouter.usage;
     const messages = buildSceneChoicesMessages(priorLog, playerText, narrationText);
     const estimatedPromptTokens = Math.ceil(estimateLlmTokens(messages) * 1.25);
+    // Same order as chatCompletionOnce: provider slot, then the reservation.
+    let slot: Awaited<ReturnType<NonNullable<typeof this.openRouter.gate>["acquire"]>> | null = null;
     let reservation: LlmUsageReservation | null = null;
     try {
+      slot = this.openRouter.gate
+        ? await this.openRouter.gate.acquire(accountId, null, Math.min(MIN_RETRY_REQUEST_BUDGET_MS, this.openRouter.timeoutMs))
+        : null;
       reservation = usageStore
         ? usageStore.reserve({
           userId: accountId,
@@ -1259,6 +1264,8 @@ export class ReferenceDungeonMaster {
       if (reservation) usageStore!.release(reservation.id);
       console.warn(`[scene-choices] skipped for campaign=${campaignId}: ${error instanceof Error ? error.message : String(error)}`);
       return [];
+    } finally {
+      slot?.release();
     }
   }
 
