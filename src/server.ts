@@ -559,6 +559,9 @@ app.use(express.json({ limit: "64kb" }));
 app.get("/favicon.ico", (_request, response) => {
   response.type("image/svg+xml").sendFile("favicon.svg", { root: publicDirectory });
 });
+// Three.js for the 3D scene view, served from our own origin (the CSP allows
+// scripts from 'self' only). Versioned by the pinned package, so it caches.
+app.use("/vendor/three", express.static(path.join(projectRoot, "node_modules", "three", "build"), { maxAge: "7d" }));
 app.use(express.static(publicDirectory, { extensions: ["html"] }));
 
 async function listAllCampaigns(userId: string) {
@@ -899,6 +902,16 @@ app.get("/api/campaigns/:campaignId", async (request, response) => {
       sendReferenceEngineError(response, error);
       return;
     }
+    sendReferenceEngineError(response, error);
+  }
+});
+
+app.get("/api/campaigns/:campaignId/scene", async (request, response) => {
+  const userId = requireUser(request, response);
+  if (!userId) return;
+  try {
+    response.json({ scene: await referenceEngineAdapter.getSceneView(userId, request.params.campaignId) });
+  } catch (error) {
     sendReferenceEngineError(response, error);
   }
 });
