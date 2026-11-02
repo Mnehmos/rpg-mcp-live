@@ -811,4 +811,52 @@ describe("ReferenceEngineAdapter", () => {
       expect(store.getLogMessages("account-1", "campaign-1").some((entry) => entry.starter)).toBe(false);
     });
   });
+
+  describe("getSceneView", () => {
+    function routedStore() {
+      const store = createStore();
+      store.setBackend("account-1", "campaign-1", "reference");
+      store.setReferenceIds("account-1", "campaign-1", { worldId: "world-1", partyId: "party-1", characterId: "char-1" });
+      return store;
+    }
+
+    it("returns the hero's room, its exits, and the named characters in it", async () => {
+      const store = routedStore();
+      const client = fakeClient({
+        "spatial_manage.look": (args) => {
+          expect(args.observerId).toBe("char-1");
+          return {
+            success: true,
+            roomId: "room-9",
+            roomName: "Brinewick Quay",
+            description: "A stone quay under fog.",
+            biomeContext: "coastal",
+            atmospherics: ["FOG"],
+            lightSource: null,
+            exits: [{ direction: "north", description: "The breakwater" }, { description: "no direction" }],
+            entities: ["char-1", "npc-1", "item-1"],
+          };
+        },
+        "character_manage.get": (args) => {
+          if (args.characterId === "item-1") throw new Error("Character not found");
+          return { id: args.characterId, name: "Marla Tull", characterType: "npc" };
+        },
+      });
+      const adapter = new ReferenceEngineAdapter(client, store);
+
+      await expect(adapter.getSceneView("account-1", "campaign-1")).resolves.toEqual({
+        room: { id: "room-9", name: "Brinewick Quay", description: "A stone quay under fog.", biome: "coastal", atmospherics: ["FOG"], lit: false },
+        exits: [{ direction: "north", description: "The breakwater" }],
+        actors: [{ id: "npc-1", name: "Marla Tull", kind: "npc" }],
+      });
+    });
+
+    it("returns no room when the hero has not been placed", async () => {
+      const store = routedStore();
+      const client = fakeClient({ "spatial_manage.look": () => ({ success: false, error: "Observer is not in any room." }) });
+      const adapter = new ReferenceEngineAdapter(client, store);
+
+      await expect(adapter.getSceneView("account-1", "campaign-1")).resolves.toEqual({ room: null, exits: [], actors: [] });
+    });
+  });
 });
