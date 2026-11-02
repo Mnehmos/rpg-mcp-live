@@ -813,6 +813,79 @@ data: [DONE]
     });
   });
 
+  it("offers choices read from the finished scene by the cheap choices model", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-choices-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      choicesModels: ["cheap-model", "cheaper-model"],
+    });
+
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      bodies.push(body);
+      return body.model === "cheap-model"
+        ? openRouterMessage('{"choices":[{"label":"Push the gate","prompt":"I put my shoulder to the gate."},{"label":"Listen first","prompt":"I press my ear to the gate."}]}')
+        : openRouterMessage("The gate creaks, but holds.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look at the gate.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    });
+
+    expect(bodies[1]).toMatchObject({ model: "cheap-model", models: ["cheap-model", "cheaper-model"], response_format: { type: "json_object" } });
+    expect(bodies[1]).not.toHaveProperty("tools");
+    expect(JSON.stringify(bodies[1].messages)).toContain("The gate creaks, but holds.");
+    expect(result.narration.suggestedActions).toEqual([
+      { id: "choice-1", label: "Push the gate", prompt: "I put my shoulder to the gate." },
+      { id: "choice-2", label: "Listen first", prompt: "I press my ear to the gate." },
+    ]);
+    const narration = store.getLogMessages("account-1", "campaign-1").find((entry) => entry.kind === "narration");
+    expect(narration?.choices).toEqual([
+      { label: "Push the gate", prompt: "I put my shoulder to the gate." },
+      { label: "Listen first", prompt: "I press my ear to the gate." },
+    ]);
+  });
+
+  it("still commits the turn when the choices model fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-choices-fail-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+      choicesModels: ["cheap-model"],
+    });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { model?: string };
+      return body.model === "cheap-model"
+        ? new Response("rate limited", { status: 429 })
+        : openRouterMessage("The gate creaks, but holds.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look at the gate.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    });
+
+    expect(result.narration).toMatchObject({ text: "The gate creaks, but holds.", suggestedActions: [] });
+    expect(store.getLogMessages("account-1", "campaign-1").find((entry) => entry.kind === "narration")).not.toHaveProperty("choices");
+  });
+
   it("records provider failures with a durable non-commit status", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-command-failure-"));
     const gameStore = new GameStore(join(directory, "game.db"));

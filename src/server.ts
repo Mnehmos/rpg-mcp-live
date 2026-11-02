@@ -45,6 +45,7 @@ import { ReferenceDmVersionConflictError, ReferenceDungeonMaster } from "./refer
 import { turnCompletedLogLine } from "./turn-log.js";
 import { REFERENCE_DM_NOT_COMMITTED_MESSAGE, TurnHealth, turnFailure, type TurnFailure } from "./turn-failure.js";
 import { getStarterScene } from "./starter-scenes.js";
+import { parseChoicesModels } from "./scene-choices.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(currentFile), "..");
@@ -93,6 +94,7 @@ const referenceDungeonMaster = config.openRouterConfigured
         timeoutMs: 60_000,
         usage: llmUsageStore,
         fallbackModel: config.openRouterFallbackModel || undefined,
+        choicesModels: parseChoicesModels(config.openRouterChoicesModels),
         gate: providerGate,
       }
     )

@@ -135,8 +135,8 @@ describe("player-facing branding", () => {
     expect(app).toContain("if (pendingForLoadedCampaign && isStreamingHere(pendingForLoadedCampaign))");
   });
 
-  it("shows a starter scene's own first moves and a type-anything hint before the first move", () => {
-    expect(app).toContain("var firstMoves = starterFirstMoves(session.log);");
-    expect(app).toContain("Type anything your character does or says, or pick a first move below.");
+  it("shows the latest page's choices and a type-anything hint", () => {
+    expect(app).toContain("var choices = sceneChoices(session.log);");
+    expect(app).toContain("Type anything your character does or says, or choose a path below.");
   });
 });

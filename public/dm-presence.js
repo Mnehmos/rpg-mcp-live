@@ -67,15 +67,19 @@ function isCampaignCreatedNotice(entry) {
 }
 
 /**
- * A quickstart's hand-written first moves, offered only while its starter
- * opening is still the latest thing in the log (before the player's first move).
+ * The choose-your-own-adventure choices under the latest page of the story:
+ * a quickstart's hand-written first moves, or the choices a cheap model read
+ * from the DM's latest narration. Offered only while that narration is still
+ * the latest thing in the log; once the player moves, they are spent.
  */
-export function starterFirstMoves(entries) {
+export function sceneChoices(entries) {
   var visible = visibleLogEntries(entries).filter(function (entry) { return entry.kind !== "system"; });
   var last = visible[visible.length - 1];
-  var moves = last && last.kind === "narration" && last.starter && Array.isArray(last.starter.firstMoves) ? last.starter.firstMoves : [];
+  if (!last || last.kind !== "narration") return null;
+  var moves = last.starter && Array.isArray(last.starter.firstMoves) ? last.starter.firstMoves
+    : Array.isArray(last.choices) ? last.choices : [];
   var normalized = moves.filter(function (move) { return move && move.label && move.prompt; }).map(function (move, index) {
-    return { id: "first-move-" + (index + 1), label: String(move.label), prompt: String(move.prompt) };
+    return { id: "choice-" + (index + 1), label: String(move.label), prompt: String(move.prompt) };
   });
   return normalized.length ? normalized : null;
 }

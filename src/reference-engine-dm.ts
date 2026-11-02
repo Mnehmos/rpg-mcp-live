@@ -31,6 +31,7 @@ import {
 } from "./llm-usage.js";
 import { sanitizeReleasedNarration } from "./narration-provenance.js";
 import { REPLAY_RESULT_CHARACTER_LIMIT, toolCallLogLine } from "./tool-call-log.js";
+import { buildSceneChoicesMessages, parseSceneChoices, type SceneChoice } from "./scene-choices.js";
 
 /**
  * ADR-H37 doctrine, applied to the ADR-H13 override: "the LLM calls the
@@ -94,7 +95,7 @@ export interface ReferenceTurnResult {
   campaignId: string;
   clientCommandId: string;
   campaignVersion: number;
-  narration: { text: string; proposedFacts: []; suggestedActions: [] };
+  narration: { text: string; proposedFacts: []; suggestedActions: Array<{ id: string } & SceneChoice> };
   narrationSource: "llm";
   toolDisclosure: EngineToolDisclosure | null;
   session: EngineSessionView;
@@ -230,6 +231,7 @@ const REFERENCE_COMMAND_LEASE_RENEW_MS = 60_000;
 const RETRY_JITTER_FRACTION = 0.5;
 /** Ledger estimate for an in-flight reservation; not sent to the provider. */
 const ESTIMATED_COMPLETION_TOKENS = 900;
+const SCENE_CHOICES_ESTIMATED_COMPLETION_TOKENS = 200;
 /**
  * Gate key for calls with no authenticated account (local development and
  * tooling). Grouping them under one key keeps unattributed traffic from
@@ -705,6 +707,12 @@ export class ReferenceDungeonMaster {
        */
       fallbackModel?: string;
       /**
+       * Cheap models (first preferred, the rest as OpenRouter fallbacks) that
+       * read each finished scene and offer choose-your-own-adventure choices.
+       * Absent or empty means turns carry no choices.
+       */
+      choicesModels?: string[];
+      /**
        * Bounds simultaneous upstream calls. Absent means unbounded, which is
        * only appropriate for tests and single-player local runs.
        */
@@ -1016,6 +1024,8 @@ export class ReferenceDungeonMaster {
       );
     }
 
+    const choices = await this.sceneChoices(accountId, campaignId, clientCommandId, priorLog, playerText, narrationText);
+
     try {
       if (authoredScene.roomId) {
         this.persistAuthoredSceneState(accountId, campaignId, authoredScene);
@@ -1034,7 +1044,13 @@ export class ReferenceDungeonMaster {
         ...(toolDisclosure
           ? [{ id: randomUUID(), kind: "tool" as const, text: "The DM consulted the game world.", createdAt: now, toolDisclosure }]
           : []),
-        { id: randomUUID(), kind: "narration", text: narrationText, createdAt: new Date().toISOString() },
+        {
+          id: randomUUID(),
+          kind: "narration",
+          text: narrationText,
+          createdAt: new Date().toISOString(),
+          ...(choices.length ? { choices } : {}),
+        },
       ];
       this.store.appendLogMessages(accountId, campaignId, logMessages);
 
@@ -1043,7 +1059,11 @@ export class ReferenceDungeonMaster {
         campaignId,
         clientCommandId,
         campaignVersion: version,
-        narration: { text: narrationText, proposedFacts: [], suggestedActions: [] },
+        narration: {
+          text: narrationText,
+          proposedFacts: [],
+          suggestedActions: choices.map((choice, index) => ({ id: `choice-${index + 1}`, ...choice })),
+        },
         narrationSource: "llm",
         toolDisclosure,
         session: campaign,
@@ -1169,6 +1189,76 @@ export class ReferenceDungeonMaster {
     } catch (error) {
       if (nestedReservation) this.openRouter.usage!.release(nestedReservation.id);
       throw error;
+    }
+  }
+
+  /**
+   * One cheap, tool-free call that reads the finished scene and returns
+   * choices for the player. Best effort: any failure means no choices, never
+   * a failed turn, since the narration is already written.
+   */
+  private async sceneChoices(
+    accountId: string,
+    campaignId: string,
+    clientCommandId: string,
+    priorLog: StoredLogMessage[],
+    playerText: string,
+    narrationText: string,
+  ): Promise<SceneChoice[]> {
+    const models = this.openRouter.choicesModels ?? [];
+    if (!models.length) return [];
+    const usageStore = this.openRouter.usage;
+    const messages = buildSceneChoicesMessages(priorLog, playerText, narrationText);
+    const estimatedPromptTokens = Math.ceil(estimateLlmTokens(messages) * 1.25);
+    let reservation: LlmUsageReservation | null = null;
+    try {
+      reservation = usageStore
+        ? usageStore.reserve({
+          userId: accountId,
+          campaignId,
+          clientCommandId,
+          source: "dm",
+          provider: "openrouter",
+          model: models[0],
+          estimatedPromptTokens,
+          estimatedCompletionTokens: SCENE_CHOICES_ESTIMATED_COMPLETION_TOKENS,
+          estimatedCostMicros: usageStore.estimateCostMicros(estimatedPromptTokens, SCENE_CHOICES_ESTIMATED_COMPLETION_TOKENS),
+          admittedTurn: true,
+        })
+        : null;
+      const response = await fetch(`${this.openRouter.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.openRouter.apiKey}` },
+        body: JSON.stringify({
+          model: models[0],
+          ...(models.length > 1 ? { models } : {}),
+          messages,
+          response_format: { type: "json_object" },
+          usage: { include: true },
+        }),
+        // Hang detection, as for the DM: a stalled provider costs the player
+        // their choices, not their turn.
+        signal: AbortSignal.timeout(this.openRouter.timeoutMs),
+      });
+      if (!response.ok) throw new Error(`status ${response.status}: ${(await response.text().catch(() => "")).slice(0, 300)}`);
+      const data = (await response.json()) as {
+        id?: string;
+        model?: string;
+        choices?: Array<{ message?: { content?: string | null } }>;
+        usage?: ChatCompletionUsageEnvelope;
+      };
+      const message = data.choices?.[0]?.message;
+      if (reservation) {
+        usageStore!.settle(reservation.id, buildCompletionUsage(data, message, usageStore!, reservation, data.model ?? models[0]));
+        reservation = null;
+      }
+      const choices = parseSceneChoices(message?.content);
+      console.log(`[scene-choices] campaign=${campaignId} model=${data.model ?? models[0]} choices=${choices.length}`);
+      return choices;
+    } catch (error) {
+      if (reservation) usageStore!.release(reservation.id);
+      console.warn(`[scene-choices] skipped for campaign=${campaignId}: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
     }
   }
 
