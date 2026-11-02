@@ -117,80 +117,38 @@ describe("ReferenceDungeonMaster", () => {
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("improvisation_manage with action stunt");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Do not ask the player to roll");
     expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("nonexistent roll_skill_check");
-    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("call activate_tools with the smallest set");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).toContain("Every RPG MCP capability is available on every round");
+    expect(REFERENCE_DM_SYSTEM_PROMPT).not.toContain("activate_tools");
   });
 
-  it("starts with a compact palette and lets the DM activate only the capabilities it chooses", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-palette-"));
+  it("offers every engine tool on every round in a stable order, with no activation step", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-all-tools-"));
     const gameStore = new GameStore(join(directory, "game.db"));
     const store = new ReferenceEngineStore(gameStore.getRawDb());
     setUpRoutedCampaign(store);
-    const client = fakeClient({ ...CHARACTER_FIXTURES });
+    const client = fakeClient({ ...CHARACTER_FIXTURES, "spatial_manage.generate": () => ({ roomId: "room-1" }) });
     const adapter = new ReferenceEngineAdapter(client, store);
-    const usage = new LlmUsageStore(gameStore.getRawDb(), {
-      ...config.llmUsage,
-      freeDailyCostMicros: 1_000_000,
-      freeMonthlyCostMicros: 1_000_000,
-    });
     const dm = new ReferenceDungeonMaster(
       client,
       store,
       fakeCatalog(["combat_action", "spatial_manage", "npc_manage"]),
       adapter,
-      {
-        apiKey: "key",
-        baseUrl: "https://openrouter.example/api/v1",
-        model: "test-model",
-        timeoutMs: 5000,
-        usage,
-      },
+      { apiKey: "key", baseUrl: "https://openrouter.example/api/v1", model: "test-model", timeoutMs: 5000 },
     );
     const requestBodies: Array<{ messages: Array<{ role: string; content: string | null }>; tools: Array<{ function: { name: string } }> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
       requestBodies.push(JSON.parse(init.body));
-      if (requestBodies.length === 1) {
-        return Response.json({
-          choices: [{ message: { content: null, tool_calls: [{
-            id: "activate-1",
-            type: "function",
-            function: {
-              name: "activate_tools",
-              arguments: JSON.stringify({ names: ["spatial_manage", "npc_manage"] }),
-            },
-          }] } }],
-          usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cost: 0.000001 },
-        });
-      }
-      return Response.json({
-        choices: [{ message: { content: "Mist gathers around the road ahead." } }],
-        usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cost: 0.000001 },
-      });
+      return requestBodies.length === 1
+        ? openRouterMessage(null, [{ id: "room", type: "function", function: { name: "spatial_manage", arguments: JSON.stringify({ action: "generate" }) } }])
+        : openRouterMessage("Mist gathers around the road ahead.");
     }));
 
-    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road into the mist.");
+    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road into the mist.");
 
-    expect(requestBodies[0]?.tools.map((tool) => tool.function.name)).toEqual([
-      "activate_tools",
-      "spatial_manage",
-      "read_docket",
-      "write_docket",
-    ]);
-    expect(requestBodies[1]?.tools.map((tool) => tool.function.name)).toEqual([
-      "activate_tools",
-      "spatial_manage",
-      "npc_manage",
-      "read_docket",
-      "write_docket",
-    ]);
-    expect(requestBodies[0]?.messages.some((message) =>
-      message.role === "system"
-      && message.content?.includes("RPG MCP CAPABILITY DIRECTORY")
-      && message.content.includes("combat_action")
-      && message.content.includes("spatial_manage")
-      && message.content.includes("npc_manage")
-    )).toBe(true);
-    expect(result.toolDisclosure).toBeNull();
-    expect(result.turnUsage).toMatchObject({ calls: 2, totalTokens: 220, costMicros: 2 });
+    const offered = ["combat_action", "spatial_manage", "npc_manage", "read_docket", "write_docket"];
+    expect(requestBodies).toHaveLength(2);
+    for (const body of requestBodies) expect(body.tools.map((tool) => tool.function.name)).toEqual(offered);
+    expect(JSON.stringify(requestBodies[0].messages)).not.toContain("CAPABILITY DIRECTORY");
     gameStore.close();
   });
 
@@ -442,65 +400,6 @@ data: [DONE]
     gameStore.close();
   });
 
-  it("makes the stable authoring palette available without an activation-only round", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-core-palette-"));
-    const gameStore = new GameStore(join(directory, "game.db"));
-    const store = new ReferenceEngineStore(gameStore.getRawDb());
-    setUpRoutedCampaign(store);
-    const client = fakeClient({
-      ...CHARACTER_FIXTURES,
-      "inventory_manage.use": () => ({ success: true, actionType: "use", lightSource: { active: true } }),
-    });
-    const adapter = new ReferenceEngineAdapter(client, store);
-    const dm = new ReferenceDungeonMaster(
-      client,
-      store,
-      fakeCatalog(["inventory_manage", "spatial_manage", "scene_manage", "quest_manage"]),
-      adapter,
-      {
-        apiKey: "key",
-        baseUrl: "https://openrouter.example/api/v1",
-        model: "test-model",
-        timeoutMs: 5000,
-      },
-    );
-    let requestCount = 0;
-    let firstTools: string[] = [];
-    let firstToolChoice: string | undefined;
-    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
-      requestCount += 1;
-      const body = JSON.parse(init.body) as { tools: Array<{ function: { name: string } }>; tool_choice?: string };
-      firstTools = body.tools.map((tool) => tool.function.name);
-      if (requestCount === 1) firstToolChoice = body.tool_choice;
-      if (requestCount === 1) {
-        return openRouterMessage(null, [{
-          id: "use-torch",
-          type: "function",
-          function: {
-            name: "inventory_manage",
-            arguments: JSON.stringify({ action: "use", itemId: "torch-1" }),
-          },
-        }]);
-      }
-      return openRouterMessage("The torch flares and pushes back the dark.");
-    }));
-
-    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I light the torch.");
-
-    expect(firstTools).toEqual([
-      "activate_tools",
-      "inventory_manage",
-      "spatial_manage",
-      "scene_manage",
-      "read_docket",
-      "write_docket",
-    ]);
-    expect(firstToolChoice).toBe("auto");
-    expect(requestCount).toBe(2);
-    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "inventory_manage", accepted: true });
-    gameStore.close();
-  });
-
   it("lets the model decide whether a move needs a tool call", async () => {
     const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-required-routing-"));
     const gameStore = new GameStore(join(directory, "game.db"));
@@ -539,42 +438,6 @@ data: [DONE]
     expect(toolChoices).toEqual(["auto"]);
     expect(result.toolDisclosure).toBeNull();
     expect(result.narration.text).toContain("dark gives way");
-    gameStore.close();
-  });
-
-  it("keeps improvisation opt-in even when an older turn used it", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-improvisation-palette-"));
-    const gameStore = new GameStore(join(directory, "game.db"));
-    const store = new ReferenceEngineStore(gameStore.getRawDb());
-    setUpRoutedCampaign(store);
-    store.appendLogMessages("account-1", "campaign-1", [{
-      id: "prior-improvisation",
-      kind: "tool",
-      text: "The DM consulted the game world.",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      toolDisclosure: {
-        spoilerWarning: "Spoilers",
-        calls: [{ name: "improvisation_manage", arguments: { action: "apply_effect" }, result: { success: true }, accepted: true }],
-      },
-    }]);
-    const client = fakeClient({ ...CHARACTER_FIXTURES });
-    const adapter = new ReferenceEngineAdapter(client, store);
-    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(["combat_action", "improvisation_manage"]), adapter, {
-      apiKey: "key",
-      baseUrl: "https://openrouter.example/api/v1",
-      model: "test-model",
-      timeoutMs: 5000,
-    });
-    let requestTools: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: { body: string }) => {
-      requestTools = (JSON.parse(init.body) as { tools: Array<{ function: { name: string } }> }).tools.map((tool) => tool.function.name);
-      return openRouterMessage("The road bends into darkness.");
-    }));
-
-    await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road.");
-
-    expect(requestTools).not.toContain("improvisation_manage");
-    expect(requestTools).toContain("activate_tools");
     gameStore.close();
   });
 
