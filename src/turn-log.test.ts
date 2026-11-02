@@ -29,6 +29,7 @@ const result = {
     acceptedToolCalls: 2,
     acceptedStateChangingToolCalls: 1,
     rejectedToolCalls: 0,
+    timings: { setupMs: 412, firstNarrationMs: 9_870, roundsMs: [4_100, 5_200], narrationDoneMs: 12_300 },
   },
 } as unknown as ReferenceTurnResult;
 
@@ -50,6 +51,9 @@ describe("turn_completed log line", () => {
       providerCalls: 3,
       toolRounds: 2,
       stateChanges: 1,
+      setupMs: 412,
+      firstNarrationMs: 9_870,
+      roundsMs: [4_100, 5_200],
     });
   });
 

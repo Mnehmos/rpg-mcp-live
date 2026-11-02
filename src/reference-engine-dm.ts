@@ -112,6 +112,19 @@ export interface ReferenceTurnDiagnostics {
   acceptedToolCalls: number;
   acceptedStateChangingToolCalls: number;
   rejectedToolCalls: number;
+  timings?: ReferenceTurnTimings;
+}
+
+/** Milliseconds from the start of the turn, for finding where players wait. */
+export interface ReferenceTurnTimings {
+  /** Context (tool catalog, sheet, history) ready; the first model call can start. */
+  setupMs: number;
+  /** First narration text streamed to the player: the time to first token they feel. */
+  firstNarrationMs: number | null;
+  /** Wall time of each model round, provider-gate wait included. */
+  roundsMs: number[];
+  /** Narration finished, before choices and the commit. */
+  narrationDoneMs: number | null;
 }
 
 interface ChatMessage {
@@ -764,6 +777,9 @@ export class ReferenceDungeonMaster {
     let rejectionRecoveryPending = false;
     let activatedToolNames = new Set<string>();
     const correlationId = randomUUID();
+    const turnStartedAt = Date.now();
+    const sinceStart = () => Date.now() - turnStartedAt;
+    const timings: ReferenceTurnTimings = { setupMs: 0, firstNarrationMs: null, roundsMs: [], narrationDoneMs: null };
     const deadlineAt = this.openRouter.turnTimeoutMs && this.openRouter.turnTimeoutMs > 0
       ? Date.now() + this.openRouter.turnTimeoutMs
       : null;
@@ -803,7 +819,14 @@ export class ReferenceDungeonMaster {
     }
 
     try {
-    const allRemoteTools = await this.catalog.getTools();
+    // Independent reads, fetched together: the catalog (cached after the
+    // first turn) and the hydrated sheet (see below for why it is needed).
+    const [allRemoteTools, campaignView] = await Promise.all([
+      this.catalog.getTools(),
+      routing.referenceCharacterId
+        ? this.adapter.getCampaign(accountId, actorId, campaignId).then((loaded) => loaded.campaign)
+        : Promise.resolve(null),
+    ]);
     const availableRemoteToolNames = new Set(allRemoteTools.map((tool) => tool.function.name));
     const activationTool = buildActivateToolsDefinition(allRemoteTools);
     const toolDirectory = buildToolDirectory(allRemoteTools);
@@ -857,10 +880,7 @@ export class ReferenceDungeonMaster {
     // recorded" even though the real sheet has them. Fetching the fully-
     // hydrated view once up front and handing it over as context means the
     // model never needs to guess, and never needs an extra tool round just
-    // to ask.
-    const campaignView = routing.referenceCharacterId
-      ? (await this.adapter.getCampaign(accountId, actorId, campaignId)).campaign
-      : null;
+    // to ask. (Fetched above, alongside the tool catalog.)
     const sheetContext = campaignView ? formatCharacterSheetContext(campaignView.character) : null;
     const authoritativeStateContext = campaignView ? formatAuthoritativeStateContext(campaignView) : null;
 
@@ -888,6 +908,8 @@ export class ReferenceDungeonMaster {
       { role: "user", content: playerText },
     ];
 
+    timings.setupMs = sinceStart();
+
     // A single provider round may now stream for longer than the command
     // lease. Renew it while the turn is working so polling never marks a live
     // turn failed; a hung provider is ended by the idle watchdog instead.
@@ -914,15 +936,18 @@ export class ReferenceDungeonMaster {
               ? "Weaving the threads"
               : "Consulting the rules",
         });
-        const narrationDelta = options.onProgress
-          ? (fullText: string) => options.onProgress?.({ type: "narration", text: fullText })
-          : undefined;
+        const narrationDelta = (fullText: string) => {
+          timings.firstNarrationMs ??= sinceStart();
+          options.onProgress?.({ type: "narration", text: fullText });
+        };
+        const roundStartedAt = Date.now();
         const completion = await this.chatCompletion(messages, tools, deadlineAt, {
           userId: accountId,
           campaignId,
           clientCommandId,
           admittedTurn: true,
         }, "auto", narrationDelta);
+        timings.roundsMs.push(Date.now() - roundStartedAt);
         providerCallCount += completion.providerCalls ?? 1;
         const toolCalls = completion.tool_calls ?? [];
         if (toolCalls.length === 0) {
@@ -1024,6 +1049,8 @@ export class ReferenceDungeonMaster {
       );
     }
 
+    timings.firstNarrationMs ??= sinceStart();
+    timings.narrationDoneMs = sinceStart();
     const choices = await this.sceneChoices(accountId, campaignId, clientCommandId, priorLog, playerText, narrationText);
 
     try {
@@ -1079,6 +1106,7 @@ export class ReferenceDungeonMaster {
           acceptedToolCalls,
           acceptedStateChangingToolCalls,
           rejectedToolCalls,
+          timings,
         },
       };
       this.store.resolveReferenceCommand(accountId, campaignId, clientCommandId, result);
