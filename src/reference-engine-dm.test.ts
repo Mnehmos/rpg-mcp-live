@@ -145,7 +145,7 @@ describe("ReferenceDungeonMaster", () => {
 
     await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I follow the road into the mist.");
 
-    const offered = ["combat_action", "spatial_manage", "npc_manage", "read_docket", "write_docket"];
+    const offered = ["combat_action", "spatial_manage", "npc_manage", "read_docket", "write_docket", "scene_layout"];
     expect(requestBodies).toHaveLength(2);
     for (const body of requestBodies) expect(body.tools.map((tool) => tool.function.name)).toEqual(offered);
     expect(JSON.stringify(requestBodies[0].messages)).not.toContain("CAPABILITY DIRECTORY");
@@ -674,6 +674,45 @@ data: [DONE]
       replayed: true,
       narration: first.narration,
     });
+  });
+
+  it("stores the room layout the DM builds with scene_layout, for the player's current room", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "rpg-mcp-live-dm-layout-"));
+    const gameStore = new GameStore(join(directory, "game.db"));
+    const store = new ReferenceEngineStore(gameStore.getRawDb());
+    setUpRoutedCampaign(store);
+    const client = fakeClient({ ...CHARACTER_FIXTURES, "spatial_manage.look": () => ({ success: true, roomId: "room-7" }) });
+    const adapter = new ReferenceEngineAdapter(client, store);
+    const dm = new ReferenceDungeonMaster(client, store, fakeCatalog(), adapter, {
+      apiKey: "key",
+      baseUrl: "https://openrouter.example/api/v1",
+      model: "test-model",
+      timeoutMs: 5000,
+    });
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? openRouterMessage(null, [{ id: "layout", type: "function", function: { name: "scene_layout", arguments: JSON.stringify({
+          action: "set",
+          features: [{ name: "the old well", kind: "well", x: 2, z: -30 }, { name: "", kind: "rock", x: 0, z: 0 }],
+          people: [{ name: "Marla Tull", x: 1, z: 1 }],
+          paths: [{ direction: "north", label: "the breakwater" }, { direction: "sideways", label: "nowhere" }],
+        }) } }])
+        : openRouterMessage("A well stands at the north end of the yard.");
+    }));
+
+    const result = await dm.resolveTurn("account-1", "actor-1", "campaign-1", "I look around the yard.", {
+      clientCommandId: "command-1",
+      expectedCampaignVersion: 0,
+    });
+
+    expect(store.getSceneLayout("account-1", "campaign-1", "room-7")).toEqual({
+      features: [{ name: "the old well", kind: "well", x: 2, z: -7, description: "" }],
+      people: [{ name: "Marla Tull", x: 1, z: 1 }],
+      paths: [{ direction: "north", label: "the breakwater" }],
+    });
+    expect(result.toolDisclosure?.calls[0]).toMatchObject({ name: "scene_layout", accepted: true });
   });
 
   it("offers choices read from the finished scene by the cheap choices model", async () => {

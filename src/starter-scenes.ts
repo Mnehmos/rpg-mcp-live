@@ -1,3 +1,5 @@
+import type { SceneLayout } from "./scene-building.js";
+
 /**
  * A playable first scene committed without the model (architecture audit R01).
  * Quickstarts commit the room, place the character there and set the scene,
@@ -18,6 +20,8 @@ export interface StarterScene {
   firstMoves: Array<{ label: string; prompt: string }>;
   /** A session-zero welcome rather than a scene: the DM runs session-zero.ts's agenda until it is done. */
   sessionZero?: true;
+  /** What the 3D view shows in the opening room, matching the narration. */
+  layout: SceneLayout;
 }
 
 export interface StarterLogMarker {
@@ -49,6 +53,21 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       { label: "Head for the Gull & Anchor", prompt: "I follow the inland prints to the Gull & Anchor and watch for whoever shuttered that window." },
       { label: "Study the cut strap", prompt: "I examine the cut strap and the red wax crumb for anything that tells me who did this." },
     ],
+    layout: {
+      features: [
+        { name: "the wreckers' milestone", kind: "post", x: -1, z: -1, description: "A crooked milestone, its mile-number worn smooth by spray." },
+        { name: "the thornbush", kind: "bush", x: 1.6, z: -1.6, description: "Gull-picked and dripping, with a satchel snagged in it." },
+        { name: "the courier's satchel", kind: "crate", x: 2.2, z: -0.8, description: "The strap was cut clean. A red wax crumb clings to the leather." },
+        { name: "the boot prints", kind: "rubble", x: 0.4, z: 1.4, description: "Fresh prints, splitting two ways: down the cliff and inland." },
+        { name: "the cliff edge", kind: "boulder", x: -7, z: 2, description: "Below, the tide hisses over black rocks." },
+        { name: "the cliff edge", kind: "rock", x: -7.5, z: -3, description: "Spray climbs the rocks with every wave." },
+      ],
+      people: [],
+      paths: [
+        { direction: "down", label: "the cliff path to the tide caves" },
+        { direction: "east", label: "inland to the Gull & Anchor" },
+      ],
+    },
   },
   "ember-watch": {
     room: {
@@ -69,6 +88,20 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       { label: "Question Marla", prompt: "I ask Marla what Kessick and the Dorn brothers said before they rowed out." },
       { label: "Search the skiffs", prompt: "I search the moored skiffs and the quay for anything the missing men left behind." },
     ],
+    layout: {
+      features: [
+        { name: "Marla Tull", kind: "person", x: 1.8, z: 1.2, description: "The harbor watchwoman, gripping her lantern with both hands." },
+        { name: "Marla's lantern", kind: "brazier", x: 2.6, z: 1.6, description: "The only warm light on the quay." },
+        { name: "the still harbor", kind: "water", x: -6, z: 0, description: "Water flat as poured glass. Nothing creaks. Nothing drips." },
+        { name: "the moored skiffs", kind: "cart", x: -4.2, z: -2.5, description: "Skiffs that have not moved in three days." },
+        { name: "a coil of rope", kind: "barrel", x: -3, z: 3, description: "Dry, though everything else is damp with fog." },
+        { name: "the mooring posts", kind: "post", x: -3.6, z: 0.6, description: "Lines hang slack between them." },
+      ],
+      people: [],
+      paths: [
+        { direction: "north", label: "the breakwater toward the burning lighthouse" },
+      ],
+    },
   },
   "glass-under-moon": {
     room: {
@@ -90,6 +123,20 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       { label: "Try the trapdoor", prompt: "I kneel by the iron trapdoor behind the counter and check whether it can be opened." },
       { label: "Press Hesper", prompt: "I ask Hesper what has shown up in the glass on other nights, and what she is not telling me." },
     ],
+    layout: {
+      features: [
+        { name: "Hesper Quill", kind: "person", x: -2, z: -1, description: "The old glazier keeps her eyes on the floor." },
+        { name: "the counter", kind: "table", x: 0.5, z: -3, description: "Scarred wood, glass dust in every groove." },
+        { name: "the iron trapdoor", kind: "door", x: 0.5, z: -5.2, description: "Sealed since Hesper's grandmother's time. The glass hums toward it." },
+        { name: "the snow-filled pane", kind: "bookshelf", x: -7, z: -4, description: "Snow falls on a summer street that is not this one." },
+        { name: "the candlelit pane", kind: "bookshelf", x: 7, z: -4, description: "A woman you don't know is mouthing a name." },
+        { name: "the unsold windows", kind: "bookshelf", x: -7, z: 2, description: "Each pane reflects the wrong night." },
+      ],
+      people: [],
+      paths: [
+        { direction: "down", label: "through the trapdoor to the drowned quarter" },
+      ],
+    },
   },
   "session-zero": {
     room: {
@@ -111,6 +158,13 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       { label: "Light-hearted", prompt: "I want something lighter, with danger but plenty of room to laugh." },
     ],
     sessionZero: true,
+    layout: {
+      features: [
+        { name: "the blank map", kind: "table", x: 0, z: -1.5, description: "A table with a blank map, waiting for a world to be drawn." },
+      ],
+      people: [],
+      paths: [],
+    },
   },
 };
 

@@ -76,4 +76,32 @@ describe("scene layout", () => {
     expect(turned.z).toBeCloseTo(0);
     expect(moveDirection({}, 0)).toEqual({ x: 0, z: 0 });
   });
+
+  it("draws the DM's layout: features where it put them, people by name, ways onward as unexplored exits", () => {
+    const plan = planScene({
+      ...scene,
+      layout: {
+        features: [{ name: "the old well", kind: "well", x: 3, z: -2, description: "Deep." }, { name: "Hesper Quill", kind: "person", x: -2, z: 1, description: "" }],
+        people: [{ name: "marla tull", x: -4, z: -3 }],
+        paths: [{ direction: "north", label: "duplicate of a real exit" }, { direction: "down", label: "the tide caves" }],
+      },
+    });
+    expect(plan.size).toEqual({ w: 20, d: 16 });
+    expect(plan.features[0]).toMatchObject({ kind: "feature", shape: "well", x: 3, z: -2, verb: "Examine the old well", prompt: "I examine the old well." });
+    expect(plan.features[1]).toMatchObject({ shape: "person", verb: "Talk to Hesper Quill" });
+    expect(plan.actors.find((actor) => actor.id === "npc-1")).toMatchObject({ x: -4, z: -3 });
+    expect(plan.exits.map((exit) => exit.direction)).toEqual(["north", "east", "down"]);
+    expect(plan.exits.find((exit) => exit.direction === "down")).toMatchObject({ unexplored: true, prompt: "I head down, the tide caves." });
+    expect(nearestInteraction({ x: 3, z: -0.6 }, plan)).toBe(plan.features[0]);
+    const blocked = stepHero({ x: 3, z: 0 }, 0, -2, plan);
+    expect(distance(blocked, plan.features[0])).toBeGreaterThanOrEqual(HERO_RADIUS + plan.features[0].r - 1e-9);
+  });
+
+  it("brings the hero in through the doorway they came from", () => {
+    const withBack = { ...scene, exits: [{ direction: "east", description: "", targetRoomId: "room-8" }] };
+    const plan = planScene(withBack, { fromRoomId: "room-8" });
+    const east = plan.exits[0];
+    expect(plan.spawn.x).toBeGreaterThan(0);
+    expect(distance(plan.spawn, east)).toBeCloseTo(1.6);
+  });
 });

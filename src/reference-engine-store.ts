@@ -202,6 +202,15 @@ export class ReferenceEngineStore {
         PRIMARY KEY (user_id, campaign_id, docket_name)
       );
 
+      CREATE TABLE IF NOT EXISTS reference_engine_scene_layouts (
+        user_id TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        layout_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, campaign_id, room_id)
+      );
+
       CREATE TABLE IF NOT EXISTS reference_engine_commands (
         user_id TEXT NOT NULL,
         campaign_id TEXT NOT NULL,
@@ -420,6 +429,31 @@ export class ReferenceEngineStore {
       )
       .get(userId, campaignId, name) as { content: string } | undefined;
     return row?.content ?? "";
+  }
+
+  /** The DM's 3D layout for a room (scene-building.ts), or null if never laid out. */
+  public getSceneLayout(userId: string, campaignId: string, roomId: string): unknown | null {
+    const row = this.db
+      .prepare("SELECT layout_json FROM reference_engine_scene_layouts WHERE user_id = ? AND campaign_id = ? AND room_id = ?")
+      .get(userId, campaignId, roomId) as { layout_json: string } | undefined;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.layout_json);
+    } catch {
+      return null;
+    }
+  }
+
+  public setSceneLayout(userId: string, campaignId: string, roomId: string, layout: unknown): void {
+    this.db
+      .prepare(
+        `INSERT INTO reference_engine_scene_layouts (user_id, campaign_id, room_id, layout_json, updated_at)
+         VALUES (@userId, @campaignId, @roomId, @layoutJson, @now)
+         ON CONFLICT(user_id, campaign_id, room_id) DO UPDATE SET
+           layout_json = excluded.layout_json,
+           updated_at = excluded.updated_at`
+      )
+      .run({ userId, campaignId, roomId, layoutJson: JSON.stringify(layout), now: new Date().toISOString() });
   }
 
   public setDocket(userId: string, campaignId: string, name: DocketName, content: string): void {

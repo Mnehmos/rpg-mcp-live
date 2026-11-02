@@ -551,8 +551,10 @@ export interface SceneView {
     atmospherics: string[];
     lit: boolean;
   } | null;
-  exits: Array<{ direction: string; description: string }>;
+  exits: Array<{ direction: string; description: string; targetRoomId: string | null }>;
   actors: Array<{ id: string; name: string; kind: "npc" | "enemy" }>;
+  /** The DM's layout for this room (scene-building.ts), or null if it has none yet. */
+  layout: unknown | null;
 }
 
 export class ReferenceEngineAdapter {
@@ -643,7 +645,7 @@ export class ReferenceEngineAdapter {
    */
   public async getSceneView(accountId: string, campaignId: string): Promise<SceneView> {
     const routing = this.requireRouting(accountId, campaignId);
-    const empty: SceneView = { room: null, exits: [], actors: [] };
+    const empty: SceneView = { room: null, exits: [], actors: [], layout: null };
     const heroId = routing.referenceCharacterId;
     if (!heroId) return empty;
     const tenant = this.tenantFor(accountId, campaignId, routing);
@@ -657,7 +659,7 @@ export class ReferenceEngineAdapter {
       biomeContext?: string;
       atmospherics?: string[];
       lightSource?: unknown;
-      exits?: Array<{ direction?: string; description?: string }>;
+      exits?: Array<{ direction?: string; description?: string; targetNodeId?: string }>;
       entities?: string[];
     };
     if (look.isError || data.success === false || !data.roomId) return empty;
@@ -685,8 +687,9 @@ export class ReferenceEngineAdapter {
       },
       exits: (data.exits ?? [])
         .filter((exit) => typeof exit.direction === "string" && exit.direction)
-        .map((exit) => ({ direction: exit.direction!, description: exit.description ?? "" })),
+        .map((exit) => ({ direction: exit.direction!, description: exit.description ?? "", targetRoomId: exit.targetNodeId ?? null })),
       actors,
+      layout: this.store.getSceneLayout(accountId, campaignId, data.roomId),
     };
   }
 
@@ -785,6 +788,7 @@ export class ReferenceEngineAdapter {
       createdAt: new Date().toISOString(),
       starter: { roomId, roomName: starter.room.name, sceneId: field(scene.payload, "sceneId", "id"), title: starter.scene.title, firstMoves: starter.firstMoves, ...(starter.sessionZero ? { sessionZero: true as const } : {}) },
     }]);
+    this.store.setSceneLayout(accountId, campaignId, roomId, starter.layout);
     if (starter.sessionZero) {
       let profile: Record<string, unknown> = {};
       try {

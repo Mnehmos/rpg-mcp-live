@@ -302,6 +302,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function showLiveNarration(text) {
+    sceneDialogLive(text);
     var node = liveEntry();
     if (!node) return;
     var target = node.querySelector(".live-narration-text");
@@ -312,6 +313,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   }
 
   function showLiveProgress(event) {
+    sceneDialogProgress(event);
     var node = liveEntry();
     if (!node) return;
     if (event.type === "status") {
@@ -1992,6 +1994,50 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
   // version moves, and walking up to someone sends the move like a choice.
   var sceneStageLoading = null;
   var sceneStageFailed = false;
+  // 3D mode: the scene is the whole game. The DM speaks in a dialog over it
+  // and text boxes open only as events (scene-dialog.js).
+  var sceneDialog = null;
+  var IMMERSIVE_KEY = "qk-play-mode";
+  state.immersive = (function () {
+    var fromUrl = new URLSearchParams(window.location.search).get("mode");
+    try {
+      if (fromUrl === "3d" || fromUrl === "classic") window.localStorage.setItem(IMMERSIVE_KEY, fromUrl);
+      return window.localStorage.getItem(IMMERSIVE_KEY) === "3d";
+    } catch (error) {
+      return fromUrl === "3d";
+    }
+  })();
+  function applyImmersive() {
+    document.body.classList.toggle("immersive-3d", Boolean(state.immersive) && !sceneStageFailed);
+    var toggle = $("#mode-toggle");
+    if (toggle) toggle.textContent = state.immersive ? "Classic view" : "3D mode";
+    if (sceneDialog) sceneDialog.setEnabled(Boolean(state.immersive));
+  }
+  function toggleImmersive() {
+    state.immersive = !state.immersive;
+    try { window.localStorage.setItem(IMMERSIVE_KEY, state.immersive ? "3d" : "classic"); } catch (error) { /* per-visit only */ }
+    applyImmersive();
+    if (state.session) renderSession({ session: state.session, state: state.engineState, subscription: state.subscription });
+  }
+  function sceneSend(text) {
+    if (!text || state.pendingPlayerText || !state.session || state.session.id !== sceneCampaignId) return;
+    playText(text);
+  }
+  function latestDmWords(session) {
+    var shown = visibleLogEntries(session && session.log).filter(function (entry) {
+      return entry.kind === "narration" || entry.kind === "system";
+    });
+    var last = shown[shown.length - 1];
+    return last ? String(last.text || "") : "";
+  }
+  function sceneDialogLive(text) {
+    if (sceneDialog && state.immersive) sceneDialog.showNarration(text);
+  }
+  function sceneDialogProgress(event) {
+    if (!sceneDialog || !state.immersive) return;
+    if (event.type === "status") sceneDialog.showStatus(event.message);
+    else if (event.type === "tool" && event.call && event.call.accepted !== false) sceneDialog.addMove(tableMoveLabel(event.call));
+  }
   var sceneStageKey = null;
   var sceneRequestSequence = 0;
   // The campaign whose room is on screen; moves only ever go to that campaign.
@@ -2000,7 +2046,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     root.hidden = true;
     shell.classList.remove("has-scene");
   }
-  function syncSceneStage(session) {
+  function syncSceneStage(session, choices) {
     var root = $("#scene-stage");
     var shell = $("#game-shell");
     if (!root || !shell) return;
@@ -2008,29 +2054,47 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     // (whose responses carry no engineBackend), so an open campaign is enough.
     if (!session || !session.id || sceneStageFailed) {
       hideSceneStage(root, shell);
+      document.body.classList.remove("immersive-3d");
       return;
     }
+    applyImmersive();
     root.hidden = false;
     shell.classList.add("has-scene");
     if (!sceneStageLoading) {
-      sceneStageLoading = import("./scene3d.js").then(function (module) {
-        return module.createSceneStage(root, {
-          onInteract: function (prompt) {
-            if (state.pendingPlayerText || !state.session || state.session.id !== sceneCampaignId) return;
-            playText(prompt);
+      sceneStageLoading = Promise.all([import("./scene3d.js"), import("./scene-dialog.js")]).then(function (modules) {
+        var stage = modules[0].createSceneStage(root, {
+          onInteract: sceneSend,
+          // Exits always just go. Anyone or anything else opens an event box
+          // in 3D mode, and sends its default move in the classic view.
+          onTarget: function (target) {
+            if (state.immersive && sceneDialog && target.kind !== "exit") sceneDialog.openEvent(target);
+            else sceneSend(target.prompt);
           },
         });
+        if (stage) {
+          sceneDialog = modules[1].createSceneDialog(root, { onSend: sceneSend });
+          applyImmersive();
+        }
+        return stage;
       }).catch(function () { return null; }).then(function (stage) {
         // No WebGL, or the module failed: stay hidden for the rest of the visit.
         if (!stage) {
           sceneStageFailed = true;
           hideSceneStage(root, shell);
+          applyImmersive();
         }
         return stage;
       });
     }
     sceneStageLoading.then(function (stage) {
-      if (stage) stage.setBusy(Boolean(state.pendingPlayerText));
+      if (!stage) return;
+      var busy = Boolean(state.pendingPlayerText);
+      stage.setBusy(busy);
+      if (sceneDialog && state.immersive) {
+        sceneDialog.setBusy(busy);
+        if (!busy || !state.streamingCommandId) sceneDialog.showNarration(busy ? "" : latestDmWords(session));
+        sceneDialog.showChoices(busy ? [] : choices);
+      }
     });
     var key = session.id + ":" + session.version;
     if (key === sceneStageKey) return;
@@ -2110,7 +2174,7 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     if (choices) sessionActions = choices;
     state.suggestedActions = sessionActions;
     renderSuggestedActions(sessionActions, session, snapshot);
-    syncSceneStage(session);
+    syncSceneStage(session, sessionActions);
 
     var entries = Array.isArray(session.log) ? session.log : [];
     var pairedEntries = pairToolDisclosureWithNarration(visibleLogEntries(entries));
@@ -3546,6 +3610,8 @@ import { usageLabel, usageResetAt, usageResetLabel } from "./usage-display.js";
     $("#character-edit-form").addEventListener("submit", editCharacter);
     $("#note-form").addEventListener("submit", addNote);
     $("#character-inventory").addEventListener("click", inventoryAction);
+    var modeToggle = $("#mode-toggle");
+    if (modeToggle) modeToggle.addEventListener("click", toggleImmersive);
     document.querySelectorAll('[data-action="open-campaign-manager"]').forEach(function (button) {
       button.addEventListener("click", function () {
         state.managerOpen = !state.managerOpen;

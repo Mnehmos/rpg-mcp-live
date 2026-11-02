@@ -91,52 +91,134 @@ function farEnough(x, z, radius, placed, gap) {
   return true;
 }
 
+/** How much floor each kind of feature takes up (it blocks the hero). */
+var FEATURE_RADIUS = {
+  tree: 0.6, bush: 0.45, rock: 0.5, boulder: 0.8, crate: 0.5, barrel: 0.4, pillar: 0.45, rubble: 0.35,
+  brazier: 0.35, post: 0.2, stalagmite: 0.4, crystal: 0.35, chest: 0.5, table: 0.9, altar: 0.8,
+  statue: 0.6, campfire: 0.6, well: 0.9, door: 0.7, bookshelf: 0.9, bed: 0.9, sign: 0.25, bones: 0.35,
+  water: 1.8, cart: 1.1, person: ACTOR_RADIUS,
+};
+
+function capitalize(text) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function sameName(a, b) {
+  return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+}
+
+function featurePrompt(feature) {
+  return feature.kind === "person"
+    ? "I walk over to " + feature.name + " and speak with them."
+    : "I examine " + feature.name + ".";
+}
+
 /**
- * Plans a room from the scene view: its size, exits on the walls, who stands
- * where, and seeded props that never block an exit, a person, or the spawn.
+ * Plans a room from the scene view. With a DM layout (scene_layout), its
+ * features, people and ways onward are placed where the DM put them; without
+ * one, the room is laid out from its id. Either way seeded props fill in
+ * around, never blocking an exit, a feature, a person, or the spawn.
+ * options.fromRoomId puts the hero just inside the doorway they came through.
  */
-export function planScene(scene) {
+export function planScene(scene, options) {
   var room = scene && scene.room;
   if (!room) return null;
   var random = seededRandom(room.id);
   var style = biomeStyle(room.biome);
   var atmospherics = Array.isArray(room.atmospherics) ? room.atmospherics : [];
-  var size = { w: 14 + Math.round(random() * 8), d: 12 + Math.round(random() * 6) };
-  var spawn = { x: 0, z: size.d / 2 - 2.4, r: 1.2 };
-  var placed = [spawn];
+  var layout = scene.layout && typeof scene.layout === "object" ? scene.layout : null;
+  // The DM lays rooms out in a fixed 18 x 14 frame (scene-building.ts), plus a margin for the walls.
+  var size = layout ? { w: 20, d: 16 } : { w: 14 + Math.round(random() * 8), d: 12 + Math.round(random() * 6) };
+  var limitX = size.w / 2 - 1;
+  var limitZ = size.d / 2 - 1;
+  var clampX = function (value) { return Math.max(-limitX, Math.min(limitX, Number(value) || 0)); };
+  var clampZ = function (value) { return Math.max(-limitZ, Math.min(limitZ, Number(value) || 0)); };
 
-  var exits = (scene.exits || []).map(function (exit) {
+  var exitSources = (scene.exits || []).map(function (exit) {
+    return { direction: String(exit.direction), description: exit.description || "", targetRoomId: exit.targetRoomId || null, unexplored: false };
+  });
+  (layout && Array.isArray(layout.paths) ? layout.paths : []).forEach(function (path) {
+    var direction = String(path.direction || "");
+    if (!direction || exitSources.some(function (exit) { return sameName(exit.direction, direction); })) return;
+    exitSources.push({ direction: direction, description: String(path.label || ""), targetRoomId: null, unexplored: true });
+  });
+  var exits = exitSources.map(function (exit) {
     var spot = exitPosition(exit.direction, size);
-    var direction = String(exit.direction);
-    var planned = {
-      id: "exit-" + direction.toLowerCase(),
+    var direction = exit.direction.toLowerCase();
+    return {
+      id: "exit-" + direction,
       kind: "exit",
-      direction: direction,
-      label: direction.charAt(0).toUpperCase() + direction.slice(1),
-      description: exit.description || "",
+      direction: exit.direction,
+      label: capitalize(direction),
+      description: exit.description,
+      targetRoomId: exit.targetRoomId,
+      unexplored: exit.unexplored,
       wall: spot.wall,
       x: spot.x,
       z: spot.z,
       r: 0.9,
-      prompt: exitPrompt(exit),
-      verb: "Go " + direction.toLowerCase(),
+      prompt: exit.unexplored && exit.description ? "I head " + direction + ", " + exit.description + "." : exitPrompt(exit),
+      verb: exit.unexplored && exit.description ? "Go " + direction + ": " + exit.description : "Go " + direction,
+    };
+  });
+
+  var spawn = { x: 0, z: size.d / 2 - 2.4, r: 1.2 };
+  var cameFrom = options && options.fromRoomId
+    ? exits.filter(function (exit) { return exit.targetRoomId === options.fromRoomId; })[0]
+    : null;
+  if (cameFrom) {
+    // Step in from the doorway, toward the middle of the room.
+    var length = Math.sqrt(cameFrom.x * cameFrom.x + cameFrom.z * cameFrom.z) || 1;
+    spawn = { x: cameFrom.x - (cameFrom.x / length) * 1.6, z: cameFrom.z - (cameFrom.z / length) * 1.6, r: 1.2 };
+  }
+  var placed = [spawn].concat(exits);
+
+  var features = (layout && Array.isArray(layout.features) ? layout.features : []).map(function (feature, index) {
+    var shape = FEATURE_RADIUS[feature.kind] ? feature.kind : "crate";
+    var planned = {
+      id: "feature-" + index,
+      kind: "feature",
+      shape: shape,
+      name: String(feature.name || "something"),
+      label: String(feature.name || "something"),
+      description: String(feature.description || ""),
+      x: clampX(feature.x),
+      z: clampZ(feature.z),
+      r: FEATURE_RADIUS[shape],
+      prompt: featurePrompt({ kind: shape, name: String(feature.name || "something") }),
+      verb: shape === "person" ? "Talk to " + feature.name : "Examine " + feature.name,
     };
     placed.push(planned);
     return planned;
   });
 
-  var actors = (scene.actors || []).map(function (actor, index, list) {
-    // A loose arc across the north half, facing the hero's spawn.
-    var span = Math.min(Math.PI * 0.8, 0.5 * list.length);
-    var angle = list.length === 1 ? 0 : -span / 2 + (span * index) / (list.length - 1);
-    var radius = Math.min(size.d * 0.42, 4 + random() * 1.5);
+  var people = layout && Array.isArray(layout.people) ? layout.people : [];
+  var unplaced = (scene.actors || []).filter(function (actor) {
+    return !people.some(function (person) { return sameName(person.name, actor.name); });
+  });
+  var actors = (scene.actors || []).map(function (actor) {
+    var spot = people.filter(function (person) { return sameName(person.name, actor.name); })[0];
+    var x;
+    var z;
+    if (spot) {
+      x = clampX(spot.x);
+      z = clampZ(spot.z);
+    } else {
+      // Anyone the DM did not place stands in a loose arc across the north half.
+      var index = unplaced.indexOf(actor);
+      var span = Math.min(Math.PI * 0.8, 0.5 * unplaced.length);
+      var angle = unplaced.length === 1 ? 0 : -span / 2 + (span * index) / (unplaced.length - 1);
+      var radius = Math.min(size.d * 0.42, 4 + random() * 1.5);
+      x = Math.sin(angle) * radius;
+      z = -Math.cos(angle) * radius + 0.5;
+    }
     var planned = {
       id: actor.id,
       kind: actor.kind === "enemy" ? "enemy" : "npc",
       name: actor.name,
       label: actor.name,
-      x: Math.sin(angle) * radius,
-      z: -Math.cos(angle) * radius + 0.5,
+      x: x,
+      z: z,
       r: ACTOR_RADIUS,
       prompt: actorPrompt(actor),
       verb: actor.kind === "enemy" ? "Face " + actor.name : "Talk to " + actor.name,
@@ -146,7 +228,7 @@ export function planScene(scene) {
   });
 
   var props = [];
-  var target = 6 + Math.round(random() * 6);
+  var target = layout ? 3 + Math.round(random() * 2) : 6 + Math.round(random() * 6);
   for (var attempt = 0; attempt < 200 && props.length < target; attempt += 1) {
     var kind = style.props[Math.floor(random() * style.props.length)];
     var r = PROP_RADIUS[kind] || 0.5;
@@ -170,6 +252,7 @@ export function planScene(scene) {
     lit: Boolean(room.lit),
     spawn: { x: spawn.x, z: spawn.z },
     exits: exits,
+    features: features,
     actors: actors,
     props: props,
   };
@@ -184,7 +267,7 @@ export function stepHero(position, dx, dz, plan) {
   var z = position.z + dz;
   var limitX = plan.size.w / 2 - HERO_RADIUS - 0.25;
   var limitZ = plan.size.d / 2 - HERO_RADIUS - 0.25;
-  var solids = plan.props.concat(plan.actors);
+  var solids = plan.props.concat(plan.actors, plan.features);
   for (var pass = 0; pass < 2; pass += 1) {
     for (var index = 0; index < solids.length; index += 1) {
       var solid = solids[index];
@@ -204,11 +287,11 @@ export function stepHero(position, dx, dz, plan) {
   return { x: x, z: z };
 }
 
-/** The closest person or exit within reach of the hero, or null. */
+/** The closest person, feature, or exit within reach of the hero, or null. */
 export function nearestInteraction(position, plan) {
   var best = null;
   var bestDistance = Infinity;
-  var targets = plan.actors.concat(plan.exits);
+  var targets = plan.actors.concat(plan.features, plan.exits);
   for (var index = 0; index < targets.length; index += 1) {
     var target = targets[index];
     var dx = position.x - target.x;
