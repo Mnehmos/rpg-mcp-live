@@ -714,7 +714,7 @@ export class ReferenceEngineAdapter {
       kind: "narration",
       text: starter.narration,
       createdAt: new Date().toISOString(),
-      starter: { roomId, roomName: starter.room.name, sceneId: field(scene.payload, "sceneId", "id"), title: starter.scene.title },
+      starter: { roomId, roomName: starter.room.name, sceneId: field(scene.payload, "sceneId", "id"), title: starter.scene.title, firstMoves: starter.firstMoves },
     }]);
     // The DM's own continuity note, so its first turn starts from this scene
     // instead of authoring a new one.

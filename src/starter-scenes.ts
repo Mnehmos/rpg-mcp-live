@@ -14,6 +14,8 @@ export interface StarterScene {
   };
   scene: { title: string; placeLabel: string };
   narration: string;
+  /** Scene-specific suggestions for the player's very first move. */
+  firstMoves: Array<{ label: string; prompt: string }>;
 }
 
 export interface StarterLogMarker {
@@ -21,6 +23,7 @@ export interface StarterLogMarker {
   roomName: string;
   sceneId: string | null;
   title: string;
+  firstMoves?: Array<{ label: string; prompt: string }>;
 }
 
 const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
@@ -38,6 +41,11 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       "Fresh boot prints lead two ways. One set goes down the cliff path toward the tide caves, already half-filled with seawater. The other heads inland toward the lamplit roof of the Gull & Anchor, where someone has just shuttered a window.",
       "The tide turns within the hour. What do you do, Mara?",
     ].join("\n\n"),
+    firstMoves: [
+      { label: "Follow the cliff path", prompt: "I follow the boot prints down the cliff path toward the tide caves before the water rises." },
+      { label: "Head for the Gull & Anchor", prompt: "I follow the inland prints to the Gull & Anchor and watch for whoever shuttered that window." },
+      { label: "Study the cut strap", prompt: "I examine the cut strap and the red wax crumb for anything that tells me who did this." },
+    ],
   },
   "ember-watch": {
     room: {
@@ -53,6 +61,11 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       "On the quay beside you, harbor watchwoman Marla Tull grips a lantern with both hands. \"Three men rowed out toward that light,\" she says. \"Kessick last night. The Dorn brothers before him. No boats came back. No bodies either.\" She looks at your sword, then at you. \"I can't go up there alone.\"",
       "The breakwater runs into the fog, toward the light. What do you do, Tovin?",
     ].join("\n\n"),
+    firstMoves: [
+      { label: "Walk the breakwater", prompt: "I draw my sword and walk the breakwater toward the lighthouse, with Marla and her lantern beside me." },
+      { label: "Question Marla", prompt: "I ask Marla what Kessick and the Dorn brothers said before they rowed out." },
+      { label: "Search the skiffs", prompt: "I search the moored skiffs and the quay for anything the missing men left behind." },
+    ],
   },
   "glass-under-moon": {
     room: {
@@ -69,6 +82,11 @@ const STARTER_SCENES: Readonly<Record<string, StarterScene>> = {
       "\"That's the old drowned quarter down there,\" Hesper whispers. \"It's been sealed since my grandmother's time. Every night the bell rings, and every night something new shows up in the glass.\"",
       "What do you do, Elian?",
     ].join("\n\n"),
+    firstMoves: [
+      { label: "Read the glass", prompt: "I study the pane where the woman is mouthing a name and try to read her lips." },
+      { label: "Try the trapdoor", prompt: "I kneel by the iron trapdoor behind the counter and check whether it can be opened." },
+      { label: "Press Hesper", prompt: "I ask Hesper what has shown up in the glass on other nights, and what she is not telling me." },
+    ],
   },
 };
 

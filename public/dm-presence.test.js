@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { OPENING_INSTRUCTION, PERSONALIZE_OPENING_PREFIX, openingPresenceCopy, renderOpeningPresence, visibleLogEntries } from "./dm-presence.js";
+import { OPENING_INSTRUCTION, PERSONALIZE_OPENING_PREFIX, openingPresenceCopy, renderOpeningPresence, starterFirstMoves, visibleLogEntries } from "./dm-presence.js";
 
 describe("opening DM presence", () => {
   it("makes an immediate contextual inference without claiming campaign state", () => {
@@ -70,5 +70,29 @@ describe("starter opening in the visible log", () => {
   it("still hides the retired personalize instruction in older logs", () => {
     const after = visibleLogEntries([starter, { kind: "player", text: PERSONALIZE_OPENING_PREFIX + " old" }, { kind: "narration", text: "Old rewrite." }]);
     expect(after.map((e) => e.text)).toEqual(["The template opening.", "Old rewrite."]);
+  });
+});
+
+describe("starter first moves", () => {
+  const moves = [
+    { label: "Follow the cliff path", prompt: "I follow the boot prints down the cliff path." },
+    { label: "Study the cut strap", prompt: "I examine the cut strap." },
+  ];
+  const starter = { kind: "narration", text: "The satchel hangs open.", starter: { roomId: "r", roomName: "Milestone", sceneId: "s", title: "T", firstMoves: moves } };
+
+  it("offers the starter's first moves before the player has moved", () => {
+    const offered = starterFirstMoves([{ kind: "system", text: "Campaign created. Your story starts here." }, starter]);
+    expect(offered.map((move) => move.label)).toEqual(["Follow the cliff path", "Study the cut strap"]);
+    expect(offered[0]).toMatchObject({ id: "first-move-1", prompt: "I follow the boot prints down the cliff path." });
+  });
+
+  it("stops offering them once the player has made a move", () => {
+    expect(starterFirstMoves([starter, { kind: "player", text: "I wait." }])).toBeNull();
+    expect(starterFirstMoves([starter, { kind: "player", text: "I wait." }, { kind: "narration", text: "Rain." }])).toBeNull();
+  });
+
+  it("offers nothing for an opening without a starter", () => {
+    expect(starterFirstMoves([{ kind: "narration", text: "Model opening." }])).toBeNull();
+    expect(starterFirstMoves([])).toBeNull();
   });
 });

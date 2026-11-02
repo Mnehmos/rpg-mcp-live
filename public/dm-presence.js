@@ -65,3 +65,17 @@ function isOpeningInstruction(entry) {
 function isCampaignCreatedNotice(entry) {
   return entry.kind === "system" && /^Campaign created\./.test(String(entry.text || ""));
 }
+
+/**
+ * A quickstart's hand-written first moves, offered only while its starter
+ * opening is still the latest thing in the log (before the player's first move).
+ */
+export function starterFirstMoves(entries) {
+  var visible = visibleLogEntries(entries).filter(function (entry) { return entry.kind !== "system"; });
+  var last = visible[visible.length - 1];
+  var moves = last && last.kind === "narration" && last.starter && Array.isArray(last.starter.firstMoves) ? last.starter.firstMoves : [];
+  var normalized = moves.filter(function (move) { return move && move.label && move.prompt; }).map(function (move, index) {
+    return { id: "first-move-" + (index + 1), label: String(move.label), prompt: String(move.prompt) };
+  });
+  return normalized.length ? normalized : null;
+}
